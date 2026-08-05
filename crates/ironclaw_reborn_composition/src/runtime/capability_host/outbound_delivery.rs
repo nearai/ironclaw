@@ -44,7 +44,7 @@ use crate::outbound::{
     outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
     parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
 };
-use crate::profile_approval_authorization::ApprovalSettingsProvider;
+use ironclaw_approvals::ApprovalSettingsProvider;
 // Synthetic outbound handler now also carries the host-private replay-payload
 // store it persists at its approval-gate raise and reconstitutes from on resume.
 // arch-exempt: too_many_args, outbound handler carries the replay-payload store (§5.3 Stage 2a-i), plan #6175

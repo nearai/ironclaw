@@ -1,6 +1,7 @@
 // arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> OutboundStateStore helper), no logic change, plan #6168
 //! Contract tests for the product workflow service.
 
+use ironclaw_loop_host::RejectingInputEnqueue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,10 +11,11 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
-    ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
-    InMemoryConversationServices,
+    ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
@@ -36,12 +38,11 @@ use ironclaw_product::{
     InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
-    PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
+    PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -58,6 +59,9 @@ use ironclaw_product_contracts::action::{
     ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,
     SourceBindingKey,
 };
+use ironclaw_product_contracts::actor_identity::{
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::subject_route::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
@@ -65,8 +69,9 @@ use ironclaw_product_contracts::subject_route::{
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator, TurnError, TurnRunState,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnCoordinator, TurnError, TurnRunState,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -195,8 +200,38 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         panic!("cancel_run is not used by product workflow contract tests")
     }
 
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        panic!("get_run_state is not used by product workflow contract tests")
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        // The busy-run steering enqueue path (`steering::enqueue_busy_steering`)
+        // reads the active run's state to recover its turn id before queueing.
+        // Return a minimal running-run state keyed to the requested scope/run so
+        // the enqueue step is exercised rather than panicking here.
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: AcceptedMessageRef::new("msg:active-run")
+                .expect("accepted message ref"),
+            source_binding_ref: SourceBindingRef::new("src:active-run")
+                .expect("source binding ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:active-run")
+                .expect("reply target binding ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+            model_usage: None,
+        })
     }
 }
 
@@ -3915,6 +3950,7 @@ async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -3969,6 +4005,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
             binding.clone(),
             InMemorySessionThreadService::default(),
             Arc::new(RecordingTurnCoordinator::default()),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4005,6 +4042,7 @@ async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4079,6 +4117,7 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
             binding.clone(),
             InMemorySessionThreadService::default(),
             coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4120,6 +4159,7 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
             binding.clone(),
             InMemorySessionThreadService::default(),
             coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4238,6 +4278,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
             binding.clone(),
             InMemorySessionThreadService::default(),
             coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4427,6 +4468,7 @@ async fn concrete_product_surface_accepts_user_message_for_trusted_installation(
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4504,6 +4546,7 @@ async fn concrete_product_surface_accepts_shared_route_participant_on_existing_t
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4591,6 +4634,7 @@ async fn concrete_product_surface_persists_first_bind_default_scope() {
             binding_alpha.clone(),
             InMemorySessionThreadService::default(),
             Arc::new(RecordingTurnCoordinator::default()),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding_alpha),
@@ -4683,6 +4727,7 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5647,6 +5692,7 @@ async fn concrete_product_surface_bot_mention_uses_shared_route() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5700,6 +5746,7 @@ async fn concrete_product_surface_reply_to_bot_requires_existing_binding() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5753,6 +5800,7 @@ async fn concrete_product_surface_reuses_prepared_binding_for_content_only_polic
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let policy = Arc::new(FakeBeforeInboundPolicy::new());
     policy.rewrite_user_message(
@@ -5803,6 +5851,7 @@ async fn concrete_product_surface_recomputes_route_after_policy_rewrites_trigger
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let policy = Arc::new(FakeBeforeInboundPolicy::new());
     policy.rewrite_user_message(
@@ -5856,6 +5905,7 @@ async fn concrete_product_surface_rejects_unknown_installation_as_terminal() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5903,6 +5953,7 @@ async fn concrete_product_surface_rejects_unpaired_actor_before_turn_submission(
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5960,6 +6011,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -6037,6 +6089,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -6100,6 +6153,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -6494,7 +6548,7 @@ impl ProductActorUserResolver for MutableProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         Ok(self
             .current
             .lock()
@@ -6524,7 +6578,7 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6571,7 +6625,7 @@ impl ProductActorUserResolver for ReplacingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if request.external_actor_ref != self.actor_ref {
             return Ok(None);
@@ -6620,7 +6674,7 @@ impl ProductActorUserResolver for RevokingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 && request.external_actor_ref == self.actor_ref {
             Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
@@ -6802,8 +6856,8 @@ impl ProductActorUserResolver for FailingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
-        Err(ProductSurfaceFailure::BindingResolutionFailed {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
             reason: "actor resolver backend down".into(),
         })
     }

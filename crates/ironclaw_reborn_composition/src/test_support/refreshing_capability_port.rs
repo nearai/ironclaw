@@ -126,6 +126,21 @@ pub struct RefreshingCapabilityPortTestParts {
 /// install/activate an extension can also just omit this call and leave the
 /// field `None` for the same no-op surface.
 #[cfg(feature = "test-support")]
+/// The EXACT per-caller workspace mount view production resolves for a
+/// scoped deployment (`runtime_mounts::scoped_workspace_mount_view` — the
+/// resolver behind `WorkspaceMountPolicy::PerCaller`), exported so an
+/// integration harness can grant its capabilities the same
+/// `tenants/{tenant}/users/{user}` subtree a scoped runtime's own factory
+/// would, instead of hand-formatting the layout and drifting from the
+/// production constructor. For tests only — gated behind `test-support`,
+/// ships zero bytes in production builds.
+pub fn scoped_workspace_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+    permissions: ironclaw_host_api::mount::MountPermissions,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::runtime_mounts::scoped_workspace_mount_view(scope, permissions)
+}
+
 pub fn build_extension_management_for_test(
     runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {

@@ -773,11 +773,25 @@ async fn build_two_user_harness(
     gateway: Arc<dyn HostManagedModelGateway>,
     policy: EffectiveRuntimePolicy,
 ) -> Harness {
+    build_two_user_harness_with_workspace_scoping(gateway, policy, false).await
+}
+
+/// `workspace_scoped_per_caller` reproduces the deployment shape `serve` builds
+/// when SSO is on: a standalone-composed runtime with a multi-user
+/// authenticator. The WebUI browser confines every non-operator caller's
+/// Workspace reads to their own subtree, so the agent's writes must be scoped
+/// to the same subtree or those users read an empty workspace.
+async fn build_two_user_harness_with_workspace_scoping(
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+    workspace_scoped_per_caller: bool,
+) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
     let input = RebornRuntimeInput::from_build_input(
         ironclaw_reborn_composition::local_filesystem_build_input(USER, storage_root)
             .with_runtime_policy(policy)
+            .with_workspace_scoped_per_caller(workspace_scoped_per_caller)
             .with_bundled_first_party_for_test(),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2176,6 +2190,138 @@ async fn wait_for_assistant_reply(router: &axum::Router, thread_id: &str, needle
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     panic!("turn never produced an assistant reply containing {needle:?}; timeline={timeline:#?}");
+}
+
+/// The reported bug, end to end, in the deployment shape that produced it: a
+/// multi-user WebUI over a standalone-composed runtime. User A's agent writes a
+/// workspace file; the browser confines A's Workspace reads to
+/// `tenants/{tenant}/users/{user}`. Before the write lanes read the same
+/// scoping decision, the file landed in the shared root and A saw an empty
+/// workspace while B could have seen A's artifacts.
+#[tokio::test]
+async fn agent_workspace_writes_are_visible_to_their_owner_and_hidden_from_other_users() {
+    let harness = build_two_user_harness_with_workspace_scoping(
+        Arc::new(WriteFileGateway::default()),
+        local_yolo_effective_policy(),
+        true,
+    )
+    .await;
+    let router = &harness.router;
+
+    let thread_id = create_thread(router, "e2e-workspace-isolation-create").await;
+    send_message(router, &thread_id, "e2e-workspace-isolation-send").await;
+    wait_for_assistant_reply(router, &thread_id, "ready to download").await;
+
+    // The owner sees the file the agent just wrote. This is the assertion that
+    // failed for hosted users: the browser read the caller subtree while the
+    // write landed in the shared root.
+    let owner_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace",
+            VALID_TOKEN,
+        ))
+        .await
+        .expect("user A workspace list oneshot");
+    assert_eq!(
+        owner_listing.status(),
+        StatusCode::OK,
+        "user A workspace listing"
+    );
+    let owner_body = String::from_utf8_lossy(&read_body_bytes(owner_listing).await).to_string();
+    let owner_listing: Value = serde_json::from_str(&owner_body).expect("owner listing json");
+    let owner_names: Vec<&str> = owner_listing["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(
+        owner_names.contains(&"report.csv"),
+        "user A must see the file their own agent wrote, got: {owner_names:?}"
+    );
+
+    // User B's listing resolves inside B's own subtree, which no agent has
+    // written to. An authorized-but-never-written workspace root reads as
+    // EMPTY, never as an error and never as A's files: a fresh user opening
+    // the Workspace tab before their first run must see an empty workspace.
+    let other_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B workspace list oneshot");
+    let other_status = other_listing.status();
+    let other_body = String::from_utf8_lossy(&read_body_bytes(other_listing).await).to_string();
+    assert_eq!(
+        other_status,
+        StatusCode::OK,
+        "a fresh caller's workspace listing must succeed, got {other_status}: {other_body}"
+    );
+    let other_json: serde_json::Value =
+        serde_json::from_str(&other_body).expect("user B workspace listing is JSON");
+    assert_eq!(
+        other_json["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a fresh caller's workspace lists as empty, got: {other_body}"
+    );
+    assert!(
+        !other_body.contains("report.csv"),
+        "user B must not see user A's workspace artifacts, got: {other_body}"
+    );
+
+    // A slash-only path names the same projected root and must get the same
+    // empty listing, not a NotFound.
+    let slash_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace&path=/",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B slash-root workspace list oneshot");
+    let slash_status = slash_listing.status();
+    let slash_body = String::from_utf8_lossy(&read_body_bytes(slash_listing).await).to_string();
+    assert_eq!(
+        slash_status,
+        StatusCode::OK,
+        "a slash-only path lists the projected root, got {slash_status}: {slash_body}"
+    );
+    let slash_json: serde_json::Value =
+        serde_json::from_str(&slash_body).expect("user B slash-root listing is JSON");
+    assert_eq!(
+        slash_json["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a slash-only path on a fresh workspace lists as empty, got: {slash_body}"
+    );
+
+    let leaked = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=workspace&path=report.csv",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B workspace read oneshot");
+    let status = leaked.status();
+    let body = String::from_utf8_lossy(&read_body_bytes(leaked).await).to_string();
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "user B must not read user A's workspace file; body={body}"
+    );
+    assert!(
+        !body.contains(CSV_BODY),
+        "user B response leaked user A's workspace file contents: {body}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 #[tokio::test]

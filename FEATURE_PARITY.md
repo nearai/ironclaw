@@ -747,7 +747,7 @@ CLAUDE.md for the full mapping + gap catalog.
 | SSRF IPv6 transition bypass block | ✅ | ❌ | Block IPv4-mapped IPv6 bypasses |
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
-| Docker sandbox | ✅ | ❌ | Orchestrator/worker containers; opt-in `sandbox.docker.gpus` passthrough; Reborn defines a typed `SandboxProcessPlan` contract (`ironclaw_process_sandbox`) with plan validation only — no production execution backend is wired for it yet |
+| Docker sandbox | ✅ | ❌ | Orchestrator/worker containers; opt-in `sandbox.docker.gpus` passthrough; Reborn defines a typed `SandboxProcessPlan` contract (`ironclaw_sandbox`) with plan validation only — no production execution backend is wired for it yet |
 | Podman support | ✅ | ❌ | `--container` accepts both Docker + Podman |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); Reborn process sandbox rejects sensitive raw env values in plans and uses placeholders for brokered credentials, but production secure-capture and MITM transport wiring remain partial |

@@ -1822,6 +1822,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                             runtime: capability.descriptor.runtime,
                             estimate: capability.estimated_resources.clone(),
                             safe_description: capability.descriptor.description.clone(),
+                            description_trust: capability.description_trust,
                             parameters_schema: capability.descriptor.parameters_schema.clone(),
                             effects: capability.descriptor.effects.clone(),
                             provider_tool_name,
@@ -3035,29 +3036,17 @@ async fn dispatch_runtime_capability_auth_decline(
 }
 
 fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
-    capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
+    capability_id.as_str() == ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
-fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    if schema_contains_external_ref(schema, 0) {
-        return false;
-    }
-    if object
-        .get("$ref")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|reference| reference.starts_with('#'))
-    {
-        return true;
-    }
-    matches!(
-        object.get("type").and_then(serde_json::Value::as_str),
-        Some("object")
-    ) && object
-        .get("properties")
-        .is_none_or(serde_json::Value::is_object)
+fn provider_schema_is_resolved(schema: &serde_json::Value) -> bool {
+    // The hot capability catalog owns canonical JSON Schema validation and the
+    // selected LLM provider owns wire-format shaping (including top-level
+    // `oneOf` flattening). The loop must not maintain a second, narrower schema
+    // dialect: doing so silently delists valid, versioned extension schemas
+    // before they reach the provider adapter. It only enforces the boundary the
+    // provider cannot resolve safely on its own.
+    !schema_contains_external_ref(schema, 0)
 }
 
 fn provider_tool_name(
@@ -4127,7 +4116,7 @@ mod tests {
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
     };
-    use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
+    use ironclaw_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
@@ -4757,17 +4746,17 @@ mod tests {
     }
 
     #[test]
-    fn provider_schema_accepts_zero_arg_object_tools() {
-        assert!(provider_schema_is_usable(
+    fn provider_schema_requires_resolved_refs_without_restricting_canonical_shape() {
+        assert!(provider_schema_is_resolved(
             &serde_json::json!({"type":"object"})
         ));
-        assert!(provider_schema_is_usable(
+        assert!(provider_schema_is_resolved(
             &serde_json::json!({"type":"object","properties":{}})
         ));
-        assert!(!provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_resolved(&serde_json::json!({
             "$ref": "schemas/builtin/write-file.input.v1.json"
         })));
-        assert!(provider_schema_is_usable(&serde_json::json!({
+        assert!(provider_schema_is_resolved(&serde_json::json!({
             "$ref": "#/$defs/input",
             "$defs": {
                 "input": {
@@ -4778,7 +4767,7 @@ mod tests {
                 }
             }
         })));
-        assert!(!provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_resolved(&serde_json::json!({
             "type": "object",
             "properties": {
                 "payload": {
@@ -4786,9 +4775,12 @@ mod tests {
                 }
             }
         })));
-        assert!(!provider_schema_is_usable(
-            &serde_json::json!({"type":"string"})
-        ));
+        assert!(provider_schema_is_resolved(&serde_json::json!({
+            "oneOf": [
+                {"type":"object","properties":{"action":{"const":"first"}}},
+                {"type":"object","properties":{"action":{"const":"second"}}}
+            ]
+        })));
     }
 
     #[test]
@@ -6392,6 +6384,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn versioned_union_schema_is_advertised_and_dispatches_through_runtime_port() {
+        let capability_id = CapabilityId::new("evm-rpc.invoke").expect("valid capability id");
+        let provider_id = ExtensionId::new("evm-rpc").expect("valid provider id");
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "EvmRpcAction",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "eth_block_number" },
+                        "chain": { "type": ["string", "null"], "default": null }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "eth_get_balance" },
+                        "address": { "type": "string" },
+                        "chain": { "type": ["string", "null"], "default": null }
+                    },
+                    "required": ["action", "address"]
+                }
+            ]
+        });
+        let arguments = serde_json::json!({
+            "action": "eth_get_balance",
+            "address": "0x0000000000000000000000000000000000000000",
+            "chain": "ethereum"
+        });
+        let mut capability = visible_capability(capability_id.clone(), provider_id.clone());
+        capability.descriptor.parameters_schema = schema.clone();
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![capability]));
+        let mut context = execution_context("thread-versioned-union-schema");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(arguments.clone())),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("versioned union schema capability must be advertised");
+        assert_eq!(definition.name.as_str(), "evm-rpc__invoke");
+        assert_eq!(definition.parameters, schema);
+
+        let mut call = provider_tool_call();
+        call.name = definition.name;
+        call.arguments = arguments.clone();
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .expect("union-valid provider call should register");
+        assert_eq!(candidate.capability_id, capability_id);
+
+        let outcome = port
+            .invoke_capability(LoopRequest {
+                activity_id: candidate.activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("union-valid capability call should dispatch");
+        assert!(matches!(&outcome, Resolution::Done(done) if done.verdict.is_success()));
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].3, arguments);
+    }
+
+    #[tokio::test]
     async fn capability_info_result_write_failure_is_retryable() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -7928,7 +8014,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_capability_invocation_uses_spawn_with_validated_plan() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-spawn");
@@ -8437,7 +8523,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_capability_maps_runtime_invalid_plan_failure_to_model() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-invalid-plan");
@@ -8515,7 +8601,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_capability_maps_runtime_malformed_plan_failure_to_model() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-malformed-plan");
@@ -8593,7 +8679,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_rejection_keeps_scrubbed_fenced_diagnostic_model_visible() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-scrubbed-diagnostic");
@@ -8716,6 +8802,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
+            description_trust: Default::default(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
@@ -8769,6 +8856,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
+            description_trust: Default::default(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
@@ -8840,6 +8928,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
+            description_trust: Default::default(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
@@ -8891,6 +8980,7 @@ mod tests {
             runtime: RuntimeKind::FirstParty,
             estimate: ResourceEstimate::default(),
             safe_description: "demo echo".to_string(),
+            description_trust: Default::default(),
             parameters_schema: serde_json::json!({ "type": "object" }),
             effects: vec![EffectKind::DispatchCapability],
             provider_tool_name: ProviderToolName::new("demo_echo").expect("provider tool name"),
@@ -8975,6 +9065,7 @@ mod tests {
             runtime: RuntimeKind::Script,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
+            description_trust: Default::default(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ExecuteCode],
             provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),

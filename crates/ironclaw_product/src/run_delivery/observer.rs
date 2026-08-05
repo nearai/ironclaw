@@ -688,7 +688,7 @@ impl RunDeliveryObserver {
                                 fallback_owner_user_id: &binding.actor_user_id,
                                 scope,
                                 run_id,
-                                gate_ref: gate_ref.as_str(),
+                                gate_ref,
                                 invocation_id: None,
                                 body: "Authenticate to continue this run.".to_string(),
                                 credential_requirements: &state.credential_requirements,

@@ -33,6 +33,14 @@ ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+# The product-facing auth ports declared in `channel_connection.rs` and
+# `product_prompt.rs` error with `ProductSurfaceError` and carry
+# `ChannelConnectionRequirement` / `BlockedAuthPromptRequest`: their callers are
+# product surfaces. `ironclaw_product_contracts` is the neutral product-tier
+# contract crate and sits in the `contracts` layer, so this is a downward edge
+# like `host_api` — never a dependency on `ironclaw_product` itself. Same shape
+# and same rationale as `ironclaw_attachments`' landing/read ports.
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 # Compile-time Mozilla Public Suffix List: DCR issuer/resource origin binding
 # needs real eTLD+1 resolution (naive label-splitting treats every `*.co.uk`

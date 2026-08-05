@@ -124,7 +124,7 @@ impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn channel_disconnect_slot_for_test(
         &self,
-    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>> {
+    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>> {
         &self.channel_disconnect_slot
     }
 
@@ -162,8 +162,12 @@ impl RebornRuntimeStores {
         &self.extension_filesystem
     }
 
+    /// The deployment's workspace mount policy, for tests that build a
+    /// production-shaped capability-port factory.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn workspace_mounts_for_test(&self) -> &MountView {
+    pub(crate) fn workspace_mount_policy_for_test(
+        &self,
+    ) -> &crate::runtime_mounts::WorkspaceMountPolicy {
         &self.workspace_mounts
     }
 
@@ -201,7 +205,7 @@ impl RebornRuntimeStores {
 
     /// Mint (or rotate) a pairing code through the composed generic pairing
     /// service — tests only. Mirrors the production `pairing/mint` route
-    /// handler in `channel_pairing_serve`; returns the code text.
+    /// handler in `ironclaw_webui::channel_pairing`; returns the code text.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn pairing_mint_for_test(
         &self,
@@ -353,6 +357,7 @@ impl RebornRuntimeStores {
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service: wiring.thread_service,
                 turn_coordinator: wiring.turn_coordinator,
+                input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
                 approval_interaction: None,
                 auth_interaction: None,
                 identity: wiring.identity,
@@ -388,15 +393,10 @@ impl RebornRuntimeStores {
     pub(crate) fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
-            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            &[],
+        crate::runtime_mounts::read_write_workspace_filesystem(
+            &self.extension_filesystem,
+            &self.workspace_mounts,
         )
-        .ok()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&self.extension_filesystem),
-            attachment_mounts,
-        )))
     }
 
     #[cfg(feature = "test-support")]
@@ -878,11 +878,12 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
             reason: format!("extension installation state path invalid: {error}"),
         }
     })?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("extension host port catalog could not be loaded: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host port catalog could not be loaded: {error}"),
+            }
+        })?;
     let host_api_contracts = product_extension_host_api_contract_registry().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension host API contracts could not be loaded: {error}"),
@@ -1114,5 +1115,39 @@ mod attachment_seam_tests {
                 ),
             Vec::new(),
         );
+    }
+}
+
+/// The ambient shared workspace view a deployment carries, or `None` under a
+/// per-caller policy.
+///
+/// Test-support only: a per-caller deployment has no shared view, and
+/// production resolves its view from the run/gate scope instead. Lives here
+/// rather than on `WorkspaceMountPolicy` so the production type carries no
+/// test-only member.
+/// The ambient shared workspace view a test runtime carries.
+///
+/// A free function rather than a `RebornRuntimeStores` method: the
+/// struct-member ratchet
+/// (`ironclaw_architecture::reborn_struct_test_support_ratchet`) counts
+/// `#[cfg(test-support)]` *members* on production structs, while
+/// `check_no_panics.py` requires the item-level `#[cfg]` for the `.expect()`
+/// below. A gated free function satisfies both.
+///
+/// Panics under a per-caller policy, which has no shared view --- such a
+/// deployment must be driven through the production seam instead.
+#[cfg(test)]
+pub(crate) fn workspace_mounts_for_test(stores: &RebornRuntimeStores) -> &MountView {
+    shared_workspace_view(&stores.workspace_mounts)
+        .expect("test runtime uses a shared workspace mount policy")
+}
+
+#[cfg(test)]
+pub(crate) fn shared_workspace_view(
+    policy: &crate::runtime_mounts::WorkspaceMountPolicy,
+) -> Option<&MountView> {
+    match policy {
+        crate::runtime_mounts::WorkspaceMountPolicy::Shared(view) => Some(view),
+        crate::runtime_mounts::WorkspaceMountPolicy::PerCaller => None,
     }
 }

@@ -16,11 +16,13 @@ use ironclaw_conversations::{
     AcceptConversationMessageRequest, AcceptedConversationMessageLookup,
     AcceptedConversationMessageReplay, AdapterInstallationId, AdapterKind,
     ConditionalUnpairOutcome, ConversationBindingService, ConversationMessageRecord,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalEventId,
-    InboundConversationService, InboundMessageContentRef, InboundTurnError,
-    MessageIdempotencyStatus, RebornFilesystemConversationServices, ResolveConversationRequest,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalEventId, InboundConversationService,
+    InboundMessageContentRef, InboundTurnError, MessageIdempotencyStatus,
+    RebornFilesystemConversationServices, ResolveConversationRequest,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, UserId},

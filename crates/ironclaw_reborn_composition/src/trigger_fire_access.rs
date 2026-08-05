@@ -1,89 +1,30 @@
-//! Fire-time trigger access checkers built from [`TriggerFireAccessPolicy`].
+//! The one fire-time trigger-access checker that is assembly, not policy.
 //!
-//! These replaced the former `ironclaw_runner::local_trigger_access` shadow
-//! store (arch-simplification §4.4). Trigger-fire authorization is no longer a
-//! persisted parallel access table: it is either a pure comparison against a
-//! config-supplied owner ([`StaticOwnerTriggerFireChecker`]) or a membership
-//! lookup against the canonical identity directory the SSO login path already
-//! populates ([`IdentityMembershipTriggerFireChecker`]). The composition build
-//! selects one from [`TriggerFireAccessPolicy`] when the trigger poller is
-//! enabled.
+//! The check contract (`TriggerFireAccessCheck`/`Decision`/`Error`/`Checker`),
+//! the exact-scope comparison, the static-owner grant, and the OR-combinator
+//! moved to `ironclaw_triggers::fire_access` with CHECKLIST WS6 — they are
+//! decisions about this host's own trigger records and carry no backend.
+//!
+//! What stays is the checker that is a *lookup against a backend composition
+//! selects*: tenant membership resolved at fire time from the canonical
+//! identity directory the SSO login path populates. It renders the same denial
+//! reason and applies the same exact-scope rule as its siblings by calling the
+//! trigger crate's [`trigger_fire_access_denied`] / [`trigger_fire_scope_matches`]
+//! rather than restating either — a second copy of the deny string is exactly
+//! how two checkers drift apart.
+//!
+//! The composition build still selects this one from `TriggerFireAccessPolicy`,
+//! which stays here: §6.10.1's Keeps list names deployment config-as-data as
+//! composition's charter.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
-
-use crate::runtime_input::{
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+use ironclaw_triggers::{
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError,
+    TriggerFireAccessError, trigger_fire_access_denied, trigger_fire_scope_matches,
 };
-
-const DENY_REASON: &str = "trigger creator does not have active access for this scope";
-
-/// Does the fire-time check's exact scope match the granted `(agent, project)`
-/// grant? Scope is exact — `None` project means "no project", never a wildcard
-/// (matches [`TriggerFireAccessCheck`] semantics).
-fn scope_matches(
-    check: &TriggerFireAccessCheck,
-    agent: &AgentId,
-    project: &Option<ProjectId>,
-) -> bool {
-    check.agent_id.as_ref() == Some(agent) && &check.project_id == project
-}
-
-fn denied() -> TriggerFireAccessDecision {
-    TriggerFireAccessDecision::Denied {
-        reason: DENY_REASON.to_string(),
-    }
-}
-
-/// A single configured owner may fire triggers for one exact scope — the
-/// env-token `serve` and CLI `run` owner grant. Pure comparison, no I/O.
-///
-/// The `tenant_id` bound is load-bearing: the due-trigger repository is global,
-/// so a fire-time check that matched only owner + scope could authorize a
-/// foreign tenant's trigger whose creator id happened to equal this owner. The
-/// former store keyed every row on tenant; this preserves that.
-pub(crate) struct StaticOwnerTriggerFireChecker {
-    tenant_id: TenantId,
-    owner: UserId,
-    agent: AgentId,
-    project: Option<ProjectId>,
-}
-
-impl StaticOwnerTriggerFireChecker {
-    pub(crate) fn new(
-        tenant_id: TenantId,
-        owner: UserId,
-        agent: AgentId,
-        project: Option<ProjectId>,
-    ) -> Self {
-        Self {
-            tenant_id,
-            owner,
-            agent,
-            project,
-        }
-    }
-}
-
-#[async_trait]
-impl TriggerFireAccessChecker for StaticOwnerTriggerFireChecker {
-    async fn check_trigger_fire_access(
-        &self,
-        request: TriggerFireAccessCheck,
-    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
-        let allowed = request.tenant_id == self.tenant_id
-            && request.creator_user_id == self.owner
-            && scope_matches(&request, &self.agent, &self.project);
-        Ok(if allowed {
-            TriggerFireAccessDecision::Allowed
-        } else {
-            denied()
-        })
-    }
-}
 
 /// Any active member of the host tenant may fire triggers for one exact scope —
 /// the SSO/WebUI deployment. Membership is resolved at fire time from the
@@ -119,8 +60,8 @@ impl TriggerFireAccessChecker for IdentityMembershipTriggerFireChecker {
         &self,
         request: TriggerFireAccessCheck,
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
-        if !scope_matches(&request, &self.agent, &self.project) {
-            return Ok(denied());
+        if !trigger_fire_scope_matches(&request, &self.agent, &self.project) {
+            return Ok(trigger_fire_access_denied());
         }
         let user = self
             .directory
@@ -145,60 +86,15 @@ impl TriggerFireAccessChecker for IdentityMembershipTriggerFireChecker {
         Ok(if allowed {
             TriggerFireAccessDecision::Allowed
         } else {
-            denied()
+            trigger_fire_access_denied()
         })
-    }
-}
-
-/// OR-combines several checkers: `Allowed` if any grant allows; otherwise
-/// `Unavailable` if any grant's backend was unavailable (retryable, so a
-/// transient identity-store fault is not a hard denial); otherwise `Denied`.
-pub(crate) struct CompositeTriggerFireChecker {
-    checkers: Vec<Arc<dyn TriggerFireAccessChecker>>,
-}
-
-impl CompositeTriggerFireChecker {
-    pub(crate) fn new(checkers: Vec<Arc<dyn TriggerFireAccessChecker>>) -> Self {
-        Self { checkers }
-    }
-}
-
-#[async_trait]
-impl TriggerFireAccessChecker for CompositeTriggerFireChecker {
-    async fn check_trigger_fire_access(
-        &self,
-        request: TriggerFireAccessCheck,
-    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
-        // Split so the last checker takes `request` by move — no redundant
-        // final clone (the common case is a single StaticOwner + SsoMembership
-        // pair, so this saves one clone per fire).
-        let Some((last, rest)) = self.checkers.split_last() else {
-            return Ok(denied());
-        };
-        let mut unavailable: Option<TriggerFireAccessError> = None;
-        for checker in rest {
-            match checker.check_trigger_fire_access(request.clone()).await {
-                Ok(TriggerFireAccessDecision::Allowed) => {
-                    return Ok(TriggerFireAccessDecision::Allowed);
-                }
-                Ok(TriggerFireAccessDecision::Denied { .. }) => {}
-                Err(error) => unavailable = Some(error),
-            }
-        }
-        match last.check_trigger_fire_access(request).await {
-            Ok(TriggerFireAccessDecision::Allowed) => Ok(TriggerFireAccessDecision::Allowed),
-            Ok(TriggerFireAccessDecision::Denied { .. }) => match unavailable {
-                Some(error) => Err(error),
-                None => Ok(denied()),
-            },
-            Err(error) => Err(error),
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ids::UserId;
 
     fn check(creator: &str, agent: Option<&str>, project: Option<&str>) -> TriggerFireAccessCheck {
         TriggerFireAccessCheck {
@@ -209,110 +105,6 @@ mod tests {
             trigger_id: ironclaw_triggers::TriggerId::new(),
             fire_slot: chrono::Utc::now(),
         }
-    }
-
-    fn static_checker() -> StaticOwnerTriggerFireChecker {
-        StaticOwnerTriggerFireChecker::new(
-            TenantId::new("tenant").expect("tenant"),
-            UserId::new("owner").expect("user"),
-            AgentId::new("agent").expect("agent"),
-            Some(ProjectId::new("project").expect("project")),
-        )
-    }
-
-    #[tokio::test]
-    async fn static_owner_allows_exact_owner_and_scope() {
-        let decision = static_checker()
-            .check_trigger_fire_access(check("owner", Some("agent"), Some("project")))
-            .await
-            .expect("check");
-        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
-    }
-
-    #[tokio::test]
-    async fn static_owner_denies_non_owner() {
-        let decision = static_checker()
-            .check_trigger_fire_access(check("intruder", Some("agent"), Some("project")))
-            .await
-            .expect("check");
-        assert!(matches!(decision, TriggerFireAccessDecision::Denied { .. }));
-    }
-
-    #[tokio::test]
-    async fn static_owner_denies_scope_mismatch() {
-        // Right owner, wrong project scope.
-        let decision = static_checker()
-            .check_trigger_fire_access(check("owner", Some("agent"), Some("other")))
-            .await
-            .expect("check");
-        assert!(matches!(decision, TriggerFireAccessDecision::Denied { .. }));
-        // Right owner, missing project where one was granted.
-        let decision = static_checker()
-            .check_trigger_fire_access(check("owner", Some("agent"), None))
-            .await
-            .expect("check");
-        assert!(matches!(decision, TriggerFireAccessDecision::Denied { .. }));
-    }
-
-    #[tokio::test]
-    async fn static_owner_denies_foreign_tenant() {
-        // The due-trigger repository is global: a foreign tenant's trigger with
-        // a matching owner id + scope must NOT be authorized (regression guard).
-        let foreign = TriggerFireAccessCheck {
-            tenant_id: TenantId::new("other-tenant").expect("tenant"),
-            creator_user_id: UserId::new("owner").expect("user"),
-            agent_id: Some(AgentId::new("agent").expect("agent")),
-            project_id: Some(ProjectId::new("project").expect("project")),
-            trigger_id: ironclaw_triggers::TriggerId::new(),
-            fire_slot: chrono::Utc::now(),
-        };
-        let decision = static_checker()
-            .check_trigger_fire_access(foreign)
-            .await
-            .expect("check");
-        assert!(matches!(decision, TriggerFireAccessDecision::Denied { .. }));
-    }
-
-    #[tokio::test]
-    async fn composite_allows_if_any_grant_allows() {
-        // Two static owners; only the second matches the creator.
-        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> = vec![
-            Arc::new(StaticOwnerTriggerFireChecker::new(
-                TenantId::new("tenant").expect("tenant"),
-                UserId::new("owner-a").expect("user"),
-                AgentId::new("agent").expect("agent"),
-                Some(ProjectId::new("project").expect("project")),
-            )),
-            Arc::new(StaticOwnerTriggerFireChecker::new(
-                TenantId::new("tenant").expect("tenant"),
-                UserId::new("owner-b").expect("user"),
-                AgentId::new("agent").expect("agent"),
-                Some(ProjectId::new("project").expect("project")),
-            )),
-        ];
-        let composite = CompositeTriggerFireChecker::new(checkers);
-        let decision = composite
-            .check_trigger_fire_access(check("owner-b", Some("agent"), Some("project")))
-            .await
-            .expect("check");
-        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
-    }
-
-    #[tokio::test]
-    async fn composite_denies_if_no_grant_allows() {
-        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
-            vec![Arc::new(StaticOwnerTriggerFireChecker::new(
-                TenantId::new("tenant").expect("tenant"),
-                UserId::new("owner-a").expect("user"),
-                AgentId::new("agent").expect("agent"),
-                None,
-            ))];
-        let composite = CompositeTriggerFireChecker::new(checkers);
-        let decision = composite
-            .check_trigger_fire_access(check("stranger", Some("agent"), None))
-            .await
-            .expect("check");
-        assert!(matches!(decision, TriggerFireAccessDecision::Denied { .. }));
     }
 
     mod identity {

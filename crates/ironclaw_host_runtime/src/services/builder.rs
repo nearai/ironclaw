@@ -511,7 +511,7 @@ where
         self
     }
 
-    pub fn with_credential_account_store<T>(mut self, store: Arc<T>) -> Self
+    pub(crate) fn with_credential_account_store<T>(mut self, store: Arc<T>) -> Self
     where
         T: CredentialAccountStore + 'static,
     {
@@ -520,7 +520,7 @@ where
         self
     }
 
-    pub fn with_credential_session_store<T>(mut self, store: Arc<T>) -> Self
+    pub(crate) fn with_credential_session_store<T>(mut self, store: Arc<T>) -> Self
     where
         T: CredentialSessionStore + 'static,
     {
@@ -652,7 +652,7 @@ where
     /// Attaches the host HTTP egress shape required for production runtime
     /// adapters. The service must use staged network-policy handoffs and secret
     /// injection handoffs, not request-local/test policy fallback.
-    pub fn with_host_http_egress_service<N, SecretBackend>(
+    pub(crate) fn with_host_http_egress_service<N, SecretBackend>(
         mut self,
         runtime_http_egress: Arc<crate::HostHttpEgressService<N, SecretBackend>>,
     ) -> Self

@@ -11,8 +11,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    AutoApproveSettingKey, PersistentApprovalAction, PersistentApprovalPolicyKey,
-    PersistentApprovalScope, ToolPermissionOverride, ToolPermissionOverrideKey,
+    ApprovalSettingsProvider, AutoApproveSettingKey, PersistentApprovalAction,
+    PersistentApprovalPolicyKey, PersistentApprovalScope, ProfileApprovalGatePolicy,
+    RuntimeProfileApprovalGatePolicy, ToolPermissionOverride, ToolPermissionOverrideKey,
+    profile_approval_authorizer,
 };
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
@@ -26,12 +28,6 @@ use ironclaw_runtime_policy::MinimalApprovalBypass;
 use tokio::sync::Notify;
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
-use crate::{
-    profile_approval_authorization::{
-        ApprovalSettingsProvider, ProfileApprovalGatePolicy, profile_approval_authorizer,
-    },
-    runtime_profile_approval_policy::RuntimeProfileApprovalGatePolicy,
-};
 
 pub(crate) fn capability_authorizer(
     runtime_policy: Option<&EffectiveRuntimePolicy>,

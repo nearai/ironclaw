@@ -85,6 +85,9 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
                 && message
                     .content
                     .contains("When `extension_search` and `extension_install` are present")
+                && message
+                    .content
+                    .contains("`extension_register_hosted_mcp` is also visible")
         }),
         "bridged disclosure should inject a visibility-conditional discovery protocol"
     );
@@ -222,7 +225,7 @@ fn runtime_input(
     .with_model_gateway_override(gateway)
     // Pin bridged explicitly so the disclosure-protocol assertions do not depend
     // on the production default.
-    .with_tool_disclosure(ironclaw_runner::runtime::ToolDisclosureMode::Bridged)
+    .with_tool_disclosure(ironclaw_loop_host::ToolDisclosureMode::Bridged)
 }
 
 fn recorded_requests(

@@ -21,6 +21,10 @@ import {
   setDraft,
   setStagedAttachments,
 } from "../lib/draft-store";
+import {
+  canStealFocus,
+  shouldAutoFocusComposer,
+} from "../lib/chat-input-focus";
 
 export function ChatInput({
   onSend,
@@ -49,8 +53,8 @@ export function ChatInput({
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
   const textRef = React.useRef(text);
-  const currentDraftKeyRef = React.useRef(draftKey);
-  currentDraftKeyRef.current = draftKey;
+  const currentDraftContextRef = React.useRef({ draftKey, resetKey });
+  currentDraftContextRef.current.draftKey = draftKey;
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
   const sendBlockedRef = React.useRef(false);
@@ -204,16 +208,31 @@ export function ChatInput({
     textRef.current = initialText;
     setText(initialText);
     resetCommandMenuSelection(initialText);
-    window.requestAnimationFrame(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-        textareaRef.current.setSelectionRange(
-          initialText.length,
-          initialText.length
-        );
-      }
-    });
   }, [initialText, resetKey, resetCommandMenuSelection]);
+
+  // One focus owner. Fires on composer identity change (thread open, "+ New",
+  // route remount) and on the landing-hero draft hand-off. The rAF defers past
+  // the restore effects above, so the caret lands after restored text.
+  React.useEffect(() => {
+    const locationChanged = currentDraftContextRef.current.resetKey !== resetKey;
+    currentDraftContextRef.current.resetKey = resetKey;
+    if (disabled) return;
+    if (!shouldAutoFocusComposer(window)) return;
+    window.requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      const active = window.document.activeElement;
+      if (!canStealFocus(active, node)) return;
+      // A draft-key-only change is the first reply adopting its thread id, so
+      // preserve an active user's selection. A location change means browser
+      // navigation restored a different draft into this still-mounted node;
+      // in that case its old selection is stale even when it retained focus.
+      if (active === node && !locationChanged) return;
+      if (active !== node) node.focus();
+      const end = textRef.current.length;
+      node.setSelectionRange(end, end);
+    });
+  }, [draftKey, resetKey, initialText, disabled]);
 
   // Stage dropped/picked/pasted files: validate against the server contract,
   // append the accepted ones, and surface any rejection reasons as a single
@@ -324,7 +343,8 @@ export function ChatInput({
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     const restoreSubmittedDraft = () => {
       const scopeUnchanged = authScope() === submittedScope;
-      const draftKeyUnchanged = currentDraftKeyRef.current === submittedDraftKey;
+      const draftKeyUnchanged =
+        currentDraftContextRef.current.draftKey === submittedDraftKey;
       if (!scopeUnchanged) return;
       const shouldRestoreActiveText = draftKeyUnchanged && textRef.current === "";
       if (shouldRestoreActiveText) {
@@ -569,6 +589,13 @@ export function ChatInput({
 
   const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
+  // While a run is active the composer shows a cancel button, but as soon as
+  // the user types a new message we swap it for send so the follow-up can be
+  // queued behind the running turn instead of forcing a cancel first. Only
+  // swap when send is actually usable: with a draft and a disabled send
+  // (cooldown) the user would otherwise have to erase the draft to reach
+  // cancel.
+  const showCancelOnly = canCancel && (!hasPayload || isSubmitDisabled);
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -578,13 +605,6 @@ export function ChatInput({
     : "px-4 py-3 sm:px-5 lg:px-8";
   const composerClass = [
     "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5 transition-colors",
-    // Highlight the full rounded container on focus (not just the
-    // leaking textarea ring), mirroring the global input:focus accent.
-    // Suppressed only when the composer is hard-disabled; busy runs
-    // still allow draft editing.
-    disabled
-      ? ""
-      : "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
     isHero ? "min-h-[120px]" : "",
     disabled ? "opacity-70" : "",
   ].join(" ");
@@ -848,7 +868,7 @@ export function ChatInput({
             >
               <Icon name="plus" className="h-5 w-5" />
             </button>
-            {canCancel
+            {showCancelOnly
               ? (
                 <Button
                   type="button"

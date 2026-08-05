@@ -387,6 +387,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:auth").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: Utc::now(),
@@ -1800,6 +1801,7 @@ fn auth_flow(
 ) -> AuthFlowRecord {
     let now = Utc::now();
     AuthFlowRecord {
+        requested_scopes: Vec::new(),
         id: AuthFlowId::new(),
         scope: auth_scope(scope, actor),
         kind: AuthFlowKind::IntegrationCredential,

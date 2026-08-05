@@ -122,6 +122,7 @@ registerPack("en", {
   "chat.identityUser": "You",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
+  "chat.queued": "Queued",
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.send": "Send message",
   "shortcuts.newline": "New line",
@@ -243,6 +244,8 @@ registerPack("en", {
   "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
+
+  // Settings — usage tab
 
   // Settings — Trace Commons credits (read-only)
   "traceCommons.title": "Trace Commons credits",
@@ -1383,7 +1386,7 @@ registerPack("en", {
   "extensions.customMcpIdInvalid": "Server ID must use lowercase letters, numbers, underscores, hyphens, or dots, starting with a letter or number (128 chars max).",
   "extensions.customMcpEndpointRequired": "Enter a server address.",
   "extensions.customMcpEndpointHttps": "Enter a public HTTPS URL without credentials, fragments, localhost, or an IP address.",
-  "extensions.customMcpAuthHint": "IronClaw connects without credentials first to detect OAuth or bearer-token needs. Override under Advanced options.",
+  "extensions.customMcpAuthHint": "This server requires authentication. Choose OAuth or bearer token to finish registration.",
   "extensions.customMcpReviewHint": "Add it now, then install it from Extensions. Connect an account or add a token if needed.",
   "extensions.customMcpAuth.no_auth": "No authentication",
   "extensions.customMcpAuth.bearer": "Bearer token",

@@ -16,6 +16,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
     ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     approval::{ApprovalRequest, InvocationFingerprint},
@@ -42,8 +43,7 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_trust::{
-    AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy,
-    TrustPolicyInput, TrustProvenance,
+    AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy, TrustProvenance,
 };
 use serde_json::json;
 

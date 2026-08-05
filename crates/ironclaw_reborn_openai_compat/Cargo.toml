@@ -42,9 +42,6 @@ futures-core = { version = "0.3" }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
-# Force `storage` on for this crate's own test builds so the ref-store contract
-# suite runs under a bare `cargo test -p ironclaw_reborn_openai_compat`.
-ironclaw_reborn_openai_compat = { path = "." }
 http = "1"
 http-body-util = "0.1"
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0", features = ["test-support"] }

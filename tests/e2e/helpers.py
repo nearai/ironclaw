@@ -305,6 +305,8 @@ SEL_V2 = {
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "thread_search": "input[placeholder='Search chats...']",
     "thread_load_more": "[data-testid='thread-load-more']",
+    "thread_new": "[data-testid='new-chat']",
+    "thread_item": "[data-testid='thread-item']",
     "sign_out_button": "button[title='Sign out']",
     "nav_chat": "a[href='/chat']",
     "nav_settings_inference": "a[href='/settings/inference']",
@@ -440,6 +442,11 @@ SEL_V2 = {
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
     "llm_provider_disclosure": "llm-provider-disclosure",
+    "onboarding_provider_card_for": (
+        "[data-testid='onboarding-provider-card']"
+        "[data-provider-id='{provider_id}']"
+    ),
+    "onboarding_provider_setup": "[data-testid='onboarding-provider-setup']",
     "automation_row_for": (
         "[data-testid='automation-row'][data-automation-id='{id}']"
     ),

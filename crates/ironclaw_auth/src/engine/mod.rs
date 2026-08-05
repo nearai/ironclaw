@@ -10,8 +10,11 @@
 //! - host-constructed authorize URLs (recipes can never supply or override
 //!   `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
 //!   scope parameter),
-//! - scope intersection against the recipe ceiling, rejected before any
-//!   vendor call,
+//! - scope requests validated against the recipe ceiling before any vendor
+//!   call: a host flow's explicit scopes are honored verbatim, an
+//!   extension-scoped flow's scopes are validated as a lower bound and the
+//!   full ceiling is requested instead (the vendor account is shared across
+//!   that vendor's installed extensions, #7069),
 //! - token exchange over `post_body` or `basic` client authentication,
 //! - bounded JSON-pointer extraction of token-response and identity fields,
 //! - on-demand refresh honoring `rotates_refresh_token` both ways,
@@ -19,6 +22,32 @@
 //!
 //! Vendor response bodies are size-capped and never logged or embedded in
 //! errors; only stable OAuth error codes (`invalid_grant`, …) are extracted.
+//!
+//! # Module charter
+//!
+//! This is **the first of this crate's two engines** (PROPOSAL §6.4.8).
+//!
+//! **Owns:** every conversation with a vendor. Authorize-URL construction,
+//! scope validation against the recipe ceiling, `oauth2_code` + PKCE,
+//! `api_key` + probe, RFC 7591 dynamic client registration, token exchange and
+//! refresh, bounded JSON-pointer extraction of token/identity fields, the
+//! keepalive refresh sweep and its leader lock, authorization-server and
+//! protected-resource admission metadata, and the auth-account state machine
+//! ([`crate::AuthAccountState`]).
+//!
+//! **Never contains:** a vendor-conditional code path (a vendor difference is
+//! recipe *data*, or — last resort, with an ADR — a narrow declared quirk
+//! hook), and none of the durable product-auth lifecycle: flow records,
+//! credential-account projections, secure interactions, and cleanup are
+//! [`crate::product_auth`]'s.
+//!
+//! **The severance is the point, and it is enforced.** This module must not
+//! name `product_auth`, and `product_auth` must not name this module —
+//! measured at zero references in both directions and pinned by
+//! `tests/module_charter.rs::the_two_engines_do_not_name_each_other`. The two
+//! engines meet only through the shared vocabulary re-exported from the crate
+//! root, which is a **third** owner in `CLAUDE.md`'s sub-owner map rather than
+//! being charged to either engine.
 
 pub mod admission;
 mod dcr;
@@ -34,7 +63,11 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::{
     OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, VendorAuthRecipe,
 };
-use ironclaw_host_api::{http::RuntimeHttpEgress, ids::ExtensionId, resource::ResourceScope};
+use ironclaw_host_api::{
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use url::Url;
@@ -77,11 +110,18 @@ pub struct ResolvedVendorAuthRecipe {
 #[async_trait]
 pub trait AuthRecipeResolver: Send + Sync + fmt::Debug {
     /// Resolve only the recipe declared by the requesting installed extension.
-    /// `None` is reserved for built-in/static callers; installed-manifest
-    /// resolvers must fail closed when it is absent.
+    /// `requester_extension` is `None` for built-in/static callers;
+    /// installed-manifest resolvers must fail closed when it is absent.
+    ///
+    /// `caller` is the user the flow authorizes for. A shared vendor's scope
+    /// ceiling is the union across the extensions that user INSTALLED, so a
+    /// resolver reading installation state must narrow to them — registration
+    /// is tenant-wide, installation is per user, and pooling the two would put
+    /// another user's extensions on this user's consent screen.
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe>;
 }
@@ -118,6 +158,7 @@ impl AuthRecipeResolver for StaticAuthRecipeResolver {
     async fn resolve(
         &self,
         _requester_extension: Option<&ExtensionId>,
+        _caller: Option<&UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
         self.recipes.get(vendor).cloned()
@@ -290,17 +331,34 @@ impl AuthEngine {
     async fn resolved_recipe(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Result<ResolvedVendorAuthRecipe, AuthProductError> {
-        self.recipes
-            .resolve(requester_extension, vendor)
+        match self
+            .recipes
+            .resolve(requester_extension, caller, vendor)
             .await
-            .ok_or(AuthProductError::MalformedConfig)
+        {
+            Some(resolved) => Ok(resolved),
+            None => {
+                // Every caller maps this to an opaque `malformed_config`
+                // (HTTP 503 on the connect route), so without this line an
+                // unresolvable recipe leaves no server-side trace of WHICH
+                // requester/vendor pair could not be resolved.
+                tracing::warn!(
+                    vendor = %vendor,
+                    requester_extension = requester_extension.map(ExtensionId::as_str).unwrap_or("<host>"),
+                    "no auth recipe resolved for this requester and vendor"
+                );
+                Err(AuthProductError::MalformedConfig)
+            }
+        }
     }
 
     async fn oauth2_recipe(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Result<
         (
@@ -310,7 +368,9 @@ impl AuthEngine {
         ),
         AuthProductError,
     > {
-        let resolved = self.resolved_recipe(requester_extension, vendor).await?;
+        let resolved = self
+            .resolved_recipe(requester_extension, caller, vendor)
+            .await?;
         match resolved.recipe {
             VendorAuthRecipe::Oauth2Code(recipe) => Ok((
                 recipe,
@@ -367,15 +427,22 @@ impl AuthEngine {
         request: PrepareOAuthFlowRequest,
     ) -> Result<PreparedOAuthFlow, AuthProductError> {
         let (recipe, resource, protected_resource_metadata_url) = self
-            .oauth2_recipe(request.requester_extension.as_ref(), &request.vendor)
+            .oauth2_recipe(
+                request.requester_extension.as_ref(),
+                Some(&request.scope.resource.user_id),
+                &request.vendor,
+            )
             .await?;
         // Enforce the recipe invariants at execution time; manifest-parse
         // validation is not trusted alone (AUTH-2).
         recipe
             .validate()
             .map_err(|_| AuthProductError::MalformedConfig)?;
-        let requested_scopes =
-            effective_requested_scopes(&recipe, request.requested_scopes.clone())?;
+        let requested_scopes = effective_requested_scopes(
+            &recipe,
+            request.requested_scopes.clone(),
+            request.requester_extension.as_ref(),
+        )?;
         let client = self
             .oauth_client_material(
                 &request.scope.resource,
@@ -394,7 +461,6 @@ impl AuthEngine {
             request.flow_id,
             request.scope.clone(),
             request.account_label.clone(),
-            requested_scopes.clone(),
         )?
         .encode()?;
         let opaque_state_hash = opaque_state_hash(state.as_str())?;
@@ -435,7 +501,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(None, request.provider.as_str())
+            .oauth2_recipe(
+                None,
+                Some(&context.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         // Widening past the ceiling is rejected before the vendor call, on
@@ -456,10 +526,37 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
+            .oauth2_recipe(
+                requester_extension.as_ref(),
+                Some(&context.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
-        validate_scopes_within_ceiling(&recipe, &request.scopes)?;
+        let request = match &requester_extension {
+            Some(_) => {
+                // An extension-scoped flow persists the shared-vendor ceiling as
+                // it stood at PREPARE time. A sibling extension uninstalled
+                // while the user was on the vendor's consent screen shrinks
+                // that ceiling, and rejecting here would fail this flow's
+                // callback over an unrelated extension's removal (lifecycle
+                // cleanup deliberately does not cancel shared-provider flows).
+                // Clamp to the CURRENT ceiling instead: the stored grant still
+                // can never exceed what is authorized right now — including on
+                // the `fallback_to_requested` path, where the exchange echoes
+                // these scopes without clamping them itself.
+                clamp_callback_scopes_to_ceiling(&recipe, request)
+            }
+            None => {
+                // A HOST flow has no sibling extension whose uninstall could
+                // legitimately shrink the ceiling mid-flow, so silently
+                // dropping out-of-ceiling scopes here would only weaken the
+                // exchange-time defense-in-depth check and hide
+                // misconfiguration. Reject instead, matching `exchange_callback`.
+                validate_scopes_within_ceiling(&recipe, &request.scopes)?;
+                request
+            }
+        };
         self.execute_oauth_exchange(context, request, recipe, resource)
             .await
     }
@@ -473,7 +570,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(None, request.provider.as_str())
+            .oauth2_recipe(
+                None,
+                Some(&request.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
         self.execute_oauth_refresh(request, recipe, resource).await
@@ -489,7 +590,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
+            .oauth2_recipe(
+                requester_extension.as_ref(),
+                Some(&request.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
         self.execute_oauth_refresh(request, recipe, resource).await
@@ -517,21 +622,70 @@ impl AuthProviderClient for AuthEngine {
     }
 }
 
-/// Effective requested scopes for a flow: empty request means the recipe's
-/// full ceiling; anything outside the ceiling is rejected (AUTH-4).
+/// The scopes this flow asks the vendor for (AUTH-4).
+///
+/// An empty request means the recipe's full ceiling. A HOST flow
+/// (`requester_extension` is `None`) is authorizing on its own behalf, so an
+/// explicit request is honored verbatim once validated.
+///
+/// An EXTENSION-scoped flow is different: it authorizes the vendor account
+/// that every installed extension of that vendor SHARES, and the recipe
+/// ceiling is already the union across those installed manifests
+/// (`ironclaw_extension_host::unified_vendor_recipes`). The account holds one
+/// scope set that each exchange replaces, and dispatch requires a
+/// capability's scopes to already be on it, so asking for only the requesting
+/// extension's slice forces a separate consent per sibling and leaves every
+/// not-yet-authorized sibling returning `auth_required` (#7069). Such a
+/// request is therefore validated as a LOWER BOUND — the caller's scopes must
+/// still be within the ceiling — and the ceiling is what gets requested; the
+/// returned value deliberately does not echo the input.
 fn effective_requested_scopes(
     recipe: &OAuth2CodeRecipe,
     requested: Vec<ProviderScope>,
+    requester_extension: Option<&ExtensionId>,
 ) -> Result<Vec<ProviderScope>, AuthProductError> {
-    if requested.is_empty() {
-        return recipe
-            .scopes
-            .iter()
-            .map(|scope| ProviderScope::new(scope.clone()))
-            .collect();
+    if !requested.is_empty() {
+        validate_scopes_within_ceiling(recipe, &requested)?;
+        if requester_extension.is_none() {
+            return Ok(requested);
+        }
     }
-    validate_scopes_within_ceiling(recipe, &requested)?;
-    Ok(requested)
+    recipe
+        .scopes
+        .iter()
+        .map(|scope| ProviderScope::new(scope.clone()))
+        .collect()
+}
+
+/// Drop callback scopes the vendor recipe no longer declares.
+///
+/// Used only on the EXTENSION-scoped arm of the requester-scoped exchange
+/// (`requester_extension.is_some()`), where the persisted request is the
+/// prepare-time shared-vendor ceiling and may name a scope a sibling
+/// extension has since taken away. The HOST arm (`requester_extension`
+/// is `None`) does not call this — it validates instead, since there is no
+/// sibling extension whose uninstall could legitimately shrink the ceiling.
+/// The result is always a subset of the current ceiling, so it is never
+/// wider than the host path's [`validate_scopes_within_ceiling`] would have
+/// permitted.
+fn clamp_callback_scopes_to_ceiling(
+    recipe: &OAuth2CodeRecipe,
+    mut request: OAuthProviderCallbackRequest,
+) -> OAuthProviderCallbackRequest {
+    request
+        .scopes
+        .retain(|scope| scope_in_ceiling(recipe, scope));
+    request
+}
+
+/// The one membership rule deciding whether a scope is inside a recipe's
+/// ceiling. Both the clamp above and [`validate_scopes_within_ceiling`] answer
+/// "may this caller keep this scope", so they must never diverge on it.
+fn scope_in_ceiling(recipe: &OAuth2CodeRecipe, scope: &ProviderScope) -> bool {
+    recipe
+        .scopes
+        .iter()
+        .any(|ceiling| ceiling == scope.as_str())
 }
 
 fn validate_scopes_within_ceiling(
@@ -539,11 +693,7 @@ fn validate_scopes_within_ceiling(
     requested: &[ProviderScope],
 ) -> Result<(), AuthProductError> {
     for scope in requested {
-        if !recipe
-            .scopes
-            .iter()
-            .any(|ceiling| ceiling == scope.as_str())
-        {
+        if !scope_in_ceiling(recipe, scope) {
             return Err(AuthProductError::invalid_request(
                 "requested scopes exceed the vendor recipe scope ceiling",
             ));

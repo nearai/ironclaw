@@ -11,10 +11,13 @@
 `ironclaw_extensions` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
 It also owns package manifests and caller-membership installation records.
 Caller membership is the only installation-lifecycle authority; runtime
-publication and administrator configuration are separate host concerns. Domain
-crates such as `ironclaw_product_adapter_registry` project their own host API
-sections from that generic state rather than owning a second installation
-store.
+publication and administrator configuration are separate host concerns. Host
+API sections are projected from that generic state rather than by a second
+installation store: the built-in contracts live in
+`ironclaw_extensions::host_api` (`capability_provider`, `product_adapter`), and
+each one's declared section *schema* is the neutral vocabulary crate's
+(`ironclaw_extension_contracts::product_adapter_section` for
+`[product_adapter.*]`).
 
 It answers:
 
@@ -30,7 +33,7 @@ It does **not** execute capabilities.
 Execution belongs to:
 
 - `ironclaw_wasm` for WASM modules
-- `ironclaw_scripts` for Docker-backed native CLI/script capabilities
+- `ironclaw_sandbox` for Docker-backed native CLI/script capabilities
 - `ironclaw_mcp` for MCP adapter calls
 - host-policy-selected service crates for first-party/system work
 
@@ -432,6 +435,7 @@ Rules:
 - Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
 - The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
 - Descriptions from registry packages whose signature, provenance, and artifact digests were verified carry that provenance into prompt assembly. They may bypass vocabulary/path/credential-shape false-positive checks, but never structural prompt limits or execution authorization. Unknown, local, and synthetic sources remain fully checked.
+- Registry package schema references resolve only to path-keyed artifacts whose bytes and hashes are covered by the signed catalog. The host must not replace a missing publisher schema with a permissive generic schema; missing, extra, invalid, or digest-mismatched schemas fail before lifecycle mutation.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.
 - Every `[[host_api]]` must reference an existing explicit `section` path.
@@ -488,10 +492,10 @@ Rules:
 
 Tests: `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
 (capability surface projection block) and
-`crates/ironclaw_product_adapter_registry/tests/manifest_ingestion.rs`
+`crates/ironclaw_extensions/tests/product_adapter_manifest_ingestion.rs`
 (channel-surface projection through the real product-adapter contract). Run:
 `cargo test -p ironclaw_extensions --test manifest_v2_contract` and
-`cargo test -p ironclaw_product_adapter_registry --test manifest_ingestion`.
+`cargo test -p ironclaw_extensions --test product_adapter_manifest_ingestion`.
 
 ---
 

@@ -40,7 +40,9 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_first_run_server,  # noqa: F401 - imported fixture
     reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
     send_and_settle as _send_and_settle,
@@ -237,6 +239,14 @@ async def _install_fake_v2_event_stream(page) -> None:
             }
             return activeStream;
           };
+
+          // Readiness probes so tests do not race forced failures against the
+          // fake stream lifecycle. A hidden RECONNECTING badge can no longer
+          // double as a wait for reconnect readiness.
+          window.__v2SseHasOpenStream = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.controller);
+          window.__v2SseHasHeldConnection = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.resolve);
 
           const closeStream = (stream, error = null) => {
             if (!stream || stream.closed) return;
@@ -520,6 +530,166 @@ async def test_reborn_v2_shared_control_typography_is_stable(
         assert viewport_metrics["documentWidth"] <= viewport_metrics["viewportWidth"], (
             f"{locale} layout overflowed at {width}px: {viewport_metrics}"
         )
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_first_run_onboarding_configures_llm_and_survives_restart(
+    reborn_v2_first_run_server,
+    reborn_v2_browser,
+    mock_llm_server,
+):
+    """A fresh install can configure its first provider without leaking the key."""
+    state, start, stop = reborn_v2_first_run_server
+    base_url = state["base_url"]
+    api_key = "first-run-e2e-secret-7054"
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+
+    try:
+        await page.goto(
+            f"{base_url}/chat?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await page.wait_for_url(re.compile(r".*/welcome(?:[?#].*)?$"), timeout=15000)
+        await expect(
+            page.get_by_role("heading", name="Welcome to IronClaw")
+        ).to_be_visible(timeout=15000)
+
+        openai_row = page.locator(
+            SEL_V2["onboarding_provider_card_for"].format(provider_id="openai")
+        )
+        await openai_row.locator(SEL_V2["onboarding_provider_setup"]).click()
+
+        dialog = page.get_by_role("dialog")
+        await expect(
+            dialog.get_by_role("heading", name="Configure OpenAI")
+        ).to_be_visible(timeout=5000)
+        await dialog.get_by_label("Base URL").fill(f"{mock_llm_server}/v1")
+        await dialog.get_by_label("API key").fill(api_key)
+        await dialog.get_by_label("Default model").fill("mock-model")
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/webchat/v2/llm/test-connection")
+        ) as probe_info:
+            await dialog.get_by_role("button", name="Test connection").click()
+        probe = await probe_info.value
+        probe_body = await probe.text()
+        assert probe.status == 200, probe_body
+        assert (await probe.json())["ok"] is True
+        assert api_key not in probe_body
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/webchat/v2/llm/providers")
+        ) as upsert_info:
+            async with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and response.url.endswith("/api/webchat/v2/llm/active")
+            ) as active_info:
+                await dialog.get_by_role("button", name="Save").click()
+
+        upsert = await upsert_info.value
+        active = await active_info.value
+        upsert_body = await upsert.text()
+        active_body = await active.text()
+        assert upsert.status == 200, upsert_body
+        assert active.status == 200, active_body
+        assert api_key not in upsert_body
+        assert api_key not in active_body
+
+        await page.wait_for_url(re.compile(r".*/chat(?:[?#].*)?$"), timeout=15000)
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+
+        async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+            providers = await client.get(
+                f"{base_url}/api/webchat/v2/llm/providers",
+                timeout=15,
+            )
+            providers.raise_for_status()
+            providers_body = providers.json()
+            openai = next(
+                provider
+                for provider in providers_body["providers"]
+                if provider["id"] == "openai"
+            )
+            assert providers_body["active"] == {
+                "provider_id": "openai",
+                "model": "mock-model",
+            }
+            assert openai["api_key_set"] is True
+            assert api_key not in providers.text
+
+        browser_state = await page.evaluate(
+            """() => JSON.stringify({
+              html: document.documentElement.outerHTML,
+              inputValues: Array.from(
+                document.querySelectorAll("input, textarea"),
+                (element) => element.value,
+              ),
+              localStorage: Array.from(
+                { length: localStorage.length },
+                (_, index) => localStorage.getItem(localStorage.key(index)),
+              ),
+              sessionStorage: Array.from(
+                { length: sessionStorage.length },
+                (_, index) => sessionStorage.getItem(sessionStorage.key(index)),
+              ),
+            })"""
+        )
+        assert REBORN_V2_AUTH_TOKEN in browser_state
+        assert api_key not in browser_state
+        persisted_config = (
+            state["home_dir"] / "reborn-home" / "config.toml"
+        ).read_text(encoding="utf-8")
+        assert api_key not in persisted_config
+
+        await page.reload()
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        assert urlparse(page.url).path == "/chat"
+
+        await composer.fill("hello from first-run onboarding")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
+            "Hello!", timeout=30000
+        )
+
+        await stop()
+        restarted_url = await start()
+        await page.goto(
+            f"{restarted_url}/chat?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        assert urlparse(page.url).path == "/chat"
+
+        async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+            providers = await client.get(
+                f"{restarted_url}/api/webchat/v2/llm/providers",
+                timeout=15,
+            )
+            providers.raise_for_status()
+            assert providers.json()["active"] == {
+                "provider_id": "openai",
+                "model": "mock-model",
+            }
+            assert api_key not in providers.text
+
+        await stop()
+        captured_logs = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in state["log_paths"]
+            if path.exists()
+        )
+        assert captured_logs, "first-run server logs were not captured"
+        assert "Using OpenAI-compatible provider" in captured_logs
+        assert api_key not in captured_logs
     finally:
         await context.close()
 
@@ -1667,11 +1837,89 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     ).to_be_visible(timeout=15000)
 
     await expect(composer).to_be_enabled()
+    # A busy run no longer gates the composer: sends are queued behind the
+    # active run rather than blocked, so the send affordance stays enabled.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     await composer.fill("draft while the reply is still running")
     await expect(composer).to_have_value("draft while the reply is still running")
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
 
     await composer.press("Enter")
-    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(2, timeout=5000)
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).nth(1)).to_contain_text(
+        "draft while the reply is still running"
+    )
+
+
+async def test_reborn_v2_composer_takes_focus_from_sidebar_navigation(reborn_v2_page):
+    """"+ New" and opening a thread both land keyboard focus in the composer.
+
+    This is the tier that matters for #7204: Chromium focuses a <button> on
+    click, so after either sidebar action the clicked button owns
+    document.activeElement when the composer's rAF runs. A component test that
+    stubs activeElement to None cannot see that, and the first fix shipped a
+    focus guard that refused to steal from the button — leaving the composer
+    unfocused on exactly the two paths the issue is about.
+    """
+    page = reborn_v2_page
+    composer = page.locator(SEL_V2["chat_composer"])
+
+    async def composer_is_focused() -> bool:
+        return await composer.evaluate("node => node === document.activeElement")
+
+    # Give the sidebar a thread to open later. The serve fixture is shared
+    # across this module, so the sidebar already holds other tests' threads —
+    # tag this one so the row lookup below cannot match theirs.
+    marker = f"focus-nav-{uuid.uuid4().hex[:8]}"
+    await composer.fill(marker)
+    await composer.press("Enter")
+    await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        marker, timeout=15000
+    )
+    await expect(composer).to_have_attribute(
+        "data-send-disabled", "false", timeout=15000
+    )
+
+    sidebar = page.locator(SEL_V2["sidebar"])
+    # Pin the row by its own thread id, read off the DOM. "New" prepends a row
+    # and a `.first` locator resolves lazily, so it would silently retarget the
+    # new empty thread; the URL is not usable either (it stays on /chat).
+    marked_row = sidebar.locator(SEL_V2["thread_item"]).filter(has_text=marker)
+    await expect(marked_row).to_be_visible(timeout=15000)
+    first_thread_id = await marked_row.get_attribute("data-thread-id")
+    assert first_thread_id, "sidebar thread row must expose data-thread-id"
+    existing_thread = sidebar.locator(
+        f"{SEL_V2['thread_item']}[data-thread-id='{first_thread_id}']"
+    )
+
+    # "New": a real click, so the button holds focus until we take it back.
+    new_button = sidebar.locator(SEL_V2["thread_new"])
+    await expect(new_button).to_be_enabled(timeout=15000)
+    await new_button.click()
+    await expect(composer).to_have_value("", timeout=15000)
+    await page.wait_for_function(
+        "selector => document.activeElement === document.querySelector(selector)",
+        arg=SEL_V2["chat_composer"],
+        timeout=5000,
+    )
+    assert await composer_is_focused() is True
+
+    # Typing goes straight into the composer with no intermediate click.
+    await page.keyboard.type("typed without clicking")
+    await expect(composer).to_have_value("typed without clicking")
+
+    # Opening an existing thread does the same.
+    await existing_thread.click()
+    await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        marker, timeout=15000
+    )
+    await page.wait_for_function(
+        "selector => document.activeElement === document.querySelector(selector)",
+        arg=SEL_V2["chat_composer"],
+        timeout=5000,
+    )
+    assert await composer_is_focused() is True
 
 
 async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
@@ -1706,7 +1954,9 @@ async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
 
     await expect(cancel_button).to_be_visible(timeout=10000)
     await expect(cancel_button).to_be_enabled(timeout=10000)
-    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    # The run is still active after the failed cancel, and a busy run no
+    # longer gates the composer: sends are queued behind the active run.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
         has_text="Couldn't stop this run"
     )
@@ -1793,44 +2043,42 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         connection_status = page.locator(SEL_V2["connection_status"])
 
         await context.set_offline(True)
-        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
-        await expect(connection_status).to_have_css("position", "static")
-        assert await connection_status.evaluate("node => Boolean(node.closest('header'))")
-        await expect(connection_status).to_be_in_viewport()
-
+        # RECONNECTING is no longer rendered (internal state only): a proxy
+        # that closes the SSE body between streamed frames would otherwise
+        # blink the badge on every chunk. The badge stays absent during a
+        # transient/retryable reconnect and only reappears on a terminal
+        # DISCONNECTED state.
+        await expect(connection_status).to_have_count(0, timeout=5000)
         await page.set_viewport_size({"width": 390, "height": 844})
         connection_status_toggle = page.locator(SEL_V2["connection_status_toggle"])
         connection_status_label = page.locator(SEL_V2["connection_status_label"])
-        disclosure_id = await connection_status_label.get_attribute("id")
-        assert disclosure_id
-        await expect(connection_status_label).to_be_hidden()
-        await expect(connection_status_label).to_have_attribute("aria-hidden", "true")
-        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "false")
-        await expect(connection_status_toggle).to_have_attribute("aria-controls", disclosure_id)
-        await expect(connection_status_toggle).to_be_in_viewport()
-
-        await connection_status_toggle.click()
-        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "true")
-        await expect(connection_status_label).to_have_attribute("aria-hidden", "false")
-        await expect(connection_status_label).to_be_visible()
-        await expect(connection_status_label).to_have_text("Reconnecting...")
-        await expect(connection_status_label).to_have_css("position", "absolute")
-        await expect(connection_status_toggle).to_be_in_viewport()
-        await expect(connection_status_label).to_be_in_viewport()
+        # No visible status affordance while RECONNECTING is hidden.
+        await expect(connection_status_toggle).to_have_count(0, timeout=5000)
+        await expect(connection_status_label).to_have_count(0, timeout=5000)
         await expect(page.locator(SEL_V2["header_logs_link"])).to_be_visible()
         await expect(page.locator(SEL_V2["header_docs_link"])).to_be_visible()
 
         await page.set_viewport_size({"width": 1280, "height": 720})
         await context.set_offline(False)
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
         await expect(connection_status).to_have_count(0, timeout=5000)
 
         await composer.fill("summarize 3 X/Twitter posts")
         await composer.press("Enter")
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
 
+        # A retryable stream interruption (readyState 0) stays RECONNECTING
+        # internally and is not rendered; the badge remains absent. Wait for
+        # an open stream first so the forced failure does not race the fake
+        # stream lifecycle, then wait for the held pending connection so the
+        # terminal failure below targets the held promise.
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
         await page.evaluate("() => window.__failLatestV2Sse(0)")
-        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+        await page.wait_for_function("() => window.__v2SseHasHeldConnection?.() === true")
+        await expect(connection_status).to_have_count(0, timeout=5000)
 
+        # A terminal (non-retryable) failure escalates to DISCONNECTED, which
+        # is still rendered.
         await page.evaluate("() => window.__failLatestV2Sse(2)")
         await expect(connection_status).to_have_text("Disconnected", timeout=5000)
 

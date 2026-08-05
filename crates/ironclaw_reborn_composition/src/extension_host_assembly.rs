@@ -2,18 +2,18 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ironclaw_attachments::InboundAttachmentLander;
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, BlockedAuthFlowCanceller};
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
 use ironclaw_host_api::{
     ids::{CapabilityId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
-    ApprovalInteractionService, AuthChallengeProvider, AuthInteractionService,
-    BlockedAuthFlowCanceller, ExtensionAccountSetupRegistry, ProjectFilesystemReader,
-    RunDeliverySettings,
+    ApprovalInteractionService, AuthInteractionService, ExtensionAccountSetupRegistry,
+    ProjectFilesystemReader, RunDeliverySettings,
 };
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 use ironclaw_product_contracts::prompt_source::{
@@ -197,7 +197,7 @@ pub(crate) struct BackendChannelPairingAssemblyInput {
     pub(crate) account_status_reader:
         Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>,
     pub(crate) disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
 }
 
 pub(crate) async fn build_backend_channel_pairing(
@@ -342,6 +342,7 @@ pub(crate) async fn build_backend_channel_pairing(
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
@@ -355,6 +356,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub(crate) approval_interaction: Arc<dyn ApprovalInteractionService>,
     pub(crate) auth_interaction: Arc<dyn AuthInteractionService>,
     pub(crate) thread_scope: &'a ThreadScope,
@@ -383,21 +385,21 @@ pub(crate) struct ChannelHostAssemblySource {
 }
 
 fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAssemblySource> {
-    let inbound_mounts = crate::runtime_mounts::workspace_mount_view(
-        ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-        &[],
-    )
-    .ok()?;
-    let inbound_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&services.extension_filesystem),
-        inbound_mounts,
-    ));
+    // Lander and reader share ONE handle so an inbound attachment is read back
+    // from the subtree it landed in. Under a per-caller workspace policy that
+    // subtree is the caller's own; the shared read-only `workspace_filesystem`
+    // would address the root instead. Mirrors the test-support wiring in
+    // `RebornRuntime::start_channel_host_assembly_for_test`.
+    let inbound_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &services.extension_filesystem,
+        &services.workspace_mounts,
+    )?;
     let inbound_attachments: Arc<dyn InboundAttachmentLander> = Arc::new(
-        ironclaw_attachments::ProjectScopedAttachmentLander::new(inbound_filesystem),
+        ironclaw_attachments::ProjectScopedAttachmentLander::new(Arc::clone(&inbound_filesystem)),
     );
     let project_filesystem: Arc<dyn ProjectFilesystemReader> = Arc::new(
         ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
-            Arc::clone(&services.workspace_filesystem),
+            inbound_filesystem,
             ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
         ),
     );
@@ -431,10 +433,10 @@ pub(crate) fn channel_admin_users(
             identity.agent_id.clone(),
             identity.project_id.clone(),
         );
-    Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+    Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
         directory,
         Arc::clone(&services.admin_secret_provisioner),
-        Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+        Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
     ))
 }
 
@@ -450,6 +452,7 @@ pub(crate) fn start_channel_host(
     let ChannelHostAssemblyWiring {
         thread_service,
         turn_coordinator,
+        input_enqueue,
         approval_interaction,
         auth_interaction,
         identity,
@@ -501,6 +504,7 @@ pub(crate) fn start_channel_host(
         thread_service,
         turn_coordinator,
         inbound_attachments: Arc::clone(inbound_attachments),
+        input_enqueue,
         approval_interaction,
         auth_interaction,
         identity,
@@ -520,6 +524,7 @@ pub(crate) async fn build_runtime_channel_host(
         turn_coordinator,
         approval_interaction,
         auth_interaction,
+        input_enqueue,
         thread_scope,
         actor_user_id,
         auth_challenges,
@@ -551,6 +556,7 @@ pub(crate) async fn build_runtime_channel_host(
         ChannelHostAssemblyWiring {
             thread_service,
             turn_coordinator,
+            input_enqueue,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
             identity,

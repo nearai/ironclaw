@@ -45,6 +45,56 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `models.rs` | Top-level model-name catalog and helpers |
 | `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `test-support` cargo feature for downstream test harnesses |
 
+## Sub-owner map
+
+The File Map above says what each file *is*. This map says who **owns** it —
+which of the crate's ten concerns a change belongs to, and what must not drift
+into it. PROPOSAL §6.4.13 asks for this map and names five sub-owners
+(providers / auth-sessions / registry / decorators / recording); measured
+against the tree those five cover 28 of 48 files, so five more are named here
+to reach 100%. See the amendment on §6.4.13 for why each addition is not one
+of the original five.
+
+**This table is enforced.** `tests/module_charter.rs` asserts every `.rs` file
+under `src/` appears in exactly one row and every path in a row exists, so the
+map cannot rot in either direction — a new file fails until it is given an
+owner, and a deleted one fails until its entry goes.
+
+| Sub-owner | Owns | Never contains | Files |
+|---|---|---|---|
+| `core-contract` | The `LlmProvider` trait, the request/response vocabulary, the error taxonomy, the config types, shared HTTP hardening, and the factory that assembles everything | A vendor protocol, or reliability behavior | `lib.rs`, `provider.rs`, `error.rs`, `config.rs`, `url_check.rs` |
+| `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
+| `auth-sessions` | Acquiring, persisting, refreshing and revoking provider credentials, plus the host seam that stores them | Request/response shaping | `auth.rs`, `session.rs`, `openai_codex_session.rs`, `github_copilot_auth.rs`, `codex_auth.rs`, `token_refreshing.rs`, `host.rs` |
+| `registry` | The **provider** catalog: definitions, protocols, base-URL and api-key resolution | Model facts (that is `model-catalog`) | `registry.rs`, `resolution.rs` |
+| `decorators` | Anything that wraps `dyn LlmProvider` and is not credential work: retry, breaker, failover, cache, hot-reload, cost routing | Vendor protocol | `retry.rs`, `circuit_breaker.rs`, `failover.rs`, `response_cache.rs`, `runtime.rs`, `smart_routing.rs` |
+| `normalization` | Cross-provider wire hygiene in all three directions: outbound tool schemas, inbound tool arguments, inbound content text | A fix that only one provider needs — that belongs beside it in `providers` | `tool_schema.rs`, `tool_schema/placeholder_stripping.rs`, `tool_args.rs`, `reasoning.rs` |
+| `model-catalog` | Facts about **models**: what an endpoint lists, and which models see images, generate images, or think natively | Provider identity or routing | `models.rs`, `reasoning_models.rs`, `vision_models.rs`, `image_models.rs` |
+| `recording` | Trace capture and replay, and binding recorded tool arguments to earlier results | Live provider behavior | `recording.rs`, `trace_binding.rs` |
+| `transcription` | The `TranscriptionProvider` trait and its implementations — a **different trait** from `LlmProvider`, sharing only transports | Anything implementing `LlmProvider` | `transcription/mod.rs`, `transcription/chat_completions.rs`, `transcription/openai.rs` |
+| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs` |
+
+Four placement calls worth stating, because each is a file whose *shape*
+suggests one owner and whose *purpose* is another:
+
+- **`token_refreshing.rs` is `auth-sessions`, not `decorators`.** It is a
+  decorator by construction, but its whole body is pre-emptive OAuth refresh
+  and retry-once-on-`AuthFailed`; nothing in it is reliability. (The File Map
+  above calls it a decorator; `AGENTS.md` files it under auth. This is the
+  ruling.)
+- **`runtime.rs` and `smart_routing.rs` are `decorators`** even though neither
+  is a *reliability* wrapper — which is why this table's definition is "wraps
+  `dyn LlmProvider` and is not credential work" rather than the narrower
+  "retry/breaker/failover/cache".
+- **`url_check.rs` is `core-contract`** on the strength of `build_http_client`
+  being shared egress plumbing. Its SSRF policy (`check_models_url`) is
+  security-relevant and has three in-crate consumers; if it ever grows a second
+  concern it should become its own sub-owner rather than be split.
+- **`gemini_oauth.rs` is the one genuinely two-owner file.** Its
+  `CredentialManager`/`OAuthCredential` half is `auth-sessions` and its
+  `GeminiOauthProvider` half is `providers`. A file-granular map has to pick
+  one, so it is charged to `providers` (the larger half). Splitting it is owed
+  work, not a defect in this map.
+
 ## Provider Selection
 
 Set via `LLM_BACKEND` env var:

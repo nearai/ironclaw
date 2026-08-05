@@ -19,8 +19,8 @@ use std::time::Duration;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_loop_host::CapabilityAllowSet;
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
 
 use super::super::builder::StorageMode;

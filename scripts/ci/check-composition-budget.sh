@@ -2,9 +2,15 @@
 #
 # Composition mass ratchet gate.
 #
-# Fails when ironclaw_reborn_composition's share of production crate code grows
-# past the committed ceiling in scripts/ci/composition-budget.toml. See that
-# file's header for the rationale and the metric definition.
+# Fails when ironclaw_reborn_composition breaches any of the three committed
+# bounds in scripts/ci/composition-budget.toml:
+#   [mass]     its SHARE of production crate code            (relative)
+#   [abs]      its ABSOLUTE production LOC                   (relative to nothing)
+#   [dispatch] its Arc<dyn> site count in governed prod code
+# See that file's header for each metric's rationale and definition. The
+# absolute bound is the binding one: the share metric's denominator is every
+# other crate's production code, so feature inflow elsewhere improves
+# composition's score while composition itself grows (#7151).
 #
 # Usage:
 #   scripts/ci/check-composition-budget.sh          # run the gate
@@ -150,6 +156,9 @@ ceiling_bp="$(toml_get ceiling_bp)"
 tolerance_bp="$(toml_get tolerance_bp)"
 arc_dyn_ceiling="$(toml_get arc_dyn_ceiling)"
 arc_dyn_tolerance="$(toml_get arc_dyn_tolerance)"
+loc_ceiling="$(toml_get loc_ceiling)"
+loc_tolerance="$(toml_get loc_tolerance)"
+loc_nudge_slack="$(toml_get loc_nudge_slack)"
 
 # Schema validation — manifest bugs always exit 1, regardless of enforce.
 case "${enforce}" in
@@ -160,6 +169,16 @@ esac
 [[ "${tolerance_bp}"    =~ ^[0-9]+$ ]] || fail_schema "[gate].tolerance_bp must be an integer, got '${tolerance_bp:-<missing>}'"
 [[ "${arc_dyn_ceiling}"   =~ ^[0-9]+$ ]] || fail_schema "[gate].arc_dyn_ceiling must be an integer, got '${arc_dyn_ceiling:-<missing>}'"
 [[ "${arc_dyn_tolerance}" =~ ^[0-9]+$ ]] || fail_schema "[gate].arc_dyn_tolerance must be an integer, got '${arc_dyn_tolerance:-<missing>}'"
+# The absolute-mass keys are REQUIRED, not optional-with-a-default: a default
+# would let the binding metric be disarmed by deleting three lines, which is the
+# quiet way a gate joins the ones that check nothing (#7151).
+[[ "${loc_ceiling}"      =~ ^[0-9]+$ ]] || fail_schema "[gate].loc_ceiling must be an integer, got '${loc_ceiling:-<missing>}'"
+[[ "${loc_tolerance}"    =~ ^[0-9]+$ ]] || fail_schema "[gate].loc_tolerance must be an integer, got '${loc_tolerance:-<missing>}'"
+[[ "${loc_nudge_slack}"  =~ ^[0-9]+$ ]] || fail_schema "[gate].loc_nudge_slack must be an integer, got '${loc_nudge_slack:-<missing>}'"
+# A zero ceiling is unreachable by real code and would make the gate fire on
+# every commit; a zero-or-absurd ceiling is far likelier to be a typo or a
+# stubbed-out disarm than a genuine bound.
+[ "${loc_ceiling}" -gt 0 ] || fail_schema "[gate].loc_ceiling must be greater than 0 — a zero absolute ceiling is a disarmed gate, not a bound"
 
 comp_loc="$(count_loc "${COMPOSITION_SRC}")"
 den_loc="$(count_denominator)"
@@ -186,12 +205,14 @@ arc_dyn="$(count_arc_dyn)"
 
 if [ "${print_only}" = true ]; then
     echo "composition share: $(fmt_pct "${observed_bp}")% (${observed_bp} bp) — ${comp_loc} / ${den_loc} LOC"
+    echo "composition absolute: ${comp_loc} LOC (production src)"
     echo "composition dispatch: ${arc_dyn} Arc<dyn> (governed prod, excl slack/extension_host)"
     exit 0
 fi
 
 effective_ceiling=$((ceiling_bp + tolerance_bp))
 effective_arc_ceiling=$((arc_dyn_ceiling + arc_dyn_tolerance))
+effective_loc_ceiling=$((loc_ceiling + loc_tolerance))
 breached=0
 
 echo "Composition budget gate: $([ "${enforce}" = true ] && echo ENFORCING || echo DRY-RUN)"
@@ -210,6 +231,26 @@ if [ "${observed_bp}" -gt "${effective_ceiling}" ]; then
     breached=1
 elif [ "$((ceiling_bp - observed_bp))" -gt 100 ]; then
     echo "  NUDGE: mass is $(fmt_pct "$((ceiling_bp - observed_bp))")pp below ceiling — lower ceiling_bp to lock it in."
+fi
+
+# ---- Metric 1b: ABSOLUTE mass (production LOC, no denominator) ----
+# The binding bound. Metric 1's denominator is every other crate's production
+# code, so feature inflow elsewhere improves composition's share while
+# composition itself grows; this one cannot be moved by anyone else's work.
+echo "  [abs] composition src  : ${comp_loc} LOC"
+echo "         ceiling         : ${loc_ceiling} (tol ${loc_tolerance} -> effective ${effective_loc_ceiling})"
+if [ "${comp_loc}" -gt "${effective_loc_ceiling}" ]; then
+    over=$((comp_loc - effective_loc_ceiling))
+    prefix=""; [ "${enforce}" = true ] || prefix="[dry-run, would FAIL] "
+    echo "  ${prefix}ABSOLUTE MASS EXCEEDED: composition holds ${comp_loc} production LOC, ${over} over the"
+    echo "    effective ceiling of ${effective_loc_ceiling}. Composition's charter is service-graph ASSEMBLY;"
+    echo "    behavior belongs in an owning crate. Note the share metric above may still look"
+    echo "    healthy — it improves whenever the rest of the workspace grows, which is exactly"
+    echo "    why this absolute bound exists (#7151)."
+    echo "    If the growth is justified, raise loc_ceiling in ${BUDGET_FILE} with a PR rationale."
+    breached=1
+elif [ "$((loc_ceiling - comp_loc))" -gt "${loc_nudge_slack}" ]; then
+    echo "  NUDGE: absolute mass is $((loc_ceiling - comp_loc)) LOC below ceiling — lower loc_ceiling to lock it in (re-ratchet at every wave close)."
 fi
 
 # ---- Metric 2: dispatch (Arc<dyn> density in governed production code) ----

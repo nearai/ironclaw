@@ -94,6 +94,7 @@ fn error_class(error: ProcessJournalStoreError) -> &'static str {
         ProcessJournalStoreError::Deserialization(_) => "deserialization",
         ProcessJournalStoreError::Observer(_) => "observer",
         ProcessJournalStoreError::MigrationRequired => "migration",
+        ProcessJournalStoreError::GroupCommitFailed { .. } => "group_commit",
     }
 }
 
@@ -274,7 +275,7 @@ fn control_transition_table_covers_every_action_class() {
             })
             .map_err(error_class)?;
         match outcome {
-            StoredCommandOutcome::Controlled(result, _) => {
+            StoredCommandOutcome::Controlled(result) => {
                 Ok((result.state.status, result.changed, result.already_terminal))
             }
             _ => panic!("control command returned a non-control outcome"),

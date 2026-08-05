@@ -11,6 +11,7 @@ mod egress;
 mod error;
 mod policy;
 mod resolver;
+#[cfg(any(debug_assertions, feature = "test-support"))]
 mod test_rewrite;
 mod transport;
 mod types;
@@ -23,6 +24,7 @@ pub use policy::{
     target_matches_pattern,
 };
 pub use resolver::NetworkResolver;
+#[cfg(any(debug_assertions, feature = "test-support"))]
 pub use test_rewrite::{
     HostRewriteMap, HostRewriteMapError, RewriteNetworkTransport, TEST_HTTP_REWRITE_MAP_ENV,
     default_policy_http_egress,

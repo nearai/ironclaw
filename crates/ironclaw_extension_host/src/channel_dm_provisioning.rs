@@ -171,8 +171,8 @@ async fn provision_dm_target(
         .adapter
         .list_targets(
             TargetQuery {
-                extension_id: channel.extension_id.clone(),
-                installation_id: channel.installation_id.clone(),
+                extension_id: channel.extension_id.as_str().to_string(),
+                installation_id: channel.installation_id.as_str().to_string(),
                 query: Some(direct_conversation_query(external_actor_id)),
                 limit: 1,
             },
@@ -226,7 +226,9 @@ mod tests {
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
     use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::ids::ExtensionId;
     use ironclaw_host_api::ids::TenantId;
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
     use ironclaw_product_contracts::delivery::ResolvedChannelDelivery;
 
     use super::*;
@@ -318,8 +320,9 @@ mod tests {
                 return None;
             }
             Some(ResolvedChannelDelivery {
-                extension_id: extension_id.to_string(),
-                installation_id: "vendorx-install-1".to_string(),
+                extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+                installation_id: AdapterInstallationId::new("vendorx-install-1")
+                    .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
             })
@@ -337,8 +340,9 @@ mod tests {
                 return None;
             }
             Some(ResolvedChannelDelivery {
-                extension_id: extension_id.to_string(),
-                installation_id: "vendorx-install-1".to_string(),
+                extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+                installation_id: AdapterInstallationId::new("vendorx-install-1")
+                    .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
             })

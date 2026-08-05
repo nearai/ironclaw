@@ -323,6 +323,7 @@ pub(super) async fn build_backend_production(
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
+        workspace_scoped_per_caller,
         wiring_config,
         production_wiring,
         local_process_port,
@@ -341,6 +342,7 @@ pub(super) async fn build_backend_production(
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
+        ironhub_manifest_url,
         workspace_filesystems,
         standalone_storage_root,
         default_system_prompt_path,
@@ -399,10 +401,14 @@ pub(super) async fn build_backend_production(
                         }
                     })?;
                 let runtime_workspace_mounts =
-                    ambient_workspace_mount_view(MountPermissions::read_write(), &[], &[])
-                        .map_err(|error| RebornBuildError::InvalidConfig {
-                            reason: error.to_string(),
-                        })?;
+                    crate::runtime_mounts::WorkspaceMountPolicy::resolve(
+                        workspace_scoped_per_caller,
+                        &[],
+                        &[],
+                    )
+                    .map_err(|error| RebornBuildError::InvalidConfig {
+                        reason: error.to_string(),
+                    })?;
                 (
                     Arc::new(ScopedFilesystem::new(
                         Arc::clone(&stores.filesystem),
@@ -524,7 +530,7 @@ pub(super) async fn build_backend_production(
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
-    let admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner> =
+    let admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner> =
         Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
             Arc::clone(&stores.filesystem),
             Arc::clone(&stores.secret_credentials.crypto),
@@ -631,7 +637,7 @@ pub(super) async fn build_backend_production(
     let services = attach_hosted_mcp_runtime(services)?;
     let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let extension_host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension host port catalog could not be loaded: {error}"),
             }
@@ -860,7 +866,7 @@ pub(super) async fn build_backend_production(
         .filter_map(|manifest| {
             channel_extension_bindings
                 .iter()
-                .find(|binding| binding.extension_id == manifest.id.as_str())
+                .find(|binding| binding.extension_id == manifest.id)
                 .map(|binding| {
                     ironclaw_extension_host::DeploymentChannelBinding::new(
                         Arc::clone(manifest),
@@ -925,7 +931,7 @@ pub(super) async fn build_backend_production(
     );
     let account_setups = ExtensionAccountSetupRegistry::default();
     let channel_disconnect_slot: Arc<
-        std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>,
+        std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>,
     > = Arc::new(std::sync::OnceLock::new());
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
@@ -951,7 +957,7 @@ pub(super) async fn build_backend_production(
                     },
             },
         )
-        .with_account_setup_registry(account_setups.clone())
+        .with_account_setup_registry(Arc::new(account_setups.clone()))
         .with_removal_cleanup_registry(removal_cleanup)
         .with_provider_instance_readiness(provider_instance_readiness)
         .with_channel_disconnect_slot(Arc::clone(&channel_disconnect_slot)),
@@ -1025,7 +1031,13 @@ pub(super) async fn build_backend_production(
             channel_egress_scope.user_id.clone(),
         ),
     );
+    let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
+    let ironhub_link_state = Arc::new(
+        ironclaw_extension_manager::ironhub::IronhubLinkStateStore::new(Arc::clone(
+            &fold_filesystem,
+        )),
+    );
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),
@@ -1038,6 +1050,8 @@ pub(super) async fn build_backend_production(
         &mut first_party_registry,
         Arc::clone(&skill_management),
         Arc::clone(&extension_management),
+        Arc::clone(&ironhub_link_state),
+        ironhub_manifest_url,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("IronHub handlers are invalid: {error}"),
@@ -1132,8 +1146,7 @@ pub(super) async fn build_backend_production(
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
-        reserved_capability_ids
-            .extend(ironclaw_runner::tool_disclosure_bridge::bridge_capability_ids());
+        reserved_capability_ids.extend(ironclaw_loop_host::bridge_capability_ids());
         let generic_installation_store = extension_management.installation_store_handle();
         let backend_extension_host =
             build_backend_extension_host(BackendExtensionHostAssemblyInput {
@@ -1237,7 +1250,8 @@ pub(super) async fn build_backend_production(
         channel_identity_store,
         channel_dm_target_store,
         channel_disconnect_slot,
-        host_runtime_http_egress,
+        runtime_http_egress,
+        ironhub_link_state,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
@@ -1374,7 +1388,9 @@ pub(super) async fn build_postgres_production(
         filesystem,
         trigger_repository,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
+        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool {
+            pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
+        },
         ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
     )
     .await

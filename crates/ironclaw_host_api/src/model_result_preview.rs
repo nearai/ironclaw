@@ -46,6 +46,27 @@ impl ModelResultPreview {
         Ok(Self(value))
     }
 
+    /// Construct a preview from content that may contain credential markers or
+    /// credential-shaped tokens, masking those spans instead of refusing the
+    /// whole payload.
+    ///
+    /// The refusing [`Self::new`] is right for a caller that can reject the
+    /// operation. It is wrong for model-visible *content*: dropping the preview
+    /// also drops the continuation metadata that travels with it, so the model
+    /// receives an opaque reference it cannot read or page. Prefer this when the
+    /// alternative is showing nothing.
+    pub fn redacted(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        match validate_model_result_preview(&value) {
+            Ok(()) => Ok(Self(value)),
+            Err(_) => {
+                let redacted = crate::credential_redaction::redact_credential_text(&value);
+                validate_model_result_preview(&redacted)?;
+                Ok(Self(redacted))
+            }
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -121,6 +142,69 @@ fn validate_model_result_preview(value: &str) -> Result<(), HostApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production incident: one catalog entry's summary said "no API key",
+    /// `ModelResultPreview::new` refused the WHOLE 13.7 KB payload, and the
+    /// caller dropped the preview *and* its continuation metadata — the model
+    /// got an opaque reference it could neither read nor page.
+    #[test]
+    fn redacted_masks_credential_vocabulary_instead_of_refusing_the_payload() {
+        let catalog = concat!(
+            r#"{"catalog_total":61,"entries":["#,
+            r#"{"name":"attio","description":"Attio CRM. Authenticated with a workspace API key."},"#,
+            r#"{"name":"bitcoin-reddit-sentiment","description":"Reads Bitcoin posts (no API key needed)."},"#,
+            r#"{"name":"near-rpc","description":"NEAR Protocol JSON-RPC integration."}"#,
+            r#"]}"#
+        );
+
+        // Precondition: today's strict constructor refuses all of it.
+        assert!(
+            ModelResultPreview::new(catalog).is_err(),
+            "fixture must reproduce the refusal that caused the incident"
+        );
+
+        let preview = ModelResultPreview::redacted(catalog).expect("redacted preview is built");
+        let text = preview.as_str();
+
+        // The payload survives: entries the user needed are still readable.
+        assert!(text.contains("attio"), "content must survive redaction");
+        assert!(text.contains("near-rpc"));
+        assert!(text.contains("bitcoin-reddit-sentiment"));
+        assert!(
+            text.contains(r#""catalog_total":61"#),
+            "totals must survive"
+        );
+        // The offending vocabulary is masked rather than taking the payload with it.
+        assert!(!text.to_ascii_lowercase().contains("api key"));
+        assert!(text.contains("[redacted]"));
+    }
+
+    /// Redaction must not fire on ordinary words that merely contain a marker.
+    #[test]
+    fn redacted_leaves_non_credential_words_alone() {
+        let text = "The Secretary reviewed the passwordless login and the bearers of the note.";
+        let preview = ModelResultPreview::redacted(text).expect("clean text passes through");
+        assert_eq!(
+            preview.as_str(),
+            text,
+            "word-boundary markers must not over-match"
+        );
+    }
+
+    /// A genuine credential-shaped token is masked, not preserved.
+    #[test]
+    fn redacted_masks_secret_like_tokens() {
+        let text = "deploy finished; token sk-abc123def456 was rotated";
+        let preview = ModelResultPreview::redacted(text).expect("redacted preview is built");
+        assert!(
+            !preview.as_str().contains("sk-abc123def456"),
+            "secret-shaped token must be masked"
+        );
+        assert!(
+            preview.as_str().contains("deploy finished"),
+            "surrounding content survives"
+        );
+    }
 
     #[test]
     fn preserves_delimiter_and_multiline_content() {

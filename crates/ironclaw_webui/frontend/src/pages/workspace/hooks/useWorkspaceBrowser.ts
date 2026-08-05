@@ -8,23 +8,45 @@ import { expandWorkspaceSelection } from "../lib/workspace-presenters";
 // at the mount list (empty path); selecting a file loads a preview, selecting a
 // folder loads its listing into the main pane. There is intentionally no
 // edit/save path — this surface is navigation + preview/download only.
-export function useWorkspaceBrowser(selectedPath, { threadId = null } = {}) {
+function workspaceScopeKey(currentUser) {
+  return currentUser?.tenant_id && currentUser?.user_id
+    ? JSON.stringify([currentUser.tenant_id, currentUser.user_id])
+    : "__unscoped__";
+}
+
+export function useWorkspaceBrowser(
+  selectedPath,
+  {
+    currentUser = null,
+    requireScopedWorkspace = true,
+    threadId = null,
+  } = {},
+) {
   const t = useT();
   const queryClient = useQueryClient();
-  const scopeKey = threadId ? `thread:${threadId}` : "caller-default";
-  const listDirectory = React.useCallback(
-    (path) => listWorkspace(path, { threadId }),
-    [threadId],
-  );
-  const readFile = React.useCallback(
-    (path) => readWorkspaceFile(path, { threadId }),
-    [threadId],
-  );
   const [expandedPaths, setExpandedPaths] = React.useState<Set<string>>(() =>
     expandWorkspaceSelection(new Set<string>(), selectedPath)
   );
   const [filter, setFilter] = React.useState("");
   const [result, setResult] = React.useState(null);
+  const scopeKey = threadId
+    ? `thread:${threadId}`
+    : JSON.stringify([
+        workspaceScopeKey(currentUser),
+        requireScopedWorkspace ? "scoped-workspace" : "raw-workspace-ok",
+      ]);
+  const workspaceOptions = React.useMemo(
+    () => ({ currentUser, requireScopedWorkspace, threadId }),
+    [currentUser, requireScopedWorkspace, threadId]
+  );
+  const listDirectory = React.useCallback(
+    (path) => listWorkspace(path, workspaceOptions),
+    [workspaceOptions],
+  );
+  const readFile = React.useCallback(
+    (path) => readWorkspaceFile(path, workspaceOptions),
+    [workspaceOptions],
+  );
 
   React.useEffect(() => {
     setExpandedPaths((current) => expandWorkspaceSelection(current, selectedPath));

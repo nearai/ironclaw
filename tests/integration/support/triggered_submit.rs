@@ -29,7 +29,7 @@ use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
-use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
@@ -129,7 +129,7 @@ impl RebornIntegrationHarness {
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::clone(&self.coordinator),
+            ironclaw_reborn_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {
@@ -214,7 +214,7 @@ impl RebornIntegrationHarness {
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::clone(&self.coordinator),
+            ironclaw_reborn_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {

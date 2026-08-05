@@ -23,21 +23,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use ironclaw_host_api::{
-    Timestamp,
-    ids::{AgentId, ProjectId, TenantId, UserId},
-};
+use ironclaw_host_api::ids::{AgentId, ProjectId, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT,
 };
-use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
+use ironclaw_triggers::TriggerPollerWorkerConfig;
 
 use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
@@ -72,61 +69,20 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Fire-time access request for a persisted trigger.
-///
-/// This is the host/composition-facing access check shape. Checks are exact:
-/// `None` for `agent_id` or `project_id` means the trigger has no value for
-/// that scope dimension, not that the checker should treat it as a wildcard.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriggerFireAccessCheck {
-    /// Tenant that owns the persisted trigger.
-    pub tenant_id: TenantId,
-    /// User that created the persisted trigger and whose access is evaluated
-    /// again at fire time.
-    pub creator_user_id: UserId,
-    /// Optional agent scope stored on the trigger.
-    pub agent_id: Option<AgentId>,
-    /// Optional project scope stored on the trigger.
-    pub project_id: Option<ProjectId>,
-    /// Trigger being fired. Included so production access checks can audit or
-    /// apply trigger-specific policy without changing this request shape.
-    pub trigger_id: TriggerId,
-    /// Deterministic fire slot being submitted. Included for audit and policy
-    /// decisions that depend on scheduled fire identity.
-    pub fire_slot: Timestamp,
-}
-
-/// Result of a fire-time trigger access check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TriggerFireAccessDecision {
-    /// The trigger creator is still authorized for the exact trigger scope.
-    Allowed,
-    /// The trigger creator is not authorized for the exact trigger scope.
-    Denied { reason: String },
-}
-
-/// Error returned when the access backend cannot answer the request.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum TriggerFireAccessError {
-    /// The backing access source was unavailable; trigger fire handling should
-    /// treat this as retryable rather than a permanent denial.
-    #[error("trigger fire access backend unavailable: {reason}")]
-    Unavailable { reason: String },
-}
-
-/// Fire-time trigger access checker supplied by the composition root.
-#[async_trait]
-pub trait TriggerFireAccessChecker: Send + Sync {
-    /// Check whether the persisted trigger creator may fire the trigger for
-    /// the exact stored tenant/agent/project scope.
-    async fn check_trigger_fire_access(
-        &self,
-        request: TriggerFireAccessCheck,
-    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
-}
+/// The fire-time access contract lives in `ironclaw_triggers` (CHECKLIST WS6):
+/// the check is a decision about a persisted trigger's own stored scope, so the
+/// request/decision vocabulary and the checkers that carry no backend belong
+/// beside the trigger record and the worker that consults them. What stays in
+/// this file is the *deployment grant* the `serve`/`run` edge resolves — §6.10.1
+/// names config-as-data as composition's charter — and `build_reborn_runtime`
+/// still turns one into the other.
+pub use ironclaw_triggers::{
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError,
+};
 
 /// A single fire-time access grant. The granted scope is exact (`None` project
 /// means "no project", never a wildcard), matching [`TriggerFireAccessCheck`].
@@ -201,7 +157,7 @@ impl TriggerFireAccessPolicy {
     }
 }
 
-pub use ironclaw_operator::{RebornProviderFactory, ResolvedRebornLlm};
+pub(crate) use ironclaw_operator::ResolvedRebornLlm;
 
 /// Configuration for the turn-runner worker spawned by the runtime.
 #[derive(Debug, Clone)]
@@ -358,6 +314,14 @@ pub struct RebornRuntimeInput {
     /// Operator boot config. When present, the product surface composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
     pub boot: Option<RebornBootConfig>,
+    /// Shared HMAC key for the IronHub register/install gateway.
+    ///
+    /// Absence is the default-off gate. The runtime constructs one link
+    /// service from this key and reuses that same optional service for both
+    /// product-surface attachment and public register-route attachment.
+    pub ironhub_agent_shared_key: Option<ironclaw_extension_manager::ironhub::IronhubSharedKey>,
+    /// Validated signed-catalog URL resolved by the CLI/config boundary.
+    pub ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
@@ -405,7 +369,8 @@ pub struct RebornRuntimeInput {
     /// Mints the one-time API bearer returned when an admin creates a user. The
     /// serve layer supplies a session-store-backed minter; when unset, the admin
     /// user-management surface stays unwired (create reports unavailable).
-    pub admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
+    pub admin_api_token_minter:
+        Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -430,10 +395,13 @@ impl RebornRuntimeInput {
     /// the substrate decisions (standalone root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
     pub fn from_build_input(services: RebornHostBindings) -> Self {
+        let ironhub_manifest_url = services.ironhub_manifest_url.clone();
         Self {
             services: Some(services),
             llm: None,
             boot: None,
+            ironhub_agent_shared_key: None,
+            ironhub_manifest_url,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
@@ -468,6 +436,23 @@ impl RebornRuntimeInput {
     /// bindings-independent value. Returns `None` only before services are set.
     pub fn config(&self) -> Option<&crate::deployment::DeploymentConfig> {
         self.services.as_ref().map(RebornHostBindings::deployment)
+    }
+
+    /// Enable the IronHub register/install gateway with a validated shared key.
+    pub fn with_ironhub_agent_shared_key(
+        mut self,
+        shared_key: ironclaw_extension_manager::ironhub::IronhubSharedKey,
+    ) -> Self {
+        self.ironhub_agent_shared_key = Some(shared_key);
+        self
+    }
+
+    pub fn with_ironhub_manifest_url(
+        mut self,
+        manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
+    ) -> Self {
+        self.ironhub_manifest_url = manifest_url;
+        self
     }
 
     /// Override the deployment config carried by the bindings. Lets a caller
@@ -510,7 +495,7 @@ impl RebornRuntimeInput {
     /// admin user-management surface stays unwired.
     pub fn with_admin_api_token_minter(
         mut self,
-        minter: Arc<dyn crate::AdminApiTokenMinter>,
+        minter: Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>,
     ) -> Self {
         self.admin_api_token_minter = Some(minter);
         self
@@ -643,6 +628,18 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Raise the deployment's per-caller workspace scoping decision after the
+    /// input has been built. `serve` uses this because whether the deployment
+    /// produces non-operator callers (SSO on) is only known after the auth
+    /// surface is resolved. Raise-only; no-op when the services input is
+    /// absent.
+    pub fn with_workspace_scoped_per_caller_services(mut self, required: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_workspace_scoped_per_caller(required));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
@@ -698,5 +695,43 @@ impl RebornRuntimeInput {
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_build_input_preserves_configured_ironhub_manifest_url() {
+        let manifest_url = ironclaw_extension_manager::ironhub::validated_manifest_url(
+            "https://hub.ironclaw.com/test/manifest.json",
+        )
+        .expect("valid manifest URL");
+        let services = RebornHostBindings::disabled("test-owner")
+            .with_ironhub_manifest_url(manifest_url.clone());
+
+        let input = RebornRuntimeInput::from_build_input(services);
+
+        assert_eq!(input.ironhub_manifest_url, manifest_url);
+    }
+
+    #[test]
+    fn ironhub_builder_methods_preserve_validated_inputs() {
+        let shared_key = ironclaw_extension_manager::ironhub::IronhubSharedKey::new(
+            "ihub_sk_RuntimeInputTestKey00000000000000000000000000",
+        )
+        .expect("valid shared key");
+        let manifest_url = ironclaw_extension_manager::ironhub::validated_manifest_url(
+            "https://hub.ironclaw.com/test/other.json",
+        )
+        .expect("valid manifest URL");
+
+        let input = RebornRuntimeInput::default()
+            .with_ironhub_agent_shared_key(shared_key)
+            .with_ironhub_manifest_url(manifest_url.clone());
+
+        assert!(input.ironhub_agent_shared_key.is_some());
+        assert_eq!(input.ironhub_manifest_url, manifest_url);
     }
 }

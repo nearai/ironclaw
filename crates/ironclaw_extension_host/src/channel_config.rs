@@ -769,8 +769,34 @@ visibility = "model"
 input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 "#;
 
-    const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str =
-        include_str!("../../extensions/packages/gmail/manifest.toml");
+    /// A no-channel fixture that declares an `[admin_configuration]` group:
+    /// the two properties this test needs, spelled out rather than reached for.
+    ///
+    /// This was an `include_str!` of `packages/gmail/manifest.toml` — a
+    /// cross-package reach-in for a *fixture*, which coupled the test to a
+    /// shipped product manifest it does not own (WS2 §11.2.7). The shipped
+    /// manifest's other 60 lines were never load-bearing here.
+    const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "gmail"
+name = "Gmail"
+version = "0.1.0"
+description = "no-channel fixture with deployment admin configuration"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "gmail"
+
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+"#;
 
     struct RecordingReactivation {
         calls: AtomicUsize,
@@ -817,8 +843,9 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                 Arc::new(InMemoryBackend::new()),
                 ironclaw_host_api::path::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-                ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+                ironclaw_host_api::host_port::default_host_port_catalog()
+                    .expect("host port catalog"),
+                ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             )
             .await
             .expect("filesystem extension installation store"),
@@ -826,9 +853,9 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         let record = ExtensionManifestRecord::from_toml(
             manifest_toml,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest parses");

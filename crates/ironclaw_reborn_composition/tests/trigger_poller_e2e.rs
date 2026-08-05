@@ -37,6 +37,7 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -54,7 +55,6 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput, RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
@@ -595,7 +595,7 @@ async fn build_runtime_with_slack_delivery(
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,

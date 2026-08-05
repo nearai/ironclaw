@@ -23,7 +23,14 @@ on:
         type: string
   pull_request:
     branches:
+      # Release branches get the same gate as main: a release-blocker fix
+      # opened against a frozen candidate must clear the deterministic Reborn
+      # suite before it can produce a new rc. `release-fix-*` is the 1.0.0-era
+      # name; `release/*` is the weekly cut named in
+      # docs/internal/weekly-release-strategy.md.
       - main
+      - "release-fix-*"
+      - "release/*"
   merge_group:
     branches:
       - main
@@ -115,6 +122,7 @@ jobs:
           fi
 
           python3 scripts/ci/test_reborn_pr_test_plan.py
+          python3 scripts/ci/test_pre_commit_staged_paths.py
           scripts/ci/discover-reborn-package-crates.sh \
             > "${RUNNER_TEMP}/reborn-canonical-packages.json"
           plan="$(
@@ -157,7 +165,17 @@ jobs:
           echo "run_group_tests=$(jq -r '.run_group_tests' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "run_coverage=$(jq -r '.coverage_mode == "full"' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          # Owner decision 2026-08-04 (Ben + Firat): coverage collection,
+          # the report job, the floors, and the changed-line gate all run on
+          # pushes to main ONLY. PR and merge-queue lanes run plain
+          # (uninstrumented) tests — llvm-cov overhead was a large share of
+          # the ~hour cycle — and a post-merge coverage breach lands as a red
+          # main run that main-ci-slack-alerts.yml announces, fixed forward.
+          run_coverage="$(jq -r '.coverage_mode == "full"' <<< "${plan}")"
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            run_coverage=false
+          fi
+          echo "run_coverage=${run_coverage}" >> "$GITHUB_OUTPUT"
           echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
 
           scripts/ci/check-test-suite-boundaries.sh
@@ -267,7 +285,16 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the flat line stays live for today's tree and the nested line picks
+          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
+          # without either one needing to be conditional.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
@@ -276,7 +303,9 @@ jobs:
       - name: Install WebUI frontend dependencies
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -649,14 +678,25 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the flat line stays live for today's tree and the nested line picks
+          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
+          # without either one needing to be conditional.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies for coverage
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -799,9 +839,21 @@ jobs:
         run: python3 scripts/ci/test_reborn_changed_coverage.py
 
       - name: Gate changed Reborn lines and branches
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push'
+        # Owner decision 2026-08-04 (Ben + Firat, reversing the "leave CI
+        # policy as-is" note recorded on #7036): the changed-line verdict no
+        # longer blocks PRs or the merge queue. For move-heavy refactors it
+        # re-attributes relocated code as new-and-uncovered, and because this
+        # job runs last its verdict lands after the full hour of test lanes —
+        # the worst feedback shape the program has. It still RUNS on both
+        # lanes for visibility (step summary, sticky comment, and this step's
+        # red annotation), and it ENFORCES on pushes to main, where
+        # main-ci-slack-alerts.yml surfaces a breach. The aggregate and
+        # per-crate coverage floors are untouched and still gate everywhere
+        # they always did.
+        continue-on-error: ${{ github.event_name != 'push' }}
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           # `gh` resolves the base commit's merged-lcov artifact. The checkout
           # runs with persist-credentials: false, so the token is passed here
@@ -944,14 +996,25 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the flat line stays live for today's tree and the nested line picks
+          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
+          # without either one needing to be conditional.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies for QA replay
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
@@ -1051,13 +1114,21 @@ jobs:
               "${{ needs.changes.outputs.run_root_tests }}" \
               "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
-              "${{ needs.changes.outputs.run_coverage }}" \
               "${{ needs.changes.outputs.run_qa_replay }}"; do
               if [[ "${flag}" != "true" ]]; then
                 echo "Full Reborn plan omitted a required lane"
                 exit 1
               fi
             done
+            # Coverage is push-only by owner decision (2026-08-04, Ben +
+            # Firat): full-mode merge_group runs plain tests, so run_coverage
+            # must be true exactly when the event is a push and false
+            # otherwise — either mismatch is a wiring bug worth failing on.
+            expected_coverage=${{ github.event_name == 'push' }}
+            if [[ "${{ needs.changes.outputs.run_coverage }}" != "${expected_coverage}" ]]; then
+              echo "run_coverage=${{ needs.changes.outputs.run_coverage }} but expected ${expected_coverage} for ${{ github.event_name }}"
+              exit 1
+            fi
           fi
 
           check_planned_job() {

@@ -495,7 +495,7 @@ app_id = "/app_id"
         let record = ExtensionManifestRecord::from_toml(
             CHANNEL_AUTH_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
             None,

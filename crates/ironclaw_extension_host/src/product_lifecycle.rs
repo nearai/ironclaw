@@ -1,10 +1,11 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
 };
 
 use async_trait::async_trait;
+use ironclaw_auth::ChannelConnectionService;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
@@ -23,20 +24,18 @@ use ironclaw_host_api::{
     ids::{ExtensionId, UserId, VendorId},
     resource::ResourceScope,
 };
-use ironclaw_product::{
-    ChannelConnectionService, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
-};
 use ironclaw_product_contracts::account_setup::{
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupReader,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
 };
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
-use tokio::sync::{AcquireError, Mutex, RwLock, Semaphore};
+use tokio::sync::{AcquireError, Mutex, Notify, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
@@ -160,11 +159,10 @@ pub struct ExtensionLifecycleManager {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
-    /// Serializes registry package publication with the lifecycle operations
-    /// it coordinates. The ordinary lifecycle lock remains the state writer;
-    /// this outer lock only prevents two catalog clients from replacing the
-    /// same package between catalog publication and install.
-    registry_install_lock: Arc<Mutex<()>>,
+    /// Tracks registry package publications currently in flight. The map lock
+    /// protects only this in-memory coordination state; waiters never retain a
+    /// mutex guard across lifecycle, filesystem, or store I/O.
+    registry_install_operations: Arc<std::sync::Mutex<BTreeMap<String, Arc<Notify>>>>,
     /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
@@ -197,7 +195,9 @@ pub struct ExtensionLifecycleManager {
     /// connection-requirement overrides). Descriptors are declared during
     /// composition; the activation success path consults it and the pairing
     /// seam extends it.
-    account_setups: ExtensionAccountSetupRegistry,
+    /// `None` behaves exactly as an empty registry: no descriptor, no missing
+    /// requirement (`ExtensionAccountSetupReader`'s doc pins the equivalence).
+    account_setups: Option<Arc<dyn ExtensionAccountSetupReader>>,
     /// Static per-provider instance-config readiness map. Opt-in, defaults
     /// empty via `new` — a third readiness axis alongside `account_setups`
     /// (per-user) and the package-level
@@ -214,6 +214,56 @@ pub struct ExtensionLifecycleManager {
 /// memory at 128 MiB; imports are a rare admin-only operation, so waiting is
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
+
+struct RegistryInstallPermit {
+    key: String,
+    completion: Arc<Notify>,
+    operations: Arc<std::sync::Mutex<BTreeMap<String, Arc<Notify>>>>,
+}
+
+impl Drop for RegistryInstallPermit {
+    fn drop(&mut self) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if operations
+            .get(&self.key)
+            .is_some_and(|active| Arc::ptr_eq(active, &self.completion))
+        {
+            operations.remove(&self.key);
+        }
+        drop(operations);
+        self.completion.notify_waiters();
+    }
+}
+
+async fn acquire_registry_install_permit(
+    operations: Arc<std::sync::Mutex<BTreeMap<String, Arc<Notify>>>>,
+    key: String,
+) -> RegistryInstallPermit {
+    loop {
+        let waiter = {
+            let mut active_operations = operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(active) = active_operations.get(&key) {
+                Some(Arc::clone(active).notified_owned())
+            } else {
+                let completion = Arc::new(Notify::new());
+                active_operations.insert(key.clone(), Arc::clone(&completion));
+                return RegistryInstallPermit {
+                    key,
+                    completion,
+                    operations: Arc::clone(&operations),
+                };
+            }
+        };
+        if let Some(waiter) = waiter {
+            waiter.await;
+        }
+    }
+}
 
 /// Constructor dependency bundle for [`ExtensionLifecycleManager::new`].
 ///
@@ -236,8 +286,9 @@ impl ExtensionLifecycleManager {
     pub async fn register_hosted_mcp(
         &self,
         request: RegisterHostedMcpRequest,
+        scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        self.hosted_mcp_preparation.register(request).await
+        self.hosted_mcp_preparation.register(request, scope).await
     }
 
     /// Run the composed preparation strategy, if this installation's generic
@@ -251,6 +302,23 @@ impl ExtensionLifecycleManager {
     ) -> Result<Option<LifecycleProductResponse>, ProductOperationFailure> {
         self.hosted_mcp_preparation
             .prepare_if_pending(package_ref, scope, credential_gate, caller)
+            .await
+    }
+
+    /// Validates the caller and persists an explicit hosted-MCP authentication selection.
+    pub async fn select_hosted_mcp_auth(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        auth_selection: ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection,
+        caller: &UserId,
+    ) -> Result<(), ProductOperationFailure> {
+        self.hosted_mcp_preparation
+            .select_auth(
+                package_ref,
+                auth_selection,
+                caller,
+                &self.tenant_operator_user_id,
+            )
             .await
     }
     pub fn new(dependencies: ExtensionLifecycleManagerDependencies) -> Self {
@@ -287,10 +355,10 @@ impl ExtensionLifecycleManager {
             generic_host: std::sync::OnceLock::new(),
             channel_config: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
-            registry_install_lock: Arc::new(Mutex::new(())),
+            registry_install_operations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
-            account_setups: ExtensionAccountSetupRegistry::default(),
+            account_setups: None,
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
             provider_instance_readiness: std::collections::BTreeMap::new(),
         }
@@ -399,13 +467,9 @@ impl ExtensionLifecycleManager {
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package.id.as_str())?;
                 let available = self.catalog.read().await.resolve(&package_ref)?;
-                let host_ports =
-                    ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-                        ProductOperationFailure::InvalidBindingRequest {
-                            reason: format!(
-                                "host port catalog rejected bundled extension: {error}"
-                            ),
-                        }
+                let host_ports = ironclaw_host_api::host_port::default_host_port_catalog()
+                    .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+                        reason: format!("host port catalog rejected bundled extension: {error}"),
                     })?;
                 let contracts =
                     crate::product_extension_host_api_contract_registry().map_err(|error| {
@@ -491,9 +555,9 @@ impl ExtensionLifecycleManager {
 
     pub fn with_account_setup_registry(
         mut self,
-        account_setups: ExtensionAccountSetupRegistry,
+        account_setups: Arc<dyn ExtensionAccountSetupReader>,
     ) -> Self {
-        self.account_setups = account_setups;
+        self.account_setups = Some(account_setups);
         self
     }
 
@@ -654,7 +718,7 @@ impl ExtensionLifecycleManager {
                 installation_state_for_installation(
                     installation,
                     has_activatable_surface,
-                    activation_errors.contains_key(installation.extension_id().as_str()),
+                    activation_errors.contains_key(installation.extension_id()),
                 )
             })
             .unwrap_or(InstallationState::Installed);
@@ -662,7 +726,17 @@ impl ExtensionLifecycleManager {
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
         let summary = available.summary();
-        Ok(response_with_payload(
+        let auth_selection_required = available.source
+            == ironclaw_extensions::ManifestSource::UserRegistered
+            && available.resolved_manifest.mcp.as_ref().is_some_and(|mcp| {
+                matches!(
+                    mcp.registration_auth,
+                    ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto
+                )
+            })
+            && !has_activatable_surface
+            && package_runtime_credential_auth_requirements(&available.package).is_empty();
+        let mut response = response_with_payload(
             Some(package_ref),
             phase,
             LifecycleProductPayload::ExtensionList {
@@ -673,7 +747,15 @@ impl ExtensionLifecycleManager {
                 }],
                 count: 1,
             },
-        ))
+        );
+        if auth_selection_required {
+            response.blockers = vec![LifecycleReadinessBlocker::Setup {
+                ref_id: Some(LifecycleBlockerRef::new(
+                    ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                )?),
+            }];
+        }
+        Ok(response)
     }
 
     pub async fn active_model_visible_capabilities(
@@ -738,11 +820,11 @@ impl ExtensionLifecycleManager {
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
         let mut requirements = package_runtime_credential_auth_requirements(&package);
-        if let Some(requirement) = self
-            .account_setups
-            .missing_requirement(&extension_id, caller)
-            .await
-            .map_err(map_account_setup_error)?
+        if let Some(setups) = self.account_setups.as_ref()
+            && let Some(requirement) = setups
+                .missing_requirement(&extension_id, caller)
+                .await
+                .map_err(map_account_setup_error)?
         {
             requirements.push(requirement);
         }
@@ -777,13 +859,15 @@ impl ExtensionLifecycleManager {
     /// `activation_error` are driven from this one source.
     pub async fn installation_activation_errors(
         &self,
-    ) -> Result<std::collections::HashMap<String, String>, ProductOperationFailure> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductOperationFailure> {
         match self.generic_host.get() {
-            Some(host) => host.installation_errors().await.map_err(|error| {
-                ProductOperationFailure::Transient {
+            Some(host) => host
+                .installation_errors()
+                .await
+                .map(typed_activation_errors)
+                .map_err(|error| ProductOperationFailure::Transient {
                     reason: format!("extension activation errors could not be read: {error}"),
-                }
-            }),
+                }),
             None => Ok(std::collections::HashMap::new()),
         }
     }
@@ -824,7 +908,7 @@ impl ExtensionLifecycleManager {
                 phase: installation_state_for_installation(
                     &installation,
                     package_has_activatable_surface(&available.package),
-                    activation_errors.contains_key(installation.extension_id().as_str()),
+                    activation_errors.contains_key(installation.extension_id()),
                 ),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
             });
@@ -837,7 +921,7 @@ impl ExtensionLifecycleManager {
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
-        activation_errors: &std::collections::HashMap<String, String>,
+        activation_errors: &std::collections::HashMap<ExtensionId, String>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
@@ -853,7 +937,7 @@ impl ExtensionLifecycleManager {
                 installation_phase: None,
             });
         };
-        let has_last_error = activation_errors.contains_key(installation.extension_id().as_str());
+        let has_last_error = activation_errors.contains_key(installation.extension_id());
         let phase =
             search_installation_phase(extension, &installation, credential_gate, has_last_error)
                 .await?;
@@ -985,12 +1069,16 @@ impl ExtensionLifecycleManager {
                 reason: "registry install requires a registry-validated package".to_string(),
             });
         }
-        let _registry_guard = self.registry_install_lock.lock().await;
         let package_ref = package.package_ref.clone();
         let extension_id = package.package.id.clone();
+        let _registry_permit = acquire_registry_install_permit(
+            Arc::clone(&self.registry_install_operations),
+            extension_id.as_str().to_string(),
+        )
+        .await;
         let previous = {
             let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref).ok()
+            catalog.resolve_optional(&package_ref)?
         };
         if let Some(previous) = &previous {
             let matches = previous.manifest_toml == package.manifest_toml
@@ -1377,7 +1465,9 @@ impl ExtensionLifecycleManager {
             return Ok(activation_success_response(
                 package_ref,
                 &active_package,
-                self.account_setups.descriptor(extension_id),
+                self.account_setups
+                    .as_ref()
+                    .and_then(|setups| setups.descriptor(extension_id)),
             ));
         }
         self.enable_lifecycle_package(extension_id).await?;
@@ -1460,7 +1550,11 @@ impl ExtensionLifecycleManager {
         let visible_capability_ids = package_visible_capability_ids(&active_package);
         let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
-            .and_then(|id| self.account_setups.descriptor(&id));
+            .and_then(|id| {
+                self.account_setups
+                    .as_ref()
+                    .and_then(|setups| setups.descriptor(&id))
+            });
         let message = activation_success_message(
             &package_ref,
             &active_package,
@@ -2841,6 +2935,24 @@ fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperatio
     }
 }
 
+/// Project the durable installation records' bare-string keys onto the
+/// `ExtensionId` every consumer of this map already holds, so the lookup is
+/// typed instead of stringified at each call site.
+///
+/// A key the boundary vocabulary rejects is **dropped**. That changes no
+/// answer — such a key could never have matched an installation's own
+/// `ExtensionId` — it only stops an unmatchable row from being carried around
+/// as though it could match.
+fn typed_activation_errors(
+    raw: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<ExtensionId, String> {
+    raw.into_iter()
+        .filter_map(|(extension_id, reason)| {
+            ExtensionId::new(extension_id).ok().map(|id| (id, reason))
+        })
+        .collect()
+}
+
 pub(crate) fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductOperationFailure> {
@@ -3125,7 +3237,7 @@ where
     Ok(owners)
 }
 
-fn ensure_caller_may_mutate_tenant_installation(
+pub(crate) fn ensure_caller_may_mutate_tenant_installation(
     installation: &ExtensionInstallation,
     caller: &UserId,
     tenant_operator: &UserId,
@@ -3157,6 +3269,37 @@ fn compensation_failure(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    /// The activation-error map is keyed by `ExtensionId` so the three
+    /// installation-state call sites can look it up with the id they already
+    /// hold instead of stringifying. This pins both halves of that projection:
+    /// a well-formed durable key survives verbatim, and a key that is not
+    /// extension vocabulary is dropped rather than carried as an entry nothing
+    /// could ever match.
+    #[test]
+    fn typed_activation_errors_keeps_valid_keys_and_drops_unmatchable_ones() {
+        let typed = super::typed_activation_errors(std::collections::HashMap::from([
+            (
+                "slack".to_string(),
+                "activation failed: bad token".to_string(),
+            ),
+            // Not a name segment: uppercase and a space.
+            ("Slack Channel".to_string(), "corrupted row".to_string()),
+            (String::new(), "empty key".to_string()),
+        ]));
+
+        assert_eq!(
+            typed.len(),
+            1,
+            "only the well-formed key survives: {typed:?}"
+        );
+        assert_eq!(
+            typed
+                .get(&super::ExtensionId::new("slack").expect("valid extension id"))
+                .map(String::as_str),
+            Some("activation failed: bad token"),
+        );
+    }
 
     use ironclaw_extensions::{
         ExtensionInstallationStore, ExtensionInstallationStorePort as _, ExtensionLifecycleService,
@@ -3508,6 +3651,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_install_coordination_serializes_same_extension_without_held_mutex_guard() {
+        let operations = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let first =
+            acquire_registry_install_permit(Arc::clone(&operations), "fixture".to_string()).await;
+        let waiting_operations = Arc::clone(&operations);
+        let waiter = tokio::spawn(async move {
+            acquire_registry_install_permit(waiting_operations, "fixture".to_string()).await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "same-extension publication must wait for the active operation"
+        );
+
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter must be notified")
+            .expect("waiter task must complete");
+        drop(second);
+
+        assert!(
+            operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "completed operations must leave no coordination entry"
+        );
+    }
+
+    #[tokio::test]
     async fn lifecycle_manager_installs_activates_and_removes_catalog_package() {
         let package = fixture_extension_package();
         let extension_id = package.package.id.clone();
@@ -3517,7 +3692,7 @@ mod tests {
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -3609,7 +3784,7 @@ mod tests {
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -3935,7 +4110,7 @@ output_schema_ref = "schemas/run.output.json"
         let inner_store = ExtensionInstallationStore::load_at(
             filesystem.clone(),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
             crate::product_extension_host_api_contract_registry().expect("host contracts"),
         )
         .await
@@ -3992,14 +4167,20 @@ output_schema_ref = "schemas/run.output.json"
             )
             .expect("public fixture endpoint"),
             auth_selection: Some(
-                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto,
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
             ),
         };
+        let register_scope = ResourceScope::local_default(
+            UserId::new("lock-order-owner").expect("valid owner"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("local registration scope");
         let register_manager = Arc::clone(&manager);
-        let register_task =
-            tokio::spawn(
-                async move { register_manager.register_hosted_mcp(register_request).await },
-            );
+        let register_task = tokio::spawn(async move {
+            register_manager
+                .register_hosted_mcp(register_request, register_scope)
+                .await
+        });
 
         holding.notified().await;
 
@@ -4055,7 +4236,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4138,7 +4319,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4245,7 +4426,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await

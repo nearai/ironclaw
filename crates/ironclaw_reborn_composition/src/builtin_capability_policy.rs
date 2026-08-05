@@ -14,7 +14,7 @@ use ironclaw_host_api::{
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::runtime_profile_approval_policy::RuntimeProfileApprovalGateEffectSets;
+use ironclaw_approvals::RuntimeProfileApprovalGateEffectSets;
 
 const BUILTIN_CAPABILITY_POLICY_TOML: &str = include_str!("builtin_capability_policy.toml");
 
@@ -271,6 +271,7 @@ pub(crate) enum CapabilityMountProfile {
 pub(crate) enum CapabilityNetworkProfile {
     Default,
     DevWildcard,
+    IronhubArtifacts,
 }
 
 #[derive(Clone, Copy)]
@@ -441,6 +442,9 @@ fn constraint_terms(
     let network = match source.network() {
         CapabilityNetworkProfile::Default => NetworkPolicy::default(),
         CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
+        CapabilityNetworkProfile::IronhubArtifacts => {
+            ironclaw_extension_manager::ironhub::artifact_network_policy()
+        }
     };
     let mut allowed_effects = source.effects().to_vec();
     if let Some(effect) = required_effect
@@ -603,6 +607,20 @@ mod tests {
                 .grant(&CapabilityId::new("builtin.skill_install").expect("capability id"))
                 .is_ok()
         );
+        for capability in [
+            "builtin.ironhub_search",
+            "builtin.ironhub_info",
+            "builtin.ironhub_install",
+        ] {
+            let grant = policy
+                .grant(&CapabilityId::new(capability).expect("capability id"))
+                .expect("IronHub grant");
+            assert_eq!(
+                grant.network,
+                CapabilityNetworkProfile::IronhubArtifacts,
+                "{capability} must not inherit developer wildcard egress"
+            );
+        }
         assert_trigger_grant(
             &policy,
             "builtin.trigger_create",
@@ -738,6 +756,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ironhub_artifact_policy_is_https_only_and_host_scoped() {
+        let policy = ironclaw_extension_manager::ironhub::artifact_network_policy();
+
+        assert!(policy.deny_private_ip_ranges);
+        assert!(policy.allowed_targets.iter().all(|target| {
+            target.scheme == Some(ironclaw_host_api::action::NetworkScheme::Https)
+                && target.port.is_none()
+        }));
+        let hosts = policy
+            .allowed_targets
+            .iter()
+            .map(|target| target.host_pattern.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            hosts,
+            std::collections::BTreeSet::from([
+                "*.githubusercontent.com",
+                "github-releases.githubusercontent.com",
+                "github.com",
+                "hub.ironclaw.com",
+                "objects.githubusercontent.com",
+                "raw.githubusercontent.com",
+            ])
+        );
+        assert!(!hosts.contains("api.github.com"));
+        assert!(!hosts.contains("*"));
     }
 
     fn assert_trigger_grant(

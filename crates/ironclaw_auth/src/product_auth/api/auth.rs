@@ -127,6 +127,9 @@ pub struct RebornOAuthCallbackRequest {
 /// the verifier cannot be probed by comparison.
 #[derive(Debug, Clone)]
 pub struct RebornOAuthStartFlowRequest {
+    /// Scopes the authorize URL asked for, persisted with the flow instead of
+    /// being echoed back through the opaque `state` value.
+    pub requested_scopes: Vec<crate::ProviderScope>,
     pub flow_id: Option<AuthFlowId>,
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
@@ -151,6 +154,9 @@ pub struct RebornOAuthStartFlowRequest {
 pub struct RebornOAuthCallbackFlowIdentity {
     pub provider: AuthProviderId,
     pub requester_extension: Option<ExtensionId>,
+    /// What the authorize URL asked for, read back from the durable flow
+    /// rather than from the caller-supplied `state` value.
+    pub requested_scopes: Vec<crate::ProviderScope>,
 }
 
 /// Host-route OAuth callback parse result.
@@ -1325,6 +1331,7 @@ impl RebornProductAuthServices {
         Ok(RebornOAuthCallbackFlowIdentity {
             provider: record.provider,
             requester_extension: record.requester_extension,
+            requested_scopes: record.requested_scopes,
         })
     }
 
@@ -1443,6 +1450,7 @@ impl RebornProductAuthServices {
         let created = self
             .flow_manager
             .create_flow(NewAuthFlow {
+                requested_scopes: request.requested_scopes.clone(),
                 id: Some(flow_id),
                 scope: request.scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,

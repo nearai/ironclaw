@@ -12,6 +12,20 @@ pub(super) struct ResolvedPath {
     pub(super) grant: MountGrant,
 }
 
+impl ResolvedPath {
+    /// Whether this resolution IS its grant's mount root.
+    ///
+    /// A mount root the caller is authorized for exists by definition: it is
+    /// the namespace their grant names, not a path they chose. A per-caller
+    /// workspace root (`tenants/{tenant}/users/{user}`) does not exist on the
+    /// backend until the first write, so reads of the root itself must behave
+    /// as an empty directory rather than `NotFound`. Deeper paths keep
+    /// reporting `NotFound`.
+    pub(super) fn is_mount_root(&self) -> bool {
+        self.virtual_path == self.grant.target
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ListEntry {
     pub(super) display: String,

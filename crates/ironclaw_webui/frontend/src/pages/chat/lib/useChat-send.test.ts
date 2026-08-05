@@ -35,6 +35,11 @@ import {
   requestFailureIdForMessage,
 } from "./message-types";
 import {
+  RECORD_STATUS,
+  uiStatusFromRecordStatus,
+} from "./message-status";
+import { buildOptimisticMessage } from "./optimistic-message";
+import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
   forgetChannelConnectionWaiter,
@@ -126,6 +131,9 @@ function runUseChatSource(context) {
     normalizeConnectionChannel,
     rememberChannelConnectionWaiter,
     requestFailureIdForMessage,
+    RECORD_STATUS,
+    uiStatusFromRecordStatus,
+    buildOptimisticMessage,
   });
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
@@ -4735,7 +4743,10 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
   assert.equal(lastIsProcessing?.value, false);
 });
 
-test("useChat.send: active run refuses duplicate submit before network call", async () => {
+test("useChat.send: admits a follow-up while a run is active and renders it queued", async () => {
+  // Queued-message UX: an active run no longer blocks a local send. The
+  // follow-up must reach the backend so Reborn can queue it (deferred_busy),
+  // and the optimistic bubble renders as "queued" (not an error).
   const threadId = "thread-busy-local";
   let renderedMessages = [];
   let sendCalls = 0;
@@ -4767,7 +4778,11 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     resolveGateRequest: async () => {},
     sendMessage: async () => {
       sendCalls += 1;
-      throw new Error("busy send should not reach API");
+      return {
+        outcome: "deferred_busy",
+        thread_id: threadId,
+        accepted_message_ref: "msg:queued-1",
+      };
     },
     setInterval,
     setTimeout,
@@ -4792,12 +4807,13 @@ test("useChat.send: active run refuses duplicate submit before network call", as
   const chat = context.globalThis.__testExports.useChat(threadId);
   const response = await chat.send("second message while first run is active");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
-  assert.deepEqual(renderedMessages, []);
+  assert.equal(response.outcome, "deferred_busy");
+  assert.equal(sendCalls, 1);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].status, "queued");
 });
 
-test("useChat.send: accepted run blocks another submit until settlement", async () => {
+test("useChat.send: admits a follow-up submit while a prior run is still active", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
   let sendCalls = 0;
@@ -4862,30 +4878,26 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   const first = await chat.send("first message");
+  // The previous send's POST has already settled (awaited), so the
+  // re-entrancy guard is released. Queued-message UX: the still-active run no
+  // longer blocks the follow-up — it reaches the backend to be queued.
   const second = await chat.send("draft while the reply is still running");
 
   assert.equal(first.run_id, "run-1");
-  assert.equal(second, null);
-  assert.equal(sendCalls, 1);
-  assert.equal(renderedMessages.length, 1);
-  assert.equal(renderedMessages[0].content, "first message");
-
-  context.chatEventsArgs.setIsProcessing(false);
-  context.chatEventsArgs.setActiveRun(null);
-  context.chatEventsArgs.onRunSettled("run-1", { success: true });
-
-  const third = await chat.send("message after settlement");
-
-  assert.equal(third.run_id, "run-2");
+  assert.equal(second.run_id, "run-2");
   assert.equal(sendCalls, 2);
+  assert.equal(renderedMessages.length, 2);
+  assert.equal(renderedMessages[0].content, "first message");
+  assert.equal(renderedMessages[1].content, "draft while the reply is still running");
 });
 
-test("useChat.send: created thread stays blocked until accepted run settles", async () => {
+test("useChat.send: created thread admits a follow-up send while its run is active", async () => {
   const createdThreadId = "thread-created";
   let renderedMessages = [];
   let createThreadCalls = 0;
   let sendCalls = 0;
   const seededByThread = new Map();
+  const stateSlots = new Map();
 
   const context = {
     AbortController,
@@ -4893,7 +4905,7 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
     Error,
     Map,
     Math,
-    React: createReactStub(),
+    React: createReactStub({ stateSlots }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -4916,12 +4928,21 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
+      if (sendCalls === 1) {
+        return {
+          accepted_message_ref: "msg:created-1",
+          run_id: "run-1",
+          status: "queued",
+          thread_id: threadId,
+          content,
+        };
+      }
+      // The created thread's first run is still active, so Reborn queues the
+      // follow-up behind it instead of starting a new run.
       return {
-        accepted_message_ref: `msg:created-${sendCalls}`,
-        run_id: `run-${sendCalls}`,
-        status: "queued",
+        outcome: "deferred_busy",
         thread_id: threadId,
-        content,
+        accepted_message_ref: "msg:created-2",
       };
     },
     setInterval,
@@ -4960,22 +4981,25 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
   assert.equal(first.run_id, "run-1");
   assert.equal(first.thread_id, createdThreadId);
 
-  context.chatEventsArgs.setIsProcessing(false);
-  context.chatEventsArgs.setActiveRun(null);
+  // The first run is deliberately left active: this is the state a
+  // reintroduced local busy rejection would trip over.
+  assert.equal(stateSlots.get(STATE_SLOT.isProcessing).value, true);
+  assert.equal(stateSlots.get(STATE_SLOT.activeRun).value?.runId, "run-1");
 
+  // Queued-message UX: the still-active run on the just-created thread no
+  // longer blocks a follow-up — it reaches the backend, which queues it
+  // (deferred_busy), and the optimistic bubble renders as "queued".
   const second = await chat.send("draft while the reply is still running", {
     threadId: createdThreadId,
   });
-  assert.equal(second, null);
-  assert.equal(sendCalls, 1);
-
-  context.chatEventsArgs.onRunSettled("run-1", { success: true });
-
-  const third = await chat.send("message after settlement", {
-    threadId: createdThreadId,
-  });
-  assert.equal(third.run_id, "run-2");
+  assert.equal(second.outcome, "deferred_busy");
   assert.equal(sendCalls, 2);
+  assert.equal(renderedMessages.length, 2);
+  assert.equal(renderedMessages[1].status, "queued");
+  const seededMessages = seededByThread.get(createdThreadId);
+  assert.equal(seededMessages[seededMessages.length - 1].status, "queued");
+  // deferred_busy keeps the active run processing — it was queued, not dropped.
+  assert.equal(stateSlots.get(STATE_SLOT.isProcessing).value, true);
 });
 
 test("useChat.send: clears local busy when run settles before send response", async () => {
@@ -5671,10 +5695,11 @@ test("useChat.send: addresses a second thread in parallel while viewing a runnin
   assert.ok(result, "send must resolve with a response, not null");
 });
 
-test("useChat.send: still blocks a duplicate send into the already-running thread", async () => {
-  // The one case the gate must keep blocking: a second send into the SAME
-  // thread that already has a run in flight (both activeRun and isProcessing
-  // set — the real busy state).
+test("useChat.send: admits a follow-up into the already-running thread (queued)", async () => {
+  // Queued-message UX: a second send into the SAME thread that already has a
+  // run in flight (both activeRun and isProcessing set — the real busy state)
+  // is no longer blocked locally. It must reach the backend so Reborn can
+  // queue it behind the active run.
   const { context, sentBody, createThreadCalls } = createParallelSendContext({
     threadId: "thread-a",
     activeRun: { runId: "run-a", threadId: "thread-a", status: "running" },
@@ -5684,21 +5709,20 @@ test("useChat.send: still blocks a duplicate send into the already-running threa
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat("thread-a");
-  const result = await chat.send("duplicate into the busy thread", {
+  const result = await chat.send("follow-up into the busy thread", {
     threadId: "thread-a",
   });
 
-  assert.equal(result, null, "duplicate send into the busy thread is rejected");
-  assert.equal(sentBody(), null, "sendMessage must not be called for a busy thread");
+  assert.ok(result, "the follow-up send resolves with a response, not null");
+  assert.ok(sentBody(), "sendMessage is called so the backend can queue it");
+  assert.equal(sentBody().threadId, "thread-a");
   assert.equal(createThreadCalls(), 0);
 });
 
-test("useChat.send: blocks a send addressed to a busy thread that is NOT the viewed one", async () => {
-  // The block must key on the *destination* thread, not the viewed one:
-  // viewing thread-a, but the active run is on thread-b, and the send is
-  // addressed to thread-b — that destination is busy, so it must be blocked.
-  // This complements the parallel-send test (viewed busy, different target →
-  // allowed) so the pair pins the block on destination identity alone.
+test("useChat.send: admits a send addressed to a busy thread that is NOT the viewed one", async () => {
+  // The destination thread being busy no longer blocks the send: viewing
+  // thread-a, active run on thread-b, send addressed to thread-b — it must
+  // still reach the backend to be queued.
   const { context, sentBody, createThreadCalls } = createParallelSendContext({
     threadId: "thread-a",
     activeRun: { runId: "run-b", threadId: "thread-b", status: "running" },
@@ -5711,8 +5735,9 @@ test("useChat.send: blocks a send addressed to a busy thread that is NOT the vie
     threadId: "thread-b",
   });
 
-  assert.equal(result, null, "send into the busy destination thread is rejected");
-  assert.equal(sentBody(), null, "sendMessage must not be called for the busy destination");
+  assert.ok(result, "send into the busy destination reaches the backend, not blocked");
+  assert.ok(sentBody(), "sendMessage is called for the busy destination");
+  assert.equal(sentBody().threadId, "thread-b");
   assert.equal(createThreadCalls(), 0);
 });
 

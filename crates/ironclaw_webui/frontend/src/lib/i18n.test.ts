@@ -92,6 +92,62 @@ function loadLocalePack(locale) {
   return registeredPack;
 }
 
+function interpolationParams(value) {
+  return [...value.matchAll(/\{([^}]+)\}/g)].map((match) => match[1]).sort();
+}
+
+test("non-English locale packs cover the English key set and interpolation params", () => {
+  const english = loadLocalePack("en");
+  const englishKeys = Object.keys(english).sort();
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    const missing = englishKeys.filter((key) => typeof pack[key] !== "string");
+
+    assert.deepEqual(missing, [], `${locale} missing keys: ${missing.join(", ")}`);
+    for (const key of englishKeys) {
+      assert.deepEqual(
+        interpolationParams(pack[key]),
+        interpolationParams(english[key]),
+        `${locale} interpolation params differ for ${key}`,
+      );
+    }
+  }
+});
+
+test("non-English locale packs localize exposed workflow copy", () => {
+  const english = loadLocalePack("en");
+  const technicalTerms = new Set([
+    "extensions.customMcpIdGenerated",
+    "extensions.customMcpAuth.oauth",
+  ]);
+  const exposedWorkflowKeys = Object.keys(english).filter(
+    (key) =>
+      !technicalTerms.has(key) &&
+      (key === "chat.downloadRunArtifact" ||
+        key === "chat.downloadThreadArtifact" ||
+        key.startsWith("pairing.web.") ||
+        key === "extensions.tools" ||
+        key === "tools.installed" ||
+        key === "tools.available" ||
+        key === "extensions.addCustomMcp" ||
+        key === "extensions.emptyToolsTitle" ||
+        key === "extensions.emptyToolsDesc" ||
+        key.startsWith("extensions.customMcp")),
+  );
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    for (const key of exposedWorkflowKeys) {
+      assert.strictEqual(
+        pack[key] === english[key],
+        false,
+        `${locale} must localize ${key}`,
+      );
+    }
+  }
+});
+
 test("ensurePack: unknown locale resolves null (no loader, not registered)", async () => {
   const { ensurePack } = loadI18n();
   assert.equal(await ensurePack("zz-unknown"), null);

@@ -542,6 +542,7 @@ async fn uninstall_cancels_pending_flow_and_rejects_late_callback() {
     // minted under the connect popup's `Web` surface + session.
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
@@ -626,6 +627,7 @@ async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
         async move {
             services
                 .create_flow(NewAuthFlow {
+                    requested_scopes: Vec::new(),
                     id: None,
                     scope: flow_scope,
                     kind: AuthFlowKind::IntegrationCredential,
@@ -747,6 +749,7 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
     let expires_at = Utc::now() + Duration::minutes(5);
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
@@ -824,6 +827,7 @@ async fn expired_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
     let owner = scope("alice");
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
@@ -910,6 +914,7 @@ async fn uninstall_cancels_lifecycle_package_flows_regardless_of_provider() {
     let surviving_package = LifecyclePackageRef::new("gdrive").unwrap();
     let expires_at = Utc::now() + Duration::minutes(5);
     let lifecycle_flow = |package: &LifecyclePackageRef, state: &str| NewAuthFlow {
+        requested_scopes: Vec::new(),
         id: None,
         scope: owner.clone(),
         kind: AuthFlowKind::IntegrationCredential,

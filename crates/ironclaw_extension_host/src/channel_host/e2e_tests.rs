@@ -110,6 +110,7 @@ use crate::extension_ingress::{
     extension_ingress_route_mount,
 };
 use crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
+use ironclaw_auth::product_prompt::AuthChallengeProvider;
 use ironclaw_extension_host::{
     AdminConfigurationService, ChannelConfigReactivation, ChannelConfigService,
     FilesystemAdminConfigurationStore,
@@ -117,7 +118,6 @@ use ironclaw_extension_host::{
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
 use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
-use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]
@@ -558,6 +558,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
         inbound_attachments: Arc::new(InertAttachmentLander),
+        input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
@@ -608,7 +609,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     // them: the preference-target codec — no storage-root override.
     assembly
         .register_extras(
-            "slack",
+            &ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
             ChannelExtras {
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,
@@ -645,7 +646,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
     let record = ExtensionManifestRecord::from_toml(
         slack_manifest_from_bundled_inventory(),
         ManifestSource::HostBundled,
-        &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
+        &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
         &product_extension_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
         None,
@@ -800,7 +801,8 @@ async fn slack_test_extension_host_with_manifest_commands(
     }
 
     let resolved = {
-        let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
+        let host_ports =
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
         let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
         let mut manifest = slack_manifest_from_bundled_inventory();
         if let Some(commands) = manifest_commands {
@@ -3147,6 +3149,7 @@ fn turn_state(
         reply_target_binding_ref,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: chrono::Utc::now(),

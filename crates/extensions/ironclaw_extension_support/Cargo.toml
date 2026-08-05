@@ -11,7 +11,21 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [package.metadata.ironclaw]
-layer = "loops"
+# `runtimes`, not `loops` (WS3, 2026-08-04). The executor/adapter seam this
+# crate was re-chartered around in WS3 makes the *kernel* a designed consumer:
+# a tool arrives here as an executor and leaves its `FirstPartyCapabilityHandler`
+# in `ironclaw_host_runtime`, so `host_runtime -> extension_support` is
+# structural, not transitional. A crate the kernel is designed to call cannot
+# sit two rungs above it. `runtimes` is the least demotion that legalizes that
+# consumer, it matches this crate's own §8.2 posture (mediated services arrive
+# by injection; kernel ✗ — the same cell the wasm/mcp/sandbox lanes carry), and
+# it costs zero same-layer edges, where `substrates` would hide six of this
+# crate's seven dependencies from the layer matrix. Ceiling checked both ways:
+# every normal dependency and every domain this crate's charter names
+# (memory, traces, triggers) is `substrates` or `contracts`; every consumer is
+# `kernel` or above. Consumer set frozen by the `DowngradePin` in
+# `reborn_same_layer_edge_inventory.rs`.
+layer = "runtimes"
 
 [dependencies]
 async-trait = "0.1"
@@ -36,8 +50,12 @@ tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
 unicode-normalization = "0.1"
 url = "2"
+# ZIP skill bundles fetched by `builtin.skill_install` from an HTTPS/GitHub
+# source are extracted here (WS3, moved from `ironclaw_host_runtime`).
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+ironclaw_filesystem = { path = "../../ironclaw_filesystem", features = ["test-support"] }
 ironclaw_loop_contracts = { path = "../../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_auth = { path = "../../ironclaw_auth", features = ["test-support"] }
 # Dev-only: coding-tool tests re-run the loop-boundary safe-summary validator

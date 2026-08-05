@@ -1,16 +1,15 @@
 use async_trait::async_trait;
-use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
+use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 
 use crate::{
     AcceptConversationMessageRequest, AcceptedConversationMessage,
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
     AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetBinding,
-    ValidateReplyTargetRequest,
+    ExpectedExternalActorOwner, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetBinding, ValidateReplyTargetRequest,
 };
-use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_extension_contracts::external::{ExternalActorBindingEpoch, ExternalActorRef};
 
 #[async_trait]
 pub trait ConversationBindingService: Send + Sync {

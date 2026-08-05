@@ -2560,9 +2560,11 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     // identity and conversation-actor state, otherwise re-pairing this exact
     // Telegram chat would silently resurrect the old thread.
     let first_thread_id = vendor_scope.thread_id.clone();
-    let pairing_mount = services
-        .channel_pairing_route_mount_for_test()
-        .expect("the composed runtime exposes the production pairing routes");
+    let pairing_mount = ironclaw_webui::channel_pairing_route_mount(
+        services
+            .channel_pairing_registry_for_test()
+            .expect("the composed runtime exposes the production pairing registry"),
+    );
     let pairing_caller = ProductSurfaceCaller::new(
         inbound.binding.tenant_id.clone(),
         paired_user.clone(),

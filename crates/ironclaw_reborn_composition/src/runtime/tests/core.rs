@@ -139,7 +139,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_runtime_policy(standalone_runtime_policy())
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: None,
     }]);
@@ -151,6 +151,13 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
             reply_target_binding_id: "runtime-channel-bind-race-reply".to_string(),
         });
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    assert!(
+        runtime
+            .ironhub_register_route_mount()
+            .expect("default-off register route composes")
+            .is_none(),
+        "the public register route must remain absent without a shared key"
+    );
     let extension_management = &runtime.extension_management;
     let operator = extension_management
         .tenant_operator_user_id_for_test()
@@ -246,6 +253,62 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn runtime_with_ironhub_shared_key_builds_link_service_and_public_register_mount() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "unused IronHub runtime test reply".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input(
+            "runtime-ironhub-link-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_ironhub_agent_shared_key(
+        ironclaw_extension_manager::ironhub::IronhubSharedKey::new(
+            "ihub_sk_RuntimeLinkTestKey000000000000000000000000000",
+        )
+        .expect("shared key"),
+    )
+    .with_model_gateway_override(gateway)
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-ironhub-link-tenant".to_string(),
+        agent_id: "runtime-ironhub-link-agent".to_string(),
+        source_binding_id: "runtime-ironhub-link-source".to_string(),
+        reply_target_binding_id: "runtime-ironhub-link-reply".to_string(),
+    });
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    use ironclaw_extension_manager::ironhub::RebornIronHubRuntime;
+    assert!(runtime.ironhub_runtime_http_egress().is_some());
+    drop(runtime.ironhub_skill_management());
+    drop(runtime.ironhub_extension_management());
+    drop(runtime.ironhub_link_state());
+    assert_eq!(
+        runtime.ironhub_manifest_url().as_str(),
+        ironclaw_extension_manager::ironhub::IronhubManifestUrl::default().as_str()
+    );
+    let product_surface = runtime
+        .product_surface(None)
+        .expect("IronHub link reaches product surface");
+    let mount = runtime
+        .ironhub_register_route_mount()
+        .expect("register route composes")
+        .expect("shared key enables register route");
+    assert_eq!(mount.descriptors.len(), 1);
+    assert_eq!(
+        mount.descriptors[0].route_pattern().as_str(),
+        crate::IRONHUB_REGISTER_PATH
+    );
+    drop(product_surface);
+    drop(mount);
+
+    drop(runtime);
 }
 /// Wiring guard: the `regex_skill_activation_enabled` flag from
 /// [`RebornRuntimeInput`] must reach
@@ -1915,13 +1978,15 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2064,13 +2129,15 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2567,13 +2634,15 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     // Provider selection lives entirely in config.toml (mirrors an
@@ -2883,15 +2952,15 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
 struct RecordingSandboxTransport;
 
 #[async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
         &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
+        _request: ironclaw_host_api::process::CommandExecutionRequest,
     ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
     > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
             output: String::new(),
             saved_output: None,
             exit_code: 0,
@@ -5237,11 +5306,47 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
         .expect("production channel-host attachment lander has write authority");
 
     assert_eq!(refs.len(), 1);
+    // A single-user deployment keeps the shared workspace root, so an inbound
+    // attachment stays where its host aliases and browser look for it.
+    assert_landed_under(
+        &runtime,
+        &refs[0],
+        "/projects/workspace",
+        "standalone channel attachment",
+    )
+    .await;
     lander
         .rollback(&thread_scope, &refs)
         .await
         .expect("production channel-host attachment lander has batch rollback authority");
     runtime.shutdown().await.expect("runtime shutdown");
+}
+
+/// Assert the landed attachment's bytes are physically readable under
+/// `expected_root` on the composed filesystem — the placement claim the
+/// scoped-view read ports cannot make, because they resolve through the very
+/// mount view under test.
+async fn assert_landed_under(
+    runtime: &crate::RebornRuntime,
+    landed: &ironclaw_common::AttachmentRef,
+    expected_root: &str,
+    label: &str,
+) {
+    use ironclaw_filesystem::RootFilesystem;
+
+    let storage_key = landed
+        .storage_key
+        .as_deref()
+        .expect("landed attachment carries a storage_key");
+    let relative = storage_key
+        .strip_prefix("/workspace/")
+        .expect("attachment storage keys are workspace-scoped");
+    let path = ironclaw_host_api::path::VirtualPath::new(format!("{expected_root}/{relative}"))
+        .expect("composed attachment path");
+    assert!(
+        runtime.extension_filesystem.read_file(&path).await.is_ok(),
+        "{label} should be readable at {path:?}"
+    );
 }
 
 async fn query_webui_extension_setup(
@@ -6464,24 +6569,24 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-/// Regression guard: a message that arrives while the thread is busy is stored with
-/// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
-/// reaches a terminal state.
+/// Regression guard: a message that arrives while the thread is busy is queued
+/// as steering input for the active run (`Queued` status, `DeferredBusy`
+/// response) and must NOT be auto-resubmitted as a separate run when the
+/// blocking run reaches a terminal state.
 ///
 /// Scenario:
 ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
 ///      Queued and holds the active-lock.
-///  B – submitted via `bundle.submit_turn` (WebUI path); thread is busy → stored
-///      as `RejectedBusy`; response carries a non-empty `notice`.
-///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
+///  B – submitted via the WebUI path; thread is busy → stored as `Queued`,
+///      bound to run A; response is `DeferredBusy` with a non-empty `notice`.
+///  Cancel A → B flips `Queued` → `RejectedBusy` (the cancel-time steering
+///      reconciler claims the undrained input; resend affordance, never an
+///      auto-resubmission as a separate run).
 ///  C – submitted after A is cancelled; thread is free → `Submitted`.
 ///
-/// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
-/// it requires `build_reborn_runtime` + full turn-runner control that only the runtime test
-/// harness provides; moving it would require duplicating that harness. Decomposition of
-/// runtime.rs is tracked in plan #4471.
+// arch-exempt: large_file, requires `build_reborn_runtime` + full turn-runner control that only this runtime test harness provides — moving it would duplicate the harness, plan #4471
 #[tokio::test]
-async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "busy-drain ok".to_string(),
@@ -6573,25 +6678,30 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     .await
     .expect("message B submit should not error");
 
-    let RebornSubmitTurnResponse::RejectedBusy {
+    let RebornSubmitTurnResponse::DeferredBusy {
         notice: notice_b,
         active_run_id: busy_run_id,
+        status: status_b,
         ..
     } = response_b
     else {
-        panic!("expected RejectedBusy for message B, got {response_b:?}");
+        panic!("expected DeferredBusy for message B, got {response_b:?}");
     };
     assert_eq!(
-        busy_run_id,
-        Some(run_id_a),
-        "RejectedBusy should report run A as the active run"
+        busy_run_id, run_id_a,
+        "DeferredBusy should report run A as the active run"
+    );
+    assert_eq!(
+        status_b,
+        TurnStatus::Queued,
+        "run A holds the lock in Queued state"
     );
     assert!(
         !notice_b.is_empty(),
-        "RejectedBusy response must carry a non-empty notice"
+        "DeferredBusy response must carry a non-empty notice"
     );
 
-    // Verify message B is stored with RejectedBusy status.
+    // Verify message B is stored with Queued status, bound to run A.
     let history = runtime
         .thread_service
         .list_thread_history(ThreadHistoryRequest {
@@ -6600,20 +6710,25 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         })
         .await
         .expect("thread history after B");
-    let rejected_messages: Vec<_> = history
+    let queued_messages: Vec<_> = history
         .messages
         .iter()
-        .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+        .filter(|m| matches!(m.status, MessageStatus::Queued))
         .collect();
     assert_eq!(
-        rejected_messages.len(),
+        queued_messages.len(),
         1,
-        "exactly one message should be stored as RejectedBusy after thread-busy submit"
+        "exactly one message should be stored as Queued after thread-busy submit"
     );
     assert_eq!(
-        rejected_messages[0].kind,
+        queued_messages[0].kind,
         MessageKind::User,
-        "the RejectedBusy message must be of kind User"
+        "the Queued message must be of kind User"
+    );
+    assert_eq!(
+        queued_messages[0].turn_run_id.as_deref(),
+        Some(run_id_a.to_string().as_str()),
+        "the Queued message must be bound to run A"
     );
 
     // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
@@ -6637,10 +6752,10 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         .await
         .expect("thread history after cancel");
     // Identify message B by the message_id we captured from the pre-cancel history.
-    // Using the stable message_id (rather than a simple RejectedBusy count) ensures
-    // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
-    // same message cannot slip past as "still one RejectedBusy".
-    let msg_b_id = rejected_messages[0].message_id;
+    // Using the stable message_id (rather than a simple Queued count) ensures
+    // a regression that leaves the Queued row AND adds a Submitted row for the
+    // same message cannot slip past as "still one Queued".
+    let msg_b_id = queued_messages[0].message_id;
 
     let msg_b_after_cancel: Vec<_> = history_after_cancel
         .messages
@@ -6655,7 +6770,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     assert_eq!(
         msg_b_after_cancel[0].status,
         MessageStatus::RejectedBusy,
-        "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+        "message B must flip to RejectedBusy after run A is cancelled — resend affordance, no auto-resubmission"
     );
     // Guard: no additional Submitted row must have been created for message B's message_id.
     let submitted_for_b: Vec<_> = history_after_cancel

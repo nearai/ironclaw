@@ -9,8 +9,9 @@ use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId},
     path::ScopedPath,
+    product_adapter::AdapterInstallationId,
 };
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
@@ -363,25 +364,47 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             return None;
         }
         Some(ResolvedChannelDelivery {
-            extension_id: extension_id.to_string(),
-            installation_id: "inst-1".to_string(),
+            extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+            installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
         })
     }
 }
 
-struct FixedReplyContext(Vec<u8>);
+/// Answers with fixed bytes, and **records the identity it was asked about**.
+/// A double that ignores its arguments makes its test vacuous: the assertion
+/// that matters at this seam is that the coordinator looks the anchor up under
+/// the identity of the channel it *resolved*, not under the extension id the
+/// caller asked to deliver to.
+#[derive(Default)]
+struct FixedReplyContext {
+    bytes: Vec<u8>,
+    asked: Mutex<Vec<(String, String)>>,
+}
+
+impl FixedReplyContext {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+}
 
 #[async_trait]
 impl DeliveryReplyContextSource for FixedReplyContext {
     async fn reply_context(
         &self,
-        _extension_id: &str,
-        _installation_id: &str,
+        extension_id: &ExtensionId,
+        installation_id: &AdapterInstallationId,
         _conversation_fingerprint: &str,
     ) -> Option<Vec<u8>> {
-        Some(self.0.clone())
+        self.asked.lock().expect("lock").push((
+            extension_id.as_str().to_string(),
+            installation_id.as_str().to_string(),
+        ));
+        Some(self.bytes.clone())
     }
 }
 
@@ -394,8 +417,9 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
         assert_eq!(self.phase.swap(1, Ordering::SeqCst), 0);
         Some(ResolvedChannelDelivery {
-            extension_id: extension_id.to_string(),
-            installation_id: "inst-ordered".to_string(),
+            extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+            installation_id: AdapterInstallationId::new("inst-ordered")
+                .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
         })
@@ -410,8 +434,8 @@ struct OrderedReplyContext {
 impl DeliveryReplyContextSource for OrderedReplyContext {
     async fn reply_context(
         &self,
-        _extension_id: &str,
-        _installation_id: &str,
+        _extension_id: &ExtensionId,
+        _installation_id: &AdapterInstallationId,
         _conversation_fingerprint: &str,
     ) -> Option<Vec<u8>> {
         assert_eq!(self.phase.swap(2, Ordering::SeqCst), 1);
@@ -597,18 +621,29 @@ fn coordinator_over(
     store: &Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     adapter: &Arc<ScriptedChannelAdapter>,
 ) -> DeliveryCoordinator {
-    DeliveryCoordinator::new(
+    coordinator_over_recording_reply_lookups(store, adapter).0
+}
+
+/// Same coordinator, with a handle on the reply-context double so a test can
+/// assert *which identity* the anchor was looked up under.
+fn coordinator_over_recording_reply_lookups(
+    store: &Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    adapter: &Arc<ScriptedChannelAdapter>,
+) -> (DeliveryCoordinator, Arc<FixedReplyContext>) {
+    let reply_context = Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()));
+    let coordinator = DeliveryCoordinator::new(
         Arc::clone(store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
         }),
-        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
         },
-    )
+    );
+    (coordinator, reply_context)
 }
 
 /// Resolver that rejects with `OutboundTargetNotDirectMessage` whenever
@@ -733,7 +768,7 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
             parts: vec![sent("ts-100")],
         })],
     ));
-    let coordinator = coordinator_over(&store, &adapter);
+    let (coordinator, reply_context) = coordinator_over_recording_reply_lookups(&store, &adapter);
 
     let outcome = coordinator
         .deliver(
@@ -777,6 +812,16 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
     assert_eq!(
         envelopes[0].target.thread_anchor.as_deref(),
         Some("thread-1")
+    );
+    // ING-11 identity: the anchor is looked up under the identity of the
+    // channel the resolver returned — extension `vendorx`, installation
+    // `inst-1` — not under the requested extension id in both slots. The two
+    // are distinct newtypes now, so a transposition is a compile error; this
+    // pins that the coordinator reads them off the resolved channel rather
+    // than reconstructing either one.
+    assert_eq!(
+        *reply_context.asked.lock().expect("lock"),
+        vec![("vendorx".to_string(), "inst-1".to_string())]
     );
     let attempts = store.list_delivery_attempts(scope).await.unwrap();
     assert_eq!(
@@ -1581,7 +1626,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
             adapter: Arc::clone(&adapter),
             unavailable: true,
         }),
-        Arc::new(FixedReplyContext(Vec::new())),
+        Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
     );
 
@@ -1878,7 +1923,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
             adapter: Arc::clone(&adapter),
             unavailable: true,
         }),
-        Arc::new(FixedReplyContext(Vec::new())),
+        Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
     );
 

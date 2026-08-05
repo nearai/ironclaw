@@ -1,6 +1,5 @@
-use ironclaw_turns::{AdmissionRejectionReason, TurnError};
-
 use crate::InboundTurnError;
+use crate::turn_submission::TurnSubmissionRetry;
 
 /// Shared classification for trusted trigger paths that encounter
 /// conversation inbound failures.
@@ -17,37 +16,18 @@ pub(crate) enum TrustedTriggerInboundFailureKind {
 
 pub(crate) fn classify_inbound_error(error: &InboundTurnError) -> TrustedTriggerInboundFailureKind {
     match error {
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::ThreadBusy(_),
-        } => TrustedTriggerInboundFailureKind::RetryableBackend,
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(rejection),
-        } => match rejection.reason {
-            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
+        // A submission failure classifies by the port error's own retry class.
+        // Both retryable classes are the same thing to a trigger fire — the
+        // fire is re-polled — while a permanent rejection is a submit
+        // rejection. Which host failure lands in which class is the port
+        // implementor's total mapping, pinned at that seam.
+        InboundTurnError::TurnSubmissionFailed { error } => match error.retry() {
+            TurnSubmissionRetry::RetryableAfterKeyRotation
+            | TurnSubmissionRetry::RetryableWithSameKey => {
                 TrustedTriggerInboundFailureKind::RetryableBackend
             }
-            AdmissionRejectionReason::ProfileRejected
-            | AdmissionRejectionReason::Policy
-            | AdmissionRejectionReason::Unauthorized => {
-                TrustedTriggerInboundFailureKind::SubmitRejected
-            }
+            TurnSubmissionRetry::Permanent => TrustedTriggerInboundFailureKind::SubmitRejected,
         },
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::Unavailable { .. }
-                | TurnError::CapacityExceeded { .. }
-                | TurnError::Conflict { .. },
-        } => TrustedTriggerInboundFailureKind::RetryableBackend,
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::ScopeNotFound
-                | TurnError::Unauthorized
-                | TurnError::InvalidRequest { .. }
-                | TurnError::RunNotRetryable { .. }
-                | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch
-                | TurnError::InvalidRunOriginAdapter,
-        } => TrustedTriggerInboundFailureKind::SubmitRejected,
         InboundTurnError::BindingRequired { .. }
         | InboundTurnError::InvalidExternalRef { .. }
         | InboundTurnError::AccessDenied { .. }

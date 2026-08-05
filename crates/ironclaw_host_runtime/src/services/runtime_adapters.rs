@@ -17,6 +17,7 @@ use ironclaw_host_api::{
     resource::{ResourceEstimate, ResourceReservation},
     runtime_policy::EffectiveRuntimePolicy,
 };
+use ironclaw_resources::GovernorRuntimeBudget;
 use serde_json::Value;
 
 use super::wasm_blocking::run_wasm_prepare_blocking;
@@ -378,12 +379,17 @@ where
         &self,
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        // The lane holds no budget authority: it is handed the narrow
+        // reserve/reconcile/release port, not the governor (#7067).
+        let budget = GovernorRuntimeBudget::new(request.governor);
         let execution = self
             .executor
             .execute_extension_json(
-                request.governor,
+                &budget,
                 ScriptExecutionRequest {
-                    package: request.package,
+                    extension: &request.package.id,
+                    capabilities: &request.package.capabilities,
+                    runtime: &request.package.manifest.runtime,
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
@@ -430,12 +436,17 @@ where
         &self,
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        // The lane holds no budget authority: it is handed the narrow
+        // reserve/reconcile/release port, not the governor (#7067).
+        let budget = GovernorRuntimeBudget::new(request.governor);
         let execution = self
             .executor
             .execute_extension_json(
-                request.governor,
+                &budget,
                 McpExecutionRequest {
-                    package: request.package,
+                    extension: &request.package.id,
+                    capabilities: &request.package.capabilities,
+                    runtime: &request.package.manifest.runtime,
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
@@ -972,17 +983,20 @@ where
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
-            ExtensionRuntime::Wasm { module } => module
-                .resolve_under(request.package.materialized_root().map_err(|error| {
-                    DispatchError::Wasm {
+            ExtensionRuntime::Wasm { module } => ironclaw_extensions::resolve_asset_under(
+                module,
+                request
+                    .package
+                    .materialized_root()
+                    .map_err(|error| DispatchError::Wasm {
                         kind: RuntimeDispatchErrorKind::Manifest,
                         model_visible_cause: Some(error.to_string()),
-                    }
-                })?)
-                .map_err(|error| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Manifest,
-                    model_visible_cause: Some(error.to_string()),
-                })?,
+                    })?,
+            )
+            .map_err(|error| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Manifest,
+                model_visible_cause: Some(error.to_string()),
+            })?,
             other => {
                 return Err(DispatchError::Wasm {
                     kind: if other.kind() == RuntimeKind::Wasm {

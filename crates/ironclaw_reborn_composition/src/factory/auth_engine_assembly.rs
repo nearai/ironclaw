@@ -186,15 +186,16 @@ impl AuthRecipeResolver for CompositionAuthRecipeResolver {
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&ironclaw_host_api::ids::UserId>,
         vendor: &str,
     ) -> Option<ironclaw_auth::ResolvedVendorAuthRecipe> {
         match requester_extension {
             Some(requester_extension) => {
                 self.installed_recipes
-                    .resolve(Some(requester_extension), vendor)
+                    .resolve(Some(requester_extension), caller, vendor)
                     .await
             }
-            None => self.static_recipes.resolve(None, vendor).await,
+            None => self.static_recipes.resolve(None, caller, vendor).await,
         }
     }
 }
@@ -583,7 +584,7 @@ pub(crate) fn auth_continuation_dispatcher(
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
         // turn-state snapshot source is wired.
-        Some(gate_source) => Arc::new(crate::blocked_auth_resume::BlockedAuthResumeFanout::new(
+        Some(gate_source) => Arc::new(ironclaw_product::BlockedAuthResumeFanout::new(
             single_run,
             gate_source,
             turn_coordinator,

@@ -375,7 +375,7 @@ Rules — kept short on purpose:
   (`compose_provider_client`,
   `crates/ironclaw_reborn_composition/src/factory.rs`);
   the `ironclaw_auth` engine crate carries zero concrete-vendor literals and the
-  extension ABI (`wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
+  extension ABI (`crates/ironclaw_wasm/wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
   "no vendor-conditional in composition" is not yet literal — the specificity
   gate `reborn_generic_code_names_no_concrete_extension` passes against a
   non-empty allowlist that still lists composition vendor branches (e.g.
@@ -393,8 +393,13 @@ Rules — kept short on purpose:
   PKCE-hash / TTL validation stays in the durable `AuthFlowManager`
   (`crates/ironclaw_auth/src/product_auth/durable/tests.rs`).
 - [x] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
-  rejected before the vendor call. —
-  `scope_widening_is_rejected_before_any_vendor_call` (`auth_engine_contract.rs`).
+  rejected before the vendor call. A host flow's explicit scopes are then
+  honored verbatim; an extension-scoped flow's scopes are validated as a
+  lower bound and the full ceiling is requested instead, since the vendor
+  account is shared across that vendor's installed extensions (#7069). —
+  `scope_widening_is_rejected_before_any_vendor_call`,
+  `extension_scoped_flow_requests_the_shared_vendor_ceiling`
+  (`auth_engine_contract.rs`).
 - [x] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
   extract via bounded JSON pointers, including `fallback_to_requested` scope. —
   `token_exchange_supports_post_body_and_basic_client_auth`,
@@ -816,6 +821,22 @@ Rules — kept short on purpose:
   gone; a stale `[slack]` section hard-fails config parse (accepted beta
   posture, pinned by `rejects_retired_slack_section`); the secrets guard
   keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
+  > ✎ **Corrected 2026-08-04 — two of these three claims stopped being true
+  > after this box was ticked, and the citation is a phantom.** `SlackSection`
+  > and `SlackChannelRouteSection` came *back* as a parse-only shim (with
+  > `TelegramSection` beside them) and lived on `main` until the WS6 config
+  > narrowing; `rejects_retired_slack_section` was added by `4c8195a3ca` and
+  > removed with them, so this line has cited a nonexistent test since.
+  > A stale `[slack]` section also never hard-failed **parse** on the shipped
+  > code — the refusal was at `serve`, and only for *setup* fields. Current
+  > state: the types are gone again, and deliberately so is the parse-time
+  > refusal — an operator with a stale section must still be able to run
+  > `config list`/`config set` to fix it. `serve` fails closed on a retired
+  > setup key; an inert section boots with a deprecation notice. Pinned by
+  > `retired_setup_key_fails_closed_with_migration_guidance` and
+  > `inert_retired_section_boots_with_a_notice`
+  > (`crates/ironclaw_reborn_config/src/config_file.rs`). See PROPOSAL
+  > §6.10.3.
 - [x] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
   — no non-test slack constant remains in `ironclaw_product`

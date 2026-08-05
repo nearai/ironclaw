@@ -34,18 +34,24 @@ const MIN_KEYWORD_TAG_LENGTH: usize = 3;
 /// Maximum file size for SKILL.md (64 KiB).
 pub const MAX_PROMPT_FILE_SIZE: u64 = 64 * 1024;
 
-/// Trust state for a skill, determining its authority ceiling.
+/// Trust state for a skill.
+///
+/// What it gates is **content exposure**, not tool access: the consuming side is
+/// `ironclaw_loop_contracts::skill_context::SkillTrustLevel`, which decides
+/// whether the model sees a skill's prompt body or only its safe description.
+/// Tool authority is owned by `ironclaw_authorization` / `ironclaw_capabilities`
+/// and has nothing to do with this enum.
 ///
 /// SAFETY: Variant ordering matters. `Ord` is derived from discriminant values
 /// and the security model relies on `Installed < Trusted`. Do NOT reorder
 /// variants or change discriminant values without auditing all `min()` /
-/// comparison call-sites in attenuation code.
+/// comparison call-sites that take a trust ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillTrust {
-    /// Registry/external skill. Read-only tools only.
+    /// Registry/external skill. Lower trust: safe description only.
     Installed = 0,
-    /// User-placed skill (local or workspace). Full trust, all tools available.
+    /// User-placed skill (local or workspace). Full trust: prompt body visible.
     Trusted = 1,
 }
 

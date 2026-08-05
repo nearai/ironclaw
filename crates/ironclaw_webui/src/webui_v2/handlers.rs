@@ -81,6 +81,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
@@ -140,10 +143,11 @@ use ironclaw_product_contracts::surface::{
 };
 use uuid::Uuid;
 
+use crate::webui_rate_limit::mark_rate_limit_refundable;
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
-use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseAcquireResult, SseSlot};
 use ironclaw_product_contracts::admin_users::AdminUserSecretMeta;
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
@@ -162,9 +166,9 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
-    /// Deployment-wide feature gates the browser uses to show/hide
-    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
-    /// per-token authorization flags.
+    /// Effective feature gates the browser uses to show/hide or constrain
+    /// surfaces. Distinct from `capabilities`, which are per-token
+    /// authorization flags.
     pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
@@ -173,10 +177,11 @@ pub struct WebUiV2SessionResponse {
     pub attachments: AttachmentCapabilities,
 }
 
-/// Deployment-wide WebUI feature gates surfaced to the browser on
-/// `GET /session`. These are global "is this surface ready to show"
-/// toggles, not per-caller authorization — keep authorization in
-/// [`WebUiV2Capabilities`].
+/// Effective WebUI feature gates surfaced to the browser on `GET /session`.
+/// Most are deployment-level "is this surface ready to show" toggles. Keep
+/// authorization in [`WebUiV2Capabilities`]; feature values may still be
+/// derived from capabilities when they describe effective browser behavior for
+/// the authenticated bearer.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct WebUiV2Features {
     /// Reborn Projects surface (the conversations-panel entry + the
@@ -184,6 +189,11 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Whether the browser must hide raw workspace fallback and only show the
+    /// caller-scoped workspace projection. Hosted deployments enable this to
+    /// avoid showing artifacts from a shared `/workspace` root; local
+    /// deployments keep it disabled so single-user workspaces remain visible.
+    pub workspace_requires_scoped_projection: bool,
     /// QA-only run and full-thread artifact export surface. Hidden and
     /// unmounted unless the deployment explicitly opts in.
     pub regression_artifact_export: bool,
@@ -210,12 +220,15 @@ pub async fn get_session(
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
     let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
+    let workspace_requires_scoped_projection =
+        workspace_scoped_projection_required(&state, &capabilities);
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },
@@ -764,19 +777,48 @@ pub async fn list_fs_mounts(
 pub async fn browse_fs_dir(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
+    let requested_path = query
+        .path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_default();
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let surface = state.bind_services(caller);
+    let mount = query.mount;
     let request = RebornFsListRequest {
         mount: query.mount,
-        // Absent, empty, or whitespace-only path lists the mount root.
-        path: query
-            .path
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or_default(),
+        path: served_path,
         project_id: query.project_id,
     };
-    let surface = state.bind_services(caller);
-    let response = FS_LIST_VIEW.query_on(&surface, request, None).await?;
+    let mut response = match FS_LIST_VIEW.query_on(&surface, request, None).await {
+        // A caller's own projection ROOT exists by authorization: it is the
+        // subtree their identity keys, not a path they chose. It has no
+        // backing directory until their first write, so a fresh user opening
+        // the Workspace tab must see an empty workspace, not an error. Deeper
+        // paths under it keep reporting NotFound.
+        Err(error)
+            if error.code == ProductSurfaceErrorCode::NotFound
+                && scoped_prefix.is_some()
+                && requested_path.trim_matches('/').is_empty() =>
+        {
+            RebornFsListResponse {
+                mount,
+                path: String::new(),
+                entries: Vec::new(),
+            }
+        }
+        other => other?,
+    };
+    response.path = requested_path;
+    if let Some(prefix) = scoped_prefix {
+        for entry in response.entries.iter_mut() {
+            entry.path = strip_workspace_prefix(&prefix, &entry.path);
+        }
+    }
     Ok(Json(response))
 }
 
@@ -786,15 +828,23 @@ pub async fn browse_fs_dir(
 pub async fn stat_fs_path(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
+    let requested_path = require_fs_browse_path(query.path)?;
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let surface = state.bind_services(caller);
     let request = RebornFsStatRequest {
         mount: query.mount,
-        path: require_fs_browse_path(query.path)?,
+        path: served_path,
         project_id: query.project_id,
     };
-    let surface = state.bind_services(caller);
-    let response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
+    let mut response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
+    if let Some(prefix) = scoped_prefix {
+        response.stat.path = strip_workspace_prefix(&prefix, &response.stat.path);
+    }
     Ok(Json(response))
 }
 
@@ -805,14 +855,23 @@ pub async fn stat_fs_path(
 pub async fn read_fs_file(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
+    let requested_path = require_fs_browse_path(query.path)?;
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
     let request = RebornFsReadRequest {
         mount: query.mount,
-        path: require_fs_browse_path(query.path)?,
+        path: served_path,
         project_id: query.project_id,
     };
-    let file = invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
+    let mut file =
+        invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
+    if let Some(prefix) = scoped_prefix {
+        file.path = strip_workspace_prefix(&prefix, &file.path);
+    }
     project_fs_download_response(file)
 }
 
@@ -825,6 +884,101 @@ fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpErr
             Err(ProductSurfaceError::validation("path", ProductSurfaceValidationCode::Blank).into())
         }
     }
+}
+
+/// Effective scoped-workspace mode for one authenticated caller. The deployment
+/// gate and the operator bypass are one policy; `/session` and the `/fs/*`
+/// handlers must never compute it differently.
+fn workspace_scoped_projection_required(
+    state: &WebUiV2State,
+    capabilities: &WebUiV2Capabilities,
+) -> bool {
+    state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config
+}
+
+/// Effective caller-scoped workspace projection for an authenticated `/fs/*`
+/// request. The browser must confine Workspace reads to the caller's own
+/// subtree (`tenants/{tenant}/users/{user}`) when scoped projection is
+/// required. Memory is already caller-scoped server-side; Workspace is shared
+/// by default, so this projection is what prevents one user from listing
+/// another user's workspace artifacts through the browser.
+///
+/// Returns the per-caller prefix to prepend when `Ok(Some)`; `Ok(None)` means
+/// the raw shared workspace root is served (local/operator fallback). `Err`
+/// fails closed: scoped projection is required but the caller identity cannot
+/// key a subtree, so serving the shared root would reintroduce the leak the
+/// projection exists to prevent.
+fn workspace_projection_for(
+    state: &WebUiV2State,
+    caller: &ProductSurfaceCaller,
+    capabilities: &WebUiV2Capabilities,
+) -> Result<Option<String>, WebUiV2HttpError> {
+    if !workspace_scoped_projection_required(state, capabilities) {
+        return Ok(None);
+    }
+    let tenant = caller.tenant_id.as_str();
+    let user = caller.user_id.as_str();
+    if tenant.is_empty() || user.is_empty() {
+        return Err(
+            ProductSurfaceError::validation("caller", ProductSurfaceValidationCode::Blank).into(),
+        );
+    }
+    Ok(Some(format!("tenants/{tenant}/users/{user}")))
+}
+
+/// Translate a mount-relative browser path into the path the product layer
+/// should read. For `Workspace` under scoped projection, the caller prefix is
+/// prepended so the product layer reads inside the caller's subtree; a missing
+/// subtree surfaces as a clean empty/404 rather than the shared root. Other
+/// mounts (Memory is already caller-scoped) pass through unchanged.
+///
+/// Returns the served path plus the prefix that must be stripped from any
+/// paths the product layer echoes back, so the browser keeps round-tripping
+/// mount-relative paths.
+fn workspace_served_path(
+    mount: &FsMount,
+    requested: &str,
+    projection: Option<String>,
+) -> Result<(String, Option<String>), WebUiV2HttpError> {
+    if *mount == FsMount::Workspace
+        && let Some(prefix) = projection
+    {
+        let trimmed = requested.trim_matches('/');
+        // Reject parent-directory traversal before prepending the caller prefix.
+        // A `..` segment would otherwise become `tenants/{tenant}/users/{user}/../other`,
+        // which the product layer rejects too, but defense in depth keeps the
+        // browser from ever dispatching an escape attempt to the product layer.
+        if trimmed.split('/').any(|segment| segment == "..") {
+            return Err(ProductSurfaceError::validation(
+                "path",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+            .into());
+        }
+        let served = if trimmed.is_empty() {
+            prefix.clone()
+        } else {
+            format!("{prefix}/{trimmed}")
+        };
+        return Ok((served, Some(prefix)));
+    }
+    Ok((requested.to_string(), None))
+}
+
+/// Strip a caller-scoped workspace prefix from a path the product layer echoed
+/// back, yielding the mount-relative path the browser round-trips. A path that
+/// does not carry the prefix (e.g. a NotFound response that echoes the raw
+/// request) is returned trimmed of surrounding slashes.
+fn strip_workspace_prefix(prefix: &str, path: &str) -> String {
+    let base = prefix.trim_matches('/');
+    let value = path.trim_matches('/');
+    if value.is_empty() {
+        return String::new();
+    }
+    value
+        .strip_prefix(&format!("{base}/"))
+        .map(|rest| rest.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a
@@ -1213,8 +1367,8 @@ pub async fn stream_events(
         connection_id.and(query.connection_generation),
     ) {
         crate::webui_v2::sse_capacity::SseAcquireResult::Acquired(slot) => slot,
-        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity => {
-            return Err(sse_concurrency_exhausted());
+        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity { refundable } => {
+            return Ok(sse_capacity_rejected(refundable));
         }
         crate::webui_v2::sse_capacity::SseAcquireResult::StaleGeneration => {
             return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1244,7 +1398,26 @@ pub async fn stream_events(
     Ok(response)
 }
 
-/// Build the 429 response for SSE openings that exceed the per-caller
+/// Build the 429 response for SSE openings (both [`stream_events`] and
+/// [`stream_events_ws`]) that exceed the per-caller concurrency cap.
+///
+/// `refundable` — decided by `SseCapacity::try_acquire_ordered`'s per-caller
+/// rejection streak — marks the response so it doesn't also drain
+/// `enforce_rate_limit`'s separate request-volume budget, *up to* a short
+/// burst of consecutive rejections; see that middleware's module doc for
+/// why refunding differs from e.g. turn-submission admission-control 429s,
+/// and `sse_capacity::REJECTION_REFUND_LIMIT` for why refunding stops once
+/// a caller hammers a saturated cap.
+fn sse_capacity_rejected(refundable: bool) -> Response {
+    let response = sse_concurrency_exhausted().into_response();
+    if refundable {
+        mark_rate_limit_refundable(response)
+    } else {
+        response
+    }
+}
+
+/// Build the 429 error for SSE openings that exceed the per-caller
 /// concurrency cap. `retryable: true` because the slot will free as soon
 /// as one of the caller's existing streams closes.
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
@@ -1293,7 +1466,19 @@ struct SseErrorPayload {
 
 fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<Event> {
     let frame = WebChatV2EventFrame::from_outbound(envelope);
-    let id = cursor_token(frame.cursor());
+    // Keep-alive frames are liveness pings, not durable resume positions.
+    // The product seam stamps an advancing cursor into every envelope
+    // (including `KeepAlive`), and the browser's `EventSource` echoes the
+    // last `id:` back as `Last-Event-ID` on reconnect. If a keep-alive is the
+    // last frame before a disconnect, resuming from its cursor skips real
+    // events that precede it. Omit the `id:` field for keep-alives so the
+    // browser keeps the last real event's id as the resume point.
+    let is_keep_alive = matches!(&frame.event, WebChatV2Event::KeepAlive);
+    let id = if is_keep_alive {
+        None
+    } else {
+        cursor_token(frame.cursor())
+    };
     match serde_json::to_string(&frame) {
         Ok(payload) => {
             let mut event = Event::default().event(frame.event_name()).data(payload);
@@ -2403,6 +2588,22 @@ pub async fn import_extension(
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
     let response = extension_action_completed("Extension imported.");
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/ironhub/install`
+pub async fn ironhub_deliver_install(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<IronhubInstallDeliveryRequest>,
+) -> Result<Json<IronhubInstallDeliveryResult>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        IRONHUB_DELIVER_INSTALL_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -4014,14 +4215,24 @@ pub async fn stream_events_ws(
     Query(query): Query<StreamEventsQuery>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
-    let slot = state
-        .sse_capacity()
-        .try_acquire(
-            &caller.tenant_id,
-            &caller.user_id,
-            stream_connection_id(query.connection_id.as_deref()),
-        )
-        .ok_or_else(sse_concurrency_exhausted)?;
+    let slot = match state.sse_capacity().try_acquire(
+        &caller.tenant_id,
+        &caller.user_id,
+        stream_connection_id(query.connection_id.as_deref()),
+    ) {
+        SseAcquireResult::Acquired(slot) => slot,
+        SseAcquireResult::AtCapacity { refundable } => {
+            return Ok(sse_capacity_rejected(refundable));
+        }
+        // A stale generation on the upgrade path means a newer stream for
+        // the same connection id already holds the slot. Treat it as the
+        // ordinary capacity rejection this handler has always returned, but
+        // never refund it: it is not the saturation signal the refund
+        // budget exists to absorb.
+        SseAcquireResult::StaleGeneration => {
+            return Ok(sse_capacity_rejected(false));
+        }
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)

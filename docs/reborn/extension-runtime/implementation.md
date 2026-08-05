@@ -53,7 +53,7 @@ Not generic yet — the work:
 | Lifecycle emits channel connection copy; workflow has cleanup literals | `crates/ironclaw_extension_host/src/product_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
 | Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
-| Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
+| Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution/envelope.rs` |
 | Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
 | Telegram adapter exists but is test-only | `crates/extensions/packages/telegram` |
 
@@ -276,7 +276,8 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   deployment tick, due at half the declared lifetime, soonest-death-first
   under the per-tick cap). There is no per-vendor refresher code.
 - Shared vendors: unify recipes during internal publication (identical except
-  `scopes`/`display_name`, else conflict); scope union and incremental
+  `scopes` and presentation-only `display_name`/`instructions`/`setup_url`,
+  else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive
   removal of one consumer while another active extension shares the vendor.
 - Recipe reference (fields beyond `overview.md` §3): `scope_param` (default
@@ -406,8 +407,8 @@ signed vendor POST → verified → normalized → turn admitted.
   flows into prompt construction; delete the concrete
   Discord/WhatsApp/Telegram/Slack branches in
   `crates/ironclaw_llm/src/reasoning.rs`. Replace concrete trace contribution
-  variants in `crates/ironclaw_reborn_traces/src/contribution.rs` with
-  extension/surface origin ids.
+  variants in `crates/ironclaw_reborn_traces/src/contribution/envelope.rs`
+  with extension/surface origin ids.
 - **Slack:** `SlackChannelAdapter::deliver` absorbs Block Kit/plain rendering,
   splitting, `chat.postMessage`/update/delete, DM provisioning
   (`conversations.open`, from `slack_dm_open.rs`), target formats

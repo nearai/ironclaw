@@ -113,6 +113,9 @@ use ironclaw_product::{
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
 };
+use ironclaw_product_contracts::ironhub::{
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
@@ -152,6 +155,7 @@ enum ProductSurfaceCallId {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -181,6 +185,7 @@ impl ProductSurfaceCallId {
             Self::ProjectFsRead => "project.fs.read",
             Self::FsRead => "fs.read",
             Self::AttachmentRead => "attachment.read",
+            Self::IronhubDeliverInstall => "ironhub.deliver_install",
             Self::TraceAccountLoginLink => "trace.account_login_link",
             Self::TraceHoldAuthorize => "trace.hold_authorize",
             Self::OperatorConfigSetKey => "operator.config.set_key",
@@ -210,6 +215,7 @@ impl ProductSurfaceCallId {
             "project.fs.read" => Some(Self::ProjectFsRead),
             "fs.read" => Some(Self::FsRead),
             "attachment.read" => Some(Self::AttachmentRead),
+            "ironhub.deliver_install" => Some(Self::IronhubDeliverInstall),
             "trace.account_login_link" => Some(Self::TraceAccountLoginLink),
             "trace.hold_authorize" => Some(Self::TraceHoldAuthorize),
             "operator.config.set_key" => Some(Self::OperatorConfigSetKey),
@@ -233,13 +239,19 @@ impl ProductSurfaceCallId {
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedProductSurfaceCallRequest {
     call_id: String,
+    caller_user_id: String,
     input: Value,
 }
 
 impl RecordedProductSurfaceCallRequest {
-    fn from_value(call_id: ProductSurfaceCallId, input: Value) -> Self {
+    fn from_value(
+        call_id: ProductSurfaceCallId,
+        caller: &ProductSurfaceCaller,
+        input: Value,
+    ) -> Self {
         Self {
             call_id: call_id.as_str().to_string(),
+            caller_user_id: caller.user_id.as_str().to_string(),
             input,
         }
     }
@@ -1243,13 +1255,18 @@ impl StubServices {
                     .lock()
                     .expect("lock")
                     .push(request.clone());
+                let entry_path = if request.path.is_empty() {
+                    "today.md".to_string()
+                } else {
+                    format!("{}/today.md", request.path.trim_end_matches('/'))
+                };
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornFsListResponse {
                         mount: request.mount,
                         path: request.path,
                         entries: vec![ProjectFsEntry {
                             name: "today.md".to_string(),
-                            path: "daily/today.md".to_string(),
+                            path: entry_path,
                             kind: ProjectFsEntryKind::File,
                         }],
                     })
@@ -1616,6 +1633,15 @@ impl StubServices {
                     .await?,
                 ))
             }
+            ProductSurfaceCallId::IronhubDeliverInstall => {
+                let request: IronhubInstallDeliveryRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(IronhubInstallDeliveryResult {
+                    installed: true,
+                    slug: request.slug,
+                    message: "installed".to_string(),
+                })
+            }
             ProductSurfaceCallId::TraceAccountLoginLink => {
                 RecordedProductSurfaceCallResponse::json(
                     self.trace_account_login_link(caller).await?,
@@ -1759,8 +1785,8 @@ impl ProductSurface for StubServices {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
-                    caller,
-                    RecordedProductSurfaceCallRequest::from_value(call_id, request.input),
+                    caller.clone(),
+                    RecordedProductSurfaceCallRequest::from_value(call_id, &caller, request.input),
                 )
                 .await?
                 .into_value()?;
@@ -1909,6 +1935,7 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
         package_ref,
         phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
+        message: None,
         payload: None,
         secrets: Vec::new(),
         fields: Vec::new(),
@@ -3893,6 +3920,45 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
 }
 
 #[tokio::test]
+async fn get_session_reports_effective_workspace_scoped_projection_feature() {
+    for (state_enabled, operator_capability, expected) in [
+        (false, false, true),
+        (false, true, false),
+        (true, false, true),
+        (true, true, true),
+    ] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(state_enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: operator_capability,
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["workspace_requires_scoped_projection"], expected,
+            "features.workspace_requires_scoped_projection must be state flag OR non-operator token \
+             (state_enabled={state_enabled}, operator_capability={operator_capability})"
+        );
+    }
+}
+
+#[tokio::test]
 async fn get_session_reports_regression_artifact_export_feature_from_state_flag() {
     for enabled in [false, true] {
         let services = Arc::new(StubServices::default());
@@ -5502,6 +5568,58 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
 }
 
 #[tokio::test]
+async fn ironhub_deliver_install_dispatches_with_authenticated_caller_and_typed_body() {
+    let services = Arc::new(StubServices::default());
+    let authenticated_caller = caller_for_user("user-ironhub");
+    let router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        authenticated_caller,
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1","private_manifest_url":"https://catalog.example/private/repo?token=rotating"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["installed"], true);
+    assert_eq!(body["slug"], "my-skill");
+
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::IronhubDeliverInstall.as_str()
+    );
+    assert_eq!(calls[0].caller_user_id, "user-ironhub");
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({
+            "slug": "my-skill",
+            "version": "1.0.0",
+            "uid": "u",
+            "aid": "a",
+            "ts": 1_700_000_000_u64,
+            "nonce": "n",
+            "artifact_digest": "sha256:deadbeef",
+            "sig": "sig-1",
+            "private_manifest_url": "https://catalog.example/private/repo?token=rotating"
+        })
+    );
+}
+
+#[tokio::test]
 async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
     let services = Arc::new(StubServices::default());
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
@@ -5546,6 +5664,36 @@ async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
         services.view_queries.lock().expect("lock").is_empty(),
         "registration is admission only and must not read an installation projection"
     );
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_surfaces_ambiguous_auth_as_a_typed_registration_choice() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Err(ProductSurfaceError::validation(
+        "auth_selection",
+        ProductSurfaceValidationCode::AuthSelectionRequired,
+    )));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"desired_id":"stripe","desired_name":"Stripe MCP","endpoint":"https://mcp.stripe.com","auth_selection":{"kind":"auto"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "auth_selection");
+    assert_eq!(body["validation_code"], "auth_selection_required");
 }
 
 #[tokio::test]
@@ -7030,6 +7178,101 @@ async fn stream_events_emits_application_keep_alive_while_subscription_is_idle()
     assert!(text.contains(r#"data: {"type":"keep_alive"}"#), "{text}");
 }
 
+// Keep-alive frames are liveness pings, not durable resume positions.
+// The product seam stamps an advancing cursor into every envelope
+// (including `KeepAlive`), and the browser's `EventSource` echoes the
+// last `id:` back as `Last-Event-ID` on reconnect. If a keep-alive is
+// the last frame before a disconnect, resuming from its cursor would
+// skip real events that precede it. Pin that keep-alive envelopes never
+// carry an SSE `id:` so the browser keeps the last real event's id as
+// the resume point.
+#[tokio::test]
+async fn stream_events_keep_alive_frame_carries_no_sse_id() {
+    let services = Arc::new(StubServices::default());
+
+    let real_envelope = make_projection_envelope("cursor:real", "hello");
+    let keep_alive_envelope =
+        make_outbound_envelope("cursor:keepalive", ProductOutboundPayload::KeepAlive);
+
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![real_envelope.clone(), keep_alive_envelope],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let mut bytes = Vec::<u8>::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 2;
+        let saw_second_call = services.stream_events_calls.lock().expect("lock").len() >= 2;
+        if have_events && saw_second_call {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    bytes.extend_from_slice(data.as_ref());
+                }
+            }
+            _ => break,
+        }
+    }
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    let keep_alive = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("keep_alive"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a keep_alive event; got: {events:?}; raw: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    assert!(
+        keep_alive.id.is_none(),
+        "keep_alive frame must not carry an SSE id (resume cursor); got: {keep_alive:?}"
+    );
+    let keep_alive_json: Value =
+        serde_json::from_str(keep_alive.data.as_deref().expect("data")).expect("keep_alive json");
+    assert_eq!(keep_alive_json["type"], "keep_alive");
+    // The cursor field may be present on the frame (it is the envelope's
+    // projection cursor), but it must not be surfaced as the SSE `id:`
+    // field — that is the contract the assertion above pins.
+    assert_eq!(
+        keep_alive_json.get("cursor"),
+        Some(&Value::String("cursor:keepalive".to_string())),
+        "keep_alive frame data carries its envelope cursor as a data field, {keep_alive_json}"
+    );
+
+    // The preceding real event still carries its cursor id, so the browser
+    // keeps it as the Last-Event-ID resume point across the keep-alive.
+    let real_event = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("final_reply"))
+        .expect("real event precedes keep-alive");
+    let real_cursor_json =
+        serde_json::to_string(real_envelope.projection_cursor()).expect("cursor json");
+    assert_eq!(real_event.id.as_deref(), Some(real_cursor_json.as_str()));
+}
+
 // Pins the *wire* contract the browser sees, not just the handler being
 // called: each envelope must emit a typed WebChat v2 event with the
 // JSON-serialized projection cursor as the SSE `id` and the redacted
@@ -7847,6 +8090,316 @@ async fn stat_fs_path_returns_metadata() {
     assert_eq!(body["stat"]["mime_type"], "text/markdown");
     let queries = services.view_queries.lock().expect("lock");
     assert_eq!(queries[0].view_id.as_str(), FS_STAT_VIEW.id);
+}
+
+#[tokio::test]
+async fn browse_fs_dir_prefixes_workspace_path_with_scoped_projection() {
+    // Scoped projection ON + non-operator caller: the browser must confine
+    // Workspace reads to the caller's own subtree. The server prepends
+    // `tenants/{tenant}/users/{user}` before forwarding to the product layer,
+    // so one user can never list another user's workspace artifacts.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    // The response echoes the *requested* mount-relative root, not the prefixed
+    // served path, so the browser never sees the caller storage prefix.
+    assert_eq!(body["path"], "");
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "tenants/tenant-alpha/users/user-alpha",
+        "workspace list must be confined to the caller subtree under scoped projection"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_keeps_raw_workspace_root_for_operator_fallback() {
+    // Operator bypass with scoped projection OFF: raw shared workspace root is
+    // served unchanged so local/single-user workspaces stay visible. The
+    // deployment flag gates scoping; operator capability alone does not override
+    // a deployment that requires scoped projection.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(false),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=shared.txt")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "shared.txt",
+        "operator fallback must not prefix the workspace path"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_scopes_workspace_for_non_operator_even_when_state_flag_off() {
+    // Non-operator caller is always scoped (state flag OR not-operator), so a
+    // hosted user without operator capability is confined to their own subtree
+    // even on a deployment that has not set the scoped-projection flag.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(false),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=notes/idea.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "tenants/tenant-alpha/users/user-alpha/notes/idea.md",
+        "non-operator callers must be scoped to their own workspace subtree"
+    );
+}
+
+#[tokio::test]
+async fn stat_fs_path_prefixes_workspace_path_with_scoped_projection() {
+    // The stat route must apply the same caller-subtree prefixing so a user
+    // cannot stat another user's file. The echoed stat path is stripped back
+    // to the mount-relative request.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=workspace&path=report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["stat"]["path"], "report.md",
+        "stat response must echo the mount-relative path, not the prefixed served path"
+    );
+}
+
+#[tokio::test]
+async fn read_fs_file_prefixes_workspace_path_with_scoped_projection() {
+    // The download route applies the same caller-subtree prefixing as list/stat.
+    // The stub records the dispatched command input, so assert it received the
+    // prefixed path (the caller can never request another user's subtree).
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=workspace&path=report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.surface_calls.lock().expect("lock");
+    let read_call = calls
+        .iter()
+        .rev()
+        .find(|call| call.call_id == "fs.read")
+        .expect("fs.read command dispatched");
+    let request: RebornFsReadRequest =
+        serde_json::from_value(read_call.input.clone()).expect("fs read input");
+    assert_eq!(
+        request.path, "tenants/tenant-alpha/users/user-alpha/report.md",
+        "read_fs_file must confine the workspace download to the caller subtree under scoped projection"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
+    // A `..` segment must be rejected before the caller prefix is prepended, so
+    // `../other-user/secret` can never become `tenants/.../users/.../../other-user`.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=../tenant-b/users/bob/secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "parent-directory traversal must be rejected before dispatching to the product layer"
+    );
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert!(
+        calls.is_empty(),
+        "traversal request must not reach the product layer"
+    );
+}
+
+/// `stat_fs_path` and `read_fs_file` run the identical
+/// `workspace_projection_for` / `workspace_served_path` sequence as
+/// `browse_fs_dir`; the `..` guard must hold on every route that prepends the
+/// caller prefix, not just the listing.
+#[tokio::test]
+async fn stat_and_read_fs_routes_reject_parent_traversal_under_scoped_projection() {
+    for uri in [
+        "/api/webchat/v2/fs/stat?mount=workspace&path=../tenant-b/users/bob/secret",
+        "/api/webchat/v2/fs/content?mount=workspace&path=../tenant-b/users/bob/secret",
+    ] {
+        let services = Arc::new(StubServices::default());
+        let caller = caller_for_user("user-alpha");
+        let router = webui_v2_router(
+            WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(true),
+        )
+        .layer(axum::Extension(caller))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: false,
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "parent-directory traversal must be rejected on {uri}"
+        );
+        assert!(
+            services.surface_calls.lock().expect("lock").is_empty(),
+            "traversal request on {uri} must not reach the product layer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn browse_fs_dir_strips_prefixed_entry_paths_under_scoped_projection() {
+    // The stub now echoes entry paths under the served (prefixed) root, as the
+    // product layer does. The handler must strip the caller prefix from every
+    // entry path so the browser navigates with mount-relative paths and never
+    // sees the storage ownership prefix.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["entries"][0]["path"], "today.md",
+        "entry paths must be stripped to mount-relative, not the prefixed served path"
+    );
+    assert_eq!(body["entries"][0]["name"], "today.md");
 }
 
 #[tokio::test]

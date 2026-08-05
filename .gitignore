@@ -109,3 +109,6 @@ crates/*/frontend/dist/
 # It is a regenerable build artifact of a local audit, never source.
 mutants.out/
 mutants.out.old/
+
+# for a local typescript app, but don't want to push with main repo
+/app/

@@ -77,7 +77,7 @@ run_architecture_boundaries() {
     tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect
   # Keep protocol/recovery selectors with the targets already compiled by this
   # lane instead of rebuilding them in the host-runtime lane.
-  run_test_exact ironclaw_runner llm_gateway \
+  run_test_exact ironclaw_loop_host llm_gateway \
     gateway_maps_deterministic_provider_response_errors_to_invalid_output
   run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
     deterministic_provider_response_errors_use_bounded_invalid_output_recovery
@@ -132,9 +132,10 @@ run_runtimes() {
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract
-  run_test ironclaw_scripts script_dispatch_integration
-  run_test ironclaw_scripts script_http_adapter_contract
-  run_test ironclaw_scripts script_runner_contract
+  run_test ironclaw_sandbox script_dispatch_integration
+  run_test ironclaw_sandbox script_http_adapter_contract
+  run_test ironclaw_sandbox script_runner_contract
+  run_test ironclaw_sandbox docker_security
   run_test ironclaw_mcp mcp_adapter_contract
   run_test ironclaw_mcp mcp_dispatch_integration
   # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole

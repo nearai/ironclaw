@@ -119,6 +119,28 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         network_http_egress,
         google_oauth_configured,
         auth_provider_client,
+        Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+        Arc::new(FaultInjecting::new(InMemoryBackend::new())),
+        Arc::new(SecretStore::ephemeral()),
+    )
+    .await
+}
+
+/// Test-only construction seam for registration journeys that select an
+/// operator-managed OAuth client profile. The production path receives this
+/// registry from composition; the default test helpers remain fail-closed.
+pub async fn build_lifecycle_test_services_with_oauth_client_profiles(
+    owner_id: &str,
+    network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
+    google_oauth_configured: bool,
+    oauth_client_profiles: Arc<dyn ironclaw_auth::OAuthClientProfileRegistry>,
+) -> ExtensionLifecycleTestServices {
+    build_lifecycle_test_services_over_backing(
+        owner_id,
+        network_http_egress,
+        google_oauth_configured,
+        Arc::new(UnavailableAuthProviderClient),
+        oauth_client_profiles,
         Arc::new(FaultInjecting::new(InMemoryBackend::new())),
         Arc::new(SecretStore::ephemeral()),
     )
@@ -142,6 +164,7 @@ pub async fn rebuild_lifecycle_test_services_with_auth_provider(
         network_http_egress,
         google_oauth_configured,
         auth_provider_client,
+        Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
         Arc::clone(&previous.filesystem_faults),
         Arc::clone(&previous.secret_store),
     )
@@ -153,6 +176,7 @@ async fn build_lifecycle_test_services_over_backing(
     network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     google_oauth_configured: bool,
     auth_provider_client: Arc<dyn ironclaw_auth::AuthProviderClient>,
+    oauth_client_profiles: Arc<dyn ironclaw_auth::OAuthClientProfileRegistry>,
     filesystem: Arc<FaultInjecting<InMemoryBackend>>,
     secret_store: Arc<dyn SecretStorePort>,
 ) -> ExtensionLifecycleTestServices {
@@ -239,7 +263,7 @@ async fn build_lifecycle_test_services_over_backing(
             .expect("first-party extension catalog")
             .with_reserved_bundled_ids(first_party_reserved_ids.clone());
     let extension_host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog");
     let extension_host_api_contracts =
         product_extension_host_api_contract_registry().expect("host contracts");
     let installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> = Arc::new(
@@ -293,7 +317,7 @@ async fn build_lifecycle_test_services_over_backing(
                 catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
                     ironclaw_safety::Sanitizer::new(),
                 )),
-                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+                oauth_client_profiles,
             },
         },
     )
