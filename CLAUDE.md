@@ -166,7 +166,7 @@ Safety logic lives in `crates/substrates/ironclaw_safety/`, skills in `crates/do
 ## Project Structure
 
 All production code lives in the Reborn stack under `crates/` (the one
-workspace `exclude` is `crates/ironclaw_silk_decoder`, a standalone helper
+workspace `exclude` is `tools/ironclaw_silk_decoder`, a standalone helper
 binary). For where a symbol or subsystem lives, query the codebase knowledge
 graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 `AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The reborn-feature

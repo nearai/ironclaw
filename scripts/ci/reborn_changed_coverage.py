@@ -164,7 +164,7 @@ class ProductionPaths:
             # inventory, so a broken tree cannot read as "nothing changed".
             self._crate_directories = crate_directories(repo_root)
             # Separate workspace roots under `crates/` (the `wasm-src/` guest
-            # components, `ironclaw_silk_decoder`). Nothing here compiles them,
+            # components). Nothing here compiles them,
             # so no line inside one can ever be covered — but they are also not
             # "the inventory and the tree disagree", which is what
             # `reject_unattributable` is for. Enumerated once, beside the

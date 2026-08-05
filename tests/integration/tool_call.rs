@@ -348,6 +348,192 @@ async fn runs_http_save_tool_call_through_real_egress_and_persists_body() {
         .expect("final reply finalized");
 }
 
+/// Regression derived from the sanitized IPO thread export: a realistic-size
+/// response saved under `/workspace` must be queryable without shell or inline
+/// copying. The same caller-level turn pins the original `$` query and invalid
+/// expression failures, adjacent indices, root arrays, actionable diagnostics,
+/// and the operation-specific schema disclosed to the model.
+#[tokio::test]
+async fn json_queries_scoped_file_and_adjacent_array_indices() {
+    let source = serde_json::json!({
+        "schema": "ironclaw.thread.export.v1",
+        "messages": [
+            {
+                "sequence": 23,
+                "tool_call": {
+                    "capability_id": "builtin.json",
+                    "arguments": {
+                        "data": "/workspace/market-data.json",
+                        "operation": "parse"
+                    }
+                }
+            },
+            {
+                "sequence": 64,
+                "tool_call": {
+                    "capability_id": "builtin.json",
+                    "arguments": {
+                        "data": "{\"end\":1.7405,\"start\":2.5528}",
+                        "operation": "query",
+                        "path": "$"
+                    }
+                }
+            },
+            {
+                "sequence": 180,
+                "tool_call": {
+                    "capability_id": "builtin.json",
+                    "arguments": {
+                        "data": "{\"change\":((1.74-1.70)/1.70)*100}",
+                        "operation": "stringify"
+                    }
+                }
+            }
+        ],
+        "nodes": [
+            null,
+            null,
+            {"data": (0..16).map(|index| vec![format!("value-{index}")]).collect::<Vec<_>>()}
+        ],
+        "redaction": {"applied": true},
+        "synthetic_padding": "x".repeat(470_000)
+    });
+    let source_bytes = serde_json::to_vec(&source).expect("JSON fixture serializes");
+    assert!(
+        (470_000..480_000).contains(&source_bytes.len()),
+        "sanitized fixture should preserve the supplied export's size class"
+    );
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .with_real_egress_response_bodies([source_bytes])
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http.save",
+                json!({"url": HTTP_TOOL_URL, "save_to": "/workspace/source.json"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "parse",
+                    "data": "/workspace/source.json"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "file_path": "/workspace/source.json",
+                    "path": "$.messages[1].tool_call.arguments.path"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "file_path": "/workspace/source.json",
+                    "path": "$.nodes[2].data[15][0]"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": "{\"end\":1.7404796872364274,\"start\":2.5528116140825894}",
+                    "path": "$"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": [["zero"], ["root-array-value"]],
+                    "path": "$[1][0]"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": {"items": [{"name": "jsonpath-root-value"}]},
+                    "path": "$.items[0].name"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "stringify",
+                    "data": "{\"change\":((1.74-1.70)/1.70)*100}"
+                }),
+            ),
+            RebornScriptedReply::text("queried"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("save the response and query both JSON paths")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("builtin.http.save")
+        .await
+        .expect("http.save tool ran");
+    h.assert_tool_invoked("builtin.json")
+        .await
+        .expect("JSON query tool ran");
+    h.assert_workspace_file_contains("source.json", "value-15")
+        .await
+        .expect("http.save persisted the JSON source");
+    h.assert_tool_result_contains("\"$\"")
+        .await
+        .expect("the transcript-derived file query returns its nested root marker");
+    h.assert_tool_result_contains("value-15")
+        .await
+        .expect("file-backed query traversed repeated adjacent indices");
+    h.assert_tool_result_contains("1.7404796872364274")
+        .await
+        .expect("the transcript-derived inline root query returns the full object");
+    h.assert_tool_result_contains("root-array-value")
+        .await
+        .expect("inline compatibility includes JSONPath-style root-array queries");
+    h.assert_tool_result_contains("jsonpath-root-value")
+        .await
+        .expect("JSONPath-style object roots resolve through the real capability path");
+    h.assert_tool_error_summary_contains("JSON input is not valid JSON")
+        .await
+        .expect("invalid JSON is explained to the model with an actionable safe summary");
+
+    let definitions = h.scripted_llm.captured_tool_definitions();
+    let definition = definitions
+        .iter()
+        .flatten()
+        .find(|definition| definition.name == "builtin__json")
+        .expect("JSON capability reaches the model");
+    assert_eq!(
+        definition.parameters["properties"]["operation"]["enum"],
+        json!(["parse", "stringify", "query", "validate"])
+    );
+    assert!(
+        definition.parameters["properties"]["file_path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("/workspace"))
+    );
+    assert!(
+        definition.parameters["properties"]["path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("$.nodes")),
+        "model-visible schema must advertise optional JSONPath-style roots"
+    );
+    assert!(
+        definition.parameters["oneOf"]
+            .as_array()
+            .is_some_and(|branches| branches.iter().any(|branch| {
+                branch["required"] == json!(["operation", "file_path", "path"])
+                    && branch["not"]["required"] == json!(["data"])
+            })),
+        "model-visible schema must disclose the file-backed query alternative unambiguously"
+    );
+}
+
 /// Regression for #5817: a decimal lifted from prose (`0.95`) tokenizes as
 /// `digits.digits`, satisfying the capability-id shape check. The guard must
 /// not mistake it for a requested-but-unavailable capability and suppress the

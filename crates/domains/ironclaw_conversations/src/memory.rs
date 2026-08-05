@@ -23,8 +23,9 @@ use crate::{
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalConversationIdentity,
     InboundConversationService, InboundTurnError, LinkConversationRequest,
     LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
-    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
-    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
+    ResetConversationOutcome, ResetConversationRequest, ResolveConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, StoredReplyTargetBinding,
+    ThreadAccessDecision, ValidateReplyTargetRequest,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
@@ -500,6 +501,130 @@ impl ConversationBindingService for InMemoryConversationServices {
             });
         }
         Ok(binding.resolution(actor_user_id, binding_epoch, request.tenant_id))
+    }
+
+    async fn reset_conversation_binding(
+        &self,
+        request: ResetConversationRequest,
+    ) -> Result<ResetConversationOutcome, InboundTurnError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let outcome = {
+            let mut state = self.lock_state()?;
+            let resolve = &request.resolve_request;
+            let actor_user_id = state.resolve_actor(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_actor_ref,
+            )?;
+            let external_conversation_identity =
+                ExternalConversationIdentity::from_ref(&resolve.external_conversation_ref);
+            state.ensure_external_event_route(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_event_id,
+                &external_conversation_identity,
+                &actor_user_id,
+            )?;
+            let reset_key = ExternalEventRouteKey::new(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_event_id,
+            );
+            if let Some(replay) = state.binding_resets.get(&reset_key) {
+                return Ok(replay.clone());
+            }
+
+            let binding_key = BindingKey::from_request(resolve);
+            let current = state.bindings.get(&binding_key).cloned().ok_or_else(|| {
+                InboundTurnError::BindingRequired {
+                    adapter_kind: resolve.adapter_kind.as_str().to_string(),
+                    external_actor_id: resolve.external_actor_ref.id().to_string(),
+                }
+            })?;
+            if current.thread_id != request.expected_thread_id {
+                return Err(InboundTurnError::BindingConflict {
+                    thread_id: current.thread_id.to_string(),
+                });
+            }
+            let route_actor_key = ActorKey::new(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_actor_ref,
+            );
+            if !current
+                .route_access
+                .allows(&route_actor_key, resolve.route_kind)
+            {
+                return Err(InboundTurnError::AccessDenied {
+                    actor_id: actor_user_id.to_string(),
+                    thread_id: current.thread_id.to_string(),
+                });
+            }
+            let previous_thread = state.thread_for_participant(
+                &resolve.tenant_id,
+                &actor_user_id,
+                &current.thread_id,
+            )?;
+            let new_thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
+                InboundTurnError::InvalidCanonicalRef {
+                    reason: error.to_string(),
+                }
+            })?;
+            state.threads.insert(
+                ThreadKey::new(&resolve.tenant_id, &new_thread_id),
+                previous_thread,
+            );
+            let replacement = BindingRecord::new(
+                current.tenant_id.clone(),
+                current.adapter_kind.clone(),
+                current.adapter_installation_id.clone(),
+                current.external_conversation_ref.clone(),
+                current.route_access.clone(),
+                BindingTarget::new(
+                    new_thread_id,
+                    current.agent_id.clone(),
+                    current.project_id.clone(),
+                    current.owner_user_id.clone(),
+                ),
+            )?;
+            let binding_epoch = state.pairing_epochs.get(&route_actor_key).cloned();
+            let resolution = replacement.resolution(
+                actor_user_id.clone(),
+                binding_epoch,
+                resolve.tenant_id.clone(),
+            );
+
+            state
+                .source_bindings
+                .remove(current.source_binding_ref.as_str());
+            state
+                .reply_targets
+                .remove(current.reply_target_binding_ref.as_str());
+            state.store_binding(binding_key, replacement);
+            state.record_external_event_route(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_event_id,
+                &external_conversation_identity,
+                &actor_user_id,
+            )?;
+            let outcome = ResetConversationOutcome {
+                previous_thread_id: current.thread_id,
+                resolution,
+            };
+            state.binding_resets.insert(reset_key, outcome.clone());
+            outcome
+        };
+        let snapshot = self.lock_state()?.clone();
+        self.persist_state(old_state, snapshot).await?;
+        Ok(outcome)
     }
 
     async fn link_conversation_to_thread(
@@ -1133,6 +1258,8 @@ pub(crate) struct InMemoryState {
     pub(crate) reply_targets: HashMap<String, ReplyTargetRecord>,
     pub(crate) threads: HashMap<ThreadKey, ThreadRecord>,
     pub(crate) external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
+    #[serde(default)]
+    pub(crate) binding_resets: HashMap<ExternalEventRouteKey, ResetConversationOutcome>,
     pub(crate) message_idempotency: HashMap<MessageIdempotencyKey, AcceptedConversationMessage>,
     pub(crate) message_replays: HashMap<AcceptedMessageReplayKey, StoredAcceptedMessageReplay>,
     pub(crate) submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,

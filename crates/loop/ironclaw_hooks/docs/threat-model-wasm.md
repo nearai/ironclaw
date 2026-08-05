@@ -21,7 +21,7 @@ host imports that explicitly accept `(ptr, len)` pairs and immediately
 copy UTF-8 into host-owned strings.
 
 The hook runtime reuses the tool-WASM resource-limiter primitive:
-`WasmResourceLimiter` from `crates/ironclaw_wasm/src/limiter.rs`. The
+`WasmResourceLimiter` from `crates/lanes/ironclaw_wasm_limiter/src/lib.rs`. The
 hook runtime also follows the tool-WASM per-call sandbox pattern:
 wasmtime engine-level fuel/epoch support plus a fresh store with a
 store limiter for each call.

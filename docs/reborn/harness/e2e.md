@@ -12,7 +12,7 @@ This document is the branch-local map for the dedicated Reborn E2E gate. Reborn 
 | Dedicated Reborn E2E spine | `crates/kernel/ironclaw_host_runtime/tests/reborn_e2e_gate.rs` |
 | Capability host invoke/resume/spawn | `crates/kernel/ironclaw_capabilities/tests/capability_host_*` |
 | Dispatcher adapter selection | `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` |
-| WASM runtime lane | `crates/ironclaw_wasm/tests/wasm_dispatch_integration.rs` and `wasm_http_adapter_contract.rs` |
+| WASM runtime lane | `crates/lanes/ironclaw_wasm/tests/wasm_dispatch_integration.rs` and `wasm_http_adapter_contract.rs` |
 | Script runtime lane | `crates/lanes/ironclaw_sandbox/tests/script_dispatch_integration.rs` and `script_http_adapter_contract.rs` |
 | MCP runtime lane | `crates/lanes/ironclaw_mcp/tests/mcp_dispatch_integration.rs` and `mcp_adapter_contract.rs` |
 | Process lifecycle | `crates/kernel/ironclaw_processes/tests/process_dispatch_integration.rs` and process service/store contracts |

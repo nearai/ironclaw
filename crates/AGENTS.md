@@ -83,11 +83,14 @@ enforced dependency truth stays each crate's `[package.metadata.ironclaw] layer`
 family placement is ownership and discoverability only. A crate's directory
 carries its full package name, so moving between families is never a rename.
 
-Three crates are still flat under `crates/` on purpose: `ironclaw_wasm` (moves in
-WS7 2/2 — its `wit/` forces guest rebuilds), and `ironclaw_projects` and
-`ironclaw_first_party_extension_ports` (both have open dispositions of their own;
-see the WS7 PR exceptions table). `ironclaw_silk_decoder` is excluded from the
-workspace and is ruled on separately.
+Two crates are still flat under `crates/` on purpose, and each is a documented
+exception with a named owner rather than a leftover: `ironclaw_projects` (its
+§12.10 merge into `ironclaw_identity` is decided but not executed) and
+`ironclaw_first_party_extension_ports` (its deletion is owned by its own §9 row).
+Both are pinned by `scripts/ci/check-target-tree.py`'s shrink-only exceptions
+table, which fails on a *new* delta and is the thing to update when either
+disposition lands. The standalone `ironclaw_silk_decoder` helper is not one of
+them — WS7 moved it to `tools/ironclaw_silk_decoder`, its §5 home (§12.13 D-O).
 
 ## Crate Map
 
@@ -186,7 +189,6 @@ workspace and is ruled on separately.
 | `ironclaw_llm` | `ironclaw_llm/AGENTS.md`, `ironclaw_llm/CLAUDE.md`, `ironclaw_llm/Cargo.toml` | Multi-provider LLM integration: provider trait, auth, registry, retry/failover/circuit breaker/cache, tool schemas, reasoning, tracing, transcription/vision. | Engine loop ownership or product workflow. |
 | `ironclaw_skills` | `ironclaw_skills/AGENTS.md` | Skill catalog, parser, gating, selector/scoring, registry, validation, v2 skill types, and pure skill-learning distillation/refinement logic. | Agent-loop execution, concrete LLM adapters, filesystem writes, or UI command routing. |
 | `ironclaw_safety` | `ironclaw_safety/AGENTS.md`, `crates/substrates/ironclaw_safety/fuzz/README.md` | Prompt-injection detection, validation, sanitization, safety policy, sensitive paths, credential detection, leak scanning, fuzz/benches. | Sandbox execution, credential storage/injection, network allowlists, dispatch, UI decisions. |
-| `ironclaw_silk_decoder` | `ironclaw_silk_decoder/AGENTS.md`, `ironclaw_silk_decoder/README.md`, `ironclaw_silk_decoder/Cargo.toml`, `ironclaw_silk_decoder/src/main.rs` | Excluded helper binary that decodes WeChat SILK v3 voice notes to WAV. | Main workspace build dependencies; keep libclang isolated. |
 
 ## Common Change Routes
 

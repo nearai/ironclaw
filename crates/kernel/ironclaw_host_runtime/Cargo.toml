@@ -54,7 +54,7 @@ ironclaw_triggers = { path = "../../domains/ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-ironclaw_wasm = { path = "../../ironclaw_wasm" }
+ironclaw_wasm = { path = "../../lanes/ironclaw_wasm" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 jsonschema = { version = "0.49", default-features = false }
 libc = "0.2"

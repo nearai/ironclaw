@@ -42,9 +42,8 @@ min_crate_directories=20
 # exactly what `crates/<crate>/*` globs did before.
 #
 # Manifests that declare their own `[workspace]` table are skipped entirely:
-# they root a *separate* workspace (the `wasm-src/` guest components,
-# `ironclaw_silk_decoder`), so this workspace never builds them and no test run
-# can cover them. `scripts/ci/lib/crate_tree.py` applies the same rule and
+# they root a *separate* workspace (the `wasm-src/` guest components), so this
+# workspace never builds them and no test run can cover them. `scripts/ci/lib/crate_tree.py` applies the same rule and
 # `test-classify-test-scope.sh` pins the two inventories equal.
 crate_dirs=""
 workspace_root_dirs=""
@@ -207,14 +206,13 @@ normalize_crate_path() {
   #     no `Cargo.toml` (PROPOSAL §5). Its data is embedded by
   #     `ironclaw_extension_support`, which is where it used to live, so it
   #     lights the same lane that crate does.
-  #   * a separate cargo workspace (the `wasm-src/` guest components,
-  #     `ironclaw_silk_decoder`).
+  #   * a separate cargo workspace (the `wasm-src/` guest components).
   #
   # Checked in this order and NOT symmetrically: a package-asset path is
   # rewritten onto the canonical `crates/extensions/packages/<rest>` identity
   # (the same treatment the crate-owned branch above gives its match), while a
-  # non-package workspace root (ironclaw_silk_decoder) passes through
-  # unchanged, matching its literal-path arms below. Without the rewrite, a
+  # non-package workspace root passes through unchanged, matching its
+  # literal-path arms below. Without the rewrite, a
   # data-only package's path stays literally wherever `packages/` sits
   # (`crates/<family>/packages/...`) after the family move (PROPOSAL §5), the
   # `crates/extensions/packages/*` arms in is_shared_test_path stop matching,

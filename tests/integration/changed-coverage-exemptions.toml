@@ -2401,7 +2401,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_wasm/src/bindings.rs"
+path = "crates/lanes/ironclaw_wasm/src/bindings.rs"
 lines = [
   4,
 ]

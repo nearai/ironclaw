@@ -164,6 +164,7 @@ jobs:
           scripts/ci/test-main-ci-slack-alerts.sh
           python3 scripts/ci/test_ws12_suite_shards.py
           python3 scripts/ci/test_ws12_workflow_contracts.py
+          python3 scripts/ci/test-check-target-tree.py
           scripts/ci/test-hermetic-test-process.sh
           bash .github/scripts/test-pr-labeler.sh
       - name: Self-test panic checker
@@ -182,6 +183,12 @@ jobs:
       # before testing it, so it never compares against what is committed.
       - name: Check committed WASM artifacts are not stale
         run: python3 scripts/ci/check-wasm-artifact-freshness.py
+      # Every other path gate answers "where is crate X?" by discovery, which
+      # is what lets them survive a family move — and is exactly why none of
+      # them can say the move landed where PROPOSAL §5 draws it. This one
+      # compares `cargo metadata` against the documented tree itself.
+      - name: Check the crate tree matches PROPOSAL §5
+        run: python3 scripts/ci/check-target-tree.py
       - name: Check composition mass budget
         run: bash scripts/ci/check-composition-budget.sh
       - name: Self-test the composition budget gate

@@ -115,7 +115,7 @@ jobs:
           # that crate no longer exists, so the alternative had been matching
           # nothing. The bare `wit/` alternative went the same way when the WIT
           # directory moved inside its owning crate (CHECKLIST WS4): the ABI
-          # files are `crates/ironclaw_wasm/wit/*.wit` now, already in scope via
+          # files are `crates/lanes/ironclaw_wasm/wit/*.wit` now, already in scope via
           # the `ironclaw_wasm` crate alternative, which unlike a repo-root
           # prefix survives the WS7 family move too.
           # scripts/ci/ws12_workflow_contracts.py pins this regex

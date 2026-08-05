@@ -218,20 +218,32 @@ export function Chat({
       }
       if (composerSendBlockedRef.current) return null;
       const sendCycleId = emptyThreadCycleIdRef.current;
-      // A newly created thread (from either path below) is not yet the
-      // selected/active one — route the browser to it, exactly as the send
+      // A response naming a thread other than the selected/active one —
+      // a newly created landing thread, or a command effect such as `/new`
+      // opening a fresh task — routes the browser to it, exactly as the send
       // path already did, so the result (a system notice for a command, the
-      // first reply for a message) renders somewhere visible. Only the send
-      // that still owns the current empty-thread cycle may navigate; see
-      // `emptyThreadCycleIdRef`.
+      // first reply for a message) renders somewhere visible. From the
+      // landing view, only the send that still owns the current empty-thread
+      // cycle may navigate; see `emptyThreadCycleIdRef`.
       const selectResponseThread = (response) => {
         const responseThreadId = response?.thread_id || activeThreadId;
-        if (
-          !activeThreadId &&
-          responseThreadId &&
-          onSelectThread &&
-          emptyThreadCycleIdRef.current === sendCycleId
-        ) {
+        if (!responseThreadId || !onSelectThread) return;
+        if (activeThreadId) {
+          // `previousActiveThreadIdRef` is reassigned on every render, so
+          // between renders it holds the LATEST selection. A command that
+          // resolves after the user already opened another thread no longer
+          // matches its origin selection and must not steal the newer one
+          // (the landing path gets the same protection from the cycle fence
+          // below).
+          if (
+            responseThreadId !== activeThreadId &&
+            previousActiveThreadIdRef.current === activeThreadId
+          ) {
+            onSelectThread(responseThreadId, { replace: true });
+          }
+          return;
+        }
+        if (emptyThreadCycleIdRef.current === sendCycleId) {
           emptyThreadCycleIdRef.current += 1;
           onSelectThread(responseThreadId, { replace: true });
         }

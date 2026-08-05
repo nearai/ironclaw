@@ -50,8 +50,8 @@ use crate::{
     ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
     ExpectedExternalActorOwner, ExternalConversationIdentity, InMemoryConversationServices,
     InboundConversationService, InboundTurnError, LinkConversationRequest,
-    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
-    ValidateReplyTargetRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResetConversationOutcome,
+    ResetConversationRequest, ResolveConversationRequest, ValidateReplyTargetRequest,
     memory::{
         AcceptedMessageReplayKey, ActorKey, BindingKey, BindingRecord, ExternalEventRouteKey,
         InMemoryState, MessageIdempotencyKey, ReplyTargetRecord, StoredAcceptedMessageReplay,
@@ -120,6 +120,8 @@ struct StoredConversationState {
     reply_targets: HashMap<String, ReplyTargetRecord>,
     threads: Vec<(ThreadKey, ThreadRecord)>,
     external_event_routes: Vec<(ExternalEventRouteKey, ExternalConversationIdentity)>,
+    #[serde(default)]
+    binding_resets: Vec<(ExternalEventRouteKey, ResetConversationOutcome)>,
     message_idempotency: Vec<(MessageIdempotencyKey, AcceptedConversationMessage)>,
     message_replays: Vec<(AcceptedMessageReplayKey, StoredAcceptedMessageReplay)>,
     submission_keys: Vec<(AcceptedMessageRef, IdempotencyKey)>,
@@ -158,6 +160,11 @@ impl StoredConversationState {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            binding_resets: state
+                .binding_resets
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             message_idempotency: state
                 .message_idempotency
                 .iter()
@@ -192,6 +199,7 @@ impl StoredConversationState {
             reply_targets: self.reply_targets,
             threads: self.threads.into_iter().collect(),
             external_event_routes: self.external_event_routes.into_iter().collect(),
+            binding_resets: self.binding_resets.into_iter().collect(),
             message_idempotency: self.message_idempotency.into_iter().collect(),
             message_replays: self.message_replays.into_iter().collect(),
             submission_keys: self.submission_keys.into_iter().collect(),
@@ -649,6 +657,13 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         self.inner.lookup_binding(request).await
+    }
+
+    async fn reset_conversation_binding(
+        &self,
+        request: ResetConversationRequest,
+    ) -> Result<ResetConversationOutcome, InboundTurnError> {
+        self.inner.reset_conversation_binding(request).await
     }
 
     async fn link_conversation_to_thread(

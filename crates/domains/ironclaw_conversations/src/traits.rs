@@ -6,8 +6,9 @@ use crate::{
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
     AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
     ExpectedExternalActorOwner, InboundTurnError, LinkConversationRequest,
-    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
-    ResolveStoredReplyTargetRequest, StoredReplyTargetBinding, ValidateReplyTargetRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResetConversationOutcome,
+    ResetConversationRequest, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetBinding, ValidateReplyTargetRequest,
 };
 use ironclaw_extension_contracts::external::{ExternalActorBindingEpoch, ExternalActorRef};
 
@@ -40,6 +41,18 @@ pub trait ConversationBindingService: Send + Sync {
         &self,
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError>;
+
+    /// Atomically rotate an existing external conversation to a fresh thread.
+    /// Implementations must preserve the previous thread and message history,
+    /// revoke the previous delivery refs, and replay duplicate reset event ids.
+    async fn reset_conversation_binding(
+        &self,
+        request: ResetConversationRequest,
+    ) -> Result<ResetConversationOutcome, InboundTurnError> {
+        Err(InboundTurnError::BindingConflict {
+            thread_id: request.expected_thread_id.to_string(),
+        })
+    }
 
     async fn link_conversation_to_thread(
         &self,

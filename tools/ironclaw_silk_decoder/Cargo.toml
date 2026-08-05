@@ -1,6 +1,6 @@
 # Standalone — explicitly NOT part of the IronClaw workspace so the main
 # `cargo build` does not pull in `silk-codec` (which requires `bindgen` +
-# `libclang` and a C toolchain). See `crates/ironclaw_silk_decoder/README.md`.
+# `libclang` and a C toolchain). See `tools/ironclaw_silk_decoder/README.md`.
 [workspace]
 
 [package]
