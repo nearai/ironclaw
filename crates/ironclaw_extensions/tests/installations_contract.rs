@@ -80,6 +80,42 @@ prompt_doc_ref = "prompts/acme/echo.md"
     )
 }
 
+/// Frozen from `release-fix-1.0.0-rc.1`'s shipped Web Access manifest. The
+/// released manifest schema put capability declarations at the top level.
+fn exact_rc1_web_access_manifest() -> &'static str {
+    r#"schema_version = "reborn.extension_manifest.v2"
+id = "web-access"
+name = "Web Access"
+version = "0.1.0"
+description = "Zero-config web search through Exa MCP for Reborn."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "web-access"
+
+[[capabilities]]
+id = "web-access.search"
+description = "Search the web with zero-config Exa MCP and return cited source results. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/web-access/search.input.v1.json"
+output_schema_ref = "schemas/web-access/search.output.v1.json"
+prompt_doc_ref = "prompts/web-access/search.md"
+
+[[capabilities]]
+id = "web-access.get_content"
+description = "Retrieve full web page content through Exa MCP, or read content cached from a previous web search response."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/web-access/get_content.input.v1.json"
+output_schema_ref = "schemas/web-access/get_content.output.v1.json"
+prompt_doc_ref = "prompts/web-access/get_content.md"
+"#
+}
+
 fn contracts() -> HostApiContractRegistry {
     let mut registry = HostApiContractRegistry::new();
     registry
@@ -519,6 +555,98 @@ async fn startup_imports_exact_rc1_hosted_monolithic_extension_snapshot() {
             .await
             .is_err(),
         "a retained source that changes after completion must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn startup_imports_released_rc1_top_level_capability_manifest() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root = VirtualPath::new("/system/extensions/.installations/rc1-capabilities").unwrap();
+    let snapshot_path =
+        VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json").unwrap();
+    let rc1_snapshot = serde_json::json!({
+        "manifests": [{
+            "raw_toml": exact_rc1_web_access_manifest(),
+            "source": "host_bundled",
+            "manifest_hash": "sha256:web-access-rc1"
+        }],
+        "installations": [{
+            "installation_id": "web-access",
+            "extension_id": "web-access",
+            "activation_state": "disabled",
+            "manifest_ref": {
+                "extension_id": "web-access",
+                "manifest_hash": "sha256:web-access-rc1"
+            },
+            "credential_bindings": [],
+            "health": null,
+            "updated_at": "2026-07-01T00:00:00Z"
+        }]
+    });
+    filesystem
+        .put(
+            &snapshot_path,
+            Entry::bytes(serde_json::to_vec(&rc1_snapshot).unwrap()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let mut store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let first_report = store
+        .import_rc1_snapshot_at(&snapshot_path)
+        .await
+        .expect("the exact released rc1 manifest imports through the compatibility boundary");
+    assert_eq!(first_report.sources_migrated, 1);
+    let imported_manifest = store
+        .get_manifest(&extension_id("web-access"))
+        .await
+        .unwrap()
+        .expect("the rc1 manifest is visible through the normalized store");
+    assert!(
+        imported_manifest
+            .raw_toml()
+            .contains("[[capability_provider.tools.capabilities]]"),
+        "the compatibility row must contain the canonical 1.1 capability section"
+    );
+    assert!(
+        !imported_manifest.raw_toml().contains("[[capabilities]]"),
+        "the normalized compatibility row must not retain the rejected rc1 declaration"
+    );
+    let installation = store
+        .get_installation(&installation_id("web-access"))
+        .await
+        .unwrap()
+        .expect("the rc1 installation is visible through the normalized store");
+    assert_eq!(
+        installation.persisted_activation_state(),
+        ironclaw_extensions::ExtensionActivationState::Disabled,
+        "normalization must not enable a disabled rc1 extension"
+    );
+
+    let mut reopened = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root,
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let second_report = reopened
+        .import_rc1_snapshot_at(&snapshot_path)
+        .await
+        .expect("the retained rc1 source remains idempotent after restart");
+    assert_eq!(second_report.sources_unchanged, 1);
+    assert!(
+        filesystem.get(&snapshot_path).await.unwrap().is_some(),
+        "the exact rc1 source stays available for rollback"
     );
 }
 

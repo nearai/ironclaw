@@ -273,8 +273,9 @@ impl ExtensionInstallationStore {
         if wire.resolved.is_some() {
             return wire.into_manifest_record();
         }
+        let raw_toml = normalize_rc1_capability_declarations(wire.raw_toml)?;
         ExtensionManifestRecord::from_toml_with_root_binding(
-            wire.raw_toml,
+            raw_toml,
             wire.source.into_manifest_source(),
             &self.host_ports,
             wire.manifest_hash,
@@ -327,6 +328,56 @@ impl ExtensionInstallationStore {
             Err(error) => Err(store_unavailable("import rc1 compatibility row")(error)),
         }
     }
+}
+
+/// Translate the capability declaration shape shipped by rc1 into the host
+/// API section required by 1.1. This compatibility transform is deliberately
+/// confined to rc1 snapshot import; ordinary discovery and installation keep
+/// rejecting top-level capability declarations.
+fn normalize_rc1_capability_declarations(
+    raw_toml: String,
+) -> Result<String, ExtensionInstallationError> {
+    let mut document: toml::Value = toml::from_str(&raw_toml)
+        .map_err(|error| invalid_installation_error(format!("parse rc1 manifest: {error}")))?;
+    let root = document
+        .as_table_mut()
+        .ok_or_else(|| invalid_installation_error("rc1 manifest root must be a TOML table"))?;
+    let Some(capabilities) = root.remove("capabilities") else {
+        return Ok(raw_toml);
+    };
+    if root.contains_key("capability_provider") {
+        return Err(invalid_installation_error(
+            "rc1 manifest has both top-level capabilities and a capability_provider section",
+        ));
+    }
+
+    let host_apis = root
+        .entry("host_api".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| invalid_installation_error("rc1 manifest host_api must be an array"))?;
+    let mut host_api = toml::value::Table::new();
+    host_api.insert(
+        "id".to_string(),
+        toml::Value::String(crate::CAPABILITY_PROVIDER_HOST_API_ID.to_string()),
+    );
+    host_api.insert(
+        "section".to_string(),
+        toml::Value::String(crate::CAPABILITY_PROVIDER_SECTION.to_string()),
+    );
+    host_apis.push(toml::Value::Table(host_api));
+
+    let mut tools = toml::value::Table::new();
+    tools.insert("capabilities".to_string(), capabilities);
+    let mut capability_provider = toml::value::Table::new();
+    capability_provider.insert("tools".to_string(), toml::Value::Table(tools));
+    root.insert(
+        "capability_provider".to_string(),
+        toml::Value::Table(capability_provider),
+    );
+
+    toml::to_string(&document)
+        .map_err(|error| invalid_installation_error(format!("serialize rc1 manifest: {error}")))
 }
 
 /// Exact top-level shape written by the rc1 composition-owned snapshot
