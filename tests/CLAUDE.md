@@ -185,7 +185,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
-| Bridged tool disclosure mode and the production default reach the decorator wiring | `tool_disclosure.rs` |
+| With a large tool catalog, bridged mode and the production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |

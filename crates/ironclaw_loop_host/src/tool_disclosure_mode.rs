@@ -48,7 +48,7 @@ impl ToolDisclosureMode {
                 tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_TOOL_DISCLOSURE_ENV,
-                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
+                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to Off"
                 );
                 Self::Off
             }
