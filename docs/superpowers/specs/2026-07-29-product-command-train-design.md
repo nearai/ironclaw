@@ -415,5 +415,8 @@ Telegram is unchanged.
   additive beside the dispatcher if the shorter spelling is ever wanted.
 - **`response_url` delivery** for out-of-DM slash rejections.
 - **Durable command results** in the WebUI timeline (Decision 6 revisit).
-- **Future user commands** (`/new`, `/stop`, `/compact`, Telegram `/start`
-  deep-link) ride the same registry + audience model.
+- **Delivered follow-up:** `/new`, `/stop`, and `/interrupt` now ride the same
+  registry + audience model; continuous channels reset by non-destructively
+  rotating their external binding, while WebUI `/new` opens a fresh task.
+- **Future user commands** (`/compact`, Telegram `/start` deep-link) ride the
+  same registry + audience model.

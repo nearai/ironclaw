@@ -144,14 +144,18 @@ export function ChatInput({
   // Tracks the token as of the last `handleChange` (or mount), so typing that
   // changes the filtered set can reset the selection — see `handleChange`.
   const commandTokenRef = React.useRef(commandToken);
+  const hasCommandInventory = commands.length > 0;
   const hasMenuMatches = menuCommands.length > 0;
-  // Broader than "has matches": the popover renders (with an intentional
-  // empty state — see the JSX below) for any bare command prefix, not only
-  // once something matches it. Keyboard interception (arrows/Tab/Enter)
-  // stays gated on `hasMenuMatches` alone (recomputed fresh from refs inside
-  // onKeyDown) so an empty result list never hijacks a key that would
-  // otherwise edit the textarea.
-  const menuVisible = commandToken !== null && !menuSelection.dismissed;
+  // Broader than "has matches": when commands are available, the popover
+  // renders (with an intentional empty state — see the JSX below) for any
+  // bare command prefix, not only once something matches it. An empty command
+  // inventory disables the menu entirely (for example, on the landing page).
+  // Keyboard interception (arrows/Tab/Enter) stays gated on
+  // `hasMenuMatches` alone (recomputed fresh from refs inside onKeyDown) so
+  // an empty result list never hijacks a key that would otherwise edit the
+  // textarea.
+  const menuVisible =
+    hasCommandInventory && commandToken !== null && !menuSelection.dismissed;
   const activeMenuIndex = Math.max(
     0,
     Math.min(menuSelection.index, menuCommands.length - 1)
@@ -528,6 +532,7 @@ export function ChatInput({
       // navigate/complete above.
       if (
         !menuHasMatches &&
+        hasCommandInventory &&
         e.key === "Escape" &&
         !menuSelectionRef.current.dismissed &&
         commandMenuToken(textRef.current) !== null
@@ -549,7 +554,7 @@ export function ChatInput({
         handleSend();
       }
     },
-    [handleSend, completeMenuCommand]
+    [handleSend, completeMenuCommand, hasCommandInventory]
   );
 
   const onPaste = React.useCallback(

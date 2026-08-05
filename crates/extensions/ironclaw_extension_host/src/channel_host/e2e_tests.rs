@@ -5118,7 +5118,7 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
     let feedback =
         wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
             payload["text"].as_str().is_some_and(|text| {
-                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+                text == "Available commands:\n/ironclaw interrupt\n/ironclaw model\n/ironclaw new\n/ironclaw status\n/ironclaw stop"
             })
         })
         .await;
@@ -5156,7 +5156,8 @@ async fn disabled_dm_slash_commands_are_rejected_without_execution() {
         .slack_messages()
         .into_iter()
         .filter(|payload| {
-            payload["text"] == "Available commands:\n/ironclaw model\n/ironclaw status"
+            payload["text"]
+                == "Available commands:\n/ironclaw interrupt\n/ironclaw model\n/ironclaw new\n/ironclaw status\n/ironclaw stop"
         })
         .count();
     assert_eq!(scoped_help, 2, "one scoped rejection per disabled command");
@@ -5314,7 +5315,7 @@ async fn slash_dispatcher_bare_returns_prefixed_help() {
         "prefixed command inventory help",
         |payload| {
             payload["text"].as_str().is_some_and(|text| {
-                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+                text == "Available commands:\n/ironclaw interrupt\n/ironclaw model\n/ironclaw new\n/ironclaw status\n/ironclaw stop"
             })
         },
     )

@@ -55,13 +55,15 @@ use ironclaw_assistant::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OutboundPreferencesProductService,
     PRODUCT_COMMAND_EXECUTE_COMMAND_ID, PRODUCT_COMMAND_LIST_COMMAND_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
-    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    PRODUCT_NEW_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductCapabilityInvoker, ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller,
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
+    ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
@@ -255,6 +257,51 @@ async fn status_command_reports_idle_for_a_bound_conversation_without_messages()
     assert_eq!(
         view.lines,
         vec!["No assistant activity in this conversation yet."]
+    );
+}
+
+#[tokio::test]
+async fn new_command_preflight_requires_stopping_a_nonterminal_run() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-active-new-preflight").await;
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+                "client_action_id": "send-before-new-preflight",
+                "thread_id": "thread-active-new-preflight",
+                "content": "still working"
+            }))
+            .expect("submit request"),
+        )
+        .await
+        .expect("submit run");
+
+    let response = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(PRODUCT_NEW_COMMAND_OPERATION_ID)
+                .expect("new operation"),
+            input: serde_json::to_value(ProductNewCommandInput {
+                thread_id: "thread-active-new-preflight".to_string(),
+            })
+            .expect("new input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("preflight response");
+    let output: ProductNewCommandOutput =
+        serde_json::from_value(response.output).expect("new output");
+
+    assert!(!output.can_reset);
+    assert_eq!(output.result.title, "Conversation still running");
+    assert_eq!(
+        output.result.lines,
+        vec!["Use /stop first, then try /new again."]
     );
 }
 
@@ -16323,7 +16370,7 @@ async fn member_command_list_excludes_admin_audience() {
         .await
         .expect("member may list commands");
 
-    assert_eq!(response.commands.len(), 2, "{:?}", response.commands);
+    assert_eq!(response.commands.len(), 5, "{:?}", response.commands);
     let model = response
         .commands
         .iter()
@@ -16350,10 +16397,10 @@ async fn member_command_list_excludes_admin_audience() {
     );
     assert_eq!(status.usage, "/status");
     assert!(
-        response
-            .commands
-            .iter()
-            .all(|command| command.name == "model" || command.name == "status"),
+        response.commands.iter().all(|command| matches!(
+            command.name.as_str(),
+            "model" | "status" | "new" | "stop" | "interrupt"
+        )),
         "member list must not include lifecycle commands: {:?}",
         response.commands
     );
@@ -16374,7 +16421,7 @@ async fn admin_command_list_includes_lifecycle_family() {
         .await
         .expect("admin may list commands");
 
-    assert_eq!(response.commands.len(), 12, "{:?}", response.commands);
+    assert_eq!(response.commands.len(), 15, "{:?}", response.commands);
 }
 
 #[tokio::test]
@@ -16388,7 +16435,7 @@ async fn operator_config_caller_lists_admin_commands() {
         .await
         .expect("operator-config caller may list commands");
 
-    assert_eq!(response.commands.len(), 12, "{:?}", response.commands);
+    assert_eq!(response.commands.len(), 15, "{:?}", response.commands);
 }
 
 #[tokio::test]
@@ -16474,9 +16521,104 @@ async fn member_execute_unknown_command_help_excludes_admin_names() {
         .expect("unknown command must be rejected");
     assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
     // Exact equality (not a substring check): pins that the member help text
-    // is EXACTLY the two User-audience commands, in registry order — no
+    // is EXACTLY the User-audience commands, in registry order — no
     // lifecycle name can sneak in under a future descriptor addition.
-    assert_eq!(rejection.message, "Available commands:\n/model\n/status");
+    assert_eq!(
+        rejection.message,
+        "Available commands:\n/interrupt\n/model\n/new\n/status\n/stop"
+    );
+}
+
+#[tokio::test]
+async fn execute_new_creates_a_fresh_thread_and_returns_an_open_thread_effect() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    setup_owned_thread(&services, caller(), "thread-before-new").await;
+
+    let response =
+        execute_product_command_via_invoke(&services, caller(), "thread-before-new", "/new")
+            .await
+            .expect("new command succeeds");
+
+    assert!(response.rejection.is_none());
+    assert_eq!(
+        response.result.as_ref().map(|result| result.title.as_str()),
+        Some("New conversation")
+    );
+    let effect = response.effect.expect("new returns a navigation effect");
+    let new_thread_id = effect.open_thread_id().expect("open-thread effect");
+    assert_ne!(new_thread_id, "thread-before-new");
+    let timeline = services
+        .get_timeline(caller(), RebornTimelineRequest::new(new_thread_id))
+        .await
+        .expect("new thread is durable and caller-owned");
+    assert!(timeline.messages.is_empty());
+}
+
+#[tokio::test]
+async fn execute_interrupt_cancels_the_latest_active_run() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-stop-command").await;
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+                "client_action_id": "send-before-stop",
+                "thread_id": "thread-stop-command",
+                "content": "please keep working"
+            }))
+            .expect("submit request"),
+        )
+        .await
+        .expect("submit active run");
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-stop-command",
+        "/interrupt",
+    )
+    .await
+    .expect("interrupt command succeeds");
+
+    assert!(response.rejection.is_none());
+    assert_eq!(coordinator.cancellation_count(), 1);
+    assert_eq!(
+        coordinator
+            .last_cancellation_scope()
+            .expect("cancellation scope")
+            .thread_id
+            .as_str(),
+        "thread-stop-command"
+    );
+    let result = response.result.expect("interrupt result");
+    assert_eq!(result.title, "Interrupt requested");
+    assert_eq!(result.fields[0].value, "cancelled");
+}
+
+#[tokio::test]
+async fn execute_stop_without_an_active_run_is_a_successful_no_op() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-idle-stop").await;
+
+    let response =
+        execute_product_command_via_invoke(&services, caller(), "thread-idle-stop", "/stop")
+            .await
+            .expect("idle stop is not an error");
+
+    assert!(response.rejection.is_none());
+    assert_eq!(coordinator.cancellation_count(), 0);
+    let result = response.result.expect("idle stop result");
+    assert_eq!(result.title, "Nothing to stop");
+    assert_eq!(result.fields[0].value, "idle");
 }
 
 #[tokio::test]
@@ -16877,7 +17019,7 @@ async fn suspended_admin_is_treated_as_member_on_both_doors() {
         .expect("suspended admin may still list (as a member)");
     assert_eq!(
         list_response.commands.len(),
-        2,
+        5,
         "{:?}",
         list_response.commands
     );
