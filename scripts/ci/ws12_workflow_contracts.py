@@ -478,6 +478,10 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         in_scope=(
             "docs/index.mdx",
+            # Both halves of the gate's contract: navigation (docs.json) and
+            # the fence (.mintignore). A future markdown-only narrowing of
+            # the grep would drop them while every .mdx probe stays green.
+            "docs/docs.json",
             "docs/.mintignore",
             "docs/internal/plans/whatever.md",
             # The gate's own files (review-discipline.md "Guardrails are
