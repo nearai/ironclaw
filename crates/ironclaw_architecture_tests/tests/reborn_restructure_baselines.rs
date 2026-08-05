@@ -101,7 +101,12 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print`, not derived by subtracting the diff.
 /// ✎ Union re-record 2026-08-04: the two WS6 evictions above are disjoint and
 /// their deltas add exactly on the merged batch — 45_127 − 2_189 − 2_439 = 40_499.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_499;
+/// ✎ Re-recorded 40_499 → 40_747 on 2026-08-05 for sandbox PR1: +248 LOC of
+/// provider-neutral profile/deployment mapping, fail-closed capability-policy
+/// projection, and centralized Docker/Railway binding assembly. Provider
+/// execution remains in `ironclaw_sandbox`. Measured on the merged PR tree
+/// with `bash scripts/ci/check-composition-budget.sh --print`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_747;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
