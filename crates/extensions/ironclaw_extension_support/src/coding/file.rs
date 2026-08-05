@@ -50,7 +50,13 @@ pub(super) async fn read_file(
         .stat(&resolved.virtual_path)
         .await
         .map_err(|error| {
-            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+            // Same ordering hint as `list_dir`: `.skills/<name>` exists only after activation.
+            match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
+                Some(hint) => operation_error_with_summary(hint),
+                None => {
+                    filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+                }
+            }
         })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
@@ -575,7 +581,17 @@ pub(super) async fn list_dir(
         }
         Some(_) => {}
         None if resolved.is_mount_root() => {}
-        None => return Err(operation_error()),
+        None => {
+            // A miss under `.skills/<name>` is an ordering mistake, not a missing file: activation is
+            // what stages a bundle into the workspace. Saying so costs one line and saved an agent two
+            // failed calls spent discovering it.
+            return Err(
+                match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
+                    Some(hint) => operation_error_with_summary(hint),
+                    None => operation_error(),
+                },
+            );
+        }
     }
     let recursive = request
         .input

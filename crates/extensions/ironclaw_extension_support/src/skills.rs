@@ -175,8 +175,17 @@ async fn dispatch_install(
         // database-backed store; no process can open it. Without this an agent that installed a
         // scripted skill and tried to verify it probed `/skills`, hand-copied the file into its
         // workspace to run it, and then claimed the store path was executable -- which it is not.
-        "runnable_path_after_activation": (!files.is_empty())
-            .then(|| ironclaw_skills::runnable_skill_dir(&installed.name)),
+        // Ordering, not just a path. Naming the field `..._after_activation` was not enough: an agent
+        // read the path out of this result and used it immediately, before activating, and burned two
+        // failed calls discovering that the files were not there yet.
+        "bundled_files_runnable": (!files.is_empty()).then(|| {
+            json!({
+                "requires_first": format!("skill_activate with name={}", installed.name),
+                "then_at": ironclaw_skills::runnable_skill_dir(&installed.name),
+                "note": "The skill root is read-only and never executable. Activating stages the \
+                         bundled files into the workspace; only then does the path above exist.",
+            })
+        }),
     }))
 }
 

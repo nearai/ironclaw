@@ -159,6 +159,29 @@ fn is_skill_alias(grant: &ironclaw_host_api::mount::MountGrant) -> bool {
     grant.alias.as_str().ends_with("skills")
 }
 
+/// A path under the staged-skills directory names a skill that has not been activated yet.
+///
+/// `.skills/<name>/…` only exists once the skill is activated -- activation is what copies a bundle
+/// out of the read-only store into the workspace. Without this, a miss there reported the generic
+/// "can't access your workspace file", and an agent that had just installed a skill spent two failed
+/// calls discovering the ordering instead of being told it.
+pub(super) fn unactivated_skill_hint(path: &str) -> Option<String> {
+    let trimmed = path.trim_start_matches('/');
+    let tail = trimmed
+        .strip_prefix("workspace/")
+        .unwrap_or(trimmed)
+        .strip_prefix(".skills/")?;
+    let name = tail.split('/').next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} does not exist yet: a skill's bundled files are staged into the workspace when the skill \
+         is ACTIVATED. Call skill_activate with name={name} first, then read or run it from there",
+        safe_summary_path(path)
+    ))
+}
+
 /// The mount aliases an agent may address, as directory entries.
 ///
 /// `list_dir "/"` used to fail with `path  is not under an available scoped root` -- the offending
@@ -568,5 +591,41 @@ mod root_path_normalization_tests {
             "/skills/x/SKILL.md"
         );
         assert_eq!(scoped_path_input("scripts/x.py"), "/workspace/scripts/x.py");
+    }
+}
+
+#[cfg(test)]
+mod unactivated_skill_hint_tests {
+    use super::*;
+
+    /// A miss under `.skills/<name>` must name the call that fixes it.
+    ///
+    /// Observed on a live run: the agent installed a skill, took the runnable path out of the install
+    /// result, and read it immediately -- before activating. It got the generic "can't access your
+    /// workspace file" twice, then activated and it worked. Two wasted calls and a confusing trace, for
+    /// an ordering the tools knew and did not say.
+    #[test]
+    fn a_miss_under_staged_skills_names_skill_activate() {
+        for path in [
+            ".skills/egfr-calc/scripts/egfr.py",
+            "/workspace/.skills/egfr-calc/scripts/egfr.py",
+            "/.skills/egfr-calc",
+        ] {
+            let hint = unactivated_skill_hint(path)
+                .unwrap_or_else(|| panic!("{path} must produce an activation hint"));
+            assert!(
+                hint.contains("skill_activate") && hint.contains("egfr-calc"),
+                "the hint must name the call and the skill; got {hint}"
+            );
+        }
+    }
+
+    /// Ordinary workspace paths are unaffected -- a missing file is just a missing file.
+    #[test]
+    fn other_paths_get_no_activation_hint() {
+        assert!(unactivated_skill_hint("scripts/egfr.py").is_none());
+        assert!(unactivated_skill_hint("/workspace/notes.md").is_none());
+        assert!(unactivated_skill_hint("/skills/egfr-calc/SKILL.md").is_none());
+        assert!(unactivated_skill_hint(".skills").is_none());
     }
 }
