@@ -28,6 +28,7 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # fail-closed arm is not.
 IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
 IGNORED_GUIDANCE_PATHS = {
+    "crates/AGENTS.md",
     "tests/CLAUDE.md",
     "tests/integration/CLAUDE.md",
 }

@@ -479,8 +479,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["root_partitions"], [], path)
                 self.assertEqual(plan["integration_lanes"], [], path)
 
-    def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
-        for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
+    def test_repo_wide_guidance_selects_no_rust_lane(self) -> None:
+        for path in (
+            "crates/AGENTS.md",
+            "tests/CLAUDE.md",
+            "tests/integration/CLAUDE.md",
+        ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none")
