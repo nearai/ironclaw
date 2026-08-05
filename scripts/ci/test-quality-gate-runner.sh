@@ -111,15 +111,22 @@ capture_gate without-nextest
 expect_status "nextest absent: gate succeeds" "$gate_status" 0
 expect_contains "nextest absent: falls back to cargo test" "$gate_log" "cargo test --locked --workspace"
 expect_not_contains "nextest absent: does not invoke nextest" "$gate_log" "nextest run"
+expect_contains "nextest absent: keeps --all-targets --all-features" "$gate_log" "--all-targets --all-features"
 
 capture_gate with-nextest IRONCLAW_GATE_TEST_RUNNER=cargo
 expect_status "override=cargo: gate succeeds" "$gate_status" 0
 expect_contains "override=cargo: forces the sequential runner" "$gate_log" "cargo test --locked --workspace"
 expect_not_contains "override=cargo: skips nextest even when installed" "$gate_log" "nextest run"
 
+capture_gate with-nextest IRONCLAW_GATE_TEST_RUNNER=nextest
+expect_status "override=nextest: gate succeeds" "$gate_status" 0
+expect_contains "override=nextest: runs the parallel runner" "$gate_log" "cargo nextest run"
+expect_not_contains "override=nextest: does not also run cargo test" "$gate_log" "cargo test"
+
 capture_gate without-nextest IRONCLAW_PREPUSH_TEST=0
 expect_status "IRONCLAW_PREPUSH_TEST=0: gate succeeds" "$gate_status" 0
-expect_not_contains "IRONCLAW_PREPUSH_TEST=0: runs no tests at all" "$gate_log" "--workspace"
+expect_not_contains "IRONCLAW_PREPUSH_TEST=0: skips cargo test" "$gate_log" "cargo test"
+expect_not_contains "IRONCLAW_PREPUSH_TEST=0: skips nextest" "$gate_log" "cargo nextest run"
 expect_contains "IRONCLAW_PREPUSH_TEST=0: still runs clippy" "$gate_log" "clippy"
 
 capture_gate without-nextest IRONCLAW_GATE_TEST_RUNNER=nextest
