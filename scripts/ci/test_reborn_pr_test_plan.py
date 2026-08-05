@@ -799,6 +799,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none", path)
                 self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
                 # The plan must say *why*, so a future reader sees the
                 # decision rather than a silent "nothing to run".
                 self.assertTrue(
