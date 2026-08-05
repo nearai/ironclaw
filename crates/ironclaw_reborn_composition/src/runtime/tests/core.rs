@@ -3819,7 +3819,7 @@ async fn cancel_run_propagates_to_subagent_children() {
                     subagent_kind: SubagentKindId::new("general").unwrap(),
                     mode: SpawnSubagentMode::Blocking,
                     result_ref,
-                    spawn_provider_call_id: None,
+                    spawn_provider_call: None,
                     handoff: None,
                     parent_run_context: parent_run_context.clone(),
                     gate_ref: ironclaw_host_api::turn::TurnGateRef::new(

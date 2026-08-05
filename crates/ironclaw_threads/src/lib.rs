@@ -62,5 +62,6 @@ pub use in_memory::InMemorySessionThreadService;
 pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
-    ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    ProviderToolCallReferenceEnvelope, ToolResultProviderCallKey, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary,
 };

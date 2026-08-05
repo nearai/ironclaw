@@ -44,8 +44,8 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ToolResultProviderCallKey, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -105,6 +105,22 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
         })
         .await
         .unwrap();
+    // A later provider turn recycling the spawn row's call id must not become
+    // the update target.
+    let mut recycled_call = provider_call_reference("spawn-call");
+    recycled_call.provider_turn_id = "turn_2".to_string();
+    let recycled = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            safe_summary: ToolResultSafeSummary::new("recycled call id page").unwrap(),
+            provider_call: Some(recycled_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
 
     let updated = service
         .update_tool_result_reference(UpdateToolResultReferenceRequest {
@@ -112,7 +128,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
             result_ref: "result:shared-update".into(),
-            provider_call_id: Some("spawn-call".to_string()),
+            provider_call: Some(ToolResultProviderCallKey::new("turn_1", "spawn-call")),
             safe_summary: ToolResultSafeSummary::new("subagent completed").unwrap(),
         })
         .await
@@ -120,6 +136,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
 
     assert_eq!(updated.message_id, spawn.message_id);
     assert_ne!(updated.message_id, page.message_id);
+    assert_ne!(updated.message_id, recycled.message_id);
     let updated_envelope =
         ToolResultReferenceEnvelope::from_json_str(updated.content.as_deref().unwrap()).unwrap();
     assert_eq!(updated_envelope.safe_summary.as_str(), "subagent completed");
@@ -190,9 +207,31 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
         })
         .await
         .unwrap();
+    // OpenAI-compatible backends mint call ids per response, so a later model
+    // turn in the same run can page this result under a call id it already
+    // used. Only the provider turn id keeps the rows apart.
+    let mut next_turn_call = provider_call_reference("call_1");
+    next_turn_call.provider_turn_id = "turn_2".to_string();
+    let next_turn = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("next turn page").unwrap(),
+            provider_call: Some(next_turn_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
 
     assert_eq!(duplicate.message_id, first.message_id);
     assert_ne!(second.message_id, first.message_id);
+    assert_ne!(
+        next_turn.message_id, first.message_id,
+        "a recycled provider call id in a later provider turn must not collide \
+         with the earlier turn's row"
+    );
     assert_eq!(
         first
             .tool_result_provider_call
@@ -222,7 +261,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
             .iter()
             .filter(|message| message.kind == MessageKind::ToolResultReference)
             .count(),
-        2
+        3
     );
 }
 

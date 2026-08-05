@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
-use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
+use crate::tool_result_reference::{
+    ProviderToolCallReferenceEnvelope, ToolResultProviderCallKey, ToolResultSafeSummary,
+};
 
 pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
 
@@ -446,9 +448,11 @@ pub struct UpdateToolResultReferenceRequest {
     pub thread_id: ThreadId,
     pub turn_run_id: String,
     pub result_ref: String,
-    /// Exact provider-call row to update. `None` is reserved for legacy
-    /// callers whose durable edge predates provider-call identity.
-    pub provider_call_id: Option<String>,
+    /// Exact provider-call row to update, identified by provider turn *and*
+    /// call id — the call id alone repeats across turns on providers that mint
+    /// it per response. `None` is reserved for legacy callers whose durable
+    /// edge predates provider-call identity.
+    pub provider_call: Option<ToolResultProviderCallKey>,
     pub safe_summary: ToolResultSafeSummary,
 }
 

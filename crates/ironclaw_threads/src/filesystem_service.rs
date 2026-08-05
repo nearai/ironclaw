@@ -78,11 +78,12 @@ use crate::{
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    MessageStatus, ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultProviderCallKey, ToolResultRecordChunk, ToolResultReferenceEnvelope,
     UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
@@ -710,19 +711,19 @@ where
         thread_id: &ThreadId,
         turn_run_id: &str,
         result_ref: &str,
-        provider_call_id: Option<&str>,
+        provider_call: Option<&ToolResultProviderCallKey>,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         self.ensure_transcript_indexes_migrated(scope).await?;
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
-        let indexed_message_id = match provider_call_id {
-            Some(provider_call_id) => {
+        let indexed_message_id = match provider_call {
+            Some(provider_call) => {
                 index_store
                     .read_tool_result_provider_call(
                         scope,
                         thread_id,
                         turn_run_id,
                         result_ref,
-                        provider_call_id,
+                        provider_call,
                     )
                     .await?
             }
@@ -740,7 +741,7 @@ where
                 &message,
                 turn_run_id,
                 result_ref,
-                provider_call_id,
+                provider_call,
             )
         {
             return Ok(Some(message));
@@ -750,7 +751,7 @@ where
         // provider-call-specific result indexes. Before provider calls were
         // part of this key there could be at most one row per (run, result), so
         // only a row with no provider metadata is an unambiguous legacy match.
-        if provider_call_id.is_some() {
+        if provider_call.is_some() {
             let indexed_message_id = index_store
                 .read_tool_result(scope, thread_id, turn_run_id, result_ref)
                 .await?;
@@ -1986,15 +1987,16 @@ where
             request.model_observation,
         )
         .map_err(SessionThreadError::Serialization)?;
+        let provider_call_key = provider_call
+            .as_ref()
+            .map(ProviderToolCallReferenceEnvelope::call_key);
         if let Some(existing) = self
             .find_tool_result_reference_message(
                 &request.scope,
                 &request.thread_id,
                 &request.turn_run_id,
                 &envelope.result_ref,
-                provider_call
-                    .as_ref()
-                    .map(|provider_call| provider_call.provider_call_id.as_str()),
+                provider_call_key.as_ref(),
             )
             .await?
         {
@@ -2195,7 +2197,7 @@ where
                 &request.thread_id,
                 &request.turn_run_id,
                 &request.result_ref,
-                request.provider_call_id.as_deref(),
+                request.provider_call.as_ref(),
             )
             .await?
             .ok_or_else(|| {
@@ -2212,7 +2214,7 @@ where
         // the initial lookup path.
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
-        let provider_call_id = request.provider_call_id.clone();
+        let provider_call = request.provider_call.clone();
         let thread_id_for_error = request.thread_id.clone();
         let safe_summary = request.safe_summary;
         let now = Utc::now();
@@ -2226,7 +2228,7 @@ where
                     message,
                     &turn_run_id,
                     &result_ref,
-                    provider_call_id.as_deref(),
+                    provider_call.as_ref(),
                 ) {
                     return Err(SessionThreadError::Backend(format!(
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
@@ -3297,14 +3299,14 @@ fn matches_tool_result_reference_invocation(
     message: &ThreadMessageRecord,
     turn_run_id: &str,
     result_ref: &str,
-    provider_call_id: Option<&str>,
+    provider_call: Option<&ToolResultProviderCallKey>,
 ) -> bool {
     matches_tool_result_reference(message, turn_run_id, result_ref)
-        && provider_call_id.is_none_or(|requested| {
+        && provider_call.is_none_or(|requested| {
             message
                 .tool_result_provider_call
                 .as_ref()
-                .is_none_or(|existing| existing.provider_call_id == requested)
+                .is_none_or(|existing| existing.matches_call_key(requested))
         })
 }
 

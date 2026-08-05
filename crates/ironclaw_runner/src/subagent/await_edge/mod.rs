@@ -10,6 +10,7 @@ use ironclaw_host_api::turn::{
     LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
 };
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
+use ironclaw_threads::ToolResultProviderCallKey;
 use serde::{Deserialize, Serialize};
 
 /// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.
@@ -71,7 +72,7 @@ impl EdgeTerminalKind {
 /// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus
 /// five additive fields beyond the design doc's exact list (`gate_ref`, the
 /// `source_binding_ref`/`reply_target_binding_ref` pair, `parent_run_context`,
-/// `spawn_provider_call_id`, and `terminal_reason`), each named as a spec
+/// `spawn_provider_call`, and `terminal_reason`), each named as a spec
 /// deviation in the PR:
 ///
 /// - `gate_ref` (D3): the pre-existing shared-batch-gate mechanism (one
@@ -89,8 +90,10 @@ impl EdgeTerminalKind {
 ///   recomputed, to avoid duplicating that private format-string logic
 ///   across the crate boundary and the drift risk of two copies going stale
 ///   independently.
-/// - `spawn_provider_call_id`: pins settlement updates to the original spawn
+/// - `spawn_provider_call`: pins settlement updates to the original spawn
 ///   transcript row when later `result_read` calls share its result reference.
+///   Both halves are load-bearing — providers that mint tool-call ids per
+///   response reuse the same call id across turns of one run.
 ///
 /// Identity (`parent_run_id`, `child_run_id`) lives in the path (§4.2), not
 /// here.
@@ -120,7 +123,7 @@ pub struct AwaitEdge {
     pub subagent_kind: SubagentKindId,
     pub spawn_capability_id: CapabilityId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawn_provider_call_id: Option<String>,
+    pub spawn_provider_call: Option<ToolResultProviderCallKey>,
     pub result_ref: LoopResultRef,
     pub mode: SpawnSubagentMode,
     pub state: AwaitEdgeState,

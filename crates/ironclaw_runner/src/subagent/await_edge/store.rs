@@ -10,6 +10,8 @@ use ironclaw_processes::{
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
     ProcessLifecycleStatus, ProcessTerminalEvidence, SettleProcessDependencyRequest,
 };
+#[cfg(test)]
+use ironclaw_threads::ToolResultProviderCallKey;
 
 use super::{
     AwaitEdge, AwaitEdgeState, AwaitEdgeStoreError, EdgeTerminalKind, ReservationReleaseState,
@@ -71,7 +73,7 @@ impl AwaitEdgeStore {
                     reply_target_binding_ref: submitted.reply_target_binding_ref,
                     subagent_kind: submitted.subagent_kind,
                     spawn_capability_id: submitted.spawn_capability_id,
-                    spawn_provider_call_id: submitted.spawn_provider_call_id,
+                    spawn_provider_call: submitted.spawn_provider_call,
                     result_ref: submitted.result_ref,
                     mode: submitted.mode,
                     state: AwaitEdgeState::Open,
@@ -371,7 +373,10 @@ mod tests {
                     ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
                 )
                 .expect("capability"),
-                spawn_provider_call_id: Some("spawn-call-store-transition".to_string()),
+                spawn_provider_call: Some(ToolResultProviderCallKey::new(
+                    "spawn-turn-store-transition",
+                    "spawn-call-store-transition",
+                )),
                 result_ref: LoopResultRef::new("result:store-transition").expect("result"),
                 mode: SpawnSubagentMode::Blocking,
                 state: AwaitEdgeState::Open,
@@ -486,7 +491,7 @@ mod tests {
             reply_target_binding_ref: edge.reply_target_binding_ref.clone(),
             subagent_kind: edge.subagent_kind.clone(),
             spawn_capability_id: edge.spawn_capability_id.clone(),
-            spawn_provider_call_id: edge.spawn_provider_call_id.clone(),
+            spawn_provider_call: edge.spawn_provider_call.clone(),
             result_ref: edge.result_ref.clone(),
             mode: edge.mode,
         };

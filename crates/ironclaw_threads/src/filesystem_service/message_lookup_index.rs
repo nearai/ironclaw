@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CapabilityDisplayPreviewEnvelope, MessageKind, SessionThreadError, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope,
+    ThreadMessageRecord, ThreadScope, ToolResultProviderCallKey,
 };
 
 use super::{
@@ -66,11 +66,7 @@ where
                 message.message_id,
             )
             .await?;
-            if let Some(provider_call_id) = message
-                .tool_result_provider_call
-                .as_ref()
-                .map(|provider_call| provider_call.provider_call_id.as_str())
-            {
+            if let Some(provider_call) = message.tool_result_provider_call.as_ref() {
                 self.write(
                     scope,
                     &tool_result_provider_call_index_path(
@@ -78,7 +74,7 @@ where
                         thread_id,
                         turn_run_id,
                         result_ref,
-                        provider_call_id,
+                        &provider_call.call_key(),
                     )?,
                     thread_id,
                     message.message_id,
@@ -152,18 +148,14 @@ where
                 tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
                 CasExpectation::Any,
             )?;
-            if let Some(provider_call_id) = message
-                .tool_result_provider_call
-                .as_ref()
-                .map(|provider_call| provider_call.provider_call_id.as_str())
-            {
+            if let Some(provider_call) = message.tool_result_provider_call.as_ref() {
                 push(
                     tool_result_provider_call_index_path(
                         scope,
                         thread_id,
                         turn_run_id,
                         result_ref,
-                        provider_call_id,
+                        &provider_call.call_key(),
                     )?,
                     CasExpectation::Any,
                 )?;
@@ -243,14 +235,14 @@ where
         thread_id: &ThreadId,
         turn_run_id: &str,
         result_ref: &str,
-        provider_call_id: &str,
+        provider_call: &ToolResultProviderCallKey,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
         let path = tool_result_provider_call_index_path(
             scope,
             thread_id,
             turn_run_id,
             result_ref,
-            provider_call_id,
+            provider_call,
         )?;
         self.read(scope, thread_id, &path).await
     }
@@ -412,12 +404,13 @@ fn tool_result_provider_call_index_path(
     thread_id: &ThreadId,
     turn_run_id: &str,
     result_ref: &str,
-    provider_call_id: &str,
+    provider_call: &ToolResultProviderCallKey,
 ) -> Result<ScopedPath, SessionThreadError> {
     #[derive(Serialize)]
     struct ToolResultProviderCallIndexKey<'a> {
         turn_run_id: &'a str,
         result_ref: &'a str,
+        provider_turn_id: &'a str,
         provider_call_id: &'a str,
     }
     let key = lookup_index_key(
@@ -425,7 +418,8 @@ fn tool_result_provider_call_index_path(
         &ToolResultProviderCallIndexKey {
             turn_run_id,
             result_ref,
-            provider_call_id,
+            provider_turn_id: provider_call.provider_turn_id.as_str(),
+            provider_call_id: provider_call.provider_call_id.as_str(),
         },
     )?;
     scoped_path(&format!(

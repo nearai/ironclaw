@@ -32,7 +32,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
-    ThreadMessageId, ThreadScope,
+    ThreadMessageId, ThreadScope, ToolResultProviderCallKey,
 };
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, CancelRunRequest, SubmitChildRunRequest, SubmitTurnResponse,
@@ -274,7 +274,7 @@ pub struct AwaitedChildSetRecord {
     /// Pins the eventual summary update to the spawn transcript row even when
     /// paged reads reuse `result_ref`. Missing only on legacy durable edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawn_provider_call_id: Option<String>,
+    pub spawn_provider_call: Option<ToolResultProviderCallKey>,
     pub result_ref: LoopResultRef,
     pub mode: SpawnSubagentMode,
 }
@@ -302,7 +302,7 @@ pub struct SubagentThreadMetadata {
     /// Provider-call identity of the spawn result placeholder. Recovery
     /// copies this into the reconstructed await edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawn_provider_call_id: Option<String>,
+    pub spawn_provider_call: Option<ToolResultProviderCallKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
     /// The spawning parent's `LoopRunContext`, cached verbatim at spawn time
@@ -398,7 +398,9 @@ pub struct SubagentSpawnCapabilityPort {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SpawnAuthorization {
     activity_id: CapabilityActivityId,
-    provider_call_id: String,
+    /// Provider turn *and* call id: OpenAI-compatible backends mint call ids
+    /// per response, so the call id alone repeats across turns in one run.
+    provider_call: ToolResultProviderCallKey,
 }
 
 struct SpawnContext {
@@ -613,7 +615,8 @@ impl SubagentSpawnCapabilityPort {
             .spawn_input_codec
             .register_provider_tool_call_input(&self.run_context, &tool_call)
             .await?;
-        let provider_call_id = tool_call.id.clone();
+        let provider_call =
+            ToolResultProviderCallKey::new(provider_turn_id.clone(), tool_call.id.clone());
         let activity_id = {
             let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
                 AgentLoopHostError::new(
@@ -632,7 +635,7 @@ impl SubagentSpawnCapabilityPort {
                             "provider tool-call activity identity changed",
                         ));
                     }
-                    if registered.provider_call_id != provider_call_id {
+                    if registered.provider_call != provider_call {
                         return Err(AgentLoopHostError::new(
                             AgentLoopHostErrorKind::InvalidInvocation,
                             "provider tool-call identity changed",
@@ -644,7 +647,7 @@ impl SubagentSpawnCapabilityPort {
                     let activity_id = activity_id.unwrap_or_default();
                     entry.insert(SpawnAuthorization {
                         activity_id,
-                        provider_call_id,
+                        provider_call,
                     });
                     activity_id
                 }
@@ -709,14 +712,14 @@ impl SubagentSpawnCapabilityPort {
         invocation: &LoopRequest,
         args: SpawnSubagentArgs,
         gate_override: Option<TurnGateRef>,
-        provider_call_id: String,
+        provider_call: ToolResultProviderCallKey,
     ) -> Result<Resolution, AgentLoopHostError> {
         let mut compensation = SpawnCompensationState::default();
         self.handle_spawn_with_gate_recording(
             invocation,
             args,
             gate_override,
-            provider_call_id,
+            provider_call,
             &mut compensation,
         )
         .await
@@ -727,7 +730,7 @@ impl SubagentSpawnCapabilityPort {
         invocation: &LoopRequest,
         args: SpawnSubagentArgs,
         gate_override: Option<TurnGateRef>,
-        provider_call_id: String,
+        provider_call: ToolResultProviderCallKey,
         compensation: &mut SpawnCompensationState,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
@@ -806,7 +809,7 @@ impl SubagentSpawnCapabilityPort {
                 spawn_ctx,
                 actor,
                 invocation,
-                provider_call_id,
+                provider_call,
                 compensation,
             )
             .await;
@@ -828,7 +831,7 @@ impl SubagentSpawnCapabilityPort {
     async fn authorize_spawn(
         &self,
         invocation: &LoopRequest,
-    ) -> Result<Result<String, Resolution>, AgentLoopHostError> {
+    ) -> Result<Result<ToolResultProviderCallKey, Resolution>, AgentLoopHostError> {
         let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -852,7 +855,7 @@ impl SubagentSpawnCapabilityPort {
                     "subagent spawn authorization disappeared before dispatch",
                 )
             })?;
-        Ok(Ok(authorization.provider_call_id))
+        Ok(Ok(authorization.provider_call))
     }
 
     #[cfg(test)]
@@ -868,7 +871,10 @@ impl SubagentSpawnCapabilityPort {
                 input_ref,
                 SpawnAuthorization {
                     activity_id,
-                    provider_call_id: "test-provider-call".to_string(),
+                    provider_call: ToolResultProviderCallKey::new(
+                        "test-provider-turn",
+                        "test-provider-call",
+                    ),
                 },
             );
     }
@@ -899,7 +905,7 @@ impl SubagentSpawnCapabilityPort {
         ctx: SpawnContext,
         actor: TurnActor,
         invocation: &LoopRequest,
-        provider_call_id: String,
+        provider_call: ToolResultProviderCallKey,
         compensation: &mut SpawnCompensationState,
     ) -> Result<Resolution, AgentLoopHostError> {
         let SpawnContext {
@@ -961,7 +967,7 @@ impl SubagentSpawnCapabilityPort {
                     subagent_kind: definition.subagent_kind.clone(),
                     mode,
                     result_ref: result_ref.clone(),
-                    spawn_provider_call_id: Some(provider_call_id.clone()),
+                    spawn_provider_call: Some(provider_call.clone()),
                     handoff: args.handoff.clone(),
                     parent_run_context: self.run_context.clone(),
                     gate_ref: gate_ref.clone(),
@@ -1046,7 +1052,7 @@ impl SubagentSpawnCapabilityPort {
             )?,
             subagent_kind: definition.subagent_kind.clone(),
             spawn_capability_id: self.spawn_id.clone(),
-            spawn_provider_call_id: Some(provider_call_id),
+            spawn_provider_call: Some(provider_call),
             result_ref: result_ref.clone(),
             mode,
         };
@@ -1240,12 +1246,12 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 Ok(args) => args,
                 Err(error) => return spawn_input_decode_outcome(error),
             };
-            let provider_call_id = match self.authorize_spawn(&request).await? {
-                Ok(provider_call_id) => provider_call_id,
+            let provider_call = match self.authorize_spawn(&request).await? {
+                Ok(provider_call) => provider_call,
                 Err(resolution) => return Ok(resolution),
             };
             return self
-                .handle_spawn_with_gate(&request, args, None, provider_call_id)
+                .handle_spawn_with_gate(&request, args, None, provider_call)
                 .await;
         }
         self.inner.invoke_capability(request).await
@@ -1304,7 +1310,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 }
                 let outcome = match self.authorize_spawn(invocation).await {
                     Ok(Err(outcome)) => outcome,
-                    Ok(Ok(provider_call_id)) => {
+                    Ok(Ok(provider_call)) => {
                         let args = match spawn_args.remove(&index) {
                             Some(args) => args,
                             None => {
@@ -1324,7 +1330,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                                 invocation,
                                 args,
                                 gate_override,
-                                provider_call_id,
+                                provider_call,
                                 &mut compensation,
                             )
                             .await

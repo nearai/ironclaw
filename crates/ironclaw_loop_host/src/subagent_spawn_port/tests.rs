@@ -2107,8 +2107,11 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
     assert_eq!(awaited[0].child_scope, request.child_scope);
     assert_eq!(awaited[0].result_ref.as_str(), "result:spawn");
     assert_eq!(
-        awaited[0].spawn_provider_call_id.as_deref(),
-        Some("test-provider-call")
+        awaited[0].spawn_provider_call,
+        Some(ironclaw_threads::ToolResultProviderCallKey::new(
+            "test-provider-turn",
+            "test-provider-call",
+        ))
     );
     assert_eq!(awaited[0].mode, SpawnSubagentMode::Blocking);
 }

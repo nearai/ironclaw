@@ -53,6 +53,7 @@ async fn runner_await_edge_is_a_projection_over_process_dependencies() {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply:child").expect("reply target"),
         subagent_kind: SubagentKindId::new("general").expect("subagent kind"),
         spawn_capability_id: CapabilityId::new("builtin.subagent.spawn").expect("capability"),
+        spawn_provider_call: None,
         result_ref: LoopResultRef::new("result:child").expect("result ref"),
         mode: SpawnSubagentMode::Blocking,
     })

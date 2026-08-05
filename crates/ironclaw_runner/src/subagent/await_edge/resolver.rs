@@ -376,7 +376,7 @@ where
                     reason: reason.to_string(),
                 },
             )?,
-            spawn_provider_call_id: metadata.spawn_provider_call_id,
+            spawn_provider_call: metadata.spawn_provider_call,
             result_ref: metadata.result_ref,
             mode: metadata.mode,
             state: AwaitEdgeState::Open,
@@ -481,7 +481,7 @@ where
                 thread_id: edge.parent_thread_id.clone(),
                 turn_run_id: parent_run_id.to_string(),
                 result_ref: edge.result_ref.as_str().to_string(),
-                provider_call_id: edge.spawn_provider_call_id.clone(),
+                provider_call: edge.spawn_provider_call.clone(),
                 safe_summary,
             })
             .await
@@ -1059,7 +1059,10 @@ mod tests {
             mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t1")
                 .unwrap(),
-            spawn_provider_call_id: Some("spawn-call-recon-t1".to_string()),
+            spawn_provider_call: Some(ironclaw_threads::ToolResultProviderCallKey::new(
+                "spawn-turn-recon-t1",
+                "spawn-call-recon-t1",
+            )),
             handoff: None,
             parent_run_context: parent_context.clone(),
             gate_ref: metadata_gate_ref.clone(),
@@ -1140,7 +1143,7 @@ mod tests {
             mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t2")
                 .unwrap(),
-            spawn_provider_call_id: None,
+            spawn_provider_call: None,
             handoff: None,
             parent_run_context: parent_context,
             gate_ref: TurnGateRef::new("gate:subagent-t2").unwrap(),
@@ -1287,7 +1290,7 @@ mod tests {
             mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t4")
                 .unwrap(),
-            spawn_provider_call_id: None,
+            spawn_provider_call: None,
             handoff: None,
             parent_run_context: tampered_context,
             gate_ref: TurnGateRef::new("gate:subagent-t4").unwrap(),
@@ -1572,7 +1575,10 @@ mod tests {
             let result_ref =
                 ironclaw_host_api::turn::LoopResultRef::new(format!("result:drain-{label}"))
                     .expect("result ref");
-            let spawn_provider_call_id = format!("spawn-call-{label}");
+            let spawn_provider_call = ironclaw_threads::ToolResultProviderCallKey::new(
+                "test-turn",
+                format!("spawn-call-{label}"),
+            );
             thread_service
                 .ensure_thread(EnsureThreadRequest {
                     scope: parent_thread_scope.clone(),
@@ -1603,8 +1609,8 @@ mod tests {
                     provider_call: Some(ProviderToolCallReferenceEnvelope {
                         provider_id: "test-provider".to_string(),
                         provider_model_id: "test-model".to_string(),
-                        provider_turn_id: "test-turn".to_string(),
-                        provider_call_id: spawn_provider_call_id.clone(),
+                        provider_turn_id: spawn_provider_call.provider_turn_id.clone(),
+                        provider_call_id: spawn_provider_call.provider_call_id.clone(),
                         provider_tool_name: ProviderToolName::new("spawn_subagent")
                             .expect("provider tool name"),
                         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
@@ -1637,7 +1643,7 @@ mod tests {
                 subagent_kind: SubagentKindId::new("general").expect("kind"),
                 spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                     .expect("capability"),
-                spawn_provider_call_id: Some(spawn_provider_call_id),
+                spawn_provider_call: Some(spawn_provider_call),
                 result_ref: result_ref.clone(),
                 mode: SpawnSubagentMode::Blocking,
             };

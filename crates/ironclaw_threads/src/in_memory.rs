@@ -530,7 +530,8 @@ impl SessionThreadService for InMemorySessionThreadService {
                         .tool_result_provider_call
                         .as_ref()
                         .is_none_or(|existing| {
-                            existing.provider_call_id == requested.provider_call_id
+                            existing.provider_turn_id == requested.provider_turn_id
+                                && existing.provider_call_id == requested.provider_call_id
                         })
                 })
         }) {
@@ -687,7 +688,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                     && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
                     && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
             };
-            let message_index = match request.provider_call_id.as_deref() {
+            let message_index = match request.provider_call.as_ref() {
                 Some(requested) => thread
                     .messages
                     .iter()
@@ -696,7 +697,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                             && message
                                 .tool_result_provider_call
                                 .as_ref()
-                                .is_some_and(|existing| existing.provider_call_id == requested)
+                                .is_some_and(|existing| existing.matches_call_key(requested))
                     })
                     .or_else(|| {
                         thread.messages.iter().position(|message| {

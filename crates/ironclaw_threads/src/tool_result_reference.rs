@@ -154,7 +154,39 @@ pub struct ProviderToolCallReferenceEnvelope {
     pub signature: Option<String>,
 }
 
+/// Identity of one provider tool call inside a run: the provider's turn id
+/// paired with its call id.
+///
+/// The call id alone is not unique. OpenAI-compatible backends (ollama, vllm,
+/// llama.cpp gateways) mint call ids per response, so two model turns in the
+/// same run routinely both emit `call_0`. Keying transcript rows on the pair
+/// keeps those calls distinct.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ToolResultProviderCallKey {
+    pub provider_turn_id: String,
+    pub provider_call_id: String,
+}
+
+impl ToolResultProviderCallKey {
+    pub fn new(provider_turn_id: impl Into<String>, provider_call_id: impl Into<String>) -> Self {
+        Self {
+            provider_turn_id: provider_turn_id.into(),
+            provider_call_id: provider_call_id.into(),
+        }
+    }
+}
+
 impl ProviderToolCallReferenceEnvelope {
+    /// The dedup identity of this call, dropping the payload fields.
+    pub fn call_key(&self) -> ToolResultProviderCallKey {
+        ToolResultProviderCallKey::new(self.provider_turn_id.clone(), self.provider_call_id.clone())
+    }
+
+    pub fn matches_call_key(&self, key: &ToolResultProviderCallKey) -> bool {
+        self.provider_turn_id == key.provider_turn_id
+            && self.provider_call_id == key.provider_call_id
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         validate_provider_identity(&self.provider_id, "provider id", 512)
             .map_err(|error| error.to_string())?;

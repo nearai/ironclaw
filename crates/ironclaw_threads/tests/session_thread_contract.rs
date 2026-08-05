@@ -15,8 +15,9 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    ThreadMessageRangeRequest, ThreadScope, ToolResultProviderCallKey, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -880,6 +881,12 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
     let first_call = provider_call_reference();
     let mut second_call = provider_call_reference();
     second_call.provider_call_id = "call_2".to_string();
+    // OpenAI-compatible backends (ollama, vllm, llama.cpp gateways) mint
+    // per-response call ids, so a later model turn in the SAME run can page the
+    // same durable result under a call id it already used. Only the provider
+    // turn id separates the two.
+    let mut next_turn_call = provider_call_reference();
+    next_turn_call.provider_turn_id = "turn_2".to_string();
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -917,22 +924,45 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
         })
         .await
         .unwrap();
+    let next_turn = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("next turn page").unwrap(),
+            provider_call: Some(next_turn_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
 
     assert_eq!(duplicate.message_id, first.message_id);
     assert_ne!(second.message_id, first.message_id);
+    assert_ne!(
+        next_turn.message_id, first.message_id,
+        "a recycled provider call id in a later provider turn must not collide \
+         with the earlier turn's row"
+    );
+    assert_ne!(next_turn.message_id, second.message_id);
     let updated = service
         .update_tool_result_reference(UpdateToolResultReferenceRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
             result_ref: "result:shared-continuation".into(),
-            provider_call_id: Some("call_1".to_string()),
+            provider_call: Some(ToolResultProviderCallKey::new("turn_1", "call_1")),
             safe_summary: ToolResultSafeSummary::new("first page settled").unwrap(),
         })
         .await
         .unwrap();
     assert_eq!(updated.message_id, first.message_id);
     assert_ne!(updated.message_id, second.message_id);
+    assert_ne!(
+        updated.message_id, next_turn.message_id,
+        "an update keyed by provider turn must not land on the recycled call id \
+         from another turn"
+    );
     assert_eq!(
         first
             .tool_result_provider_call
@@ -949,6 +979,14 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
             .provider_call_id,
         "call_2"
     );
+    assert_eq!(
+        next_turn
+            .tool_result_provider_call
+            .as_ref()
+            .expect("next-turn provider call persists")
+            .provider_turn_id,
+        "turn_2"
+    );
     let history = service
         .list_thread_history(ThreadHistoryRequest {
             scope,
@@ -961,7 +999,7 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
         .iter()
         .filter(|message| message.kind == MessageKind::ToolResultReference)
         .collect::<Vec<_>>();
-    assert_eq!(result_messages.len(), 2);
+    assert_eq!(result_messages.len(), 3);
 }
 
 #[tokio::test]
@@ -2265,7 +2303,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
             result_ref: "result:model-observation-tool".into(),
-            provider_call_id: None,
+            provider_call: None,
             safe_summary: ToolResultSafeSummary::new("tool failed after child completion").unwrap(),
         })
         .await
