@@ -901,6 +901,8 @@ mod tests {
             RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
             RebornCompositionProfile::Production,
             RebornCompositionProfile::MigrationDryRun,
         ] {
@@ -941,6 +943,16 @@ mod tests {
             ),
             (
                 RebornCompositionProfile::HostedSingleTenantVolume,
+                RuntimeSubstrate::ProductionShaped,
+                true,
+            ),
+            (
+                RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                RuntimeSubstrate::ProductionShaped,
+                true,
+            ),
+            (
+                RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
                 RuntimeSubstrate::ProductionShaped,
                 true,
             ),
@@ -990,6 +1002,8 @@ mod tests {
             RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
             RebornCompositionProfile::Production,
         ] {
             let config = DeploymentConfig::for_profile(profile, true);
@@ -1022,6 +1036,8 @@ mod tests {
             RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
         ] {
             let config = DeploymentConfig::for_profile(profile, true);
             assert!(
@@ -1115,6 +1131,17 @@ mod tests {
         assert_eq!(policy.resolved_profile, RuntimeProfile::SecureDefault);
         assert_eq!(policy.process_backend, ProcessBackendKind::None);
         assert_eq!(policy.approval_policy, ApprovalPolicy::AskAlways);
+    }
+
+    #[test]
+    fn sandboxed_hosted_profiles_resolve_the_user_sandbox_process_backend() {
+        for profile in [
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+        ] {
+            let policy = resolved(DeploymentConfig::for_profile(profile, false));
+            assert_eq!(policy.process_backend, ProcessBackendKind::UserSandbox);
+        }
     }
 
     #[test]

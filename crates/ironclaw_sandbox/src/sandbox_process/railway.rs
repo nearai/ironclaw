@@ -36,6 +36,12 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_OUTPUT_LIMIT: usize = 16 * 1024;
 const REMOTE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(120);
+// A checkpoint list is provider metadata rather than model output. Keep it
+// bounded, but large enough for the maximum tracked-user registry. Truncation
+// produces invalid JSON and therefore fails closed instead of treating an
+// existing durable checkpoint as absent.
+const CHECKPOINT_LIST_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_TRACKED_USERS: usize = 4_096;
 const WORKSPACE_ROOT: &str = "/workspace";
 const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
@@ -180,36 +186,30 @@ impl RailwayPreviewSandboxTransport {
         output_limit: usize,
     ) -> Result<String, RuntimeProcessError> {
         let checkpoint_name = checkpoint_name(key);
-        // Ask Railway for this exact deterministic checkpoint instead of
-        // listing every user's checkpoint into one bounded JSON response.
-        // A missing checkpoint is the expected first-use case; any other
-        // provider error remains fail-closed rather than silently discarding
-        // a durable workspace.
-        let restored = self
+        let checkpoints = self
             .execute_cli(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
-                    sandbox_create_argv(&self.config, Some(&checkpoint_name)),
+                    checkpoint_list_argv(&self.config),
+                    CHECKPOINT_LIST_OUTPUT_LIMIT,
+                ),
+                deadline,
+            )
+            .await?;
+        let restore_checkpoint = checkpoint_exists(&checkpoints.stdout, &checkpoint_name)?;
+        let created = self
+            .execute_cli(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    sandbox_create_argv(
+                        &self.config,
+                        restore_checkpoint.then_some(checkpoint_name.as_str()),
+                    ),
                     output_limit,
                 ),
                 deadline,
             )
-            .await;
-        let created = match restored {
-            Ok(output) => output,
-            Err(error) if is_missing_checkpoint_error(&error) => {
-                self.execute_cli(
-                    RailwayCliInvocation::new(
-                        self.config.cli_path.clone(),
-                        sandbox_create_argv(&self.config, None),
-                        output_limit,
-                    ),
-                    deadline,
-                )
-                .await?
-            }
-            Err(error) => return Err(error),
-        };
+            .await?;
         let sandbox_id = parse_sandbox_id(&created.stdout)?;
         self.execute_cli(
             RailwayCliInvocation::new(
@@ -258,7 +258,6 @@ impl RailwayPreviewSandboxTransport {
         &self,
         key: &RebornSandboxUserKey,
         sandbox_id: &str,
-        deadline: Instant,
         output_limit: usize,
     ) -> Result<(), RuntimeProcessError> {
         // Railway checkpoint names are unique within the environment and the
@@ -266,17 +265,23 @@ impl RailwayPreviewSandboxTransport {
         // the same name synchronously. One deterministic name per user bounds
         // retention to the latest workspace snapshot; the live canary writes,
         // restores, and replaces that same name across transport restart.
-        self.execute_cli(
-            RailwayCliInvocation::new(
-                self.config.cli_path.clone(),
-                checkpoint_create_argv(&self.config, sandbox_id, &checkpoint_name(key)),
-                output_limit,
-            ),
-            deadline,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|_| {
+        let result = self
+            .cli
+            .execute(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    checkpoint_create_argv(&self.config, sandbox_id, &checkpoint_name(key)),
+                    output_limit,
+                ),
+                REMOTE_CHECKPOINT_TIMEOUT,
+            )
+            .await;
+        result.map(|_| ()).map_err(|error| {
+            tracing::error!(
+                ?error,
+                sandbox_id,
+                "Railway command completed but durable checkpoint creation failed"
+            );
             RuntimeProcessError::ExecutionFailed(
                 "Railway preview command completed but its workspace checkpoint failed".to_string(),
             )
@@ -393,8 +398,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
             }
         };
         let (stdout, exit_code) = parse_exit_sentinel(output.stdout)?;
-        self.checkpoint(&key, &sandbox_id, deadline, output_limit)
-            .await?;
+        self.checkpoint(&key, &sandbox_id, output_limit).await?;
         let raw_output = combine_output(stdout, output.stderr);
         let output = redact_command_output(raw_output);
         Ok(CommandExecutionOutput {
@@ -454,6 +458,7 @@ struct RailwayCliInvocation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RailwayCliOperation {
+    ListCheckpoints,
     CreateSandbox,
     ExecuteSandboxCommand,
     CreateCheckpoint,
@@ -464,6 +469,11 @@ enum RailwayCliOperation {
 impl RailwayCliOperation {
     fn from_args(args: &[String]) -> Self {
         match args {
+            [sandbox, checkpoint, list, ..]
+                if sandbox == "sandbox" && checkpoint == "checkpoint" && list == "list" =>
+            {
+                Self::ListCheckpoints
+            }
             [sandbox, create, ..] if sandbox == "sandbox" && create == "create" => {
                 Self::CreateSandbox
             }
@@ -484,6 +494,7 @@ impl RailwayCliOperation {
 
     fn label(self) -> &'static str {
         match self {
+            Self::ListCheckpoints => "list checkpoints",
             Self::CreateSandbox => "create sandbox",
             Self::ExecuteSandboxCommand => "execute sandbox command",
             Self::CreateCheckpoint => "create checkpoint",
@@ -624,8 +635,12 @@ impl RailwayCli for SystemRailwayCli {
             let stdout = stdout?;
             let stderr = stderr?;
             if !status.success() {
-                return Err(RuntimeProcessError::ExecutionFailed(
-                    railway_cli_failure_message(operation, status.code(), &stderr, &environment),
+                return Err(railway_cli_status_error(
+                    operation,
+                    status.code(),
+                    &stderr,
+                    &environment,
+                    timeout,
                 ));
             }
             Ok(RailwayCliOutput { stdout, stderr })
@@ -644,6 +659,24 @@ impl RailwayCli for SystemRailwayCli {
             }
         }
     }
+}
+
+fn railway_cli_status_error(
+    operation: RailwayCliOperation,
+    exit_code: Option<i32>,
+    stderr: &str,
+    environment: &BTreeMap<String, String>,
+    timeout: Duration,
+) -> RuntimeProcessError {
+    if operation == RailwayCliOperation::ExecuteSandboxCommand && exit_code == Some(124) {
+        return RuntimeProcessError::Timeout(timeout);
+    }
+    RuntimeProcessError::ExecutionFailed(railway_cli_failure_message(
+        operation,
+        exit_code,
+        stderr,
+        environment,
+    ))
 }
 
 fn railway_cli_failure_message(
@@ -673,14 +706,6 @@ fn railway_cli_failure_message(
     }
 }
 
-fn is_missing_checkpoint_error(error: &RuntimeProcessError) -> bool {
-    let RuntimeProcessError::ExecutionFailed(message) = error else {
-        return false;
-    };
-    let message = message.to_ascii_lowercase();
-    message.contains("checkpoint") && message.contains("not found")
-}
-
 fn required_config_value(label: &str, value: String) -> Result<String, RuntimeProcessError> {
     if value.trim().is_empty() || value.as_bytes().contains(&0) {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
@@ -688,6 +713,19 @@ fn required_config_value(label: &str, value: String) -> Result<String, RuntimePr
         )));
     }
     Ok(value)
+}
+
+fn checkpoint_list_argv(config: &RailwayPreviewSandboxConfig) -> Vec<String> {
+    vec![
+        "sandbox".into(),
+        "checkpoint".into(),
+        "list".into(),
+        "--json".into(),
+        "--project".into(),
+        config.project_id.clone(),
+        "--environment".into(),
+        config.environment_id.clone(),
+    ]
 }
 
 fn sandbox_create_argv(
@@ -901,6 +939,33 @@ fn parse_sandbox_id(stdout: &str) -> Result<String, RuntimeProcessError> {
             )
         })?;
     Ok(id.into())
+}
+
+fn checkpoint_exists(stdout: &str, checkpoint_name: &str) -> Result<bool, RuntimeProcessError> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|_| {
+        RuntimeProcessError::ExecutionFailed(
+            "Railway preview checkpoint listing returned an invalid response".into(),
+        )
+    })?;
+    let checkpoints = value
+        .as_array()
+        .or_else(|| {
+            value
+                .get("checkpoints")
+                .and_then(serde_json::Value::as_array)
+        })
+        .ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "Railway preview checkpoint listing returned an invalid response".into(),
+            )
+        })?;
+    Ok(checkpoints.iter().any(|checkpoint| {
+        checkpoint
+            .get("key")
+            .or_else(|| checkpoint.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name == checkpoint_name)
+    }))
 }
 
 fn parse_exit_sentinel(stdout: String) -> Result<(String, i32), RuntimeProcessError> {

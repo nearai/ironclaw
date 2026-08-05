@@ -2650,6 +2650,9 @@ regex_activation_enabled = false
     #[test]
     fn local_sandbox_profile_selects_docker_process_binding_when_required() {
         if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
+            eprintln!(
+                "skipping Docker-backed sandbox profile test; set IRONCLAW_REQUIRE_DOCKER_TESTS=1 to require it"
+            );
             return;
         }
 

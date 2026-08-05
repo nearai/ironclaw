@@ -124,6 +124,7 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "crates/ironclaw_composition/src/sandbox.rs",
     "crates/ironclaw_composition/src/builtin_capability_policy.rs",
     "crates/ironclaw_composition/src/deployment.rs",
+    "crates/ironclaw_composition/src/factory/production_backend_assembly.rs",
     "crates/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
     "crates/ironclaw_composition/src/input.rs",
     "crates/ironclaw_config/src/profile.rs",

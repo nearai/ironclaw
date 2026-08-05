@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ironclaw_host_api::process::RuntimeProcessError;
 
-use super::reject_nul;
+use crate::sandbox_process::reject_nul;
 
 #[derive(Debug, Clone)]
 pub struct RebornSandboxContainerIdentity {
@@ -28,9 +28,9 @@ impl RebornSandboxContainerIdentity {
         }
     }
 
-    pub fn container_user(&self, workspace: &Path) -> Result<String, RuntimeProcessError> {
+    pub async fn container_user(&self, workspace: &Path) -> Result<String, RuntimeProcessError> {
         match &self.user {
-            RebornSandboxContainerUser::WorkspaceOwner => workspace_owner_user(workspace),
+            RebornSandboxContainerUser::WorkspaceOwner => workspace_owner_user(workspace).await,
             RebornSandboxContainerUser::Configured(user) => validate_container_user(user),
         }
     }
@@ -75,10 +75,10 @@ fn validate_container_user(user: &str) -> Result<String, RuntimeProcessError> {
 }
 
 #[cfg(unix)]
-fn workspace_owner_user(workspace: &Path) -> Result<String, RuntimeProcessError> {
+async fn workspace_owner_user(workspace: &Path) -> Result<String, RuntimeProcessError> {
     use std::os::unix::fs::MetadataExt as _;
 
-    let metadata = std::fs::metadata(workspace).map_err(|error| {
+    let metadata = tokio::fs::metadata(workspace).await.map_err(|error| {
         RuntimeProcessError::ExecutionFailed(format!(
             "sandbox workspace identity could not be resolved: {error}"
         ))
@@ -92,7 +92,7 @@ fn workspace_owner_user(workspace: &Path) -> Result<String, RuntimeProcessError>
 }
 
 #[cfg(not(unix))]
-fn workspace_owner_user(_workspace: &Path) -> Result<String, RuntimeProcessError> {
+async fn workspace_owner_user(_workspace: &Path) -> Result<String, RuntimeProcessError> {
     // Docker Desktop's Linux VM cannot consume native Windows ownership IDs.
     // The worker image and documented local setup use this explicit non-root
     // identity instead of inheriting an operator-overridable image default.
@@ -103,34 +103,34 @@ fn workspace_owner_user(_workspace: &Path) -> Result<String, RuntimeProcessError
 mod tests {
     use super::*;
 
-    #[test]
-    fn container_user_rejects_empty_whitespace_and_nul_values() {
+    #[tokio::test]
+    async fn container_user_rejects_empty_whitespace_and_nul_values() {
         for user in ["", " \t ", "1000\0:1000"] {
             let identity = RebornSandboxContainerIdentity::configured_user(
                 user,
                 RebornSandboxWorkspaceMode::Private,
             );
 
-            assert!(identity.container_user(Path::new(".")).is_err());
+            assert!(identity.container_user(Path::new(".")).await.is_err());
         }
     }
 
-    #[test]
-    fn container_user_accepts_configured_user() {
+    #[tokio::test]
+    async fn container_user_accepts_configured_user() {
         let identity = RebornSandboxContainerIdentity::configured_user(
             "1000:1000",
             RebornSandboxWorkspaceMode::Private,
         );
 
         assert_eq!(
-            identity.container_user(Path::new(".")).unwrap(),
+            identity.container_user(Path::new(".")).await.unwrap(),
             "1000:1000".to_string()
         );
     }
 
     #[cfg(unix)]
-    #[test]
-    fn workspace_owner_is_an_explicit_non_root_container_user() {
+    #[tokio::test]
+    async fn workspace_owner_is_an_explicit_non_root_container_user() {
         let workspace = tempfile::tempdir().unwrap();
         let metadata = std::fs::metadata(workspace.path()).unwrap();
         use std::os::unix::fs::MetadataExt as _;
@@ -139,12 +139,14 @@ mod tests {
             assert!(
                 RebornSandboxContainerIdentity::workspace_owner()
                     .container_user(workspace.path())
+                    .await
                     .is_err()
             );
         } else {
             assert_eq!(
                 RebornSandboxContainerIdentity::workspace_owner()
                     .container_user(workspace.path())
+                    .await
                     .unwrap(),
                 format!("{}:{}", metadata.uid(), metadata.gid())
             );

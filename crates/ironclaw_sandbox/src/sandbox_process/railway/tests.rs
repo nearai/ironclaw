@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -21,6 +21,9 @@ struct FakeRailwayCli {
     next_sandbox: AtomicUsize,
     expired_liveness_checks: AtomicUsize,
     failed_worker_execs: AtomicUsize,
+    malformed_checkpoint_lists: AtomicUsize,
+    next_worker_delay_ms: AtomicU64,
+    checkpoint_timeouts: Mutex<Vec<Duration>>,
     delay: Option<Duration>,
 }
 
@@ -32,6 +35,9 @@ impl FakeRailwayCli {
             next_sandbox: AtomicUsize::new(1),
             expired_liveness_checks: AtomicUsize::new(0),
             failed_worker_execs: AtomicUsize::new(0),
+            malformed_checkpoint_lists: AtomicUsize::new(0),
+            next_worker_delay_ms: AtomicU64::new(0),
+            checkpoint_timeouts: Mutex::new(Vec::new()),
             delay: None,
         }
     }
@@ -54,6 +60,21 @@ impl FakeRailwayCli {
     fn fail_next_worker_exec(&self) {
         self.failed_worker_execs.store(1, Ordering::SeqCst);
     }
+
+    fn malform_next_checkpoint_list(&self) {
+        self.malformed_checkpoint_lists.store(1, Ordering::SeqCst);
+    }
+
+    fn delay_next_worker_exec(&self, delay: Duration) {
+        self.next_worker_delay_ms.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    async fn checkpoint_timeouts(&self) -> Vec<Duration> {
+        self.checkpoint_timeouts.lock().await.clone()
+    }
 }
 
 #[async_trait]
@@ -70,18 +91,29 @@ impl RailwayCli for FakeRailwayCli {
         {
             return Err(RuntimeProcessError::Timeout(timeout));
         }
+        self.invocations.lock().await.push(invocation.clone());
         if invocation
             .args
-            .starts_with(&["sandbox".into(), "create".into()])
-            && let Some(index) = invocation.args.iter().position(|arg| arg == "--checkpoint")
-            && let Some(name) = invocation.args.get(index + 1)
-            && !self.checkpoints.lock().await.contains(name)
+            .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
         {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "Railway preview failed to create sandbox: checkpoint not found".into(),
-            ));
+            if self.malformed_checkpoint_lists.swap(0, Ordering::SeqCst) > 0 {
+                return Ok(RailwayCliOutput {
+                    stdout: "truncated checkpoint response".to_string(),
+                    stderr: String::new(),
+                });
+            }
+            let checkpoints = self.checkpoints.lock().await;
+            return Ok(RailwayCliOutput {
+                stdout: serde_json::Value::Array(
+                    checkpoints
+                        .iter()
+                        .map(|name| serde_json::json!({ "key": name }))
+                        .collect(),
+                )
+                .to_string(),
+                stderr: String::new(),
+            });
         }
-        self.invocations.lock().await.push(invocation.clone());
         if invocation.args.iter().any(|arg| arg == OUTER_EXEC_WRAPPER)
             && self.failed_worker_execs.swap(0, Ordering::SeqCst) > 0
         {
@@ -108,6 +140,7 @@ impl RailwayCli for FakeRailwayCli {
             .args
             .starts_with(&["sandbox".into(), "checkpoint".into(), "create".into()])
         {
+            self.checkpoint_timeouts.lock().await.push(timeout);
             let Some(name) = invocation.args.get(3) else {
                 return Err(RuntimeProcessError::ExecutionFailed(
                     "fake checkpoint create has no name".into(),
@@ -120,6 +153,17 @@ impl RailwayCli for FakeRailwayCli {
             });
         }
         if invocation.args.iter().any(|arg| arg == OUTER_EXEC_WRAPPER) {
+            let delay_ms = self.next_worker_delay_ms.swap(0, Ordering::SeqCst);
+            if delay_ms > 0
+                && tokio::time::timeout(
+                    timeout,
+                    tokio::time::sleep(Duration::from_millis(delay_ms)),
+                )
+                .await
+                .is_err()
+            {
+                return Err(RuntimeProcessError::Timeout(timeout));
+            }
             return Ok(RailwayCliOutput {
                 stdout: format!("command output\n{EXIT_SENTINEL}0\n"),
                 stderr: String::new(),
@@ -192,11 +236,7 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
             .iter()
             .all(|call| !call.args.iter().any(|argument| argument == "--variable"))
     );
-    assert!(invocations.iter().all(|call| {
-        !call
-            .args
-            .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
-    }));
+    assert_eq!(count_checkpoint_lists(&invocations), 1);
     for invocation in invocations.iter().filter(|invocation| {
         invocation
             .args
@@ -304,6 +344,20 @@ async fn restores_the_deterministic_checkpoint_after_host_restart() {
             .windows(2)
             .any(|pair| pair[0] == "--checkpoint" && pair[1].ends_with("-checkpoint"))
     }));
+}
+
+#[tokio::test]
+async fn malformed_checkpoint_listing_fails_closed_before_fresh_creation() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.malform_next_checkpoint_list();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    assert!(matches!(
+        transport.run_command(request("tenant", "user", "true")).await,
+        Err(RuntimeProcessError::ExecutionFailed(message))
+            if message.contains("checkpoint listing returned an invalid response")
+    ));
+    assert_eq!(count_creates(&cli.invocations().await), 0);
 }
 
 #[tokio::test]
@@ -417,6 +471,22 @@ async fn times_out_when_the_cli_exceeds_the_request_deadline() {
         Err(RuntimeProcessError::Timeout(duration))
             if duration > Duration::ZERO && duration <= Duration::from_secs(1)
     ));
+}
+
+#[tokio::test]
+async fn checkpoint_gets_an_independent_budget_after_worker_uses_command_budget() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.delay_next_worker_exec(Duration::from_millis(800));
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let mut command = request("tenant", "user", "true");
+    command.timeout_secs = Some(1);
+
+    transport.run_command(command).await.unwrap();
+
+    assert_eq!(
+        cli.checkpoint_timeouts().await,
+        vec![REMOTE_CHECKPOINT_TIMEOUT]
+    );
 }
 
 #[tokio::test]
@@ -538,16 +608,37 @@ fn cli_failure_diagnostic_names_operation_and_redacts_auth_token() {
 }
 
 #[test]
-fn only_an_explicit_missing_checkpoint_error_allows_fresh_provisioning() {
-    assert!(is_missing_checkpoint_error(
-        &RuntimeProcessError::ExecutionFailed("sandbox checkpoint not found".into())
+fn checkpoint_listing_is_structured_and_fail_closed() {
+    assert!(checkpoint_exists(r#"[{"key":"wanted"}]"#, "wanted").unwrap());
+    assert!(checkpoint_exists(r#"{"checkpoints":[{"name":"wanted"}]}"#, "wanted").unwrap());
+    assert!(!checkpoint_exists(r#"[{"key":"other"}]"#, "wanted").unwrap());
+    assert!(checkpoint_exists("checkpoint not found", "wanted").is_err());
+    assert!(checkpoint_exists(r#"{"checkpoints":"truncated"}"#, "wanted").is_err());
+}
+
+#[test]
+fn railway_exec_exit_124_is_a_timeout_but_other_operations_are_provider_failures() {
+    let environment = BTreeMap::new();
+    assert!(matches!(
+        railway_cli_status_error(
+            RailwayCliOperation::ExecuteSandboxCommand,
+            Some(124),
+            "timed out",
+            &environment,
+            Duration::from_secs(7),
+        ),
+        RuntimeProcessError::Timeout(duration) if duration == Duration::from_secs(7)
     ));
-    assert!(!is_missing_checkpoint_error(
-        &RuntimeProcessError::ExecutionFailed("project not found".into())
+    assert!(matches!(
+        railway_cli_status_error(
+            RailwayCliOperation::CreateSandbox,
+            Some(124),
+            "provider failed",
+            &environment,
+            Duration::from_secs(7),
+        ),
+        RuntimeProcessError::ExecutionFailed(message) if message.contains("create sandbox")
     ));
-    assert!(!is_missing_checkpoint_error(&RuntimeProcessError::Timeout(
-        Duration::from_secs(1)
-    )));
 }
 
 async fn assert_rejected(
@@ -564,6 +655,16 @@ fn count_creates(calls: &[RailwayCliInvocation]) -> usize {
     calls
         .iter()
         .filter(|call| call.args.starts_with(&["sandbox".into(), "create".into()]))
+        .count()
+}
+
+fn count_checkpoint_lists(calls: &[RailwayCliInvocation]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.args
+                .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
+        })
         .count()
 }
 

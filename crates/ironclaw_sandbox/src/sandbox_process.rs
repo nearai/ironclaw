@@ -416,7 +416,11 @@ impl RebornScopedSandboxCommandTransport {
         workdir: ContainerWorkdir,
     ) -> Result<Config<String>, RuntimeProcessError> {
         let env = self.config.command_env(request.extra_env)?;
-        let container_user = self.config.container_identity.container_user(workspace)?;
+        let container_user = self
+            .config
+            .container_identity
+            .container_user(workspace)
+            .await?;
         let security =
             worker_spec::DockerWorkerSecuritySpec::new(self.config.container_network_mode());
         let mut binds = self

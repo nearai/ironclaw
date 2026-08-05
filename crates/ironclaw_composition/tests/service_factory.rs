@@ -1707,13 +1707,6 @@ async fn migration_dry_run_validates_libsql_shape() {
 }
 
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when user sandbox process-port wiring exists"]
-async fn migration_dry_run_validates_postgres_planned_turn_profile() {
-    // Restore the MigrationDryRunValidated readiness and planned-profile
-    // submit_turn assertions that are temporarily fail-closed below.
-}
-
-#[tokio::test]
 async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("reborn.db");
