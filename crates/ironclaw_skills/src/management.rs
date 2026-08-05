@@ -203,6 +203,25 @@ impl SkillSource {
     }
 }
 
+/// Where a skill's bundled files become runnable, once the skill is activated.
+///
+/// Must match `ironclaw_first_party_extension_ports::bundle_staging`, which does the staging and
+/// advertises the same spelling in the injected skill body. Duplicated as a literal rather than
+/// imported because that crate sits above this one; if the two ever disagree, the symptom is an agent
+/// running a command in a directory that does not exist.
+const RUNNABLE_SKILL_DIR_PREFIX: &str = "/workspace/.skills";
+
+/// The path a skill's files can be EXECUTED from, as opposed to where they are stored.
+///
+/// Reported so an agent never has to work this out by probing. It used to: `/skills/<name>` is the
+/// read-only, database-backed store and no process can open it, so an agent that installed a skill
+/// carrying a script and tried to verify it ran `ls`, hand-copied the file to its workspace, compared
+/// the copies, and then asserted -- wrongly -- that "the installed skill's script is directly
+/// executable from the skill root". Ten demo runs spent most of their tool calls on this.
+pub fn runnable_skill_dir(skill_name: &str) -> String {
+    format!("{RUNNABLE_SKILL_DIR_PREFIX}/{skill_name}")
+}
+
 pub fn skill_summary_json(skill: &SkillSummary) -> serde_json::Value {
     serde_json::json!({
         "name": skill.name,
@@ -212,6 +231,9 @@ pub fn skill_summary_json(skill: &SkillSummary) -> serde_json::Value {
         "keywords": skill.keywords,
         "tags": skill.tags,
         "requires_skills": skill.requires_skills,
+        // Storage vs execution, stated rather than discovered.
+        "store_path_read_only": format!("/skills/{}", skill.name),
+        "runnable_path_after_activation": skill.has_scripts.then(|| runnable_skill_dir(&skill.name)),
     })
 }
 

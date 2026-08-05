@@ -171,6 +171,12 @@ async fn dispatch_install(
         "path": installed.scoped_path,
         "source": installed.source.as_str(),
         "files_installed": files.len(),
+        // Storage and execution are different places, so say both. `path` is the read-only,
+        // database-backed store; no process can open it. Without this an agent that installed a
+        // scripted skill and tried to verify it probed `/skills`, hand-copied the file into its
+        // workspace to run it, and then claimed the store path was executable -- which it is not.
+        "runnable_path_after_activation": (!files.is_empty())
+            .then(|| ironclaw_skills::runnable_skill_dir(&installed.name)),
     }))
 }
 

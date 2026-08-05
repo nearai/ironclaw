@@ -36,14 +36,20 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             SKILL_LIST_CAPABILITY_ID,
-            "List Reborn filesystem skills visible to the current standalone agent",
+            // States the storage/execution split once, so an agent never probes for it. Each entry
+            // reports both `store_path_read_only` and `runnable_path_after_activation`.
+            "List Reborn filesystem skills visible to the current standalone agent. Each skill reports where it is stored (read-only, not executable) and, for a skill carrying bundled files, where those files can be run from once the skill is activated",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             SKILL_INSTALL_CAPABILITY_ID,
-            "Install a SKILL.md document, HTTPS SKILL.md URL, ZIP bundle, or GitHub skill repository/tree into the current user's Reborn skill root",
+            // The result carries `runnable_path_after_activation` for a bundle with files. Said here
+            // too, because an agent that installed a scripted skill previously tried to execute it
+            // from the store path, failed, hand-copied the file, and then asserted the store path was
+            // executable -- which it is not, in any deployment.
+            "Install a SKILL.md document, HTTPS SKILL.md URL, ZIP bundle, or GitHub skill repository/tree into the current user's Reborn skill root. The skill root is read-only and never executable; bundled files become runnable in the workspace once the skill is activated, at the path this returns",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
