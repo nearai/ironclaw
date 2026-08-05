@@ -684,6 +684,37 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ["production package changed: ironclaw_wasm"],
         )
 
+    def test_wasm_wit_prefix_resolves_through_crate_inventory_when_nested(
+        self,
+    ) -> None:
+        """A family-moved ironclaw_wasm still routes WIT changes correctly.
+
+        Mocks `crate_directory` (rather than relying on the live repo's
+        current flat layout) to pin that `_wasm_wit_prefix` follows the
+        crate wherever it lives, mirroring
+        `test_frontend_prefix_resolves_through_crate_inventory_when_nested`.
+        Without this, `test_wit_only_change_is_owned_by_platform_and_compat`
+        would still pass even if `_wasm_wit_prefix` regressed to a
+        hardcoded `crates/ironclaw_wasm/wit/` literal, since it only
+        exercises the current flat layout.
+        """
+        planner._wasm_wit_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                return_value="crates/substrates/ironclaw_wasm",
+            ) as resolver:
+                plan = self.plan(
+                    "pull_request",
+                    ["crates/substrates/ironclaw_wasm/wit/tool.wit"],
+                )
+            resolver.assert_called_once_with("ironclaw_wasm", planner.ROOT)
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["changed_packages"], [])
+        finally:
+            planner._wasm_wit_prefix.cache_clear()
+
     def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
         for wit_path in ("wit/tool.wit", "crates/ironclaw_wasm/wit/tool.wit"):
             with self.subTest(wit_path=wit_path):
