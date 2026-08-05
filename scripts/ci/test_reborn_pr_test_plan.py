@@ -484,6 +484,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan("pull_request", [".github/workflows/nightly-deep-ci.yml"])
         self.assertEqual(plan["mode"], "none")
 
+    def test_planner_owns_its_own_files(self) -> None:
+        """The planner's own source and test files must plan, not fail closed.
+
+        Both live under `scripts/ci/`, which `PR_STATIC_CONTROL_PREFIXES`
+        owns wholesale — so a PR editing the planner itself gets a plan for
+        that edit instead of `unmapped test or CI path`.
+        """
+        plan = self.plan(
+            "pull_request",
+            [
+                "scripts/ci/reborn_pr_test_plan.py",
+                "scripts/ci/test_reborn_pr_test_plan.py",
+            ],
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(
+            plan["reasons"],
+            [
+                "static CI or workspace-policy checks own: "
+                "scripts/ci/reborn_pr_test_plan.py",
+                "static CI or workspace-policy checks own: "
+                "scripts/ci/test_reborn_pr_test_plan.py",
+            ],
+        )
+
     def test_coverage_policy_change_is_statically_validated_on_pr(self) -> None:
         plan = self.plan(
             "pull_request", ["tests/integration/coverage-floor.toml"]
