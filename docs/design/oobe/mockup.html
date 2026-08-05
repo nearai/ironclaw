@@ -200,8 +200,10 @@ h1,h2,h3,p{margin:0}
 /* Foundational: section-level dismiss X (top-right, both card + pill states) */
 #drawerDismiss{position:absolute;top:-3px;right:2px;z-index:4;width:26px;height:26px;display:none;place-items:center;border:0;border-radius:8px;background:var(--v2-canvas);box-shadow:-12px 0 12px 6px var(--v2-canvas);color:var(--v2-text-muted);cursor:pointer}
 .v-foundational #drawerDismiss{display:grid}
-/* expanded: centre on the "Suggested for you" header; collapsed: centre on the pill row */
-#carouselBlock.collapsed #drawerDismiss{top:5px}
+/* expanded: small X centred on the "Suggested for you" header.
+   collapsed: a full-height gutter pinned to the right edge — a gradient that fades
+   the pills out (transparent -> canvas) so they aren't visible past it; X sits in it. */
+#carouselBlock.collapsed #drawerDismiss{top:0;bottom:0;height:auto;right:0;width:64px;border-radius:0;background:linear-gradient(90deg,transparent,var(--v2-canvas) 42%);box-shadow:none;place-items:center end;padding-right:8px}
 #drawerDismiss:hover{color:var(--v2-text-strong)}
 #drawerDismiss svg{width:15px;height:15px}
 #carouselBlock.dismissed{display:none}
@@ -225,7 +227,7 @@ h1,h2,h3,p{margin:0}
 .v-foundational .taskdrawer{padding-bottom:2px}
 .taskdrawer::-webkit-scrollbar{display:none}
 #carouselBlock.collapsed .carousel{display:none}
-#carouselBlock.collapsed .taskdrawer{display:flex;padding-right:38px}
+#carouselBlock.collapsed .taskdrawer{display:flex;padding-right:14px}
 /* Vision: the drawer is a bordered frame that docks onto the composer, cards inset */
 .drawer-on #carouselBlock{border:1px solid var(--v2-panel-border);border-bottom:0;border-radius:15px 15px 0 0;background:var(--v2-surface);padding:12px 12px 8px;margin-bottom:0;box-shadow:var(--v2-card-shadow)}
 .drawer-on #carouselBlock .carousel{margin:0}
