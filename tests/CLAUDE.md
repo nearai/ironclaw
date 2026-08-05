@@ -170,6 +170,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | The exact prompt + tool surface sent to the model is snapshot-pinned per iteration | `golden_payload.rs` |
+| Their long conversations stay cheap: the cached system prefix never churns, so per-call context (the clock, loop-control nudges) rides the conversation tail instead of re-billing the whole prompt | `prompt_prefix_stability.rs` |
 | Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
@@ -427,6 +428,7 @@ entries.
 | Every lifecycle state-machine claim names executable evidence, with zero gaps | `test_state_machine_coverage.py` (12) |
 | The product-surface coverage report can't pass vacuously or hide lost evidence | `test_product_surface_coverage.py` (7) |
 | Playwright diagnostic artifacts stay bounded | `test_reborn_webui_harness_artifacts.py` (10) |
+| No mock-LLM test may churn the provider-cached prompt prefix — the `assert_prompt_cache_reuse` autouse fixture applies this to EVERY such test, and these self-tests prove the gate itself catches the regression, permits a tool-surface change, and does not false-positive across conversations | `test_prompt_cache_gate.py` (12) |
 
 > These gates fail loudly when coverage regresses. Prefer adding a row to one of their
 > registries over adding a line to §7.

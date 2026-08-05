@@ -1,3 +1,4 @@
+// arch-exempt: large_file, one match arm forced by the new Role::HostReminder variant (#6985); no new concern in this file, plan #6985
 //! OpenAI Codex Responses API client.
 //!
 //! Implements `LlmProvider` using the Responses API at
@@ -429,7 +430,7 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
             // System messages are handled separately as `instructions`
             vec![]
         }
-        Role::User => {
+        Role::User | Role::HostReminder => {
             let image_count = msg
                 .content_parts
                 .iter()

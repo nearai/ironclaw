@@ -7,6 +7,7 @@ via TOOL_CALL_PATTERNS.
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import uuid
 
 from aiohttp import web
 from mock_llm_trace import (
+    is_host_reminder_text,
     next_llm_trace_response,
     register_llm_trace_routes,
 )
@@ -1026,16 +1028,174 @@ def _message_text(msg: dict) -> str:
     return content
 
 
+def _is_host_reminder(msg: dict) -> bool:
+    # One definition, shared with the trace mock — see `is_host_reminder_text`.
+    return is_host_reminder_text(_message_text(msg))
+
+
+# ---------------------------------------------------------------------------
+# Prompt-cache prefix observer (#6985)
+#
+# Providers cache a *prefix* of the request. A cache hit needs request N+1 to
+# reproduce request N's leading bytes exactly, so anything that rewrites the
+# system block on every call silently multiplies input cost — the failure this
+# mock exists to catch, because no functional assertion in the suite can see it
+# (the model still answers correctly; it just costs 3.5x).
+#
+# What is gated vs. what is only measured:
+#
+#   * GATED — the system block changed while the advertised tool surface did
+#     NOT. There is no legitimate cause for that: it means per-call content
+#     (a clock, a nudge, a counter) is sitting in the cached prefix.
+#   * NOT GATED — the system block changed *together with* the tool surface.
+#     Installing an extension really does rewrite the capability list, and that
+#     invalidation is the correct price of a real change.
+#   * MEASURED ONLY — how much of the message history was reused. Compaction
+#     legitimately rewrites history, so this is a statistic for a ratchet to
+#     watch, not a per-request assertion.
+#
+# Every test that drives the mock gets the gate for free via the
+# `assert_prompt_cache_reuse` autouse fixture in conftest.py.
+# ---------------------------------------------------------------------------
+
+_cache_chains: dict[str, dict] = {}
+_cache_violations: list[dict] = []
+_cache_observations: list[dict] = []
+
+
+def _leading_system_text(messages: list[dict]) -> str:
+    """The provider-cached prompt prefix: the LEADING run of system messages.
+
+    Only the leading run — a system message after the first non-system message
+    is transcript-positioned content, not part of the cached prefix.
+    """
+    parts = []
+    for msg in messages:
+        if msg.get("role") != "system":
+            break
+        parts.append(_message_text(msg))
+    return "\n\n".join(parts)
+
+
+def _stable_history(messages: list[dict]) -> list[str]:
+    """Serialized non-system messages, minus the ephemeral host reminders.
+
+    Host reminders are replaced wholesale on every request by contract, so
+    including them would report churn the design intends.
+    """
+    out = []
+    for msg in messages:
+        if msg.get("role") == "system" or _is_host_reminder(msg):
+            continue
+        out.append(f"{msg.get('role')}\x00{_message_text(msg)}")
+    return out
+
+
+def _conversation_key(messages: list[dict]) -> str:
+    """Group requests belonging to one conversation.
+
+    The first real user message is stable for the life of a conversation and
+    differs between scenarios, which is all the grouping needs.
+
+    Known limitation: compaction replaces the head of the transcript, so a
+    compacted conversation reads as a new one and its cache accounting restarts.
+    That errs toward under-reporting rather than blaming a legitimate compaction
+    for churn. Pinned by `test_compaction_starts_a_new_chain_rather_than_reporting_churn`.
+    """
+    for msg in messages:
+        if msg.get("role") == "user" and not _is_host_reminder(msg):
+            return hashlib.sha256(_message_text(msg).encode()).hexdigest()[:16]
+    return "no-user-message"
+
+
+def _tool_surface_signature(tools: object) -> str:
+    """Fingerprint of the advertised tool surface.
+
+    A changed surface is the one legitimate reason for the system block to be
+    rewritten, so it is what distinguishes explained churn from a cache bug.
+    """
+    try:
+        return hashlib.sha256(
+            json.dumps(tools, sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+    except (TypeError, ValueError):
+        return "unserializable"
+
+
+def _observe_cache_prefix(messages: list[dict], tools: object) -> None:
+    key = _conversation_key(messages)
+    system_text = _leading_system_text(messages)
+    history = _stable_history(messages)
+    surface = _tool_surface_signature(tools)
+    previous = _cache_chains.get(key)
+
+    if previous is not None:
+        system_changed = system_text != previous["system"]
+        surface_changed = surface != previous["surface"]
+        if system_changed and not surface_changed:
+            _cache_violations.append(
+                {
+                    "conversation": key,
+                    "reason": "system_prompt_churn_without_tool_surface_change",
+                    "detail": _first_divergence(previous["system"], system_text),
+                    "request_index": previous["requests"],
+                }
+            )
+        reused = 0
+        for index, entry in enumerate(previous["history"]):
+            if index >= len(history) or history[index] != entry:
+                break
+            reused += 1
+        _cache_observations.append(
+            {
+                "conversation": key,
+                "system_reused": not system_changed,
+                "system_change_explained": system_changed and surface_changed,
+                "history_messages_reused": reused,
+                "history_messages_before": len(previous["history"]),
+                "history_rewritten": reused < len(previous["history"]),
+            }
+        )
+
+    _cache_chains[key] = {
+        "system": system_text,
+        "history": history,
+        "surface": surface,
+        "requests": (previous["requests"] + 1) if previous else 1,
+    }
+
+
+def _first_divergence(before: str, after: str) -> str:
+    """Human-readable excerpt around the first differing character."""
+    at = 0
+    for at, (a, b) in enumerate(zip(before, after)):
+        if a != b:
+            break
+    else:
+        at = min(len(before), len(after))
+    start = max(0, at - 60)
+    return (
+        f"diverges at char {at}: "
+        f"before={before[start : at + 90]!r} after={after[start : at + 90]!r}"
+    )
+
+
+def _reset_cache_observations() -> None:
+    _cache_chains.clear()
+    _cache_violations.clear()
+    _cache_observations.clear()
+
+
 def _last_user_content(messages: list[dict]) -> str:
     for msg in reversed(messages):
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not _is_host_reminder(msg):
             return _message_text(msg)
     return ""
 
 
 def _last_user_message(messages: list[dict]) -> dict:
     for msg in reversed(messages):
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not _is_host_reminder(msg):
             return msg
     return {}
 
@@ -1662,7 +1822,7 @@ def _find_tool_results(
     last_user_idx = -1
     if after_latest_user:
         for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
+            if messages[i].get("role") == "user" and not _is_host_reminder(messages[i]):
                 last_user_idx = i
                 break
 
@@ -2562,6 +2722,10 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     stream = body.get("stream", False)
     tools = body.get("tools")
     has_tools = bool(tools)
+    # Every request through this mock is also a prompt-cache observation, so
+    # cache regressions surface in whatever test happens to be running rather
+    # than needing a dedicated scenario (#6985).
+    _observe_cache_prefix(messages, tools)
     available_tool_names = _available_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
@@ -3488,6 +3652,29 @@ def main():
         _chat_requests.clear()
         return web.json_response({"ok": True})
 
+    async def get_cache_stats(request: web.Request) -> web.Response:
+        observations = _cache_observations
+        comparable = len(observations)
+        reused = sum(1 for o in observations if o["system_reused"])
+        return web.json_response(
+            {
+                # Requests that had a predecessor to compare against; the first
+                # request of a conversation can neither hit nor miss.
+                "comparable_requests": comparable,
+                "system_prefix_reused": reused,
+                "system_prefix_reuse_ratio": (reused / comparable) if comparable else None,
+                "explained_surface_changes": sum(
+                    1 for o in observations if o["system_change_explained"]
+                ),
+                "history_rewrites": sum(1 for o in observations if o["history_rewritten"]),
+                "violations": _cache_violations,
+            }
+        )
+
+    async def reset_cache_stats(request: web.Request) -> web.Response:
+        _reset_cache_observations()
+        return web.json_response({"ok": True})
+
     async def set_llm_faults(request: web.Request) -> web.Response:
         body = await request.json()
         faults = body.get("faults", [])
@@ -3543,6 +3730,8 @@ def main():
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
     app.router.add_get("/__mock/chat_requests", get_chat_requests)
     app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
+    app.router.add_get("/__mock/cache_stats", get_cache_stats)
+    app.router.add_post("/__mock/cache_stats/reset", reset_cache_stats)
     app.router.add_post("/__mock/llm_faults", set_llm_faults)
     app.router.add_get("/__mock/llm_faults", get_llm_faults)
     app.router.add_post("/__mock/llm_faults/reset", reset_llm_faults)

@@ -291,6 +291,78 @@ pub struct TraceLlm {
     captured_tool_definitions: Mutex<Vec<Vec<ToolDefinition>>>,
 }
 
+/// One request whose cached prompt prefix churned with no surface change.
+///
+/// Both fields are consumed through the `Debug` rendering in
+/// `assert_prompt_cache_prefix_stable`'s failure message, which the lint does
+/// not count as a read — and the many test binaries that mount this support
+/// tree without calling that assertion see them as dead. Same allow the
+/// sibling support modules carry for the same reason.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PromptCachePrefixChurn {
+    /// Index into `captured_requests()` of the request that diverged.
+    pub request_index: usize,
+    /// Human-readable excerpt around the first differing byte.
+    pub divergence: String,
+}
+
+/// The provider-cached prompt prefix: the LEADING run of system messages.
+///
+/// Only the leading run — a system message positioned after the first
+/// non-system message is transcript content, not part of the cached prefix.
+pub fn leading_system_block(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .take_while(|message| matches!(message.role, Role::System))
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn tool_surface_signature(tools: Option<&Vec<ToolDefinition>>) -> Vec<String> {
+    tools
+        .map(|defs| {
+            let mut names: Vec<String> = defs.iter().map(|def| def.name.clone()).collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default()
+}
+
+/// Excerpt around the first differing BYTE, clamped to char boundaries.
+///
+/// Byte offsets are what a cache actually compares; the clamping keeps the
+/// diagnostic printable when the divergence lands inside a multi-byte
+/// character (the prompt is full of em dashes, so this is the common case).
+pub fn first_divergence(before: &str, after: &str) -> String {
+    let at = before
+        .as_bytes()
+        .iter()
+        .zip(after.as_bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| before.len().min(after.len()));
+    format!(
+        "diverges at byte {at}: before={:?} after={:?}",
+        excerpt_around(before, at),
+        excerpt_around(after, at)
+    )
+}
+
+/// A window around `at`, with both ends walked back to a char boundary so the
+/// slice can never panic and never degrades to an unhelpful placeholder.
+fn excerpt_around(text: &str, at: usize) -> &str {
+    let mut start = at.saturating_sub(80).min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (at + 120).min(text.len());
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    &text[start..end]
+}
+
 /// Return the `last_user_message_contains` substring of a step, if any.
 fn step_hint(step: &TraceStep) -> Option<&str> {
     step.request_hint
@@ -458,6 +530,41 @@ impl TraceLlm {
     /// Clone of all captured request message lists.
     pub fn captured_requests(&self) -> Vec<Vec<ChatMessage>> {
         self.captured_requests.lock().unwrap().clone()
+    }
+
+    /// Requests whose provider-cached prompt prefix changed without a
+    /// tool-surface change to explain it (#6985).
+    ///
+    /// Providers cache a prefix of the request, so a system block that is
+    /// rewritten between calls means every call pays full input cost. No
+    /// functional assertion can see that — the model still answers correctly —
+    /// which is why it is checked structurally here, over the same capture the
+    /// other assertions read.
+    ///
+    /// A changed tool surface is the one legitimate cause (installing an
+    /// extension really does rewrite the capability list), so it is excluded.
+    /// Mirrors the `_observe_cache_prefix` gate in `tests/e2e/mock_llm.py`.
+    pub fn prompt_cache_prefix_churn(&self) -> Vec<PromptCachePrefixChurn> {
+        let requests = self.captured_requests();
+        let surfaces = self.captured_tool_definitions();
+        let mut churn = Vec::new();
+        for index in 1..requests.len() {
+            let before = leading_system_block(&requests[index - 1]);
+            let after = leading_system_block(&requests[index]);
+            if before == after {
+                continue;
+            }
+            let surface_changed = tool_surface_signature(surfaces.get(index - 1))
+                != tool_surface_signature(surfaces.get(index));
+            if surface_changed {
+                continue;
+            }
+            churn.push(PromptCachePrefixChurn {
+                request_index: index,
+                divergence: first_divergence(&before, &after),
+            });
+        }
+        churn
     }
 
     /// Clone of every `tools` argument the dispatcher / worker shipped to the

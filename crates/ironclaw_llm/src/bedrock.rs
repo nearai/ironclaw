@@ -1,3 +1,4 @@
+// arch-exempt: large_file, one match arm forced by the new Role::HostReminder variant (#6985); no new concern in this file, plan #6985
 //! AWS Bedrock LLM provider using the native Converse API.
 //!
 //! Uses `aws-sdk-bedrockruntime` to call `client.converse()` directly,
@@ -410,7 +411,7 @@ fn convert_messages(
                     system_blocks.push(SystemContentBlock::Text(msg.content.clone()));
                 }
             }
-            Role::User => {
+            Role::User | Role::HostReminder => {
                 // Flush any pending tool results as a User message first
                 flush_tool_results(&mut pending_tool_results, &mut bedrock_messages)?;
 
