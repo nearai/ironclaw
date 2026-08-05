@@ -23,7 +23,7 @@ branch_percent = 0.0
 
 [[exemption]]
 path = "crates/contracts/ironclaw_host_api/src/capability.rs"
-lines = [256]
+lines = [265]
 owner = "@nearai/runtime"
 reason = "Serde-backed struct field declaration has no executable LLVM line record."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
