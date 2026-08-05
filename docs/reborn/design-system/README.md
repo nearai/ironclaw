@@ -2,7 +2,7 @@
 
 **Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epic [#7038](https://github.com/nearai/ironclaw/issues/7038)
 
-**Documents:** [PROPOSAL.md](PROPOSAL.md) — the case, decisions & dependencies · [PLAN.md](PLAN.md) — phased execution · [CHECKLIST.md](CHECKLIST.md) — definition of done · [interactive artifact](https://claude.ai/code/artifact/371a2622-054c-404a-8992-f110e1fa3d5a) — visual review aid (schematics + phase map)
+**Documents:** [PROPOSAL.md](PROPOSAL.md) — the case, decisions & dependencies · [PLAN.md](PLAN.md) — phased execution · [CHECKLIST.md](CHECKLIST.md) — definition of done · [explorer.html](explorer.html) — self-contained interactive review aid (schematics + phase map; also published as a [claude.ai artifact](https://claude.ai/code/artifact/371a2622-054c-404a-8992-f110e1fa3d5a))
 
 > **North star:** a *governed, catalogued* WebUI design system that carries IronClaw to an AI/agentic-first UX — realized **natively** on our React 19 + Tailwind v4 stack, reviewed and regression-tested through **Storybook**, and evolved in **five predefined phases**.
 
@@ -73,5 +73,5 @@ The reskin/interaction phases carry hard prerequisites. Each has a proposed impl
 
 1. Skim this README for the shape and the phase table.
 2. Read [PROPOSAL.md](PROPOSAL.md) §1–§4 (decision + alternatives) and **§7 (dependencies)** — that's where the real risk lives.
-3. Open the [interactive artifact](https://claude.ai/code/artifact/371a2622-054c-404a-8992-f110e1fa3d5a) for the schematics and phase map.
+3. Open [explorer.html](explorer.html) for the schematics and phase map — a self-contained page (no build step); render it in-browser via [html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/docs/design-system-proposal/docs/reborn/design-system/explorer.html) if you don't want to clone.
 4. Challenge [CHECKLIST.md](CHECKLIST.md) (is this the right definition of done?) and argue [PLAN.md](PLAN.md) sequencing.
