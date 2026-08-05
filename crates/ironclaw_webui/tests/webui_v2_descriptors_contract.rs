@@ -21,7 +21,9 @@ use ironclaw_host_api::{action::NetworkMethod, ingress::IngressScopeSource};
 use ironclaw_webui::webui_v2::{
     WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER, WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
     WEBUI_V2_ROUTE_ADMIN_DELETE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
-    WEBUI_V2_ROUTE_ADMIN_GET_USER, WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
+    WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
+    WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT, WEBUI_V2_ROUTE_ADMIN_GET_USER,
+    WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS, WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
     WEBUI_V2_ROUTE_ADMIN_LIST_USERS, WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
     WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE, WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS,
     WEBUI_V2_ROUTE_ADMIN_UPDATE_USER, WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
@@ -213,6 +215,57 @@ fn expected_table() -> Vec<Expected> {
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
             effect_path: AllowedEffectPath::ProjectionOnly,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductSurface,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/artifact",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 6,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductSurface,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/runs/{run_id}/artifact",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LOGS,
@@ -1800,9 +1853,9 @@ fn default_route_table_preserves_every_non_artifact_descriptor_policy() {
     let default = default_route_lookup();
     let enabled = route_lookup();
     assert_eq!(
-        default.len() + 2,
+        default.len() + 5,
         enabled.len(),
-        "enabling regression exports must add exactly the run and thread artifact routes"
+        "enabling regression exports must add exactly the user and admin thread-scrape artifact routes"
     );
 
     for (route_id, descriptor) in &default {
@@ -1834,7 +1887,14 @@ fn regression_artifact_descriptors_follow_the_deployment_gate() {
         .map(|route| route.route_id().as_str().to_string())
         .collect();
     assert!(!default_ids.iter().any(|id| {
-        id == WEBUI_V2_ROUTE_GET_RUN_ARTIFACT || id == WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT
+        matches!(
+            id.as_str(),
+            WEBUI_V2_ROUTE_GET_RUN_ARTIFACT
+                | WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT
+                | WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS
+                | WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT
+                | WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT
+        )
     }));
 
     let enabled_ids: Vec<String> =
@@ -1851,6 +1911,21 @@ fn regression_artifact_descriptors_follow_the_deployment_gate() {
         enabled_ids
             .iter()
             .any(|id| id == WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT)
+    );
+    assert!(
+        enabled_ids
+            .iter()
+            .any(|id| id == WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS)
+    );
+    assert!(
+        enabled_ids
+            .iter()
+            .any(|id| id == WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT)
+    );
+    assert!(
+        enabled_ids
+            .iter()
+            .any(|id| id == WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT)
     );
 }
 

@@ -33,6 +33,10 @@ use ironclaw_product_contracts::operator_service::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+pub use ironclaw_product_contracts::product_wire::{
+    RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
+    RebornAdminThreadScrapeRunArtifactRequest,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
@@ -541,6 +545,18 @@ pub const ADMIN_USER_SECRETS_VIEW: ProductView<
     RebornAdminUserRequest,
     RebornAdminUserSecretsListResponse,
 > = ProductView::unpaginated("admin_user_secrets");
+pub const ADMIN_THREAD_SCRAPE_THREADS_VIEW: ProductView<
+    RebornAdminThreadScrapeListRequest,
+    RebornListThreadsResponse,
+> = ProductView::paginated("admin_thread_scrape_threads");
+pub const ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW: ProductView<
+    RebornAdminThreadScrapeArtifactRequest,
+    RebornThreadArtifact,
+> = ProductView::unpaginated("admin_thread_scrape_artifact");
+pub const ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW: ProductView<
+    RebornAdminThreadScrapeRunArtifactRequest,
+    RebornRunArtifact,
+> = ProductView::unpaginated("admin_thread_scrape_run_artifact");
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
@@ -2742,6 +2758,22 @@ where
             })
     }
 
+    async fn thread_scrape_subject(
+        &self,
+        caller: &ProductSurfaceCaller,
+        user_id: UserId,
+    ) -> Result<ProductSurfaceCaller, ProductSurfaceError> {
+        self.authorize_admin(caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        Ok(ProductSurfaceCaller::new(
+            caller.tenant_id.clone(),
+            user_id,
+            caller.agent_id.clone(),
+            caller.project_id.clone(),
+        ))
+    }
+
     /// Reject a mutation that would strand the tenant without an admin.
     /// `target` is the user's CURRENT record; `still_admin_after` is whether the
     /// user remains an active admin once the mutation lands. Re-reads the
@@ -3004,6 +3036,55 @@ where
             .require_admin_target(&caller.tenant_id, &user_id)
             .await?;
         Ok(RebornAdminUserResponse { user })
+    }
+
+    pub async fn list_admin_thread_scrape_threads(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeListRequest,
+    ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
+        let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+        self.build_threads_view(
+            subject,
+            ProductListThreadsRequest {
+                limit: request.limit,
+                cursor: request.cursor,
+                candidate_thread_id: None,
+                needs_approval: false,
+            },
+        )
+        .await
+    }
+
+    pub async fn build_admin_thread_scrape_artifact(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeArtifactRequest,
+    ) -> Result<RebornThreadArtifact, ProductSurfaceError> {
+        let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+        self.build_thread_artifact(
+            subject,
+            RebornThreadArtifactRequest {
+                thread_id: request.thread_id,
+            },
+        )
+        .await
+    }
+
+    pub async fn build_admin_thread_scrape_run_artifact(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeRunArtifactRequest,
+    ) -> Result<RebornRunArtifact, ProductSurfaceError> {
+        let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+        self.build_run_artifact(
+            subject,
+            RebornRunArtifactRequest {
+                thread_id: request.thread_id,
+                run_id: request.run_id,
+            },
+        )
+        .await
     }
 
     pub async fn create_admin_user(
@@ -3855,6 +3936,33 @@ where
                     .list_admin_user_secrets(caller, request.user_id)
                     .await?;
                 views::view_page(response)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_THREADS_VIEW.id => {
+                let mut request: RebornAdminThreadScrapeListRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self
+                    .list_admin_thread_scrape_threads(caller, request)
+                    .await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self
+                    .build_admin_thread_scrape_artifact(caller, request)
+                    .await?;
+                views::view_page(artifact)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self
+                    .build_admin_thread_scrape_run_artifact(caller, request)
+                    .await?;
+                views::view_page(artifact)
             }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;

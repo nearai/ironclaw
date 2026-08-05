@@ -209,7 +209,11 @@ function AdminRoute({ auth }) {
   if (!auth.isAdmin) {
     return (<Navigate to={defaultRoute} replace />);
   }
-  return (<AdminPage />);
+  return (
+    <AdminPage
+      threadScrapingEnabled={auth.regressionArtifactExportEnabled}
+    />
+  );
 }
 
 export function App() {

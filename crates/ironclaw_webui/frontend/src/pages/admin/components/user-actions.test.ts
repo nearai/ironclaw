@@ -170,6 +170,7 @@ function loadUsersView(harness) {
 
 function loadDetailModule(harness) {
   function ConfirmDialog() {}
+  function ThreadScrapingPanel() {}
   const module = runVmModuleForTest(
     "./user-detail.tsx",
     ["UserDetail", "UserDetailView"],
@@ -186,6 +187,7 @@ function loadDetailModule(harness) {
       useAdminUsers: () => baseAdminState(),
       useUsage: () => ({}),
       UserSecretsPanel: function UserSecretsPanel() {},
+      ThreadScrapingPanel,
       formatRelativeTime: () => "never",
       formatCost: () => "$0",
       formatTokenCount: () => "0",
@@ -201,7 +203,7 @@ function loadDetailModule(harness) {
     },
     import.meta.url,
   );
-  return { ...module, ConfirmDialog };
+  return { ...module, ConfirmDialog, ThreadScrapingPanel };
 }
 
 function loadDetailView(harness) {
@@ -216,6 +218,20 @@ test("user detail view is keyed by user id so local state resets between users",
 
   assert.equal(rendered.type.name, "UserDetailView");
   assert.equal(rendered.props.key, "user-2");
+});
+
+test("user detail exposes thread scraping only when the deployment gate is enabled", () => {
+  const harness = createReactHarness();
+  const { UserDetailView: View, ThreadScrapingPanel } = loadDetailModule(harness);
+  const props = {
+    onBack: () => {},
+    userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
+    usageQuery: { data: { usage: [] } },
+    adminState: baseAdminState(),
+  };
+
+  assert.equal(findByType(harness.render(View, props), ThreadScrapingPanel), null);
+  assert.ok(findByType(harness.render(View, { ...props, threadScrapingEnabled: true }), ThreadScrapingPanel));
 });
 
 test("users list shows activate and role failures and disables actions while pending", () => {

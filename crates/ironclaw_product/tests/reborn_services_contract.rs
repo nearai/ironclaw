@@ -142,6 +142,7 @@ use ironclaw_product::{
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
     RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
@@ -15522,6 +15523,66 @@ fn admin_services(fake: FakeAdminUsers) -> RebornServices {
 fn assert_forbidden(err: ProductSurfaceError) {
     assert_eq!(err.status_code, 403, "expected a 403 authorization failure");
     assert_eq!(err.code, ProductSurfaceErrorCode::Forbidden);
+}
+
+#[tokio::test]
+async fn admin_thread_scraping_reads_only_the_selected_users_threads() {
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+    setup_owned_thread(&services, caller(), "thread-admin").await;
+    setup_owned_thread(&services, caller_for_user("user-beta"), "thread-target").await;
+    let target = UserId::new("user-beta").expect("target user");
+
+    let threads = services
+        .list_admin_thread_scrape_threads(
+            caller(),
+            RebornAdminThreadScrapeListRequest {
+                user_id: target.clone(),
+                limit: Some(50),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("admin thread scrape list");
+
+    assert_eq!(threads.threads.len(), 1);
+    assert_eq!(threads.threads[0].thread_id.as_str(), "thread-target");
+
+    let artifact = services
+        .build_admin_thread_scrape_artifact(
+            caller(),
+            RebornAdminThreadScrapeArtifactRequest {
+                user_id: target,
+                thread_id: "thread-target".to_string(),
+            },
+        )
+        .await
+        .expect("admin thread scrape artifact");
+    assert_eq!(artifact.thread_id, "thread-target");
+}
+
+#[tokio::test]
+async fn admin_thread_scraping_rejects_a_non_admin_before_reading_threads() {
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let error = services
+        .list_admin_thread_scrape_threads(
+            caller(),
+            RebornAdminThreadScrapeListRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                limit: Some(50),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("member must not scrape threads");
+
+    assert_forbidden(error);
 }
 
 #[tokio::test]

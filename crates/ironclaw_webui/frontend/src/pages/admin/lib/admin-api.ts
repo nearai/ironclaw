@@ -40,6 +40,29 @@ export async function fetchAdminUser(id) {
   return normalizeUser(response?.user);
 }
 
+export async function fetchThreadScrapeThreads(userId, params) {
+  const query = new URLSearchParams();
+  if (params?.limit != null) query.set("limit", String(params.limit));
+  if (params?.cursor) query.set("cursor", params.cursor);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiFetch(
+    `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/thread-scrape/threads${suffix}`,
+    { signal: params?.signal },
+  );
+}
+
+export function fetchThreadScrapeArtifact(userId, threadId) {
+  return apiFetch(
+    `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/thread-scrape/threads/${encodeURIComponent(threadId)}/artifact`,
+  );
+}
+
+export function fetchThreadScrapeRunArtifact(userId, threadId, runId) {
+  return apiFetch(
+    `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/thread-scrape/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifact`,
+  );
+}
+
 export async function createAdminUser(payload) {
   const response = await apiFetch(`${ADMIN_BASE}/users`, {
     method: "POST",

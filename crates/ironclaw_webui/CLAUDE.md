@@ -180,6 +180,9 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
+| `webui.v2.admin.thread_scrape.list_threads` | GET | `/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads` | — | `ProductSurface` |
+| `webui.v2.admin.thread_scrape.get_thread_artifact` | GET | `/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/artifact` | — | `ProductSurface` |
+| `webui.v2.admin.thread_scrape.get_run_artifact` | GET | `/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProductSurface` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
@@ -214,6 +217,16 @@ fixture importer to reconstruct multiple turns without mixing threads. Export
 is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
 messages, 16 MiB of stored message data, or 20 MiB after redaction and log
 assembly. The endpoint is limited to six requests per caller per minute.
+
+The three `webui.v2.admin.thread_scrape.*` routes are mounted under the same
+default-off regression-artifact deployment gate. Product revalidates the real
+caller's active admin/owner role on every request, resolves the selected user
+within that tenant, and delegates to the existing caller-owned thread/run
+artifact builders under the selected user's read scope. They expose no thread
+mutation, turn submission, retry, gate, or tool-action path. Successful list
+and artifact reads emit identifier-only structured records to
+`ironclaw::thread_scrape_audit`; transcript content is never copied into the
+audit message.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only

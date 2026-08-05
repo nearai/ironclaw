@@ -126,6 +126,12 @@ pub const WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE: &str = "webui.v2.admin.set_user_ro
 pub const WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS: &str = "webui.v2.admin.list_user_secrets";
 pub const WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET: &str = "webui.v2.admin.put_user_secret";
 pub const WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET: &str = "webui.v2.admin.delete_user_secret";
+pub const WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS: &str =
+    "webui.v2.admin.thread_scrape.list_threads";
+pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT: &str =
+    "webui.v2.admin.thread_scrape.get_thread_artifact";
+pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT: &str =
+    "webui.v2.admin.thread_scrape.get_run_artifact";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -168,6 +174,11 @@ pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRETS: &str =
     "/api/webchat/v2/admin/users/{user_id}/secrets";
 pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRET: &str =
     "/api/webchat/v2/admin/users/{user_id}/secrets/{handle}";
+pub const WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS: &str =
+    "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads";
+pub const WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_ARTIFACT: &str =
+    "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/artifact";
+pub const WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_RUN_ARTIFACT: &str = "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/runs/{run_id}/artifact";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
@@ -348,6 +359,9 @@ pub fn webui_v2_routes_with_regression_artifact_export(
     if regression_artifact_export_enabled {
         routes.push(get_run_artifact_descriptor());
         routes.push(get_thread_artifact_descriptor());
+        routes.push(admin_list_thread_scrape_threads_descriptor());
+        routes.push(admin_get_thread_scrape_artifact_descriptor());
+        routes.push(admin_get_thread_scrape_run_artifact_descriptor());
     }
     routes
 }
@@ -570,6 +584,48 @@ fn admin_delete_user_secret_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn admin_list_thread_scrape_threads_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_get_thread_scrape_artifact_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_ARTIFACT,
+        read_policy(
+            thread_artifact_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_get_thread_scrape_run_artifact_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_RUN_ARTIFACT,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
         ),
     )
 }

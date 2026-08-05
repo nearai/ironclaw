@@ -41,7 +41,9 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
 };
 use ironclaw_product::{
-    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
+    ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
+    ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
+    ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
@@ -65,10 +67,12 @@ use ironclaw_product::{
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
-    RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
+    RebornAdminThreadScrapeRunArtifactRequest, RebornAdminUpdateUserProductRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornCreateProjectRequest,
     RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
@@ -968,6 +972,88 @@ impl StubServices {
                         }],
                     })
                     .expect("admin user secrets payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_THREAD_SCRAPE_THREADS_VIEW.id => {
+                let _: RebornAdminThreadScrapeListRequest =
+                    serde_json::from_value(query.params).expect("thread scrape list params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornListThreadsResponse {
+                        threads: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .expect("thread scrape list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id => {
+                let request: RebornAdminThreadScrapeArtifactRequest =
+                    serde_json::from_value(query.params).expect("thread scrape artifact params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornThreadArtifact {
+                        schema: THREAD_ARTIFACT_SCHEMA.to_string(),
+                        generated_at: Utc::now(),
+                        thread_id: request.thread_id,
+                        messages: Vec::new(),
+                        logs: RunArtifactLogs {
+                            source: "test".to_string(),
+                            available: true,
+                            complete: false,
+                            truncated: false,
+                            unavailable_reason: None,
+                            entries: Vec::new(),
+                        },
+                        redaction: RunArtifactRedaction {
+                            pipeline: "deterministic-trace-redactor-v1".to_string(),
+                            applied: false,
+                        },
+                    })
+                    .expect("thread scrape artifact payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id => {
+                let request: RebornAdminThreadScrapeRunArtifactRequest =
+                    serde_json::from_value(query.params)
+                        .expect("thread scrape run artifact params");
+                let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornRunArtifact {
+                        schema: RUN_ARTIFACT_SCHEMA.to_string(),
+                        generated_at: Utc::now(),
+                        thread_id: request.thread_id,
+                        run: RebornGetRunStateResponse {
+                            turn_id: "turn-artifact".to_string(),
+                            run_id,
+                            status: TurnStatus::Completed,
+                            event_cursor: EventCursor(1),
+                            accepted_message_ref: AcceptedMessageRef::new("msg:artifact")
+                                .expect("message ref"),
+                            resolved_run_profile_id: "default".to_string(),
+                            resolved_run_profile_version: 1,
+                            received_at: Utc::now(),
+                            checkpoint_id: None,
+                            gate_ref: None,
+                            failure: None,
+                            usage: None,
+                            cost: None,
+                        },
+                        messages: Vec::new(),
+                        logs: RunArtifactLogs {
+                            source: "test".to_string(),
+                            available: true,
+                            complete: false,
+                            truncated: false,
+                            unavailable_reason: None,
+                            entries: Vec::new(),
+                        },
+                        redaction: RunArtifactRedaction {
+                            pipeline: "deterministic-trace-redactor-v1".to_string(),
+                            applied: false,
+                        },
+                    })
+                    .expect("thread scrape run artifact payload"),
                     next_cursor: None,
                 })
             }
@@ -2425,6 +2511,65 @@ async fn get_thread_artifact_threads_path_into_request() {
     let request: RebornThreadArtifactRequest =
         serde_json::from_value(queries[0].params.clone()).expect("artifact params");
     assert_eq!(request.thread_id, "thread-x");
+}
+
+#[tokio::test]
+async fn admin_thread_scrape_routes_forward_target_user_and_artifact_scope() {
+    let services = Arc::new(StubServices::default());
+    let router = artifact_router_with(services.clone());
+    let run_id = "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18";
+
+    let list_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users/user-beta/thread-scrape/threads?limit=25")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let thread_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(
+                    "/api/webchat/v2/admin/users/user-beta/thread-scrape/threads/thread-x/artifact",
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(thread_response.status(), StatusCode::OK);
+
+    let run_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/webchat/v2/admin/users/user-beta/thread-scrape/threads/thread-x/runs/{run_id}/artifact"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(run_response.status(), StatusCode::OK);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 3);
+    assert_eq!(queries[0].view_id, ADMIN_THREAD_SCRAPE_THREADS_VIEW.id);
+    assert_eq!(queries[1].view_id, ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id);
+    assert_eq!(queries[2].view_id, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id);
+    assert_eq!(queries[0].params["user_id"], "user-beta");
+    assert_eq!(queries[0].params["limit"], 25);
+    assert_eq!(queries[1].params["thread_id"], "thread-x");
+    assert_eq!(queries[2].params["run_id"], run_id);
 }
 
 #[tokio::test]
