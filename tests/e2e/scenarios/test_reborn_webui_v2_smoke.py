@@ -1728,28 +1728,32 @@ async def test_reborn_v2_composer_takes_focus_from_sidebar_navigation(reborn_v2_
     async def composer_is_focused() -> bool:
         return await composer.evaluate("node => node === document.activeElement")
 
-    # Give the sidebar a thread to open later.
-    await composer.fill("first thread message")
+    # Give the sidebar a thread to open later. The serve fixture is shared
+    # across this module, so the sidebar already holds other tests' threads —
+    # tag this one so the row lookup below cannot match theirs.
+    marker = f"focus-nav-{uuid.uuid4().hex[:8]}"
+    await composer.fill(marker)
     await composer.press("Enter")
     await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
-        "first thread message", timeout=15000
+        marker, timeout=15000
     )
     await expect(composer).to_have_attribute(
         "data-send-disabled", "false", timeout=15000
     )
 
     sidebar = page.locator(SEL_V2["sidebar"])
-    # Pin the row by thread id: "+ New" prepends a row, and a `.first` locator
-    # resolves lazily, so it would silently retarget the new empty thread.
-    first_thread_url = page.url
-    first_thread_id = first_thread_url.rsplit("/", 1)[-1]
-    assert first_thread_id, f"expected /chat/<id>, got {first_thread_url}"
+    # Pin the row by its own thread id, read off the DOM. "New" prepends a row
+    # and a `.first` locator resolves lazily, so it would silently retarget the
+    # new empty thread; the URL is not usable either (it stays on /chat).
+    marked_row = sidebar.locator(SEL_V2["thread_item"]).filter(has_text=marker)
+    await expect(marked_row).to_be_visible(timeout=15000)
+    first_thread_id = await marked_row.get_attribute("data-thread-id")
+    assert first_thread_id, "sidebar thread row must expose data-thread-id"
     existing_thread = sidebar.locator(
         f"{SEL_V2['thread_item']}[data-thread-id='{first_thread_id}']"
     )
-    await expect(existing_thread).to_be_visible(timeout=15000)
 
-    # "+ New": a real click, so the button holds focus until we take it back.
+    # "New": a real click, so the button holds focus until we take it back.
     new_button = sidebar.locator(SEL_V2["thread_new"])
     await expect(new_button).to_be_enabled(timeout=15000)
     await new_button.click()
@@ -1767,9 +1771,8 @@ async def test_reborn_v2_composer_takes_focus_from_sidebar_navigation(reborn_v2_
 
     # Opening an existing thread does the same.
     await existing_thread.click()
-    await expect(page).to_have_url(first_thread_url, timeout=15000)
     await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
-        "first thread message", timeout=15000
+        marker, timeout=15000
     )
     await page.wait_for_function(
         "selector => document.activeElement === document.querySelector(selector)",
