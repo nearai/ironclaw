@@ -2,17 +2,17 @@
 //! (PROPOSAL §6.1.3).
 //!
 //! [`AdminUserService`] is a dependency-inversion port: its only production
-//! implementation is `ironclaw_product`'s `RebornAdminUserDirectory`, over the
+//! implementation is `ironclaw_assistant`'s `RebornAdminUserDirectory`, over the
 //! identity user-directory and the per-user secret store. It was declared
-//! inside `ironclaw_product` so product and WebUI would not have to depend on
-//! `ironclaw_reborn_identity` — the right inversion in the wrong crate, since
+//! inside `ironclaw_assistant` so product and WebUI would not have to depend on
+//! `ironclaw_identity` — the right inversion in the wrong crate, since
 //! `ironclaw_extension_host` reads the same directory to resolve a channel
 //! actor's admin role and had to depend on product to do it.
 //!
 //! [`AdminApiTokenMinter`] is the second port of the same pair, inverted the
 //! other way: the adapter above *calls* it, and the implementation is the
 //! binary's session-token minter. Declared here (WS6, 2026-08-04) so neither
-//! the product adapter nor `ironclaw_reborn_cli` has to route the trait
+//! the product adapter nor `ironclaw_cli` has to route the trait
 //! through the composition root.
 //!
 //! The `Reborn*` HTTP wire DTOs that wrap these records live here too, since
@@ -134,7 +134,7 @@ pub const ADMIN_USER_LIST_MAX_LIMIT: usize = 200;
 ///
 /// A dependency-inversion port for the same reason [`AdminUserService`] is
 /// one: the implementation is a serve-layer concern (a `SignedTokenSessionStore`
-/// over the operator secret, built in `ironclaw_reborn_cli`), while the caller
+/// over the operator secret, built in `ironclaw_cli`), while the caller
 /// is the product-tier `AdminUserService` adapter. Declaring it here means
 /// neither side has to name the other's crate, and the trait carries no
 /// WebUI/ingress types — just the canonical identifiers and a `SecretString`.

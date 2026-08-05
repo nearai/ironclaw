@@ -8,7 +8,7 @@
 //! CORS allow / reject-with-configured-origin, descriptor body-limit 413
 //! and rate-limit 429 on the v2 service routes, and WebSocket
 //! same-origin 403 all live in
-//! `ironclaw_reborn_composition/tests/webui_v2_serve.rs`; OAuth CSRF
+//! `ironclaw_composition/tests/webui_v2_serve.rs`; OAuth CSRF
 //! state single-use, cross-provider replay, and redirect sanitization
 //! live in `google_oauth_routes.rs` / `pending.rs`.
 //!

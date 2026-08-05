@@ -18,7 +18,7 @@ extension (`slack_user`) auto-activated alongside the visible bot channel
   continuation; the `LifecycleActivation` variant is an unwired no-op; tool
   visibility is gated on the in-memory active registry.)
 - **Companion special-casing** — ~150 lines of Slack-named lifecycle in
-  `ironclaw_reborn_composition` under a plan-less `large_file` arch-exempt.
+  `ironclaw_composition` under a plan-less `large_file` arch-exempt.
 - **Least-privilege scopes** — every user tool, including read-only ones,
   requests the full 11-scope union with `chat:write`.
 - **Durability deferrals** — the PKCE verifier is process-local; the Slack
@@ -60,7 +60,7 @@ only if they have completed `slack_personal` OAuth.
 
 **Commit 1 — mechanical rename, no behavior change.** `slack` → `slack_bot`,
 `slack_user` → `slack`. ~200 lines across 26 files, concentrated in
-`ironclaw_reborn_composition` (id constants `SLACK_EXTENSION_ID` /
+`ironclaw_composition` (id constants `SLACK_EXTENSION_ID` /
 `SLACK_USER_EXTENSION_ID` in `available_extensions.rs`; asset dirs
 `assets/slack`→`slack_bot`, `assets/slack_user`→`slack`; string literals).
 Unchanged: `slack_bot_token`, `slack_user_token`, `slack_personal`.
@@ -113,7 +113,7 @@ Unchanged: `slack_bot_token`, `slack_user_token`, `slack_personal`.
 - **PR7:** start flow → drop in-memory state → callback recovers the verifier
   from the durable store; conversation binding survives a restart.
 - **Per PR:** `cargo fmt`; `cargo clippy --all --benches --tests --examples
-  --all-features`; `cargo test`; `cargo test -p ironclaw_architecture`; the
+  --all-features`; `cargo test`; `cargo test -p ironclaw_architecture_tests`; the
   webui descriptor-contract test if routes change; e2e / live-test skill and
   setup docs updated.
 

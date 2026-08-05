@@ -46,7 +46,7 @@ engine names belongs to that engine rather than to `vocabulary`.
 
 - Fast local check: `cargo test -p ironclaw_auth`
 - Lint check: `cargo clippy -p ironclaw_auth --all-targets -- -D warnings`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 

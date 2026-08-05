@@ -18,7 +18,9 @@ use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest};
+use ironclaw_extension_registry::{
+    ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest,
+};
 use ironclaw_host_api::host_port::{
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
 };
@@ -213,10 +215,10 @@ pub fn resolve_manifest_toml(toml: &str) -> ResolvedExtensionManifest {
 
 fn resolve(toml: &str) -> ResolvedExtensionManifest {
     let contracts = {
-        let mut registry = ironclaw_extensions::HostApiContractRegistry::new();
+        let mut registry = ironclaw_extension_registry::HostApiContractRegistry::new();
         registry
             .register(Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new().unwrap(),
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new().unwrap(),
             ))
             .unwrap();
         registry

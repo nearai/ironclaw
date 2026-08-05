@@ -7,7 +7,7 @@
 - Use these Reborn contracts before changing behavior:
   - `docs/reborn/contracts/events.md`
   - `docs/reborn/contracts/events-projections.md`
-  - `crates/ironclaw_events/AGENTS.md`
+  - `crates/ironclaw_event_log/AGENTS.md`
   - `crates/ironclaw_outbound/AGENTS.md`
 
 ## What This Crate Owns
@@ -29,7 +29,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_event_projections`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 - Run outbound/product workflow tests when projection shape changes affect delivery candidates or UI-visible feeds.
 
 ## Agent Notes

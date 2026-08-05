@@ -9,7 +9,7 @@ present. Cross-crate behavior is specified under `docs/reborn/contracts/`.
 
 All product work belongs in the Reborn workspace under `crates/`. The shipping
 binary is `ironclaw` from the `ironclaw` package in
-`crates/ironclaw_reborn_cli`. Start with:
+`crates/ironclaw_cli`. Start with:
 
 - `.claude/skills/ironclaw-reborn-orientation/SKILL.md` for ownership and flow.
 - `.claude/skills/reborn-feature/SKILL.md` for cross-layer product work.
@@ -77,16 +77,16 @@ Stable ownership decisions:
 - Durable events, projections, and transport streams are separate contracts.
 - Authorization, approvals, resources, obligations, dispatch, and runtime lanes
   remain separate stages.
-- `ironclaw_product` owns product-facing orchestration and `ProductSurface`
+- `ironclaw_assistant` owns product-facing orchestration and `ProductSurface`
   descriptors; composition wires dependencies; WebUI owns HTTP/transport and
   frontend presentation.
 - Provider-neutral model contracts and provider implementations belong in
   `ironclaw_llm`; wrappers must delegate the complete provider trait.
-- Declarative extension metadata belongs in `ironclaw_extensions`; execution
+- Declarative extension metadata belongs in `ironclaw_extension_registry`; execution
   belongs in runtime lanes and host mediation.
 
 If adding a dependency would point from a lower neutral crate into product or
-composition, stop and run `cargo test -p ironclaw_architecture` before proceeding.
+composition, stop and run `cargo test -p ironclaw_architecture_tests` before proceeding.
 
 Subagent spawn creates and wires child runs only. Planning, execution,
 capability calls, checkpointing, gates, retries, and completion must continue

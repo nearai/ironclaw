@@ -62,7 +62,7 @@ use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 
 fn admin_configuration_fields(
-    resolved: &ironclaw_extensions::ResolvedExtensionManifest,
+    resolved: &ironclaw_extension_registry::ResolvedExtensionManifest,
 ) -> Vec<RecipeSecretField> {
     resolved
         .admin_configuration
@@ -289,7 +289,7 @@ impl HostedChannelSource {
         }
     }
 
-    fn resolved(&self) -> &ironclaw_extensions::ResolvedExtensionManifest {
+    fn resolved(&self) -> &ironclaw_extension_registry::ResolvedExtensionManifest {
         match self {
             Self::Deployment(binding) => binding.resolved.as_ref(),
             Self::Active(active) => active.resolved.as_ref(),

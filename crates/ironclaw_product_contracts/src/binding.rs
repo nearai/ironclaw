@@ -9,7 +9,7 @@
 //! declared at the boundary, which is only possible now that its request and
 //! response DTOs name nothing but `ironclaw_host_api` and
 //! `ironclaw_extension_contracts` vocabulary. The error is the boundary error
-//! ([`ProductOperationFailure`]) for the same reason; `ironclaw_product`
+//! ([`ProductOperationFailure`]) for the same reason; `ironclaw_assistant`
 //! absorbs it into its workflow error with a total, discriminant-preserving
 //! `From`, so a product call site keeps every distinction it had.
 

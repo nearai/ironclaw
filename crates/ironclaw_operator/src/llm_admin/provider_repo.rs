@@ -9,7 +9,7 @@
 //! overrides it, because `ProviderRegistry::new` resolves later entries last.
 //!
 //! Writes are atomic (temp file + rename) and guarded by the same exclusive
-//! `.lock` sidecar discipline `ironclaw_reborn_config` uses for `config.toml`,
+//! `.lock` sidecar discipline `ironclaw_config` uses for `config.toml`,
 //! so concurrent CLI / webui edits cannot interleave.
 //!
 //! API-key *values* never live in this file — the catalog rejects inline

@@ -17,7 +17,7 @@ use ironclaw_event_streams::{
     ProjectionUpdateSource, ProjectionViewClass, PushCandidatesForUpdateRequest,
     SubscriberCapabilities, ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, keep_alive_item,
 };
-use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };

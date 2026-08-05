@@ -192,7 +192,7 @@ remaining-coverage items:
   guarding CAS loops (the no-mutex anti-pattern this epic's guardrail forbids)
   still live in `ironclaw_authorization` (`update_lease_cas` + `mutation_lock`),
   `ironclaw_processes` (`update_status` + `transition_lock`), and
-  `ironclaw_reborn_composition::slack_host_state`. Migrate onto `cas_update`,
+  `ironclaw_composition::slack_host_state`. Migrate onto `cas_update`,
   drop the mutex maps.
 - **#5467** — `InMemoryApprovalRequestStore::discard_pending` deletes the record
   instead of writing a `Discarded` tombstone, so it allows approval-request-id

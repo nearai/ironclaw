@@ -127,7 +127,7 @@ pub fn fake_rejection(kind: ProductRejectionKind, reason: &str) -> ProductReject
 /// It is deliberately *not* a stand-in for the production adapter's substrate
 /// behaviour: the lease protocol, the crypto and the backend error mapping all
 /// live behind the port and are pinned where they are implemented
-/// (`ironclaw_reborn_composition::operator_secret_store`). What this fake is
+/// (`ironclaw_composition::operator_secret_store`). What this fake is
 /// for is driving a caller's own policy and fail-closed paths — including the
 /// failing case, which a real store can only be pushed into with an injected
 /// backend fault.

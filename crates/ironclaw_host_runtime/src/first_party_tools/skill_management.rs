@@ -15,11 +15,11 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use async_trait::async_trait;
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_extension_support::skills::{
     SkillManagementCapabilityError, SkillManagementCapabilityKind,
     SkillManagementCapabilityRequest, SkillUrlFetchContext, dispatch, resolve_install_input,
 };
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::RuntimeDispatchErrorKind,

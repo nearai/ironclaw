@@ -40,7 +40,7 @@ Every rule below serves that.
   manifest and in the test, and widening it is a deliberate edit.
 - **No implementation of a port declared here.** `LoopExit` validation, the
   exit applier, the coordinator, and the state store are turn-kernel authority.
-  `Loop*Port` implementations live in `ironclaw_loop_host`, `ironclaw_runner`,
+  `Loop*Port` implementations live in `ironclaw_loop_host`, `ironclaw_turn_runner`,
   and `ironclaw_hooks` — the single declared decorator chain
   (`families/loop.md`).
 - **No prompt content, no model-gateway implementation.** (One inherited
@@ -66,7 +66,7 @@ Every rule below serves that.
   a new capability yet.
 - Add a port trait when the loop needs a new host-owned capability — and add
   its row to `LOOP_PORT_OWNERS` in
-  `crates/ironclaw_architecture/tests/reborn_loop_port_location_scan.rs` in the
+  `crates/ironclaw_architecture_tests/tests/reborn_loop_port_location_scan.rs` in the
   same change. The scan fails on an unowned port by design.
 - Add a new file when a contract has a separate lifecycle or validation model.
   No `common`, `misc`, or `helpers` modules.

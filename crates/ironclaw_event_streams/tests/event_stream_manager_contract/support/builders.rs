@@ -227,7 +227,7 @@ fn replay_with_activity_transition_thread(
 fn timeline_entry(scope: &ProjectionScope, cursor: u64, kind: TimelineEntryKind) -> TimelineEntry {
     TimelineEntry {
         cursor: EventCursor::new(cursor),
-        event_id: ironclaw_events::RuntimeEventId::new(),
+        event_id: ironclaw_event_log::RuntimeEventId::new(),
         timestamp: chrono::Utc::now(),
         kind,
         invocation_id: InvocationId::new(),

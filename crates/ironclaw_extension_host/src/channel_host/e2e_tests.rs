@@ -32,10 +32,20 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_assistant::{
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    DeliveryCoordinator, DeliveryRetryPolicy, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+};
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
@@ -62,16 +72,6 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
     DeliveryDefaultScope, OutboundDeliveryTargetEntry, RunFinalReplyDestination,
     WriteCommunicationPreferenceRequest,
-};
-use ironclaw_product::{
-    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    DeliveryCoordinator, DeliveryRetryPolicy, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
-    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_product_contracts::admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -247,7 +247,7 @@ struct Harness {
     /// The product-side factory the assembly builds every graph through — the
     /// triggered-delivery scenarios build their per-extension driver from the
     /// SAME one, as composition does.
-    workflow_factory: Arc<ironclaw_product::RebornChannelWorkflowFactory>,
+    workflow_factory: Arc<ironclaw_assistant::RebornChannelWorkflowFactory>,
     /// The store that factory wired into every triggered driver it builds.
     triggered_delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
 }
@@ -573,8 +573,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(in_memory_backed_outbound_state_store());
     // The production shape: composition builds ONE product-side workflow
     // factory and the assembly names no product type at all (§12.11 D-A).
-    let workflow_factory = Arc::new(ironclaw_product::RebornChannelWorkflowFactory::new(
-        ironclaw_product::RebornChannelWorkflowServices {
+    let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
+        ironclaw_assistant::RebornChannelWorkflowServices {
             filesystem: Arc::new(InMemoryBackend::new()),
             thread_service: Arc::new(threads.clone()),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -582,14 +582,14 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
-            identity: ironclaw_product::ChannelWorkflowIdentity {
+            identity: ironclaw_assistant::ChannelWorkflowIdentity {
                 tenant_id: identity.tenant_id.clone(),
                 agent_id: identity.agent_id.clone(),
                 project_id: identity.project_id.clone(),
                 operator_user_id: identity.operator_user_id.clone(),
             },
-            delivery: Some(ironclaw_product::ChannelWorkflowDeliveryServices {
-                project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+            delivery: Some(ironclaw_assistant::ChannelWorkflowDeliveryServices {
+                project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
                 coordinator: delivery_coordinator,
                 outbound_store,
                 route_store: Arc::clone(&route_store),
@@ -688,7 +688,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                 ExtensionManifestRef::new(extension_id.clone(), None),
                 Vec::new(),
                 chrono::Utc::now(),
-                ironclaw_extensions::InstallationOwner::Tenant,
+                ironclaw_extension_registry::InstallationOwner::Tenant,
             )
             .expect("installation"), // safety: static installation record is valid.
         )
@@ -833,9 +833,9 @@ async fn slack_test_extension_host_with_manifest_commands(
         if let Some(commands) = manifest_commands {
             manifest = replace_toml_array(&manifest, "commands", commands);
         }
-        ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
             manifest,
-            ironclaw_extensions::ManifestSource::HostBundled,
+            ironclaw_extension_registry::ManifestSource::HostBundled,
             &host_ports,
             None,
             &contracts,
@@ -1443,7 +1443,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1733,7 +1733,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1866,7 +1866,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
@@ -5329,7 +5329,7 @@ async fn slash_dispatcher_bare_returns_prefixed_help() {
 /// gate the JSON `shared_channel_slash_command_is_denied_with_notice`
 /// scenario pins — `post_command_feedback` addresses the rejection notice at
 /// `envelope.external_conversation_ref()` directly (verified by reading
-/// `crates/ironclaw_product/src/run_delivery/observer.rs`), independent of
+/// `crates/ironclaw_assistant/src/run_delivery/observer.rs`), independent of
 /// any shared-conversation binding/allowlist resolution, so the notice
 /// targets the invoking channel even though `C777` is never configured on
 /// `slack_allowed_channels` (only `C123` is). No command executes and no

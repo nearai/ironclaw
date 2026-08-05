@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
     HostApiContractRegistry, ManifestSource,
 };

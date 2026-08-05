@@ -381,7 +381,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extension_host::egress::{ApprovedChannelCredential, ApprovedChannelEgress};
-    use ironclaw_extensions::ExtensionRegistry;
+    use ironclaw_extension_registry::ExtensionRegistry;
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{
         action::NetworkMethod,

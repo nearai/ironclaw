@@ -7,7 +7,7 @@
 //! The product cone itself — the durable idempotency ledger and conversation
 //! binding at extension-keyed storage roots, the inbound-turn service, the
 //! product surface, the command admission policy, and the run-delivery
-//! observer — is `ironclaw_product`'s to build, and the host sits *below*
+//! observer — is `ironclaw_assistant`'s to build, and the host sits *below*
 //! product.
 //!
 //! So the host declares the shape and product supplies it: this factory is

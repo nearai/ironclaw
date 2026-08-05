@@ -17,17 +17,17 @@
 //! There are two durable external-identity stores in the Reborn stack and this
 //! is the *binding* one. It answers "which already-authenticated Reborn user is
 //! this channel actor?" and it **never mints a user**. Minting, the user
-//! profile, and the verified-email index belong to `ironclaw_reborn_identity`,
+//! profile, and the verified-email index belong to `ironclaw_identity`,
 //! which keys on `(tenant, surface_kind, provider_kind, provider_instance,
 //! subject)` and owns `resolve_or_create`. Neither store subsumes the other and
 //! neither is a migration target for the other; see
-//! `crates/ironclaw_reborn_identity/CONTRACT.md`, "Two external-identity
+//! `crates/ironclaw_identity/CONTRACT.md`, "Two external-identity
 //! stores", for the full split.
 //!
 //! Two consequences worth knowing before changing this file:
 //!
 //! * **The ports this implements stay in `ironclaw_host_api::user_identity`.**
-//!   Relocating them into `ironclaw_reborn_identity` was proposed and refuted
+//!   Relocating them into `ironclaw_identity` was proposed and refuted
 //!   (2026-08-04): that crate implements none of them, and because it depends on
 //!   `ironclaw_host_api` rather than the reverse, the move would force *this*
 //!   crate to take a new dependency purely to name a port it implements.

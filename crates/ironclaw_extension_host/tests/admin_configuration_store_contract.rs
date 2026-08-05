@@ -6,7 +6,7 @@ use ironclaw_extension_host::{
     AdminConfigurationReserveOutcome, AdminConfigurationStoreError, AdminConfigurationValueRef,
     FilesystemAdminConfigurationStore,
 };
-use ironclaw_extensions::AdminConfigurationGroupId;
+use ironclaw_extension_registry::AdminConfigurationGroupId;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::{InvocationId, SecretHandle, TenantId, UserId},

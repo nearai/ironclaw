@@ -49,7 +49,7 @@ Use `crates/ironclaw_agent_loop/src/planner.rs` as the sealed-trait template, th
 
 ## 3. Re-exports: facade vs laundering
 
-**GOOD — the house pattern**: a cross-crate re-export is legitimate exactly when a boundary test *closes the direct path*, and the re-export says so. From `crates/ironclaw_reborn_composition/src/lib.rs` (schematic):
+**GOOD — the house pattern**: a cross-crate re-export is legitimate exactly when a boundary test *closes the direct path*, and the re-export says so. From `crates/ironclaw_composition/src/lib.rs` (schematic):
 
 ```rust
 /// Re-exported so `reborn_cli` never depends on `ironclaw_host_api` directly;
@@ -63,9 +63,9 @@ Consumer named, enforcing test named, items listed explicitly. No test, no re-ex
 
 ## 4. Placement: composition vs owning crate
 
-**BAD — precedent-by-pollution**: "Slack's host code lives in `ironclaw_reborn_composition`, so mine can too." Existing delivery observer, host state, setup, and channel route code there is composition debt — not precedent.
+**BAD — precedent-by-pollution**: "Slack's host code lives in `ironclaw_composition`, so mine can too." Existing delivery observer, host state, setup, and channel route code there is composition debt — not precedent.
 
-**GOOD — the host-side product crate**: `ironclaw_webui` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
+**GOOD — the host-side product crate**: `ironclaw_webui` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
 
 ## 5. File budget and `arch-exempt` annotations
 

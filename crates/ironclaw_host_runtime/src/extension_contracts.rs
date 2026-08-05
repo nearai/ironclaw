@@ -2,12 +2,12 @@
 //!
 //! The two *default sets* this module used to define now live with the
 //! vocabulary they enumerate — `ironclaw_host_api::host_port::
-//! default_host_port_catalog` and `ironclaw_extensions::
+//! default_host_port_catalog` and `ironclaw_extension_registry::
 //! default_host_api_contract_registry` (WS3 row 3, PROPOSAL §6.5.9). What stays
 //! here is the discovery that binds them to a `RootFilesystem`, which is
 //! host-runtime's own job.
 
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionDiscovery, ExtensionError, ExtensionRegistry, HostApiContractRegistry,
     TolerantBoundedDiscovery, default_host_api_contract_registry,
 };
@@ -45,7 +45,7 @@ where
     ExtensionDiscovery::discover_with_manifest_contracts(
         fs,
         root,
-        ironclaw_extensions::ManifestSource::InstalledLocal,
+        ironclaw_extension_registry::ManifestSource::InstalledLocal,
         host_port_catalog,
         &contracts,
     )
@@ -90,7 +90,7 @@ where
     ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded(
         fs,
         root,
-        ironclaw_extensions::ManifestSource::InstalledLocal,
+        ironclaw_extension_registry::ManifestSource::InstalledLocal,
         &host_port_catalog,
         contracts,
         max_extensions,

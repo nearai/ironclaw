@@ -27,7 +27,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_wasm`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 - If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 
 ## Agent Notes

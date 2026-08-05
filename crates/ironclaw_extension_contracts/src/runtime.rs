@@ -9,15 +9,15 @@
 //! the registry crate that parses manifests.
 //!
 //! Deliberately *not* here: [`ExtensionPackage`][pkg] and [`ExtensionManifest`][man].
-//! Those stay in `ironclaw_extensions` — they carry the whole parsed manifest
+//! Those stay in `ironclaw_extension_registry` — they carry the whole parsed manifest
 //! tree and a `PackageRootBinding` typed on `ironclaw_filesystem::VirtualPath`,
 //! which the §11.2.3 contracts-purity allowlist (`{ironclaw_host_api}` only)
 //! forbids this crate from naming. A lane therefore receives the extension id,
 //! its capability descriptors, and this runtime descriptor — the three things it
 //! actually reads — rather than the package it may not depend on.
 //!
-//! [pkg]: https://docs.rs/ironclaw_extensions
-//! [man]: https://docs.rs/ironclaw_extensions
+//! [pkg]: https://docs.rs/ironclaw_extension_registry
+//! [man]: https://docs.rs/ironclaw_extension_registry
 
 use ironclaw_host_api::runtime::RuntimeKind;
 use thiserror::Error;
@@ -45,7 +45,7 @@ impl ExtensionAssetPathError {
 
 /// Manifest-local path for assets such as WASM modules.
 ///
-/// Resolution against a package root lives in `ironclaw_extensions`
+/// Resolution against a package root lives in `ironclaw_extension_registry`
 /// (`resolve_asset_under`) because it needs `ironclaw_filesystem::VirtualPath`,
 /// which this crate may not name. The orphan rule makes that a free function
 /// rather than an inherent method — the same cost the WS1.4 DTO moves recorded.
@@ -158,7 +158,7 @@ mod tests {
     /// Every rejection branch of the asset-path validator, plus the shapes it
     /// must keep accepting.
     ///
-    /// The validator moved here from `ironclaw_extensions` with the type it
+    /// The validator moved here from `ironclaw_extension_registry` with the type it
     /// constructs, where it was only ever reached indirectly through manifest
     /// parsing. A contracts crate that carries validation owes that validation
     /// a direct test — otherwise the reject branches are pinned by nothing.

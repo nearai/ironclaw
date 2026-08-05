@@ -6,7 +6,7 @@
 //! stub [`ProductSurface`] so the regression target is the wire
 //! contract — body shape, path/query plumbing, error mapping — not just
 //! the service method bodies that are already covered in
-//! `ironclaw_product`.
+//! `ironclaw_assistant`.
 
 // arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
 
@@ -27,20 +27,7 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
-use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::{
-    ids::{
-        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
-        ResultRef, TenantId, ThreadId, UserId,
-    },
-    resolution::{
-        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
-    },
-    result_meta::{ResultProgress, TerminateHint},
-    runtime::RuntimeKind,
-    safe_summary::SafeSummary,
-};
-use ironclaw_product::{
+use ironclaw_assistant::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
@@ -104,11 +91,24 @@ use ironclaw_product::{
     THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
     TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
-use ironclaw_product::{
+use ironclaw_assistant::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
+};
+use ironclaw_extension_contracts::state::LifecyclePublicState;
+use ironclaw_host_api::{
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
+        ResultRef, TenantId, ThreadId, UserId,
+    },
+    resolution::{
+        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
+    },
+    result_meta::{ResultProgress, TerminateHint},
+    runtime::RuntimeKind,
+    safe_summary::SafeSummary,
 };
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
@@ -2812,9 +2812,9 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // the captured RebornStreamEventsRequest — if a future refactor flips
     // the `.or()` order, the service will see cursor-B and this test fails.
     let header_cursor =
-        ironclaw_product::ProjectionCursor::new("cursor-from-header").expect("cursor");
+        ironclaw_assistant::ProjectionCursor::new("cursor-from-header").expect("cursor");
     let query_cursor =
-        ironclaw_product::ProjectionCursor::new("cursor-from-query").expect("cursor");
+        ironclaw_assistant::ProjectionCursor::new("cursor-from-query").expect("cursor");
     let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
     let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
     let query_encoded = url_encode(&query_json);
@@ -6851,7 +6851,7 @@ async fn stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime
 
 /// Build a minimal `ProductOutboundEnvelope` with a caller-supplied
 /// projection cursor and reply text. The exact payload shape is not the
-/// contract under test (it lives in `ironclaw_product`); these
+/// contract under test (it lives in `ironclaw_assistant`); these
 /// tests only care that whatever the service hands back becomes a
 /// well-formed SSE event.
 fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {

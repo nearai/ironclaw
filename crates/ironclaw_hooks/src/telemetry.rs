@@ -2,7 +2,7 @@
 //! summaries defined in `ironclaw_turns`.
 //!
 //! The `ironclaw_turns` crate cannot depend on `ironclaw_hooks` (that boundary
-//! is enforced by `ironclaw_architecture`). To let the dispatcher emit
+//! is enforced by `ironclaw_architecture_tests`). To let the dispatcher emit
 //! milestones into a `LoopHostMilestoneSink` without leaking hook-internal
 //! types across the seam, this module produces the string-shaped
 //! representations the milestone sink expects.

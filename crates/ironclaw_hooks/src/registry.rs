@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use ironclaw_events::RuntimeEventKind;
+use ironclaw_event_log::RuntimeEventKind;
 use ironclaw_host_api::ids::ExtensionId;
 use serde::{Deserialize, Serialize};
 

@@ -4,13 +4,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_host::{AdminConfigurationGroupState, AdminConfigurationService};
-use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
-use ironclaw_product::{
+use ironclaw_assistant::{
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
+use ironclaw_extension_host::{AdminConfigurationGroupState, AdminConfigurationService};
+use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
@@ -31,14 +31,14 @@ pub struct AdminConfigurationViewProvider {
 struct AdminConfigurationViewParts {
     service: Arc<ComposedAdminConfigurationService>,
     uses: Arc<Vec<AdminConfigurationCatalogUse>>,
-    installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
 }
 
 impl AdminConfigurationViewProvider {
     pub fn new(
         service: Arc<ComposedAdminConfigurationService>,
         uses: Vec<AdminConfigurationCatalogUse>,
-        installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+        installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
     ) -> Self {
         Self {
             parts: Some(Arc::new(AdminConfigurationViewParts {
@@ -166,7 +166,7 @@ pub fn caller_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
 /// `ProductSurfaceError` carries no free-text field at all, so the sanitized
 /// constant is the whole of what crosses the membrane.
 fn installed_extension_listing_error(
-    error: ironclaw_extensions::ExtensionInstallationError,
+    error: ironclaw_extension_registry::ExtensionInstallationError,
 ) -> ProductSurfaceError {
     tracing::debug!(
         error = %error,
@@ -245,7 +245,7 @@ fn service_error(
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
         ExtensionInstallationStorePort, ExtensionManifestRecord, MembershipDeactivation,
     };
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn a_secret_value_from_the_service_is_redacted_by_the_view() {
         use ironclaw_extension_host::AdminConfigurationFieldState;
-        use ironclaw_extensions::AdminConfigurationGroupId;
+        use ironclaw_extension_registry::AdminConfigurationGroupId;
         use ironclaw_host_api::ids::SecretHandle;
 
         let state = AdminConfigurationGroupState {
@@ -519,7 +519,7 @@ mod tests {
     /// wrong field, fails one half or the other.
     #[tokio::test]
     async fn a_used_by_entry_is_marked_installed_only_when_the_store_lists_it() {
-        use ironclaw_extensions::{
+        use ironclaw_extension_registry::{
             AdminConfigurationField, AdminConfigurationGroupId,
             ExtensionAdminConfigurationDescriptor, ExtensionManifestRef, InstallationOwner,
         };
@@ -593,7 +593,7 @@ mod tests {
     /// the descriptor set left to the caller so a case can register a group
     /// for the view to render.
     fn admin_configuration_service(
-        descriptors: Vec<ironclaw_extensions::ExtensionAdminConfigurationDescriptor>,
+        descriptors: Vec<ironclaw_extension_registry::ExtensionAdminConfigurationDescriptor>,
     ) -> ComposedAdminConfigurationService {
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
         let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());

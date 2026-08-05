@@ -16,7 +16,7 @@
 
 use std::{fmt, sync::Arc};
 
-use ironclaw_events::AuditSink;
+use ironclaw_event_log::AuditSink;
 use ironclaw_host_api::http::RuntimeHttpEgress;
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::ProcessRuntimePort;

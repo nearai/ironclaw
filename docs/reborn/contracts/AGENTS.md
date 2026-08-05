@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This directory is the **source of truth for Reborn boundary contracts** consumed by `ironclaw_host_api`, `ironclaw_capabilities`, and (after the Manifest v2 cutover) `ironclaw_extensions`.
+This directory is the **source of truth for Reborn boundary contracts** consumed by `ironclaw_host_api`, `ironclaw_capabilities`, and (after the Manifest v2 cutover) `ironclaw_extension_registry`.
 
 Files here are not implementation. They describe the vocabulary, validation rules, and capability profile contracts that Rust code in those crates must keep aligned with.
 

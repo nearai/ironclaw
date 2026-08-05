@@ -29,7 +29,7 @@ provenance — they are NOT live pointers on this branch. The structural map:
    The engine suite (`crates/ironclaw_auth/tests/auth_engine_contract.rs`) runs against
    those real bundled manifests.
 3. **The specificity scanner is present on this rollup** (unlike main):
-   `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs` /
+   `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs` /
    `reborn_retired_taxonomy.rs` exist here, so §0.5.1 is enforceable — but the folded
    changes are generic (no vendor literals in the engine), so nothing new trips it.
 
@@ -201,7 +201,7 @@ have no manifest in this tree. Nothing to verify.
   (real production code path over the FS backend).
 - [x] **A2a · Projection honors `expires_at`.** BUILT + TESTED (folded — verbatim structure match).
   `AuthGateRecord::to_view(now)` returns not-live for a non-terminal flow past `expires_at`
-  (`crates/ironclaw_product/src/auth_interaction/types.rs`), and
+  (`crates/ironclaw_assistant/src/auth_interaction/types.rs`), and
   `DefaultAuthInteractionService::list_pending` passes `chrono::Utc::now()`. RFC 6819 §5.1.5.3.
   **Proven:** `auth_interaction_contract::list_pending_auth_omits_flow_past_its_expiry`.
 - [ ] **A2b · Background flow-expiry sweep** — DEFERRED FOLLOW-UP (bounded; not shipped here). A2a

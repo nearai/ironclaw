@@ -59,7 +59,7 @@ const SECRET: &[u8] = b"contract-signing-secret";
 
 /// Channel-only manifest with a small body limit and the acme-shaped
 /// timestamped hmac recipe, so limit/verification ordering is observable.
-fn manifest() -> ironclaw_extensions::ResolvedExtensionManifest {
+fn manifest() -> ironclaw_extension_registry::ResolvedExtensionManifest {
     resolve_manifest_toml(
         r#"
 schema_version = "reborn.extension_manifest.v3"
@@ -581,7 +581,9 @@ fn signed_request(body: &[u8]) -> IngressRequest {
     }
 }
 
-fn active_binding_fingerprint(resolved: &ironclaw_extensions::ResolvedExtensionManifest) -> String {
+fn active_binding_fingerprint(
+    resolved: &ironclaw_extension_registry::ResolvedExtensionManifest,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"active");
     hasher.update([0]);
@@ -1598,7 +1600,9 @@ impl InboundSink for FetchingAdmissionSink {
     }
 }
 
-fn manifest_for_vendor(vendor_host: &str) -> ironclaw_extensions::ResolvedExtensionManifest {
+fn manifest_for_vendor(
+    vendor_host: &str,
+) -> ironclaw_extension_registry::ResolvedExtensionManifest {
     let rendered = format!(
         r#"
 schema_version = "reborn.extension_manifest.v3"

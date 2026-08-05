@@ -35,14 +35,14 @@ tree and each move is blocked by a **pinned rule**, not by taste:
   `ironclaw_llm` is `layer = "substrates"`, so the move either breaks the
   zero-exception contracts-only property WS1.2 just achieved or needs a new
   `LAYER_MATRIX_EXCEPTION` — and that ratchet is shrink-only.
-- `model_selection` — `ironclaw_reborn_openai_compat`'s boundary rule lists
+- `model_selection` — `ironclaw_openai_compat`'s boundary rule lists
   `ironclaw_llm` as **forbidden** outright. `ironclaw_llm` also has zero uses of
   this module, so the move would place a symbol in a crate that does not use it
   in order to serve two crates that may not reach it.
 - `llm_costs` — `ironclaw_llm` uses exactly two of its seven public items
   (`model_cost`, `default_cost`); the dominant consumers are `ironclaw_turn_runner`,
-  `ironclaw_reborn_composition`, and `ironclaw_product` (`RunCost`, a product
-  wire DTO). Moving it would hand `ironclaw_product` — the crate §6.9.1 exists
+  `ironclaw_composition`, and `ironclaw_assistant` (`RunCost`, a product
+  wire DTO). Moving it would hand `ironclaw_assistant` — the crate §6.9.1 exists
   to narrow — a `reqwest`/`rig-core`/Bedrock provider dependency for a pricing
   table. The real seam already exists as `ModelCostTable`; routing the static
   table behind that port is a design change, not a narrowing.
@@ -60,7 +60,7 @@ Do not treat these as precedent, and do not add a fourth.
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_common`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 - If a type is serialized over API or persisted data, add compatibility tests for stable names and validation behavior.
 
 ## Agent Notes

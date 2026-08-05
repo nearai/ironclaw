@@ -27,7 +27,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_event_streams --locked`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn --locked`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn --locked`
 - Run `cargo clippy -p ironclaw_event_streams --all-targets -- -D warnings` before requesting review.
 
 ## Agent Notes

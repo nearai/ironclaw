@@ -475,9 +475,9 @@ mod learning {
     ///
     /// This module declares the port and never the adapter: the only
     /// implementation over a live projection publisher is
-    /// `ironclaw_reborn_composition`'s `LiveSkillLearnedNotifier`, because the
+    /// `ironclaw_composition`'s `LiveSkillLearnedNotifier`, because the
     /// publisher is one of product's concrete types and naming it here was this
-    /// file's entire `ironclaw_product` dependency (CHECKLIST WS2 strays row).
+    /// file's entire `ironclaw_assistant` dependency (CHECKLIST WS2 strays row).
     /// Tests use a stub.
     pub trait SkillLearnedNotifier: Send + Sync {
         fn notify(

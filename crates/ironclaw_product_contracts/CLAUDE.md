@@ -42,7 +42,7 @@ Today that is twenty-six shipped modules (plus the dev-only `test_support`, gate
 | `inbound_requests` | The browser/API request bodies a transport hands to `ProductSurface` (`ProductSubmitTurnRequest`, `ProductCreateThreadRequest`, the cancel/gate/retry/setup/list bodies, `ProductInboundAttachment`). Field shapes and the `serde` contract only — normalization stays in product. |
 | `product_wire` | The `Reborn*` product wire DTO family every product transport serializes across the boundary. Payload vocabulary only: no service, handler, or projection reducer. |
 | `workspace_views` | Project and filesystem-browse wire vocabulary for the Projects page and the Workspace/Files explorer. The read ports that serve them stayed in product. |
-| `operator_secrets` | The operator control plane's secret-**value** port (`OperatorSecretValueStore`) and its opaque error. Implemented by `ironclaw_reborn_composition` — assembly is the only layer that may name both this port and `ironclaw_secrets` (PROPOSAL §8.2's product row). **Deliberately not a re-export of `SecretStorePort`:** no `ResourceScope` argument (the implementor fixes the operator scope), no lease/consume protocol, and an error carrying only a `&'static str` classification. Widening it back toward the substrate's shape undoes what CHECKLIST WS3 bought. |
+| `operator_secrets` | The operator control plane's secret-**value** port (`OperatorSecretValueStore`) and its opaque error. Implemented by `ironclaw_composition` — assembly is the only layer that may name both this port and `ironclaw_secrets` (PROPOSAL §8.2's product row). **Deliberately not a re-export of `SecretStorePort`:** no `ResourceScope` argument (the implementor fixes the operator scope), no lease/consume protocol, and an error carrying only a `&'static str` classification. Widening it back toward the substrate's shape undoes what CHECKLIST WS3 bought. |
 | `operator_service` | The deployment-operator control plane's three ports — `OperatorStatusService`, `OperatorLogsService`, `OperatorServiceLifecycleService` — their wire DTOs, and the log-context bound (`normalize_operator_log_context_value`). Implemented by `ironclaw_operator` except readiness status, which is composition's. Product keeps the `Unsupported*`/`Static*` doubles, the frozen view descriptors, and the operator *command-plane* envelope that wraps these DTOs. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
 | `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |
@@ -50,7 +50,7 @@ Today that is twenty-six shipped modules (plus the dev-only `test_support`, gate
 ## What must never be here
 
 The `ProductSurface` *implementation* and the frozen inventory of concrete
-commands/views/capabilities (`ironclaw_product`); any handler, admission,
+commands/views/capabilities (`ironclaw_assistant`); any handler, admission,
 delivery, or projection-reducer logic; HTTP of any kind (`axum` lives in
 `ironclaw_host_ingress`); vendor names (the specificity scanner polices this
 crate like any other); any implementation of a port declared here (§6.1.4's
@@ -73,7 +73,7 @@ inherited the dependency with the types rather than adding it.
 ## Admission tests
 
 Three architecture tests hold the line, all runnable with
-`cargo test -p ironclaw_architecture`:
+`cargo test -p ironclaw_architecture_tests`:
 
 - `reborn_dependency_boundaries.rs` — the §11.2.3 internal-dependency allowlist
   (`ironclaw_host_api` + `ironclaw_extension_contracts`, an allowlist so a
@@ -86,7 +86,7 @@ Three architecture tests hold the line, all runnable with
   trait from here; it also records exactly which re-exports are deliberately
   out of scope and why.
 - `reborn_service_method_freeze_ratchet.rs` — the `ProductSurface` method set
-  (`invoke`, `query`, `stream_events`) stays frozen, and `ironclaw_product` does
+  (`invoke`, `query`, `stream_events`) stays frozen, and `ironclaw_assistant` does
   not grow a second local product-surface trait.
 
 ## Rulings and known placements
@@ -114,7 +114,7 @@ sealed-evidence-minting row landed: that row split the *mint family* by trust
 role (channel/webhook to `ironclaw_extension_contracts::verified_inbound`,
 bearer/session kept in `ironclaw_host_api`) and replaced the `host-auth-mint`
 feature with witness grants, but §6.1.1 owns the evidence type itself and it did
-not move. Product is not a minter, and WS1.5 deleted both of `ironclaw_product`'s
+not move. Product is not a minter, and WS1.5 deleted both of `ironclaw_assistant`'s
 re-export paths to the family.
 
 **The auth-prompt view family went to the extension tier, not here.** §6.1.3
@@ -147,7 +147,7 @@ with it:
 | `ChannelConfigProductService` | `ironclaw_extension_manager` |
 | `LifecycleProductService` | `ironclaw_extension_manager` |
 | `RebornViewProvider` | `ironclaw_extension_manager` |
-**Two more it only consumes**, implemented in `ironclaw_reborn_composition`, and
+**Two more it only consumes**, implemented in `ironclaw_composition`, and
 they moved for the same reason — a port whose implementation sits outside
 product does not belong inside it: `AdminUserService`,
 `RebornOperatorToolCatalog`. Quote that test rather than this list when the
@@ -167,20 +167,20 @@ in product beside the route-kind grammar that derives them), and
 two reasons: they named `ProductSurfaceFailure`, which no longer blocks
 anything.* The residue is enumerated with its reasons and held
 shrink-only by
-`crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`;
+`crates/ironclaw_architecture_tests/tests/reborn_extension_host_port_inversion.rs`;
 **do not add a row there** — narrow the signature or move the type instead.
 
 The sibling gate `reborn_operator_port_inversion.rs` does the same job for
 `ironclaw_operator`, and its residue is **empty**: every port that crate
 implements is declared here. It additionally proves, through `cargo metadata`,
-that `ironclaw_operator` names no `ironclaw_product` dependency under any kind.
+that `ironclaw_operator` names no `ironclaw_assistant` dependency under any kind.
 Adding a product-declared port for the operator to implement will fail there
 before it fails anywhere else.
 
 **The error a port fails with lives here too** (`error::ProductOperationFailure`,
 WS2.2). It is the boundary vocabulary — six variants whose payloads are a plain
 `String` or nothing — so a crate below product can describe its own failure
-without naming product's workflow error. `ironclaw_product::ProductSurfaceFailure`
+without naming product's workflow error. `ironclaw_assistant::ProductSurfaceFailure`
 is the strict superset carrying the turn-kernel and interaction payloads only
 the workflow crate produces, and it absorbs this type with a total `From`.
 Two rules follow, both pinned by tests:
@@ -189,7 +189,7 @@ Two rules follow, both pinned by tests:
   move precisely because two of its variants carry `ironclaw_turns::TurnError`;
   reintroducing one re-creates the blocker, and the port-inversion scan fails on
   any mention of `TurnError`/`ironclaw_turns`/`ironclaw_auth`/`ironclaw_threads`/
-  `ironclaw_conversations`/`ironclaw_product` in `src/error.rs`.
+  `ironclaw_conversations`/`ironclaw_assistant` in `src/error.rs`.
 - **The projection to `ProductSurfaceError` is defined here once.** Product's
   `lifecycle_product_surface_error` delegates its matching arms to it rather than
   repeating the status choices, so the WebUI cannot get one answer through
@@ -213,7 +213,7 @@ name this module. Until it resolves:
   behind a neutral shape, not beside these six.
 - The two names the specificity scanner can see —
   `NearAiAuthProvider::{Github, Google}` — carry allowlist entries that were
-  **repointed** from `ironclaw_product`, not added. The baseline did not move
+  **repointed** from `ironclaw_assistant`, not added. The baseline did not move
   and must not move for this module.
 
 ## Deferred by design (not missing)
@@ -223,7 +223,7 @@ command/view/capability **descriptor types** now live in `descriptors`; the
 inbound request bodies in `inbound_requests`; the `Reborn*` response bodies in
 `product_wire`; the operator LLM-admin DTOs in `operator_llm`; the admin-user
 wire DTOs in `admin_users`; the project/filesystem-browse DTOs in
-`workspace_views`. What is still sourced from `ironclaw_product` and owed to the
+`workspace_views`. What is still sourced from `ironclaw_assistant` and owed to the
 WS5 **`operator`** row is the operator service *ports* themselves
 (`LlmConfigService`, `ActiveModelReader`, `OperatorLogsService`,
 `OperatorServiceLifecycleService`, `OperatorStatusService`) — they land with the
@@ -235,7 +235,7 @@ this crate the descriptor *types* and explicitly withholds "product's 27/33/18
 concrete constants, which stay in product as the frozen inventory". Those
 constants are what a route handler actually names to call the surface, so they
 are the whole reason `ironclaw_webui` (91 of them) and
-`ironclaw_reborn_openai_compat` (3) still depend on `ironclaw_product` after the
+`ironclaw_openai_compat` (3) still depend on `ironclaw_assistant` after the
 inversion. `reborn_transport_product_boundary.rs` pins the split in **both**
 directions — the moved vocabulary must be here, and a sample of the inventory
 must **not** be — so "finish the row" cannot quietly mean "move the inventory
@@ -246,4 +246,4 @@ cleanup.
 deciding: §6.1.3 names its "shape" for this crate, but `admit` takes a
 `&ProductCommand`, and §6.9.1 keeps the command grammar with product's frozen
 inventory. One of the two sections has to give; neither WS1.4 nor WS2's first
-row had standing to choose, so the port stayed in `ironclaw_product`.
+row had standing to choose, so the port stayed in `ironclaw_assistant`.

@@ -10,7 +10,7 @@
   `[dev-dependencies]`, and `[build-dependencies]` alike. That is now
   **enforced as an allowlist**, not just stated here:
   `assert_host_ingress_names_no_other_workspace_crate` in
-  `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` derives
+  `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` derives
   the forbidden set as "every workspace `ironclaw_*` crate except
   `ironclaw_host_api`", so a dependency nobody thought to blocklist still fails,
   and it reads every kind rather than only `normal`. The all-kinds scope is

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
+use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
-use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
     FilesystemOperation, Filter, InMemoryBackend, IndexKind, IndexName, IndexSpec,

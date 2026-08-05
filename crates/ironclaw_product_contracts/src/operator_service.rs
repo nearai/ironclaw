@@ -3,10 +3,10 @@
 //!
 //! Three ports and their wire vocabulary: operator readiness status, the
 //! operator log ring, and OS-service lifecycle control. None of them is
-//! implemented by `ironclaw_product` — the log ring and the service lifecycle
+//! implemented by `ironclaw_assistant` — the log ring and the service lifecycle
 //! live in `ironclaw_operator`, the readiness status in
-//! `ironclaw_reborn_composition` — which is exactly why declaring them here
-//! rather than in `ironclaw_product` un-inverts the ownership: the operator
+//! `ironclaw_composition` — which is exactly why declaring them here
+//! rather than in `ironclaw_assistant` un-inverts the ownership: the operator
 //! crate compiles against the product boundary instead of against the crate it
 //! sits beside.
 //!
@@ -66,7 +66,7 @@ fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
 }
 /// Deployment readiness for the operator surface.
 ///
-/// Implemented by `ironclaw_reborn_composition` (it is the only layer that can
+/// Implemented by `ironclaw_composition` (it is the only layer that can
 /// see every subsystem a readiness check reports on); product supplies the
 /// `Static`/`Unsupported` doubles.
 #[async_trait]

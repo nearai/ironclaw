@@ -55,7 +55,7 @@ sensitive by default. Apply the owning Reborn redaction obligation before
 logging, durable event append, projection, SSE/WebSocket delivery, model-visible
 results, or user-visible errors. Never add an unredacted observability path in
 parallel with the mediated host result. Re-verify the active redaction boundary
-with `rg -n "redact_output|redaction|sanitize" crates/ironclaw_host_runtime crates/ironclaw_events crates/ironclaw_event_streams`.
+with `rg -n "redact_output|redaction|sanitize" crates/ironclaw_host_runtime crates/ironclaw_event_log crates/ironclaw_event_streams`.
 
 Ingress review checklist:
 
@@ -132,4 +132,4 @@ Any change touching process ports, the planner's process/filesystem backend rule
 or the composition-profile → `(DeploymentMode, RuntimeProfile)` mapping requires a
 **two-user cross-tenant escape test** driven through the caller: user B runs a shell
 command and the test asserts it cannot read user A's files. Re-verify the current
-wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_reborn_composition crates/ironclaw_runtime_policy`.
+wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_composition crates/ironclaw_runtime_policy`.

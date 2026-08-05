@@ -2,7 +2,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_extensions::*;
+use ironclaw_extension_registry::*;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     host_port::HostPortCatalog,

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use ironclaw_config::{LlmSlotSelection, RebornBootConfig};
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
@@ -34,7 +35,6 @@ use ironclaw_product_contracts::operator_llm::{
     SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
-use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::llm_admin::llm_catalog::{apply_stored_api_key, resolve_against_registry};
@@ -1334,12 +1334,12 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_config::{RebornHome, RebornProfile};
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_product_contracts::test_support::fakes::{
         FakeOperatorSecretValueStore, OperatorSecretValueOp,
     };
-    use ironclaw_reborn_config::{RebornHome, RebornProfile};
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -1378,7 +1378,7 @@ mod tests {
     /// backend fault becomes `SecretStoreError::StoreUnavailable` and then an
     /// `OperatorSecretValueStoreError` carrying `"BackendUnavailable"` — is
     /// pinned where it now lives, at the port's implementor
-    /// (`ironclaw_reborn_composition::operator_secret_store`). What this helper
+    /// (`ironclaw_composition::operator_secret_store`). What this helper
     /// drives is the half that is still this crate's: the service fails loud
     /// rather than reporting a snapshot it could not verify.
     fn metadata_unavailable_secret_store() -> Arc<FakeOperatorSecretValueStore> {
@@ -2225,7 +2225,7 @@ mod tests {
 
     // ✎ WS3: `upsert_builtin_nearai_with_production_secret_store_succeeds` (the
     // #4673 system-scope write/read regression) moved to
-    // `crates/ironclaw_reborn_composition/tests/operator_llm_key_store_wiring.rs`.
+    // `crates/ironclaw_composition/tests/operator_llm_key_store_wiring.rs`.
     // Its whole value is wiring the secret store *exactly as production serve
     // does*, and after this crate lost its `ironclaw_secrets` edge (PROPOSAL
     // §8.2, §12.1b) "exactly as production" means the real store behind the
@@ -2241,9 +2241,8 @@ mod tests {
         crate::llm_admin::provider_admin::RebornProviderAdmin::new(boot.clone())
             .set_provider("nearai", Some("deepseek-ai/DeepSeek-V4-Flash"))
             .expect("persist active selection");
-        let config_file =
-            ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
-                .expect("load config file");
+        let config_file = ironclaw_config::RebornConfigFile::load(&boot.home().config_file_path())
+            .expect("load config file");
 
         let resolved =
             crate::llm_admin::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())

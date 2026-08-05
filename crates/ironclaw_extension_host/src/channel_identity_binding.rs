@@ -60,7 +60,8 @@ pub struct ChannelIdentityBindingConfig {
     pub tenant_id: TenantId,
     /// Generic discovery + scoping-value source. `None` when the composed
     /// runtime has no durable installation store — only overrides bind then.
-    pub installation_store: Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
+    pub installation_store:
+        Option<Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>>,
     /// Effective manifest-driven channel configuration, including tenant
     /// administrator values. `None` preserves the retired per-installation
     /// configuration source for compatibility and focused test fixtures.
@@ -83,7 +84,7 @@ impl ChannelIdentityBindingConfig {
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(
         tenant_id: TenantId,
-        installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+        installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
         binding_store: Arc<dyn RebornUserIdentityBindingStore>,
         rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     ) -> Self {
@@ -398,7 +399,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extension_contracts::channel_identity::ChannelConnectionScope;
     use ironclaw_extension_host::handle_declares_claim;
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionInstallationStorePort as _, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
@@ -512,7 +513,7 @@ app_id = "/app_id"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -565,7 +566,7 @@ app_id = "/app_id"
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
             installation_store: Some(Arc::clone(&installation_store)
-                as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>),
+                as Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>),
             channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),

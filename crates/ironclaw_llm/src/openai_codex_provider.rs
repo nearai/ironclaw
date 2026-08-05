@@ -7,15 +7,20 @@
 //! This mirrors OpenClaw's Responses API flow translated to Rust.
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
 
 /// OpenAI Codex Responses API provider.
@@ -30,6 +35,7 @@ struct AuthState {
 
 pub struct OpenAiCodexProvider {
     client: Client,
+    stream_idle_timeout: Duration,
     model: String,
     api_base_url: String,
     auth: RwLock<AuthState>,
@@ -39,7 +45,9 @@ impl OpenAiCodexProvider {
     /// Create a new provider.
     ///
     /// Extracts the `chatgpt_account_id` from the JWT token.
-    /// `request_timeout_secs` controls the HTTP client timeout (falls back to 300s).
+    /// `request_timeout_secs` bounds the wait for streaming response headers and
+    /// the idle gap between SSE events. The client has no overall request timeout,
+    /// so an active stream can run longer than this interval.
     pub fn new(
         model: &str,
         api_base_url: &str,
@@ -48,12 +56,13 @@ impl OpenAiCodexProvider {
     ) -> Result<Self, LlmError> {
         let account_id = extract_account_id(token)?;
         Ok(Self {
-            client: crate::config::hardened_client_builder(request_timeout_secs)
+            client: crate::config::hardened_streaming_client_builder()
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: "openai_codex".to_string(),
                     reason: format!("Failed to create HTTP client: {e}"),
                 })?,
+            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
             model: model.to_string(),
             api_base_url: api_base_url.trim_end_matches('/').to_string(),
             auth: RwLock::new(AuthState {
@@ -170,7 +179,11 @@ impl OpenAiCodexProvider {
     }
 
     /// Send a request and parse the SSE response stream.
-    async fn send_request(&self, body: serde_json::Value) -> Result<ParsedResponse, LlmError> {
+    async fn send_request_with_sink(
+        &self,
+        body: serde_json::Value,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<ParsedResponse, LlmError> {
         let url = format!("{}/responses", self.api_base_url);
         let headers = self.build_headers().await?;
 
@@ -180,17 +193,22 @@ impl OpenAiCodexProvider {
             "Sending Responses API request"
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "openai_codex".to_string(),
-                reason: format!("HTTP request failed: {e}"),
-            })?;
+        let response = tokio::time::timeout(
+            self.stream_idle_timeout,
+            self.client.post(&url).headers(headers).json(&body).send(),
+        )
+        .await
+        .map_err(|_| LlmError::RequestFailed {
+            provider: "openai_codex".to_string(),
+            reason: format!(
+                "timed out waiting {}s for streaming response headers",
+                self.stream_idle_timeout.as_secs()
+            ),
+        })?
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "openai_codex".to_string(),
+            reason: format!("HTTP request failed: {e}"),
+        })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -214,29 +232,101 @@ impl OpenAiCodexProvider {
                     None
                 });
 
-            let body_text = response.text().await.unwrap_or_default();
+            // silent-ok: the bounded provider error body is diagnostic only;
+            // status-based classification remains authoritative if reading it
+            // times out or fails.
+            let response_body = tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::error::read_bounded_provider_error_body(response),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            let body_text = String::from_utf8_lossy(&response_body);
             return Err(crate::error::map_provider_http_error(
                 crate::error::ProviderHttpError {
                     adapter: crate::error::ProductionModelAdapter::OpenAiCodex,
                     model: &self.model,
                     status: status.as_u16(),
-                    body: &body_text,
+                    body: body_text.as_ref(),
                     retry_after,
                 },
             ));
         }
 
-        // Read the full body and parse SSE events
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "openai_codex".to_string(),
-                reason: format!("Failed to read response body: {e}"),
-            })?;
+        let stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|error| error.to_string()));
+        parse_sse_stream(stream, self.stream_idle_timeout, sink).await
+    }
 
-        let body_text = String::from_utf8_lossy(&body_bytes);
-        parse_sse_response(&body_text)
+    async fn complete_inner(
+        &self,
+        request: CompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(&messages, None);
+        let parsed = self.send_request_with_sink(body, sink).await?;
+
+        Ok(CompletionResponse {
+            content: parsed.text_content,
+            input_tokens: parsed.input_tokens,
+            output_tokens: parsed.output_tokens,
+            finish_reason: parsed.finish_reason,
+            reasoning: parsed.reasoning,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools_inner(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let name_map: std::collections::HashMap<String, String> = request
+            .tools
+            .iter()
+            .filter_map(|tool| {
+                let sanitized = sanitize_tool_name(&tool.name);
+                (sanitized != tool.name).then(|| (sanitized, tool.name.clone()))
+            })
+            .collect();
+        let body = self.build_request_body(&messages, Some(&request.tools));
+        let mut parsed = self.send_request_with_sink(body, sink).await?;
+
+        for tool_call in &mut parsed.tool_calls {
+            if let Some(original) = name_map.get(&tool_call.name) {
+                tool_call.name = original.clone();
+            }
+        }
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut parsed.tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
+        let finish_reason = if parsed.tool_calls.is_empty() {
+            parsed.finish_reason
+        } else {
+            FinishReason::ToolUse
+        };
+
+        Ok(ToolCompletionResponse {
+            content: (!parsed.text_content.is_empty()).then_some(parsed.text_content),
+            tool_calls: parsed.tool_calls,
+            input_tokens: parsed.input_tokens,
+            output_tokens: parsed.output_tokens,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: parsed.reasoning,
+            reasoning_details: None,
+        })
     }
 }
 
@@ -259,88 +349,30 @@ impl LlmProvider for OpenAiCodexProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None);
-        let parsed = self.send_request(body).await?;
+        self.complete_inner(request, None).await
+    }
 
-        Ok(CompletionResponse {
-            content: parsed.text_content,
-            input_tokens: parsed.input_tokens,
-            output_tokens: parsed.output_tokens,
-            finish_reason: parsed.finish_reason,
-            reasoning: parsed.reasoning,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.complete_inner(request, Some(sink)).await
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
+        self.complete_with_tools_inner(request, None).await
+    }
 
-        // Build a reverse map so we can translate sanitized names back to originals.
-        // Only needed when sanitization actually changes a name (e.g. MCP tools with dots).
-        let name_map: std::collections::HashMap<String, String> = request
-            .tools
-            .iter()
-            .filter_map(|t| {
-                let sanitized = sanitize_tool_name(&t.name);
-                if sanitized != t.name {
-                    Some((sanitized, t.name.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let body = self.build_request_body(&messages, Some(&request.tools));
-        let mut parsed = self.send_request(body).await?;
-
-        // Reverse-map sanitized tool names back to originals so the caller
-        // can look them up in the tool registry.
-        if !name_map.is_empty() {
-            for tc in &mut parsed.tool_calls {
-                if let Some(original) = name_map.get(&tc.name) {
-                    tc.name = original.clone();
-                }
-            }
-        }
-
-        // Strict-mode tool schemas advertise every optional as required+nullable,
-        // so the model fills unset optionals with `null` (or `""` for some codex
-        // models). Strip those placeholders against each tool's original schema so
-        // only provided values reach the tool.
-        crate::tool_schema::strip_unset_optional_fields(
-            &mut parsed.tool_calls,
-            &request.tools,
-            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
-        );
-
-        let finish_reason = if !parsed.tool_calls.is_empty() {
-            FinishReason::ToolUse
-        } else {
-            parsed.finish_reason
-        };
-
-        Ok(ToolCompletionResponse {
-            content: if parsed.text_content.is_empty() {
-                None
-            } else {
-                Some(parsed.text_content)
-            },
-            tool_calls: parsed.tool_calls,
-            input_tokens: parsed.input_tokens,
-            output_tokens: parsed.output_tokens,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning: parsed.reasoning,
-            reasoning_details: None,
-        })
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.complete_with_tools_inner(request, Some(sink)).await
     }
 
     /// Returns empty — Codex uses subscription-based access with a fixed model,
@@ -564,6 +596,72 @@ struct FunctionCallState {
     call_id: String,
     name: String,
     arguments: String,
+}
+
+/// Consume the Responses API incrementally, publishing text deltas while
+/// retaining the established full-response parser as the authority for tool
+/// calls, usage, finish reasons, and terminal validation.
+async fn parse_sse_stream<S>(
+    stream: S,
+    idle_timeout: Duration,
+    sink: Option<Arc<dyn CompletionStreamSink>>,
+) -> Result<ParsedResponse, LlmError>
+where
+    S: Stream<Item = Result<bytes::Bytes, String>> + Unpin,
+{
+    let mut stream = stream.eventsource();
+    let mut collected = String::new();
+
+    loop {
+        let event = tokio::time::timeout(idle_timeout, stream.next())
+            .await
+            .map_err(|_| LlmError::StreamInterrupted {
+                provider: "openai_codex".to_string(),
+                reason: format!("SSE stream was idle for {} seconds", idle_timeout.as_secs()),
+            })?;
+        let Some(event) = event else {
+            break;
+        };
+        let event = event.map_err(|error| LlmError::StreamInterrupted {
+            provider: "openai_codex".to_string(),
+            reason: format!("Failed to read SSE stream: {error}"),
+        })?;
+        let data = event.data.trim();
+        if data.is_empty() {
+            continue;
+        }
+
+        collected.push_str("data: ");
+        collected.push_str(data);
+        collected.push_str("\n\n");
+
+        if data == "[DONE]" {
+            return parse_sse_response(&collected);
+        }
+
+        let parsed = serde_json::from_str::<SseEvent>(data).ok();
+        if let Some(delta) = parsed
+            .as_ref()
+            .filter(|event| event.event_type == "response.output_text.delta")
+            .and_then(|event| event.data.get("delta"))
+            .and_then(|delta| delta.as_str())
+            .filter(|delta| !delta.is_empty())
+            && let Some(sink) = sink.as_ref()
+        {
+            sink.text_delta(delta.to_string()).await;
+        }
+
+        if parsed.as_ref().is_some_and(|event| {
+            matches!(
+                event.event_type.as_str(),
+                "response.completed" | "response.failed" | "error"
+            )
+        }) {
+            return parse_sse_response(&collected);
+        }
+    }
+
+    parse_sse_response(&collected)
 }
 
 /// Parse the full SSE response body into a `ParsedResponse`.
@@ -883,6 +981,72 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 mod tests {
     use super::*;
     use crate::codex_test_helpers::make_test_jwt;
+    use futures::stream;
+
+    struct RecordingStreamSink {
+        sender: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.sender.send(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_parser_publishes_deltas_and_preserves_terminal_metadata() {
+        let stream = stream::iter(vec![
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
+            )),
+        ]);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingStreamSink { sender });
+
+        let parsed = parse_sse_stream(stream, Duration::from_secs(1), Some(sink))
+            .await
+            .expect("completed stream");
+
+        assert_eq!(receiver.recv().await.as_deref(), Some("Hello "));
+        assert_eq!(receiver.recv().await.as_deref(), Some("world"));
+        assert_eq!(parsed.text_content, "Hello world");
+        assert_eq!(parsed.input_tokens, 4);
+        assert_eq!(parsed.output_tokens, 2);
+        assert_eq!(parsed.finish_reason, FinishReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn streaming_parser_rejects_partial_eof_after_publishing_delta() {
+        let stream = stream::iter(vec![Ok(bytes::Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        ))]);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingStreamSink { sender });
+
+        let result = parse_sse_stream(stream, Duration::from_secs(1), Some(sink)).await;
+
+        assert_eq!(receiver.recv().await.as_deref(), Some("partial"));
+        assert!(matches!(result, Err(LlmError::StreamInterrupted { .. })));
+    }
+
+    #[tokio::test]
+    async fn streaming_parser_rejects_an_idle_stream_without_total_wall_clock_timeout() {
+        let stream = futures::stream::pending::<Result<bytes::Bytes, String>>();
+
+        let result = parse_sse_stream(stream, Duration::from_millis(1), None).await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::StreamInterrupted { reason, .. }) if reason.contains("idle")
+        ));
+    }
 
     #[test]
     fn test_extract_account_id_success() {

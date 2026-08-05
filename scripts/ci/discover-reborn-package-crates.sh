@@ -20,15 +20,15 @@ allowlist="$(
           | select(
               (
                 (.name == "ironclaw")
-                or (.name == "ironclaw_runner")
+                or (.name == "ironclaw_turn_runner")
                 or (.name | startswith("ironclaw_reborn"))
-                or (.name | startswith("ironclaw_product"))
-                or (.name == "ironclaw_architecture")
+                or (.name | startswith("ironclaw_assistant"))
+                or (.name == "ironclaw_architecture_tests")
                 or (.name == "ironclaw_slack_extension")
                 or (.name == "ironclaw_telegram_extension")
                 or (.name | startswith("ironclaw_webui"))
               )
-              and (.name != "ironclaw_reborn_integration_tests")
+              and (.name != "ironclaw_integration_tests")
             )
           | .name
         ]

@@ -10,7 +10,7 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     RuntimeDispatcher, ToolResolver,
 };
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     Timestamp,
@@ -436,7 +436,7 @@ impl ToolResolver for SingleCapabilityResolver {
 fn runtime_dispatcher_stack(
     output: Value,
 ) -> (
-    Arc<ironclaw_extensions::ExtensionRegistry>,
+    Arc<ironclaw_extension_registry::ExtensionRegistry>,
     RuntimeDispatcher<'static, InMemoryResourceGovernor>,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,

@@ -21,7 +21,9 @@ mod support;
 use std::sync::Arc;
 
 use ironclaw_authorization::{GrantAuthorizer, in_memory_backed_capability_lease_store};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     capability::{CapabilitySet, EffectKind},
@@ -466,11 +468,11 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
     }
 }
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");
