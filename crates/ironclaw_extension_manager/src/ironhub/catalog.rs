@@ -1,10 +1,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
-use ironclaw_host_api::{
-    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
-    approval::sha256_digest_token,
-};
+use ironclaw_host_api::action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
 use sha2::{Digest, Sha256};
 
 use crate::ironhub::{
@@ -203,27 +201,59 @@ pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySu
 }
 
 pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
-    let mut digest_material = format!(
-        "wasm:{}\0capabilities:{}\0",
-        entry.wasm.sha256, entry.capabilities.sha256
-    );
-    if let Some(manifest) = &entry.manifest {
-        digest_material.push_str("manifest:");
-        digest_material.push_str(&manifest.sha256);
-        digest_material.push('\0');
+    let mut hasher = package_digest_hasher(IronHubEntryKind::Tool, &entry.name);
+    hash_field(&mut hasher, &entry.version);
+    hash_field(&mut hasher, &entry.description);
+    hash_field(&mut hasher, entry.provenance.as_wire());
+    hash_artifact(&mut hasher, &entry.wasm);
+    hash_artifact(&mut hasher, &entry.capabilities);
+    match &entry.manifest {
+        Some(manifest) => {
+            hash_field(&mut hasher, "manifest-present");
+            hash_artifact(&mut hasher, manifest);
+        }
+        None => hash_field(&mut hasher, "manifest-absent"),
     }
+    hash_field(&mut hasher, "schemas");
+    hash_field(&mut hasher, &entry.schemas.len().to_string());
     for (path, artifact) in &entry.schemas {
-        digest_material.push_str("schema:");
-        digest_material.push_str(path);
-        digest_material.push('\0');
-        digest_material.push_str(&artifact.sha256);
-        digest_material.push('\0');
+        hash_field(&mut hasher, path);
+        hash_artifact(&mut hasher, artifact);
     }
-    sha256_digest_token(digest_material.as_bytes())
+    digest_token(hasher)
 }
 
-fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
-    sha256_digest_token(entry.skill_md.sha256.as_bytes())
+pub(crate) fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
+    let mut hasher = package_digest_hasher(IronHubEntryKind::Skill, &entry.name);
+    hash_field(&mut hasher, &entry.version);
+    hash_field(&mut hasher, &entry.description);
+    hash_field(&mut hasher, entry.provenance.as_wire());
+    hash_field(&mut hasher, &entry.trunk);
+    hash_artifact(&mut hasher, &entry.skill_md);
+    digest_token(hasher)
+}
+
+fn package_digest_hasher(kind: IronHubEntryKind, name: &str) -> Sha256 {
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, "ironhub-package-digest-v2");
+    hash_field(&mut hasher, kind.as_str());
+    hash_field(&mut hasher, name);
+    hasher
+}
+
+fn hash_artifact(hasher: &mut Sha256, artifact: &IronHubArtifact) {
+    hash_field(hasher, &artifact.url);
+    hash_field(hasher, &artifact.size_bytes.to_string());
+    hash_field(hasher, &artifact.sha256.to_ascii_lowercase());
+}
+
+fn hash_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn digest_token(hasher: Sha256) -> String {
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn compact_description(description: &str) -> String {
@@ -246,6 +276,24 @@ fn compact_description(description: &str) -> String {
 
 pub(crate) fn validate_manifest(manifest: &IronHubManifest) -> Result<(), IronHubCommandError> {
     validate_manifest_artifacts(manifest, None)
+}
+
+pub(crate) fn validate_manifest_freshness(
+    generated_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(), IronHubCommandError> {
+    let age = now.signed_duration_since(generated_at);
+    if age > Duration::seconds(super::model::MAX_MANIFEST_AGE_SECS) {
+        return Err(catalog(
+            "signed manifest is older than the 30-day freshness limit",
+        ));
+    }
+    if age < -Duration::seconds(super::model::MAX_MANIFEST_FUTURE_SKEW_SECS) {
+        return Err(catalog(
+            "signed manifest generated_at is more than 5 minutes in the future",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_private_manifest(

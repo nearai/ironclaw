@@ -373,7 +373,7 @@ async fn visible_surface_empty_registry_returns_deterministic_empty_version() {
 }
 
 #[tokio::test]
-async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
+async fn visible_surface_keeps_registry_and_local_descriptions_untrusted() {
     let registry_runtime = runtime_with(
         registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::RegistryInstalled),
         Arc::new(GrantAuthorizer),
@@ -405,7 +405,7 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
 
     assert_eq!(
         registry_surface.capabilities[0].description_trust,
-        CapabilityDescriptionTrust::VerifiedCatalog
+        CapabilityDescriptionTrust::Untrusted
     );
     assert_eq!(
         local_surface.capabilities[0].description_trust,

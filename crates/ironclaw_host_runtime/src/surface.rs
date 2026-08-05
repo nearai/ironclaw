@@ -1,8 +1,6 @@
 use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionPackage, ExtensionRegistry, ManifestSource,
-};
+use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     approval::{canonical_json_v1, sha256_digest_token},
@@ -306,28 +304,15 @@ impl<'a> CapabilityCatalog<'a> {
 
         Ok(Some(VisibleCapability {
             descriptor: surfaced_descriptor,
-            description_trust: self.description_trust(descriptor),
+            // A registry signature proves where package bytes came from; it does
+            // not make publisher-authored prompt text safe. Keep every extension
+            // description on the untrusted rendering surface until a separate,
+            // durable vetting classification exists.
+            description_trust: CapabilityDescriptionTrust::Untrusted,
             access,
             estimated_resources: estimate,
         }))
     }
-
-    fn description_trust(&self, descriptor: &CapabilityDescriptor) -> CapabilityDescriptionTrust {
-        match self
-            .registry
-            .get_extension(&descriptor.provider)
-            .map(|package| package.manifest.source)
-        {
-            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
-            Some(
-                ManifestSource::HostBundled
-                | ManifestSource::InstalledLocal
-                | ManifestSource::UserRegistered,
-            )
-            | None => CapabilityDescriptionTrust::Untrusted,
-        }
-    }
-
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
         self.registry
             .capability_visibility(&descriptor.id)

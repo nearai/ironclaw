@@ -319,18 +319,29 @@ sizes, a host allowlist, and private-network denial. The catalog envelope is
 verified with the pinned Ed25519 key before entries are parsed, and downloaded
 artifacts must match both the signed byte count and SHA-256 digest. Install
 automation can pin the inspected catalog state with `--expected-version` and
-`--expected-artifact-digest`.
+`--expected-artifact-digest`. The package digest is a versioned, length-framed
+hash over the entry kind, name, version, description, provenance, and complete
+artifact metadata, including the published extension manifest. The model-facing
+install capability requires both pins returned by `ironhub_info`; direct CLI
+operators may still omit them when intentionally selecting the current catalog
+entry.
 
 Private org-scoped manifests use the same pinned Ed25519 verification key and
 must come from the exact HTTPS origin configured by `IRONHUB_MANIFEST_URL`;
 their artifact URLs are pinned to that origin as well. The tokenized private
 manifest URL is read from a file so it does not appear in argv. Durable replay
 state is keyed by the configured host and the signed repository identity, not
-by the rotating access token in that URL.
+by the rotating access token in that URL. Signed manifests older than 30 days
+or more than five minutes in the future are rejected. An identical private
+manifest remains idempotently retryable after an artifact or lifecycle failure;
+an older manifest or equal timestamp with different signed bytes is rejected.
 
 Unverified community content is rejected unless a CLI operator supplies
 `--acknowledge-unverified`; the model-facing install capability intentionally
-has no equivalent acknowledgement field. `--force` replaces an existing
+has no equivalent acknowledgement field. Registry signatures authenticate
+package origin and bytes but do not elevate publisher-authored descriptions:
+all installed registry capability descriptions remain on the untrusted prompt
+surface. `--force` replaces an existing
 registry install through the normal lifecycle manager and restores the previous
 package or skill if the replacement fails. The command alias `iron-hub` is also
 accepted.

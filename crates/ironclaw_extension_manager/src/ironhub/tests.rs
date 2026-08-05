@@ -1,6 +1,7 @@
 // arch-exempt: large_file, mechanical fixture-path update follows the extension-package colocation with no new test logic, plan #7037
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_extensions::{ExtensionInstallationStorePort, InstallationOwner};
@@ -29,7 +30,8 @@ use std::sync::{Arc, Mutex};
 
 use super::agent_link::{InstallDelivery, IronhubSharedKey, RegisterChallenge};
 use super::catalog::{
-    IronHubManifestSource, classify_gate_and_digest, sha256_hex, validate_manifest,
+    IronHubManifestSource, classify_gate_and_digest, sha256_hex, skill_artifact_digest,
+    tool_artifact_digest, validate_manifest, validate_manifest_freshness,
     validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest_with_keys,
 };
 use super::link_service::{
@@ -37,7 +39,7 @@ use super::link_service::{
 };
 use super::model::{
     IronHubArtifact, IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
-    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry,
+    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry, IronHubToolEntry,
 };
 use super::service::{
     IronHubService, RebornIronHubRuntime, clear_test_manifest_cache, configure_test_catalog,
@@ -45,6 +47,10 @@ use super::service::{
 };
 
 const TOOL_RESULT_PREVIEW_BUDGET_BYTES: usize = 24 * 1024;
+const CANONICAL_TOOL_PACKAGE_DIGEST: &str =
+    "sha256:af9d22f30a99eadbd63956a18f7277b950d2917de0746eb3eebcf7247bef0f38";
+const CANONICAL_SKILL_PACKAGE_DIGEST: &str =
+    "sha256:62d94ebeb712be5ee09d460c7b7674637444bad8c44cfd470f720031a9203add";
 
 fn test_link_state() -> Arc<IronhubLinkStateStore> {
     Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new())))
@@ -242,7 +248,7 @@ async fn install_rejects_catalog_tools_that_predate_published_extension_manifest
     };
     let manifest = IronHubManifest {
         version: "1".to_string(),
-        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        generated_at: recent_timestamp(0),
         release_tag: "v1".to_string(),
         repo: "nearai/stale-tool".to_string(),
         tools: vec![super::model::IronHubToolEntry {
@@ -436,10 +442,211 @@ fn signed_catalog_verification_rejects_bad_signature() {
 }
 
 #[test]
+fn package_digest_binds_manifest_and_catalog_metadata() {
+    let tool = canonical_tool_entry();
+    let original = tool_artifact_digest(&tool);
+    assert_eq!(original, CANONICAL_TOOL_PACKAGE_DIGEST);
+
+    for mutated in [
+        IronHubToolEntry {
+            version: "2.0.0".to_string(),
+            ..tool.clone()
+        },
+        IronHubToolEntry {
+            description: "Different approval copy".to_string(),
+            ..tool.clone()
+        },
+        IronHubToolEntry {
+            provenance: IronHubProvenance::New,
+            ..tool.clone()
+        },
+        IronHubToolEntry {
+            manifest: Some(canonical_artifact("manifest.toml", 'd')),
+            ..tool.clone()
+        },
+        IronHubToolEntry {
+            schemas: [(
+                "schemas/example.input.json".to_string(),
+                canonical_artifact("example.input.json", 'e'),
+            )]
+            .into_iter()
+            .collect(),
+            ..tool.clone()
+        },
+    ] {
+        assert_ne!(
+            tool_artifact_digest(&mutated),
+            original,
+            "security-relevant catalog metadata must change the package digest"
+        );
+    }
+
+    let skill = canonical_skill_entry();
+    assert_eq!(
+        skill_artifact_digest(&skill),
+        CANONICAL_SKILL_PACKAGE_DIGEST
+    );
+    let mut changed_skill = skill.clone();
+    changed_skill.skill_md.sha256 = "f".repeat(64);
+    assert_ne!(
+        skill_artifact_digest(&skill),
+        skill_artifact_digest(&changed_skill)
+    );
+}
+
+fn canonical_artifact(name: &str, sha: char) -> IronHubArtifact {
+    IronHubArtifact {
+        url: format!("https://hub.ironclaw.com/{name}"),
+        size_bytes: 10,
+        sha256: sha.to_string().repeat(64),
+    }
+}
+
+fn canonical_tool_entry() -> IronHubToolEntry {
+    IronHubToolEntry {
+        name: "example-tool".to_string(),
+        version: "1.0.0".to_string(),
+        description: "Example tool".to_string(),
+        provenance: IronHubProvenance::Official,
+        wasm: canonical_artifact("tool.wasm", 'a'),
+        capabilities: canonical_artifact("capabilities.json", 'b'),
+        manifest: Some(canonical_artifact("manifest.toml", 'c')),
+        schemas: Default::default(),
+    }
+}
+
+fn canonical_skill_entry() -> IronHubSkillEntry {
+    IronHubSkillEntry {
+        name: "example-skill".to_string(),
+        trunk: "main".to_string(),
+        version: "1.0.0".to_string(),
+        description: "Example skill".to_string(),
+        provenance: IronHubProvenance::Verified,
+        skill_md: canonical_artifact("SKILL.md", 'e'),
+    }
+}
+
+#[test]
+fn signed_manifest_freshness_rejects_stale_and_future_catalogs() {
+    let now = Utc::now();
+    validate_manifest_freshness(now - Duration::days(30), now)
+        .expect("freshness boundary is accepted");
+    assert!(
+        validate_manifest_freshness(now - Duration::days(30) - Duration::seconds(1), now).is_err(),
+        "catalogs older than the freshness window must fail closed"
+    );
+    validate_manifest_freshness(now + Duration::minutes(5), now)
+        .expect("clock-skew boundary is accepted");
+    assert!(
+        validate_manifest_freshness(now + Duration::minutes(5) + Duration::seconds(1), now)
+            .is_err(),
+        "far-future timestamps must not freeze the replay watermark"
+    );
+}
+
+#[tokio::test]
+async fn signed_manifest_freshness_fails_before_replay_state_or_artifact_downloads() {
+    let now = Utc::now();
+    let cases = [
+        (
+            "public-stale",
+            false,
+            now - Duration::days(30) - Duration::seconds(1),
+        ),
+        (
+            "public-future",
+            false,
+            now + Duration::minutes(5) + Duration::seconds(1),
+        ),
+        (
+            "private-stale",
+            true,
+            now - Duration::days(30) - Duration::seconds(1),
+        ),
+        (
+            "private-future",
+            true,
+            now + Duration::minutes(5) + Duration::seconds(1),
+        ),
+    ];
+
+    for (fixture, private, generated_at) in cases {
+        let services =
+            crate::lifecycle_test_support::build_lifecycle_test_services(fixture, None, false)
+                .await;
+        let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(fixture);
+        let catalog_url = format!("https://hub.ironclaw.com/tests/{fixture}/catalog.json");
+        let private_url = format!("https://hub.ironclaw.com/tests/{fixture}/private.json");
+        let requested_manifest_url = if private {
+            private_url.as_str()
+        } else {
+            catalog_url.as_str()
+        };
+        let artifact_url = format!("https://hub.ironclaw.com/tests/{fixture}/SKILL.md");
+        let artifact = b"freshness must fail before this artifact is requested";
+        let manifest = skill_manifest(
+            "freshness-skill",
+            &artifact_url,
+            artifact,
+            &generated_at.to_rfc3339(),
+        );
+        let signed = signed_manifest(
+            serde_json::to_string(&manifest).expect("manifest JSON"),
+            &test_signing_key(),
+        );
+        let egress = Arc::new(RecordingEgress::new([(requested_manifest_url, signed)]));
+        let state = Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new())));
+        let service = configure_test_catalog(
+            IronHubService::new_with_runtime_egress(
+                services.skill_management,
+                services.extension_management,
+                egress.clone(),
+                scope,
+                CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+                Arc::clone(&state),
+            ),
+            &catalog_url,
+            test_manifest_verify_keys(),
+        );
+
+        let error = service
+            .execute(IronHubCommand::Install {
+                name: "freshness-skill".to_string(),
+                options: IronHubInstallOptions {
+                    kind: Some(IronHubEntryKind::Skill),
+                    private_manifest_url: private.then(|| private_url.clone()),
+                    ..IronHubInstallOptions::default()
+                },
+            })
+            .await
+            .expect_err("out-of-window signed manifest must fail closed");
+        assert!(matches!(error, IronHubCommandError::Catalog { .. }));
+        assert_eq!(
+            egress.requests().len(),
+            1,
+            "{fixture} must stop after the signed manifest fetch"
+        );
+
+        let earlier = generated_at - Duration::seconds(1);
+        if private {
+            state
+                .record_private_manifest("hub.ironclaw.com", &manifest.repo, earlier, "sentinel")
+                .await
+                .expect("rejected private manifest must not advance replay state");
+        } else {
+            state
+                .record_public_manifest(&catalog_url, earlier, "sentinel")
+                .await
+                .expect("rejected public manifest must not advance replay state");
+        }
+    }
+}
+
+#[test]
 fn unverified_entry_requires_non_model_operator_acknowledgement() {
     let manifest = IronHubManifest {
         version: "1".to_string(),
-        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        generated_at: recent_timestamp(0),
         release_tag: "test".to_string(),
         repo: "nearai/ironhub".to_string(),
         tools: Vec::new(),
@@ -486,7 +693,7 @@ fn private_provenance_requires_a_validated_private_source() {
         "private-skill",
         "https://hub.ironclaw.com/private/SKILL.md",
         b"private",
-        "2026-01-02T00:00:00Z",
+        &recent_timestamp(0),
     );
     manifest.skills[0].provenance = IronHubProvenance::Private;
     let options = IronHubInstallOptions::default();
@@ -553,7 +760,7 @@ fn private_manifest_origin_is_pinned_to_configured_catalog() {
         "private-skill",
         "https://evil.example/private/SKILL.md",
         b"private",
-        "2026-01-02T00:00:00Z",
+        &recent_timestamp(0),
     );
     assert!(
         validate_private_manifest(&cross_origin_artifact, &origin).is_err(),
@@ -862,6 +1069,116 @@ async fn execute_search_marks_an_oversized_catalog_as_incomplete_with_the_true_t
 }
 
 #[tokio::test]
+async fn install_rejects_a_stale_package_digest_before_artifact_download() {
+    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+        "ironhub-digest-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope =
+        crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("ironhub-digest-owner");
+    let manifest_url = "https://hub.ironclaw.com/tests/digest-pin/manifest.json";
+    let skill_url = "https://hub.ironclaw.com/tests/digest-pin/SKILL.md";
+    let skill = b"---\nname: pinned-skill\n---\n# Pinned\n";
+    let manifest = signed_manifest(
+        skill_manifest_json(
+            "pinned-skill",
+            &recent_timestamp(0),
+            "1.0.0",
+            skill_url,
+            skill.len(),
+            &sha256_hex(skill),
+        ),
+        &test_signing_key(),
+    );
+    let egress = Arc::new(RecordingEgress::new([(manifest_url, manifest)]));
+    let service = configured_service(
+        services.skill_management,
+        services.extension_management,
+        egress.clone(),
+        scope,
+        manifest_url,
+    );
+
+    let error = service
+        .execute(IronHubCommand::Install {
+            name: "pinned-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                expected_version: Some("1.0.0".to_string()),
+                expected_artifact_digest: Some(CANONICAL_SKILL_PACKAGE_DIGEST.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("changed package identity must fail before artifact download");
+
+    assert!(matches!(
+        error,
+        IronHubCommandError::InvalidInput { reason } if reason.contains("artifact digest")
+    ));
+    assert_eq!(
+        egress.requests().len(),
+        1,
+        "only the signed catalog may be fetched before the package pin is checked"
+    );
+}
+
+#[tokio::test]
+async fn install_accepts_the_canonical_skill_digest_before_artifact_download() {
+    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+        "ironhub-canonical-digest-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+        "ironhub-canonical-digest-owner",
+    );
+    let manifest_url = "https://hub.ironclaw.com/tests/canonical-digest/manifest.json";
+    let manifest = IronHubManifest {
+        version: "1".to_string(),
+        generated_at: recent_timestamp(0),
+        release_tag: "test".to_string(),
+        repo: "nearai/ironhub".to_string(),
+        tools: Vec::new(),
+        skills: vec![canonical_skill_entry()],
+    };
+    let signed = signed_manifest(
+        serde_json::to_string(&manifest).expect("canonical manifest JSON"),
+        &test_signing_key(),
+    );
+    let egress = Arc::new(RecordingEgress::new([(manifest_url, signed)]));
+    let service = configured_service(
+        services.skill_management,
+        services.extension_management,
+        egress.clone(),
+        scope,
+        manifest_url,
+    );
+
+    service
+        .execute(IronHubCommand::Install {
+            name: "example-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                expected_version: Some("1.0.0".to_string()),
+                expected_artifact_digest: Some(CANONICAL_SKILL_PACKAGE_DIGEST.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("the canonical pin is accepted before the absent artifact fetch fails");
+
+    assert_eq!(
+        egress.requests().len(),
+        2,
+        "the canonical wire digest must pass pin validation and reach artifact download"
+    );
+}
+
+#[tokio::test]
 async fn verified_tool_and_skill_install_through_real_managers() {
     let services =
         crate::lifecycle_test_support::build_lifecycle_test_services("ironhub-owner", None, false)
@@ -1021,7 +1338,7 @@ async fn private_manifest_install_retries_after_artifact_failure() {
         "private-skill",
         artifact_url,
         &artifact,
-        "2026-01-02T00:00:00Z",
+        &recent_timestamp(0),
     );
     let envelope = signed_manifest(
         serde_json::to_string(&manifest).expect("manifest JSON"),
@@ -1107,7 +1424,7 @@ async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scop
         "caller-skill",
         artifact_url,
         &artifact,
-        "2026-01-03T00:00:00Z",
+        &recent_timestamp(0),
     );
     manifest.skills[0].provenance = IronHubProvenance::Official;
     let envelope = signed_manifest(
@@ -1131,10 +1448,7 @@ async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scop
         .with_manifest_url(super::IronhubManifestUrl::default()),
         test_manifest_verify_keys(),
     );
-    let artifact_digest = format!(
-        "sha256:{}",
-        sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes())
-    );
+    let artifact_digest = skill_artifact_digest(&manifest.skills[0]);
     let timestamp = u64::try_from(chrono::Utc::now().timestamp()).expect("positive timestamp");
     let mut register_request = IronhubRegisterRequest {
         uid: "signed-hub-user-not-the-caller".to_string(),
@@ -1294,7 +1608,7 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
     let old_manifest = signed_manifest(
         skill_manifest_json(
             "installed-skill",
-            "2026-01-03T00:00:00Z",
+            &recent_timestamp(120),
             "0.1.0",
             old_skill_url,
             old_skill.len(),
@@ -1352,7 +1666,7 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
     let new_manifest = signed_manifest(
         skill_manifest_json(
             "installed-skill",
-            "2026-01-04T00:00:00Z",
+            &recent_timestamp(60),
             "0.2.0",
             new_skill_url,
             new_skill.len(),
@@ -1436,7 +1750,7 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
     let size_manifest = signed_manifest(
         skill_manifest_json(
             size_skill_name,
-            "2026-01-05T00:00:00Z",
+            &recent_timestamp(120),
             "0.1.0",
             size_skill_url,
             skill_bytes.len() + 1,
@@ -1472,7 +1786,7 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
     let sha_manifest = signed_manifest(
         skill_manifest_json(
             sha_skill_name,
-            "2026-01-06T00:00:00Z",
+            &recent_timestamp(60),
             "0.1.0",
             sha_skill_url,
             skill_bytes.len(),
@@ -1521,7 +1835,7 @@ async fn execute_rejects_non_utf8_install_artifacts() {
     let skill_manifest = signed_manifest(
         skill_manifest_json(
             "installed-skill",
-            "2026-01-07T00:00:00Z",
+            &recent_timestamp(60),
             "0.1.0",
             skill_url,
             invalid_skill.len(),
@@ -1559,7 +1873,7 @@ async fn execute_rejects_non_utf8_install_artifacts() {
     let invalid_tool_manifest = vec![0xff, 0xfe];
     let mut catalog: serde_json::Value =
         serde_json::from_str(&tool_manifest_json(ToolManifestFixture {
-            generated_at: "2026-01-08T00:00:00Z",
+            generated_at: &recent_timestamp(0),
             version: "0.1.0",
             tool_url,
             tool_size: tool_bytes.len(),
@@ -1613,11 +1927,11 @@ async fn execute_rejects_older_generated_at_after_cache_eviction() {
         crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("ironhub-replay-owner");
     let manifest_url = "https://hub.ironclaw.com/tests/replay/manifest.json";
     let newer = signed_manifest(
-        empty_manifest_json("2026-01-08T00:00:00Z"),
+        empty_manifest_json(&recent_timestamp(0)),
         &test_signing_key(),
     );
     let older = signed_manifest(
-        empty_manifest_json("2026-01-07T00:00:00Z"),
+        empty_manifest_json(&recent_timestamp(60)),
         &test_signing_key(),
     );
     let service = configured_service(
@@ -1675,7 +1989,7 @@ async fn fail_forced_tool_replacement(
         format!("https://hub.ironclaw.com/tests/{fixture}/old-output-schema.json");
     let old_manifest = signed_manifest(
         tool_manifest_json(ToolManifestFixture {
-            generated_at: "2026-01-03T00:00:00Z",
+            generated_at: &recent_timestamp(120),
             version: "0.1.0",
             tool_url: &old_tool_url,
             tool_size: tool_bytes.len(),
@@ -1743,7 +2057,7 @@ async fn fail_forced_tool_replacement(
         format!("https://hub.ironclaw.com/tests/{fixture}/new-output-schema.json");
     let new_manifest = signed_manifest(
         tool_manifest_json(ToolManifestFixture {
-            generated_at: "2026-01-04T00:00:00Z",
+            generated_at: &recent_timestamp(60),
             version: "0.2.0",
             tool_url: &new_tool_url,
             tool_size: tool_bytes.len(),
@@ -1963,7 +2277,7 @@ fn catalog_manifest_json(
     (
         serde_json::json!({
             "version": "1",
-            "generated_at": "2026-07-28T00:00:00Z",
+            "generated_at": recent_timestamp(0),
             "release_tag": "test",
             "repo": "nearai/ironhub",
             "tools": tools,
@@ -2006,7 +2320,7 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
     } = fixture;
     serde_json::json!({
         "version": "1",
-        "generated_at": "2026-01-02T00:00:00Z",
+        "generated_at": recent_timestamp(0),
         "release_tag": "test",
         "repo": "nearai/ironhub",
         "tools": [{
@@ -2202,6 +2516,10 @@ fn empty_manifest_json(generated_at: &str) -> String {
         "skills": []
     })
     .to_string()
+}
+
+fn recent_timestamp(seconds_ago: i64) -> String {
+    (Utc::now() - Duration::seconds(seconds_ago)).to_rfc3339()
 }
 
 #[derive(Clone)]

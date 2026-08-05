@@ -30,7 +30,8 @@ use super::catalog::{
     compact_skill_summary, compact_tool_summary, entry_matches, invalid,
     network_policy_for_url_from_origin, sha256_hex, skill_summary, tool_summary,
     validate_artifact_for_origin, validate_artifact_url, validate_hub_name, validate_manifest,
-    validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest,
+    validate_manifest_freshness, validate_private_manifest, validate_private_manifest_origin,
+    verify_signed_manifest,
 };
 use super::link_service::{IronhubLinkStateError, IronhubLinkStateStore};
 use super::model::{
@@ -497,6 +498,7 @@ impl IronHubService {
         let generated_at = DateTime::parse_from_rfc3339(&manifest.generated_at)
             .map_err(|error| catalog(format!("manifest generated_at is not RFC3339: {error}")))?
             .with_timezone(&Utc);
+        validate_manifest_freshness(generated_at, Utc::now())?;
         self.link_state
             .record_public_manifest(&self.manifest_url, generated_at, &sha256_hex(&bytes))
             .await
@@ -528,6 +530,7 @@ impl IronHubService {
                 ))
             })?
             .with_timezone(&Utc);
+        validate_manifest_freshness(generated_at, Utc::now())?;
         self.link_state
             .record_private_manifest(
                 origin.host(),

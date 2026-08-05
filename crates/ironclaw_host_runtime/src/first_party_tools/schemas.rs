@@ -466,7 +466,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "expected_version": { "type": "string" },
                 "expected_artifact_digest": { "type": "string" }
             },
-            "required": ["name"],
+            "required": ["name", "expected_version", "expected_artifact_digest"],
             "additionalProperties": false
         }),
         "schemas/builtin/ironhub_search.output.v1.json"
@@ -1033,6 +1033,10 @@ mod tests {
         assert!(
             input["properties"].get("private_manifest_url").is_none(),
             "model-visible IronHub install must not choose a private manifest source"
+        );
+        assert_eq!(
+            input["required"],
+            serde_json::json!(["name", "expected_version", "expected_artifact_digest"])
         );
         assert_eq!(input["additionalProperties"], false);
         assert_eq!(

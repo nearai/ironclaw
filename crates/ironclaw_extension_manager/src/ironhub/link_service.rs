@@ -1061,6 +1061,17 @@ mod tests {
             .record_private_manifest("catalog.example", "org/repo", generated_at, "digest-a")
             .await
             .expect("identical private manifest remains retryable");
+        assert_eq!(
+            reconstructed
+                .record_private_manifest(
+                    "catalog.example",
+                    "org/repo",
+                    generated_at,
+                    "digest-conflict",
+                )
+                .await,
+            Err(IronhubLinkStateError::ManifestReplay)
+        );
     }
 
     #[tokio::test]

@@ -160,10 +160,8 @@ struct InstallInput {
     kind: Option<IronHubEntryKind>,
     #[serde(default)]
     force: bool,
-    #[serde(default)]
-    expected_version: Option<String>,
-    #[serde(default)]
-    expected_artifact_digest: Option<String>,
+    expected_version: String,
+    expected_artifact_digest: String,
 }
 
 #[async_trait]
@@ -198,8 +196,8 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         kind: input.kind,
                         force: input.force,
                         acknowledge_unverified: false,
-                        expected_version: input.expected_version,
-                        expected_artifact_digest: input.expected_artifact_digest,
+                        expected_version: Some(input.expected_version),
+                        expected_artifact_digest: Some(input.expected_artifact_digest),
                         private_manifest_url: None,
                     },
                 }
@@ -259,7 +257,34 @@ fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    };
+
     use super::*;
+
+    struct CountingEgress {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for CountingEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(RuntimeHttpEgressError::Request {
+                reason: "unexpected test egress".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            })
+        }
+    }
 
     #[test]
     fn command_errors_map_to_redacted_dispatch_categories() {
@@ -302,5 +327,59 @@ mod tests {
             };
             assert_eq!(kind, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn model_install_dispatch_requires_pins_before_egress() {
+        let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+            "ironhub-capability-pins",
+            None,
+            false,
+        )
+        .await;
+        let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "ironhub-capability-pins",
+        );
+        let egress = Arc::new(CountingEgress {
+            calls: AtomicUsize::new(0),
+        });
+        let runtime_egress: Arc<dyn RuntimeHttpEgress> = egress.clone();
+        let handler = IronHubCapabilityHandler {
+            skill_management: services.skill_management,
+            extension_management: services.extension_management,
+            link_state: Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new()))),
+            manifest_url: IronhubManifestUrl::default(),
+        };
+
+        let error = handler
+            .dispatch(FirstPartyCapabilityRequest::request_for_test(
+                CapabilityId::new(IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+                scope,
+                serde_json::json!({"name": "example-tool"}),
+                Some(runtime_egress),
+            ))
+            .await
+            .expect_err("missing approval pins fail at the capability boundary");
+        assert!(matches!(
+            error,
+            FirstPartyCapabilityError::Dispatch {
+                kind: RuntimeDispatchErrorKind::InputEncode,
+                ..
+            }
+        ));
+        assert_eq!(
+            egress.calls.load(Ordering::SeqCst),
+            0,
+            "invalid model input must not fetch the signed catalog"
+        );
+
+        let input = serde_json::from_value::<InstallInput>(serde_json::json!({
+            "name": "example-tool",
+            "expected_version": "1.2.3",
+            "expected_artifact_digest": "sha256:abc"
+        }))
+        .expect("complete approval pins deserialize");
+        assert_eq!(input.expected_version, "1.2.3");
+        assert_eq!(input.expected_artifact_digest, "sha256:abc");
     }
 }
