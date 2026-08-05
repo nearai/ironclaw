@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 VERSION = "__VERSION__"
 DROP_STATE = __DROP_STATE__
+DROP_ROUTINES = __DROP_ROUTINES__
 
 if sys.argv[1:] == ["--version"]:
     print(f"ironclaw {VERSION}")
@@ -53,12 +54,18 @@ if DROP_STATE:
 
 def load_state():
     if not state_path.exists():
-        return {"threads": [], "timelines": {}}
+        return {"threads": [], "timelines": {}, "automations": []}
     return json.loads(state_path.read_text(encoding="utf-8"))
 
 
 def save_state(state):
     state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+if DROP_ROUTINES and state_path.exists():
+    state = load_state()
+    state["automations"] = []
+    save_state(state)
 
 
 def send_json(handler, payload, status=200):
@@ -82,6 +89,9 @@ class Handler(BaseHTTPRequestHandler):
         state = load_state()
         if parsed.path == "/api/webchat/v2/threads":
             send_json(self, {"threads": state["threads"]})
+            return
+        if parsed.path == "/api/webchat/v2/automations":
+            send_json(self, {"automations": state.get("automations", [])})
             return
         prefix = "/api/webchat/v2/threads/"
         suffix = "/timeline"
@@ -121,6 +131,30 @@ class Handler(BaseHTTPRequestHandler):
         suffix = "/messages"
         if self.path.startswith(prefix) and self.path.endswith(suffix):
             thread_id = unquote(self.path[len(prefix):-len(suffix)])
+            if "scheduled routine" in payload["content"]:
+                name = "release-upgrade-canary-scheduled"
+                expression = "0 0 1 1 *"
+            elif "paused routine" in payload["content"]:
+                name = "release-upgrade-canary-paused"
+                expression = "0 0 2 1 *"
+            else:
+                name = None
+                expression = None
+            if name is not None:
+                state.setdefault("automations", []).append(
+                    {
+                        "automation_id": f"automation-{len(state['automations']) + 1}",
+                        "name": name,
+                        "source": {
+                            "type": "schedule",
+                            "cron": expression,
+                            "timezone": "UTC",
+                        },
+                        "state": "scheduled",
+                        "next_run_at": "2999-01-01T00:00:00Z",
+                        "created_at": "2026-08-05T00:00:00Z",
+                    }
+                )
             state["timelines"][thread_id] = [
                 {
                     "message_id": f"{thread_id}-user",
@@ -141,6 +175,20 @@ class Handler(BaseHTTPRequestHandler):
             ]
             save_state(state)
             send_json(self, {"outcome": "submitted"}, status=202)
+            return
+        automation_prefix = "/api/webchat/v2/automations/"
+        pause_suffix = "/pause"
+        if self.path.startswith(automation_prefix) and self.path.endswith(pause_suffix):
+            automation_id = unquote(
+                self.path[len(automation_prefix):-len(pause_suffix)]
+            )
+            for automation in state.get("automations", []):
+                if automation["automation_id"] == automation_id:
+                    automation["state"] = "paused"
+                    save_state(state)
+                    send_json(self, {"automation": automation})
+                    return
+            send_json(self, {"error": "not found"}, status=404)
             return
         self.send_error(404)
 
@@ -165,12 +213,16 @@ class ReleaseUpgradeCanaryTests(unittest.TestCase):
         version: str,
         *,
         drop_state: bool = False,
+        drop_routines: bool = False,
         duplicate: bool = False,
     ) -> tuple[Path, Path]:
         archive = self.root / f"{name}.tar.gz"
         executable = textwrap.dedent(FAKE_BINARY).replace("__VERSION__", version)
         executable = executable.replace(
             "__DROP_STATE__", "True" if drop_state else "False"
+        )
+        executable = executable.replace(
+            "__DROP_ROUTINES__", "True" if drop_routines else "False"
         ).encode("utf-8")
         with tarfile.open(archive, "w:gz") as package:
             paths = ("package/ironclaw", "duplicate/ironclaw") if duplicate else ("package/ironclaw",)
@@ -186,10 +238,18 @@ class ReleaseUpgradeCanaryTests(unittest.TestCase):
         )
         return archive, checksum
 
-    def _run(self, *, drop_candidate_state: bool = False) -> set[str]:
+    def _run(
+        self,
+        *,
+        drop_candidate_state: bool = False,
+        drop_candidate_routines: bool = False,
+    ) -> set[str]:
         previous, previous_checksum = self._archive("previous", "1.0.0-rc.1")
         candidate, candidate_checksum = self._archive(
-            "candidate", "1.1.0-rc.1", drop_state=drop_candidate_state
+            "candidate",
+            "1.1.0-rc.1",
+            drop_state=drop_candidate_state,
+            drop_routines=drop_candidate_routines,
         )
         return CANARY.run_upgrade_canary(
             previous_archive=previous,
@@ -212,6 +272,7 @@ class ReleaseUpgradeCanaryTests(unittest.TestCase):
                 "checksums",
                 "artifact_versions",
                 "previous_release_state",
+                "routine_state",
                 "upgrade",
                 "restart_idempotence",
                 "rollback",
@@ -227,6 +288,18 @@ class ReleaseUpgradeCanaryTests(unittest.TestCase):
     def test_candidate_state_loss_fails_the_observable_upgrade_gate(self) -> None:
         with self.assertRaisesRegex(CANARY.CanaryFailure, "first candidate boot"):
             self._run(drop_candidate_state=True)
+
+        self.assertIn(
+            '"status": "failed"',
+            (self.root / "artifacts/result.json").read_text(encoding="utf-8"),
+        )
+
+    @unittest.skipIf(os.name == "nt", "the fake release binary uses POSIX signals")
+    def test_candidate_routine_loss_fails_the_observable_upgrade_gate(self) -> None:
+        with self.assertRaisesRegex(
+            CANARY.CanaryFailure, "omitted the seeded release routines"
+        ):
+            self._run(drop_candidate_routines=True)
 
         self.assertIn(
             '"status": "failed"',

@@ -34,9 +34,30 @@ MODEL_NAME = "release-upgrade-canary-model"
 WORKSPACE_FILE = "upgrade-canary.txt"
 WORKSPACE_BYTES = b"ironclaw release upgrade canary workspace\n"
 PROMPTS = (
-    "release upgrade canary first thread",
-    "release upgrade canary second thread",
+    "release upgrade canary create scheduled routine",
+    "release upgrade canary create paused routine",
 )
+ROUTINE_DEFINITIONS = {
+    PROMPTS[0]: {
+        "name": "release-upgrade-canary-scheduled",
+        "prompt": "release upgrade canary scheduled routine action",
+        "schedule": {
+            "kind": "cron",
+            "expression": "0 0 1 1 *",
+            "timezone": "UTC",
+        },
+    },
+    PROMPTS[1]: {
+        "name": "release-upgrade-canary-paused",
+        "prompt": "release upgrade canary paused routine action",
+        "schedule": {
+            "kind": "cron",
+            "expression": "0 0 2 1 *",
+            "timezone": "UTC",
+        },
+    },
+}
+PAUSED_ROUTINE_NAME = ROUTINE_DEFINITIONS[PROMPTS[1]]["name"]
 MESSAGE_FIELDS = (
     "message_id",
     "kind",
@@ -61,6 +82,11 @@ class ProductSnapshot:
     @property
     def message_count(self) -> int:
         return sum(len(messages) for messages in self.timelines.values())
+
+
+@dataclass(frozen=True)
+class RoutineSnapshot:
+    automations: tuple[dict[str, Any], ...]
 
 
 def _sha256(path: Path) -> str:
@@ -184,8 +210,71 @@ class _MockLlmHandler(http.server.BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             self.send_error(400)
             return
-        text = "release upgrade canary deterministic reply"
+        routine = _requested_routine(request)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        if routine is not None:
+            tool_call = {
+                "index": 0,
+                "id": f"call-{uuid.uuid4().hex[:12]}",
+                "type": "function",
+                "function": {
+                    "name": "builtin__trigger_create",
+                    "arguments": json.dumps(routine, separators=(",", ":")),
+                },
+            }
+            if not request.get("stream"):
+                _json_response(
+                    self,
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": MODEL_NAME,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [tool_call],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                        },
+                    },
+                )
+                return
+            chunks = (
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": MODEL_NAME,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "tool_calls": [tool_call]},
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": MODEL_NAME,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                },
+            )
+            _write_sse(self, chunks)
+            return
+
+        text = "release upgrade canary deterministic reply"
         if not request.get("stream"):
             _json_response(
                 self,
@@ -231,16 +320,35 @@ class _MockLlmHandler(http.server.BaseHTTPRequestHandler):
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             },
         )
-        body = b"".join(
-            f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n".encode("utf-8")
-            for chunk in chunks
-        ) + b"data: [DONE]\n\n"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        _write_sse(self, chunks)
+
+
+def _requested_routine(request: dict[str, Any]) -> dict[str, Any] | None:
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return None
+    if any(isinstance(message, dict) and message.get("role") == "tool" for message in messages):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content in ROUTINE_DEFINITIONS:
+            return ROUTINE_DEFINITIONS[content]
+    return None
+
+
+def _write_sse(handler: http.server.BaseHTTPRequestHandler, chunks: tuple[dict[str, Any], ...]) -> None:
+    body = b"".join(
+        f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n".encode("utf-8")
+        for chunk in chunks
+    ) + b"data: [DONE]\n\n"
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 @contextlib.contextmanager
@@ -532,6 +640,85 @@ def _assert_snapshot(actual: ProductSnapshot, expected: ProductSnapshot, label: 
         )
 
 
+def capture_routine_snapshot(base_url: str) -> RoutineSnapshot:
+    response = _request_json("GET", f"{base_url}/api/webchat/v2/automations")
+    automations = response.get("automations")
+    if not isinstance(automations, list):
+        raise CanaryFailure(f"automation-list response had invalid automations: {response}")
+    expected_names = {definition["name"] for definition in ROUTINE_DEFINITIONS.values()}
+    projected: list[dict[str, Any]] = []
+    for automation in automations:
+        if not isinstance(automation, dict) or automation.get("name") not in expected_names:
+            continue
+        projected.append(
+            {
+                field: automation.get(field)
+                for field in (
+                    "automation_id",
+                    "name",
+                    "source",
+                    "state",
+                    "next_run_at",
+                    "created_at",
+                )
+            }
+        )
+    projected.sort(key=lambda automation: str(automation["name"]))
+    if len(projected) != len(ROUTINE_DEFINITIONS):
+        raise CanaryFailure(
+            "automation-list response omitted the seeded release routines: "
+            f"expected={sorted(expected_names)} actual={projected}"
+        )
+    return RoutineSnapshot(automations=tuple(projected))
+
+
+def _wait_for_routines(base_url: str, timeout: float = 30) -> RoutineSnapshot:
+    deadline = time.monotonic() + timeout
+    last_error: CanaryFailure | None = None
+    while time.monotonic() < deadline:
+        try:
+            return capture_routine_snapshot(base_url)
+        except CanaryFailure as error:
+            last_error = error
+            time.sleep(0.25)
+    raise CanaryFailure(f"seeded routines did not become visible: {last_error}")
+
+
+def _pause_routine(base_url: str, snapshot: RoutineSnapshot) -> RoutineSnapshot:
+    paused = next(
+        (
+            automation
+            for automation in snapshot.automations
+            if automation["name"] == PAUSED_ROUTINE_NAME
+        ),
+        None,
+    )
+    if paused is None or not isinstance(paused.get("automation_id"), str):
+        raise CanaryFailure(f"could not identify routine to pause: {snapshot}")
+    automation_id = urllib.parse.quote(paused["automation_id"], safe="")
+    _request_json(
+        "POST",
+        f"{base_url}/api/webchat/v2/automations/{automation_id}/pause",
+    )
+    updated = _wait_for_routines(base_url)
+    states = {automation["name"]: automation["state"] for automation in updated.automations}
+    if states != {
+        "release-upgrade-canary-paused": "paused",
+        "release-upgrade-canary-scheduled": "scheduled",
+    }:
+        raise CanaryFailure(f"seeded routines did not preserve scheduled/paused states: {states}")
+    return updated
+
+
+def _assert_routines(actual: RoutineSnapshot, expected: RoutineSnapshot, label: str) -> None:
+    if actual != expected:
+        raise CanaryFailure(
+            f"{label} changed persisted routine state\n"
+            f"expected={json.dumps(expected.automations, sort_keys=True)}\n"
+            f"actual={json.dumps(actual.automations, sort_keys=True)}"
+        )
+
+
 def _assert_workspace(base_url: str) -> None:
     query = urllib.parse.urlencode({"mount": "workspace", "path": WORKSPACE_FILE})
     body, _ = _request("GET", f"{base_url}/api/webchat/v2/fs/content?{query}")
@@ -621,12 +808,16 @@ def run_upgrade_canary(
                         _send_message(previous.base_url, thread_id, prompt)
                         _wait_for_complete_timeline(previous.base_url, thread_id)
                     baseline = capture_snapshot(previous.base_url)
-                if len(baseline.thread_ids) != len(PROMPTS) or baseline.message_count != 4:
+                    routine_baseline = _pause_routine(
+                        previous.base_url, _wait_for_routines(previous.base_url)
+                    )
+                if len(baseline.thread_ids) != len(PROMPTS) or baseline.message_count < 4:
                     raise CanaryFailure(
-                        "previous artifact did not create the required two-thread/four-message baseline: "
+                        "previous artifact did not create the required two-thread timeline baseline: "
                         f"threads={len(baseline.thread_ids)} messages={baseline.message_count}"
                     )
                 evidence.add("previous_release_state")
+                evidence.add("routine_state")
 
                 with _server(
                     binary=candidate_binary,
@@ -639,6 +830,11 @@ def run_upgrade_canary(
                 ) as candidate:
                     _assert_snapshot(
                         capture_snapshot(candidate.base_url), baseline, "first candidate boot"
+                    )
+                    _assert_routines(
+                        capture_routine_snapshot(candidate.base_url),
+                        routine_baseline,
+                        "first candidate boot",
                     )
                     _assert_workspace(candidate.base_url)
                 evidence.add("upgrade")
@@ -654,6 +850,11 @@ def run_upgrade_canary(
                 ) as candidate:
                     _assert_snapshot(
                         capture_snapshot(candidate.base_url), baseline, "candidate restart"
+                    )
+                    _assert_routines(
+                        capture_routine_snapshot(candidate.base_url),
+                        routine_baseline,
+                        "candidate restart",
                     )
                     _assert_workspace(candidate.base_url)
                 evidence.add("restart_idempotence")
@@ -673,6 +874,11 @@ def run_upgrade_canary(
                     _assert_snapshot(
                         capture_snapshot(previous.base_url), baseline, "previous-release rollback"
                     )
+                    _assert_routines(
+                        capture_routine_snapshot(previous.base_url),
+                        routine_baseline,
+                        "previous-release rollback",
+                    )
                 evidence.add("rollback")
 
                 with _server(
@@ -686,6 +892,11 @@ def run_upgrade_canary(
                 ) as candidate:
                     _assert_snapshot(
                         capture_snapshot(candidate.base_url), baseline, "candidate re-upgrade"
+                    )
+                    _assert_routines(
+                        capture_routine_snapshot(candidate.base_url),
+                        routine_baseline,
+                        "candidate re-upgrade",
                     )
                     _assert_workspace(candidate.base_url)
                 evidence.add("reupgrade")
@@ -702,7 +913,8 @@ def run_upgrade_canary(
                 "status": "passed",
                 "evidence": sorted(evidence),
                 "threads": len(PROMPTS),
-                "messages": 4,
+                "messages": baseline.message_count,
+                "routines": len(ROUTINE_DEFINITIONS),
             },
             sort_keys=True,
         )
