@@ -137,6 +137,14 @@ pub trait OutboundStateStorePort: Send + Sync {
         request: AdvanceSubscriptionCursorRequest,
     ) -> Result<(), OutboundError>;
 
+    /// Idempotently reserve a durable row for `attempt`'s deterministic
+    /// delivery id. A caller replaying the same logical delivery (same
+    /// scope/actor/modality/candidate) that finds no existing row creates
+    /// one; a caller that finds an in-flight or terminal row leaves it
+    /// unchanged, *except* when `attempt` is a fresh `Prepared` reservation
+    /// and the existing row is `Failed` with a non-permanent failure kind
+    /// ([`crate::DeliveryFailureKind::is_permanent`]) — that case reopens the
+    /// row so a retry is not stuck forever behind a transient failure.
     async fn record_delivery_attempt(
         &self,
         attempt: OutboundDeliveryAttempt,

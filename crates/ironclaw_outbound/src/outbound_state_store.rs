@@ -1024,12 +1024,40 @@ where
             .await?;
         let path = delivery_path(&attempt.delivery_id)?;
         for _ in 0..MAX_CAS_RETRIES {
-            if let Some(existing) = self
-                .get_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+            if let Some((existing, versioned)) = self
+                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
                 .await?
             {
                 validate_delivery_identity(&existing, &attempt)?;
-                return Ok(());
+                if !attempt_reopens_stale_failure(&existing, &attempt) {
+                    return Ok(());
+                }
+                // The stable delivery id already settled `Failed` with a
+                // non-permanent failure kind — no part of this delivery
+                // reached the vendor. Reopen it to the incoming fresh
+                // `Prepared` reservation so a caller replaying the same
+                // logical delivery can claim a new send attempt instead of
+                // being stuck behind `ExistingDeliveryUnconfirmed` forever.
+                // This must use versioned CAS, not the byte-only fallback:
+                // a concurrent reopen racing a send claim must never
+                // clobber a `Sending`/terminal row a different worker
+                // already advanced past `Failed`.
+                let entry = delivery_attempt_entry(&attempt)?;
+                match self
+                    .filesystem
+                    .put(
+                        &resource_scope,
+                        &path,
+                        entry,
+                        CasExpectation::Version(versioned.version),
+                    )
+                    .await
+                    .map_err(map_fs_error)
+                {
+                    Ok(_) => return Ok(()),
+                    Err(OutboundError::CasConflict) => continue,
+                    Err(error) => return Err(error),
+                }
             }
             match self
                 .put_delivery_attempt_indexed(
@@ -1659,6 +1687,29 @@ fn delivery_attempt_entry(attempt: &OutboundDeliveryAttempt) -> Result<Entry, Ou
             tenant_id_index_key(),
             tenant_id_index_value(&attempt.scope.tenant_id),
         ))
+}
+
+/// Returns whether `record_delivery_attempt` may replace `existing` (already
+/// durable under the incoming attempt's deterministic delivery id) with
+/// `incoming` instead of treating the call as an idempotent no-op.
+///
+/// Reopening is limited to genuine retries: `incoming` must be a fresh
+/// `Prepared` reservation (every current caller constructs one this way),
+/// `existing` must be `Failed`, and its failure kind must not be permanent
+/// (see [`DeliveryFailureKind::is_permanent`]). Any other existing status —
+/// including a `Failed` row with a permanent failure kind — keeps the
+/// existing no-op behavior, so this never reopens a row another worker
+/// already advanced to `Sending`, `Delivered`, or a permanently terminal
+/// state.
+fn attempt_reopens_stale_failure(
+    existing: &OutboundDeliveryAttempt,
+    incoming: &OutboundDeliveryAttempt,
+) -> bool {
+    incoming.status == OutboundDeliveryStatus::Prepared
+        && existing.status == OutboundDeliveryStatus::Failed
+        && existing
+            .failure_kind
+            .is_some_and(|kind| !kind.is_permanent())
 }
 
 fn delivered_gate_route_path(

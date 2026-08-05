@@ -234,8 +234,36 @@ impl DeliveryFailureKind {
     ///
     /// This classification is specific to failures discovered before vendor
     /// egress ownership is claimed. It does not classify delivery failures for
-    /// retry policy outside that settlement boundary.
+    /// retry policy outside that settlement boundary — see
+    /// [`Self::is_permanent`] for that broader question.
     pub const fn is_permanent_preflight(self) -> bool {
+        match self {
+            Self::AuthorizationRevoked | Self::Rejected | Self::Unknown => true,
+            Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => false,
+        }
+    }
+
+    /// Returns whether a `Failed` row carrying this failure kind must stay
+    /// terminal for its deterministic delivery id, across the whole delivery
+    /// lifecycle — not just the preflight settlement boundary
+    /// `is_permanent_preflight` covers. A caller replaying the same logical
+    /// delivery (same scope/actor/modality/candidate, hence the same
+    /// deterministic id) may reopen a non-permanent `Failed` row to a fresh
+    /// `Prepared` attempt instead of being stuck behind it forever.
+    ///
+    /// `AuthorizationRevoked` and `Unknown` are permanently terminal for the
+    /// same reasons `is_permanent_preflight` treats them that way.
+    /// `Rejected` additionally covers the OUT-7 partial-multipart terminal
+    /// case recorded after the egress claim: once any part of a multipart
+    /// delivery reached the vendor, a whole-envelope retry would duplicate
+    /// the accepted parts, so it must never reopen even though the
+    /// underlying per-part outcome may itself have been retryable.
+    /// `TransportUnavailable`, `RateLimited`, and `TransientValidatorError`
+    /// are only ever settled for this delivery id when nothing reached the
+    /// vendor (either before the egress claim, or after in-process retries
+    /// were exhausted with no part sent), so reopening cannot duplicate a
+    /// vendor-accepted send.
+    pub const fn is_permanent(self) -> bool {
         match self {
             Self::AuthorizationRevoked | Self::Rejected | Self::Unknown => true,
             Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => false,
@@ -425,6 +453,22 @@ mod tests {
 
         for (kind, expected) in cases {
             assert_eq!(kind.is_permanent_preflight(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn permanent_classification_covers_every_failure_kind() {
+        let cases = [
+            (DeliveryFailureKind::AuthorizationRevoked, true),
+            (DeliveryFailureKind::TransientValidatorError, false),
+            (DeliveryFailureKind::TransportUnavailable, false),
+            (DeliveryFailureKind::RateLimited, false),
+            (DeliveryFailureKind::Rejected, true),
+            (DeliveryFailureKind::Unknown, true),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.is_permanent(), expected, "{kind:?}");
         }
     }
 }

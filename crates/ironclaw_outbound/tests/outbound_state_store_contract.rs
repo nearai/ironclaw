@@ -432,6 +432,7 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     coordinator_delivery_lifecycle_round_trips(&store).await;
     delivery_prepared_transition_outcomes_preserve_authoritative_state(&store).await;
     prepared_failure_is_permanent_scoped_and_source_guarded(&store).await;
+    record_delivery_attempt_reopens_only_non_permanent_failed_rows(&store).await;
     recovery_transition_never_clobbers_delivered(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
 }
@@ -600,6 +601,55 @@ async fn prepared_failure_cas_loser_returns_exact_winner_snapshot_without_post_r
             .expect("settlement loser observes the racing send claim"),
         FailPreparedDeliveryAttemptOutcome::Existing(Box::new(winner))
     );
+    racing.assert_resolved_in_retry_read().await;
+}
+
+#[tokio::test]
+async fn record_delivery_attempt_reopen_race_loser_defers_to_concurrent_winner() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(DeliveryTransitionRaceBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-reopen-race-loser");
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("seed prepared attempt");
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("claim first send attempt"),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
+    );
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Failed,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+        })
+        .await
+        .expect("settle the exhausted-retry terminal failure");
+
+    // By the time this reopen's CAS write lands, a concurrent worker already
+    // reopened and claimed the same delivery id for `Sending`. The reopen
+    // must observe that winner and defer to it instead of clobbering it back
+    // to `Prepared` — verified by the racing backend rejecting any second
+    // `put` after the first CAS loss.
+    let mut winner = prepared.clone();
+    winner.status = OutboundDeliveryStatus::Sending;
+    racing.arm(delivery_id, winner).await;
+
+    store
+        .record_delivery_attempt(prepared)
+        .await
+        .expect("reopen loser must defer, not error");
     racing.assert_resolved_in_retry_read().await;
 }
 
@@ -2213,6 +2263,144 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
         .expect("sending attempt persists");
     assert_eq!(sending.status, OutboundDeliveryStatus::Sending);
     assert_eq!(sending.failure_kind, None);
+}
+
+/// A stable delivery id that settled `Failed` for a non-permanent reason
+/// (e.g. `TransportUnavailable` after in-process retries were exhausted with
+/// nothing sent) must not be stuck behind `ExistingDeliveryUnconfirmed`
+/// forever: replaying the same logical delivery reopens it to a fresh
+/// `Prepared` attempt so a new send claim can be taken. A `Failed` row with a
+/// permanent kind (`AuthorizationRevoked`, `Rejected`, `Unknown`) must stay
+/// terminal.
+async fn record_delivery_attempt_reopens_only_non_permanent_failed_rows(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+
+    // Transient: reopen to Prepared and allow a new send claim.
+    let transient_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(transient_id, scope.clone(), "reply-reopen-transient");
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("seed prepared attempt");
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: transient_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("claim first send attempt"),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
+    );
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: transient_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Failed,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+        })
+        .await
+        .expect("settle the exhausted-retry terminal failure, mirroring drive_prepared");
+
+    // Replaying the same logical delivery reconstructs the identical
+    // attempt (same delivery_id/scope/candidate) with a fresh `Prepared`
+    // reservation, exactly like every production caller.
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("reopen a transient Failed row");
+    let reopened = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("load reopened attempt")
+        .into_iter()
+        .find(|attempt| attempt.delivery_id == transient_id)
+        .expect("reopened attempt persists");
+    assert_eq!(reopened.status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(reopened.failure_kind, None);
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: transient_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("claim the reopened attempt"),
+        ClaimDeliveryAttemptForSendOutcome::Claimed,
+        "a reopened attempt must be claimable for a fresh send"
+    );
+
+    // Permanent: AuthorizationRevoked, Rejected, and Unknown all stay
+    // terminal — replaying record_delivery_attempt is a no-op.
+    for (marker, failure_kind) in [
+        (
+            "reply-reopen-authorization-revoked",
+            DeliveryFailureKind::AuthorizationRevoked,
+        ),
+        ("reply-reopen-rejected", DeliveryFailureKind::Rejected),
+        ("reply-reopen-unknown", DeliveryFailureKind::Unknown),
+    ] {
+        let permanent_id = OutboundDeliveryId::new();
+        let prepared = prepared_delivery_attempt(permanent_id, scope.clone(), marker);
+        store
+            .record_delivery_attempt(prepared.clone())
+            .await
+            .expect("seed prepared attempt");
+        assert_eq!(
+            store
+                .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                    delivery_id: permanent_id,
+                    scope: scope.clone(),
+                })
+                .await
+                .expect("claim send attempt"),
+            ClaimDeliveryAttemptForSendOutcome::Claimed
+        );
+        store
+            .update_delivery_status(UpdateDeliveryStatusRequest {
+                delivery_id: permanent_id,
+                scope: scope.clone(),
+                status: OutboundDeliveryStatus::Failed,
+                updated_at: now(),
+                failure_kind: Some(failure_kind),
+            })
+            .await
+            .expect("settle a permanent terminal failure");
+
+        store
+            .record_delivery_attempt(prepared.clone())
+            .await
+            .expect("replaying a permanently failed delivery is a no-op");
+        let attempts = store
+            .list_delivery_attempts(scope.clone())
+            .await
+            .expect("load attempts after no-op replay");
+        let persisted = attempts
+            .iter()
+            .find(|attempt| attempt.delivery_id == permanent_id)
+            .expect("permanently failed attempt persists");
+        let mut expected = prepared;
+        expected.status = OutboundDeliveryStatus::Failed;
+        expected.failure_kind = Some(failure_kind);
+        assert_eq!(
+            persisted, &expected,
+            "{failure_kind:?} must stay terminal across a record_delivery_attempt replay"
+        );
+        assert_eq!(
+            store
+                .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                    delivery_id: permanent_id,
+                    scope: scope.clone(),
+                })
+                .await
+                .expect("claim on a permanently failed attempt"),
+            ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(persisted.clone())),
+            "{failure_kind:?} must never be claimable again"
+        );
+    }
 }
 
 async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundStateStorePort) {
