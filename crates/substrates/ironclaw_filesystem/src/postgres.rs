@@ -1,0 +1,2825 @@
+// arch-exempt: large_file, PostgreSQL RootFilesystem remains cohesive while projection DDL is isolated in helpers, plan #5274
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
+    sync::{Mutex as StdMutex, OnceLock},
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use ironclaw_host_api::path::VirtualPath;
+
+use crate::backend::{EventRecord, StorageTxn};
+use crate::db::{
+    db_error, direct_children, directory_append_error, directory_write_error, escape_like_literal,
+    escape_like_with_trailing_wildcard, infrastructure_pg_error, is_not_found, not_found,
+    page_offset_to_i64, record_version_from_i64, record_version_to_i64, sql_index_name,
+    system_time_from_unix_seconds, virtual_path_prefixes,
+};
+use crate::vector::{cosine_similarity, decode_embedding_blob};
+use crate::{
+    AtomicSubtreeEntry, BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry,
+    Entry, FileStat, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexName, IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo,
+    TxnCapability, VersionedEntry, root::validate_atomic_subtree_entries,
+};
+/// An opened PostgreSQL connection pool, as a type this workspace owns.
+///
+/// This crate is the Postgres substrate — it is where `deadpool_postgres` is a
+/// chartered dependency rather than a leak (PROPOSAL §11.2.6). Crates *above*
+/// it that only need to pass a pool along should name this type instead of the
+/// driver's, so a third-party type stops appearing in their public APIs
+/// (PROPOSAL §6.3.2, "stop leaking `deadpool_postgres::Pool` in the public API
+/// (wrap)").
+///
+/// It is a carrier, not an abstraction: [`driver`](Self::driver) hands back the
+/// pool for the crates that genuinely execute SQL on it. Deliberately **not**
+/// `Deref` — an implicit unwrap would let the driver type back into a signature
+/// without anyone noticing, which is the thing being fixed.
+#[derive(Clone)]
+pub struct PostgresConnectionPool {
+    pool: deadpool_postgres::Pool,
+}
+
+impl PostgresConnectionPool {
+    /// Adopt an already-opened driver pool.
+    pub fn new(pool: deadpool_postgres::Pool) -> Self {
+        Self { pool }
+    }
+
+    /// The underlying driver pool, for a caller that runs SQL against it.
+    pub fn driver(&self) -> &deadpool_postgres::Pool {
+        &self.pool
+    }
+
+    /// Consume the carrier and yield the driver pool.
+    pub fn into_driver(self) -> deadpool_postgres::Pool {
+        self.pool
+    }
+}
+
+impl std::fmt::Debug for PostgresConnectionPool {
+    /// Never renders the pool. `deadpool_postgres::Pool`'s `Debug` prints its
+    /// `Manager` (`deadpool-postgres-0.14.1/src/lib.rs:134`), which prints its
+    /// `tokio_postgres::Config`. That config **does** redact the password
+    /// (`tokio-postgres-0.7.16/src/config.rs:766-776` substitutes `_`), but it
+    /// still prints `user`, `dbname`, `host`, `hostaddr`, `port` and
+    /// `ssl_mode`. That is deployment topology, and anything holding this
+    /// carrier would inherit it through a `#[derive(Debug)]` nobody reviewed —
+    /// so the carrier declines to be that vector.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PostgresConnectionPool")
+            .finish_non_exhaustive()
+    }
+}
+
+/// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
+pub struct PostgresRootFilesystem {
+    pool: deadpool_postgres::Pool,
+    index_ddl_lock: tokio::sync::Mutex<()>,
+    projection_specs: StdMutex<HashMap<(String, IndexName), IndexSpec>>,
+}
+const POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV: &str =
+    "IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS";
+const POSTGRES_MIGRATION_CONNECT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(300);
+const POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+const POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK: i64 = 824_917_203;
+static POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS: OnceLock<tokio::sync::Mutex<HashSet<String>>> =
+    OnceLock::new();
+
+fn projection_cache_error(path: &VirtualPath) -> FilesystemError {
+    FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::EnsureIndex,
+        reason: "projection index cache mutex poisoned".to_string(),
+    }
+}
+
+fn cached_projection_result(
+    path: &VirtualPath,
+    requested: &IndexSpec,
+    existing: &IndexSpec,
+) -> Result<(), FilesystemError> {
+    if existing == requested {
+        Ok(())
+    } else {
+        Err(FilesystemError::IndexConflict {
+            path: path.clone(),
+            name: requested.name.clone(),
+            reason: crate::IndexConflictReason::SpecMismatch,
+        })
+    }
+}
+
+impl PostgresRootFilesystem {
+    pub fn new(pool: deadpool_postgres::Pool) -> Self {
+        Self {
+            pool,
+            index_ddl_lock: tokio::sync::Mutex::new(()),
+            projection_specs: StdMutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
+        let mut client = self.migration_client_with_retry().await?;
+        let migration_key = postgres_root_filesystem_migration_key(&client).await?;
+        let registry = POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS
+            .get_or_init(|| tokio::sync::Mutex::new(HashSet::new()));
+        let mut migrated_schemas = registry.lock().await;
+        if migrated_schemas.contains(&migration_key) {
+            return Ok(());
+        }
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
+            .execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                &[&POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK],
+            )
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
+            .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        drop_legacy_projection_indexes(&transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        migrated_schemas.insert(migration_key);
+        Ok(())
+    }
+
+    async fn migration_client_with_retry(
+        &self,
+    ) -> Result<deadpool_postgres::Object, FilesystemError> {
+        let max_wait = postgres_migration_connect_max_wait()?;
+        let started_at = tokio::time::Instant::now();
+        let mut attempt = 0u32;
+        loop {
+            attempt = attempt.saturating_add(1);
+            match self.client().await {
+                Ok(client) => return Ok(client),
+                Err(error) => {
+                    let elapsed = started_at.elapsed();
+                    if elapsed >= max_wait {
+                        return Err(error);
+                    }
+                    let remaining = max_wait - elapsed;
+                    let delay = postgres_migration_connect_backoff(attempt - 1).min(remaining);
+                    tracing::debug!(
+                        attempt,
+                        max_wait_ms = max_wait.as_millis(),
+                        elapsed_ms = elapsed.as_millis(),
+                        retry_after_ms = delay.as_millis(),
+                        "postgres root filesystem migration connect failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
+        self.pool.get().await.map_err(|error| {
+            let reason = format!(
+                "failed to create PostgreSQL filesystem connection: {}",
+                format_error_chain(&error)
+            );
+            tracing::debug!(
+                %reason,
+                "postgres root filesystem pool checkout failed"
+            );
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::Connect,
+                reason,
+            }
+        })
+    }
+}
+async fn drop_legacy_projection_indexes(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<(), FilesystemError> {
+    let rows = transaction
+        .query(
+            "SELECT indexname \
+             FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND tablename = 'root_filesystem_entries' \
+               AND indexname LIKE 'idx_rfs_%' \
+               AND indexdef LIKE '%btree (((indexed ->>%'",
+            &[],
+        )
+        .await
+        .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+    for row in rows {
+        let index_name: String = row.get(0);
+        let quoted = quote_postgres_identifier(&index_name);
+        transaction
+            .batch_execute(&format!("DROP INDEX IF EXISTS {quoted}"))
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+    }
+    Ok(())
+}
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+async fn postgres_root_filesystem_migration_key(
+    client: &deadpool_postgres::Object,
+) -> Result<String, FilesystemError> {
+    // `inet_server_addr()` / `inet_server_port()` can collapse to the same
+    // value across isolated Docker testcontainers. The postmaster start time
+    // distinguishes those server instances while still letting a live process
+    // skip repeat migrations against the same running database.
+    let row = client
+        .query_one(
+            "SELECT \
+                current_database(), \
+                current_schema(), \
+                COALESCE(inet_server_addr()::text, 'local'), \
+                COALESCE(inet_server_port()::text, 'local'), \
+                pg_postmaster_start_time()::text",
+            &[],
+        )
+        .await
+        .map_err(|error| infrastructure_pg_error(FilesystemOperation::Connect, error))?;
+    let database: String = row.get(0);
+    let schema: String = row.get(1);
+    let host: String = row.get(2);
+    let port: String = row.get(3);
+    let postmaster_started_at: String = row.get(4);
+    Ok(format!(
+        "{host}:{port}/{database}/{schema}@{postmaster_started_at}"
+    ))
+}
+fn postgres_migration_connect_backoff(attempt: u32) -> Duration {
+    POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF
+        .saturating_mul(2u32.saturating_pow(attempt.min(16)))
+        .min(POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF)
+}
+fn postgres_migration_connect_max_wait() -> Result<Duration, FilesystemError> {
+    match std::env::var(POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV) {
+        Ok(raw) => {
+            let seconds =
+                raw.trim()
+                    .parse::<u64>()
+                    .map_err(|_| FilesystemError::BackendInfrastructure {
+                        operation: FilesystemOperation::Connect,
+                        reason: format!(
+                            "{POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV} must be a positive integer"
+                        ),
+                    })?;
+            if seconds == 0 {
+                return Err(FilesystemError::BackendInfrastructure {
+                    operation: FilesystemOperation::Connect,
+                    reason: format!(
+                        "{POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV} must be greater than 0"
+                    ),
+                });
+            }
+            Ok(Duration::from_secs(seconds))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(POSTGRES_MIGRATION_CONNECT_DEFAULT_MAX_WAIT),
+        Err(std::env::VarError::NotUnicode(_)) => Err(FilesystemError::BackendInfrastructure {
+            operation: FilesystemOperation::Connect,
+            reason: format!("{POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV} must be valid Unicode"),
+        }),
+    }
+}
+fn format_error_chain(error: &(dyn Error + 'static)) -> String {
+    let mut reason = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        reason.push_str(": ");
+        reason.push_str(&error.to_string());
+        source = error.source();
+    }
+    reason
+}
+#[async_trait]
+impl RootFilesystem for PostgresRootFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        // sql_typical: read/write/append/list/stat/delete/records/query/
+        // IndexExact/IndexPrefix/CAS. Events join the set with the V30
+        // append/tail backing table. Postgres has native `tsvector` /
+        // `plainto_tsquery` so we advertise IndexFts. Vector indexing is
+        // currently a brute-force cosine ranker against `indexed->>'key'`
+        // values stored as IndexValue::Bytes; we advertise IndexVector but
+        // do not require pgvector.
+        BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
+            .with_txn(TxnCapability::MultiKey)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let client = self.client().await?;
+        postgres_put_with_client(&client, path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let client = self.client().await?;
+        postgres_get_with_client(&client, path).await
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        let versions =
+            postgres_create_subtree_with_transaction(&transaction, prefix, entries).await?;
+        transaction.commit().await.map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        Ok(versions)
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        let kind_str = match &spec.kind {
+            IndexKind::Exact => "exact".to_string(),
+            IndexKind::Prefix => "prefix".to_string(),
+            IndexKind::Fts => "fts".to_string(),
+            IndexKind::Vector { dim } => format!("vector:{dim}"),
+        };
+        if spec.keys.is_empty() {
+            return Err(FilesystemError::IndexConflict {
+                path: path.clone(),
+                name: spec.name.clone(),
+                reason: crate::IndexConflictReason::EmptyKeys,
+            });
+        }
+        let shared_projection = matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix);
+        let projection_key = (path.as_str().to_string(), spec.name.clone());
+        if shared_projection {
+            let cache = self
+                .projection_specs
+                .lock()
+                .map_err(|_| projection_cache_error(path))?;
+            if let Some(existing) = cache.get(&projection_key) {
+                return cached_projection_result(path, spec, existing);
+            }
+        }
+        let _ddl_guard = self.index_ddl_lock.lock().await;
+        if shared_projection {
+            let cache = self
+                .projection_specs
+                .lock()
+                .map_err(|_| projection_cache_error(path))?;
+            if let Some(existing) = cache.get(&projection_key) {
+                return cached_projection_result(path, spec, existing);
+            }
+        }
+        let catalog_prefix = path.as_str();
+        let keys_json = serde_json::to_value(
+            spec.keys
+                .iter()
+                .map(|k| k.as_str().to_string())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| FilesystemError::SerializeIndexed {
+            path: path.clone(),
+            operation: FilesystemOperation::EnsureIndex,
+        })?;
+
+        let mut client = self.client().await?;
+        // PR #3661 reviewer fix: race-idempotent declaration. Single
+        // INSERT ... ON CONFLICT DO NOTHING followed by a read-back +
+        // canonical-spec equality check. Two concurrent declarers of the
+        // same spec both succeed; declarers of conflicting specs see
+        // IndexConflict deterministically.
+        cached_execute(
+            &client,
+            "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (prefix, name) DO NOTHING",
+            &[&catalog_prefix, &spec.name.as_str(), &keys_json, &kind_str],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+
+        let row = cached_query_opt(
+            &client,
+            "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = $1 AND name = $2",
+            &[&catalog_prefix, &spec.name.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?
+        .ok_or_else(|| FilesystemError::IndexSpecMissingAfterUpsert {
+            path: path.clone(),
+            name: spec.name.clone(),
+        })?;
+        let existing_keys: serde_json::Value = row.get("keys");
+        let existing_kind: String = row.get("kind");
+        if existing_keys != keys_json || existing_kind != kind_str {
+            return Err(FilesystemError::IndexConflict {
+                path: path.clone(),
+                name: spec.name.clone(),
+                reason: crate::IndexConflictReason::SpecMismatch,
+            });
+        }
+
+        let index_name = sql_index_name(path.as_str(), spec.name.as_str());
+        match &spec.kind {
+            IndexKind::Exact | IndexKind::Prefix => {
+                ensure_postgres_ordered_projection(&mut client, path, spec).await?;
+            }
+            IndexKind::Fts => {
+                if spec.keys.len() != 1 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                let fts_key = spec.keys[0].as_str();
+                // GIN expression index on a `to_tsvector(...)` over the
+                // indexed JSON projection. Postgres `to_tsvector` returns
+                // `tsvector`, which GIN indexes natively. The matching
+                // predicate at query time uses `@@ plainto_tsquery`.
+                //
+                // Audit finding F4: libsql FTS5 virtual tables are
+                // declared per-mount-prefix (one vtable per
+                // `ensure_index(prefix, ...)`), so a query at one prefix
+                // can't accidentally match indexed rows under a sibling
+                // prefix. The Postgres GIN index, by contrast, used to
+                // be global over `root_filesystem_entries` regardless of
+                // which prefix declared it — fine for correctness (the
+                // query path still scopes by `path LIKE prefix/%`) but
+                // it breaks parity in two ways: a search at `/memory/a`
+                // would have its planner consider postings from
+                // `/memory/b` before filtering, and `DROP INDEX` for a
+                // prefix-scoped tear-down would impact other prefixes.
+                // Make the index a partial index gated by the prefix to
+                // restore parity.
+                let prefix_pattern =
+                    escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+                let prefix_literal = prefix_pattern.replace('\'', "''");
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries \
+                     USING GIN (to_tsvector('english', COALESCE(indexed->>'{fts_key}', ''))) \
+                     WHERE path = '{path_literal}' OR path LIKE '{prefix_literal}' ESCAPE '!'",
+                    path_literal = path.as_str().replace('\'', "''"),
+                );
+                client.batch_execute(&ddl).await.map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Vector { dim } => {
+                if *dim == 0 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                // Vector storage = IndexValue::Bytes in the indexed JSON
+                // projection. No per-row table or DDL is required; queries
+                // brute-force cosine over the candidate set. pgvector
+                // support could be layered in later via a dialect probe
+                // (`SELECT * FROM pg_extension WHERE extname='vector'`)
+                // without changing this trait surface.
+            }
+        }
+        if shared_projection {
+            self.projection_specs
+                .lock()
+                .map_err(|_| projection_cache_error(path))?
+                .insert(projection_key, spec.clone());
+        }
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        // Vector-nearest is evaluated by ranking the candidate set in Rust.
+        if let Filter::VectorNearest {
+            key,
+            embedding,
+            limit,
+        } = filter
+        {
+            return self
+                .vector_nearest_query(path, key, embedding, *limit)
+                .await;
+        }
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
+        let path_str = path.as_str().to_string();
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        params.push(Box::new(path_str));
+        params.push(Box::new(prefix_lower));
+        params.push(Box::new(prefix_upper));
+
+        let mut conditions = String::new();
+        translate_filter(path, filter, &mut conditions, &mut params)?;
+
+        let mut sql = String::from(
+            "SELECT path, contents, content_type, kind, indexed, version \
+             FROM root_filesystem_entries \
+             WHERE is_dir = FALSE AND (path = $1 OR (path >= $2 AND path < $3))",
+        );
+        if !conditions.is_empty() {
+            sql.push_str(" AND ");
+            sql.push_str(&conditions);
+        }
+        sql.push_str(&format!(
+            " ORDER BY path LIMIT ${} OFFSET ${}",
+            params.len() + 1,
+            params.len() + 2
+        ));
+        // `page.limit` is `u32` and clamped to `Page::MAX_LIMIT`, so the
+        // `i64::from` is safe by construction. `page.offset` is `u64` and
+        // user-supplied — guard with `try_from` so values ≥ 2^63 surface
+        // a typed `Backend` error instead of wrapping to a negative
+        // OFFSET. (Audit finding F6.)
+        params.push(Box::new(i64::from(page.limit.min(Page::MAX_LIMIT))));
+        params.push(Box::new(page_offset_to_i64(path, page.offset)?));
+
+        let client = self.client().await?;
+        let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref() as _).collect();
+        let statement = client
+            .prepare_cached(sql.as_str())
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let rows = client
+            .query(&statement, &params_ref[..])
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let row_path: String = row.get("path");
+                let row_path = VirtualPath::new(row_path)?;
+                let body: Vec<u8> = row.get("contents");
+                let content_type_raw: String = row.get("content_type");
+                let kind_raw: Option<String> = row.get("kind");
+                let indexed_value: serde_json::Value = row.get("indexed");
+                let version_raw: i64 = row.get("version");
+                let entry =
+                    build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
+                let version = record_version_from_i64(&row_path, version_raw)?;
+                Ok(VersionedEntry {
+                    path: row_path,
+                    entry,
+                    version,
+                })
+            })
+            .collect()
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let client = self.client().await?;
+        // Resolve the spec against `path` and every ancestor prefix, most
+        // specific first, so a caller may declare the index once on a higher
+        // prefix and query a child path. `/shared` keeps its existing
+        // precedence over every path-derived candidate. Binding the candidates
+        // as one array keeps this a single prepared statement regardless of
+        // path depth, and the lookup stays keyed rather than a catalog scan.
+        let mut candidate_prefixes: Vec<String> = crate::index::ancestor_prefixes(path.as_str())
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        candidate_prefixes.push("/shared".to_string());
+        let spec_row = cached_query_opt(
+            &client,
+            "SELECT keys, kind FROM root_filesystem_index_specs \
+             WHERE prefix = ANY($1) AND name = $2 \
+             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END, length(prefix) DESC \
+             LIMIT 1",
+            &[&candidate_prefixes, &page.index.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let spec = if let Some(row) = spec_row {
+            let keys_json: serde_json::Value = row.get("keys");
+            let keys = serde_json::from_value::<Vec<String>>(keys_json)
+                .map_err(|_| FilesystemError::DeserializeIndexed {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                })?
+                .into_iter()
+                .map(IndexKey::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            let kind: String = row.get("kind");
+            let kind = match kind.as_str() {
+                "exact" => IndexKind::Exact,
+                "prefix" => IndexKind::Prefix,
+                _ => {
+                    return Err(FilesystemError::Unsupported {
+                        path: path.clone(),
+                        operation: FilesystemOperation::Query,
+                    });
+                }
+            };
+            Some(IndexSpec::new(page.index.clone(), keys, kind))
+        } else {
+            None
+        };
+        let Some(spec) = spec else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let Some(prefix_values) = crate::index::ordered_query_prefix_values(&spec, filter, page)
+        else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let sort_position = prefix_values.len();
+        let tie_position = sort_position.saturating_add(1);
+        if tie_position >= crate::index::MAX_ORDERED_INDEX_KEYS {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        }
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
+        params.push(Box::new(page.index.as_str().to_string()));
+        let path_str = path.as_str().to_string();
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        params.push(Box::new(path_str));
+        params.push(Box::new(prefix_lower));
+        params.push(Box::new(prefix_upper));
+        let expression = format!("ordered.k{sort_position}");
+        let tie_expression = format!("ordered.k{tie_position}");
+        let mut sql = String::from(
+            "SELECT entry.path, entry.contents, entry.content_type, entry.kind, \
+                    entry.indexed, entry.version \
+             FROM root_filesystem_ordered_index_rows AS ordered \
+             JOIN root_filesystem_entries AS entry ON entry.path = ordered.path \
+             WHERE ordered.index_name = $1 \
+               AND (ordered.path = $2 OR (ordered.path >= $3 AND ordered.path < $4))",
+        );
+        for (position, value) in prefix_values.iter().enumerate() {
+            let value_index = bind_ordered_index_value(path, value, &mut params)?;
+            sql.push_str(&format!(" AND ordered.k{position} = ${value_index}"));
+        }
+        if let Some(cursor) = &page.after {
+            let value_index = bind_ordered_index_value(path, &cursor.value, &mut params)?;
+            let tie_index = bind_ordered_index_value(path, &cursor.tie_breaker, &mut params)?;
+            let comparison = match page.direction {
+                crate::SortDirection::Ascending => ">",
+                crate::SortDirection::Descending => "<",
+            };
+            sql.push_str(&format!(
+                " AND ({expression} {comparison} ${value_index} \
+                 OR ({expression} = ${value_index} AND {tie_expression} {comparison} ${tie_index}))"
+            ));
+        }
+        let direction = match page.direction {
+            crate::SortDirection::Ascending => "ASC",
+            crate::SortDirection::Descending => "DESC",
+        };
+        params.push(Box::new(i64::from(page.limit.min(crate::Page::MAX_LIMIT))));
+        let limit_index = params.len();
+        sql.push_str(&format!(
+            " ORDER BY {expression} {direction}, {tie_expression} {direction} LIMIT ${limit_index}"
+        ));
+        let params_ref = params
+            .iter()
+            .map(|param| param.as_ref() as _)
+            .collect::<Vec<&(dyn tokio_postgres::types::ToSql + Sync)>>();
+        let statement = client
+            .prepare_cached(sql.as_str())
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let rows = client
+            .query(&statement, &params_ref)
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let row_path: String = row.get("path");
+                let row_path = VirtualPath::new(row_path)?;
+                let body: Vec<u8> = row.get("contents");
+                let content_type_raw: String = row.get("content_type");
+                let kind_raw: Option<String> = row.get("kind");
+                let indexed_value: serde_json::Value = row.get("indexed");
+                let version_raw: i64 = row.get("version");
+                let entry =
+                    build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
+                let version = record_version_from_i64(&row_path, version_raw)?;
+                Ok(VersionedEntry {
+                    path: row_path,
+                    entry,
+                    version,
+                })
+            })
+            .collect()
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        let client = self.client().await?;
+        let row = cached_query_opt(
+            &client,
+            "SELECT contents, is_dir FROM root_filesystem_entries WHERE path = $1",
+            &[&path.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let Some(row) = row else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
+        Ok(row.get("contents"))
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let client = self.client().await?;
+        let max_bytes = max_bytes as i64;
+        let row = cached_query_opt(
+            &client,
+            r#"
+                SELECT
+                    CASE
+                        WHEN octet_length(contents)::BIGINT <= $2 THEN contents
+                        ELSE NULL
+                    END AS contents,
+                    octet_length(contents)::BIGINT AS len,
+                    is_dir
+                FROM root_filesystem_entries
+                WHERE path = $1
+                "#,
+            &[&path.as_str(), &max_bytes],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let Some(row) = row else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
+        let len: i64 = row.get("len");
+        if len > max_bytes {
+            return Ok(None);
+        }
+        Ok(Some(row.get("contents")))
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        if matches!(
+            self.exact_entry_with_client(&client, path).await?,
+            Some((_, FileType::Directory, _))
+        ) || self.has_child_entry_with_client(&client, path).await?
+        {
+            return Err(directory_write_error(path.clone()));
+        }
+        // PR #3660 reviewer fix: legacy write_file must reset content_type
+        // / kind / indexed and bump version, otherwise get() after
+        // write_file-overwrite of a previously record-shaped entry
+        // returns stale metadata.
+        let rows = cached_execute(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_entries
+                    (path, contents, is_dir, content_type, kind, indexed, version)
+                VALUES ($1, $2, FALSE, 'application/octet-stream', NULL, '{}'::jsonb, 1)
+                ON CONFLICT (path) DO UPDATE SET
+                    contents = EXCLUDED.contents,
+                    is_dir = FALSE,
+                    content_type = EXCLUDED.content_type,
+                    kind = EXCLUDED.kind,
+                    indexed = EXCLUDED.indexed,
+                    version = root_filesystem_entries.version + 1,
+                    updated_at = NOW()
+                WHERE root_filesystem_entries.is_dir = FALSE
+                "#,
+            &[&path.as_str(), &bytes],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+        if rows == 0 {
+            return Err(directory_write_error(path.clone()));
+        }
+        Ok(())
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        if matches!(
+            self.exact_entry_with_client(&client, path).await?,
+            Some((_, FileType::Directory, _))
+        ) || self.has_child_entry_with_client(&client, path).await?
+        {
+            return Err(directory_append_error(path.clone()));
+        }
+        // PR #3660 reviewer fix: append also resets schema metadata.
+        // Appending bytes onto a previously record-shaped entry was always
+        // a category error; surface it by clearing the schema metadata
+        // rather than leaving it stale on top of changed bytes.
+        // Note: append rewrites the whole DB row. This is acceptable for
+        // the legacy bytes plane (slated for removal in the consumer-
+        // migration cleanup pass — see RootFilesystem::append_file's
+        // deprecation note). New callers must use `append`/`tail` for
+        // log-shaped mounts or `get`+`put` read-modify-write.
+        cached_execute(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_entries
+                    (path, contents, is_dir, content_type, kind, indexed, version)
+                VALUES ($1, $2, FALSE, 'application/octet-stream', NULL, '{}'::jsonb, 1)
+                ON CONFLICT (path) DO UPDATE SET
+                    contents = root_filesystem_entries.contents || EXCLUDED.contents,
+                    is_dir = FALSE,
+                    content_type = EXCLUDED.content_type,
+                    kind = EXCLUDED.kind,
+                    indexed = EXCLUDED.indexed,
+                    version = root_filesystem_entries.version + 1,
+                    updated_at = NOW()
+                "#,
+            &[&path.as_str(), &bytes],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        Ok(())
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        let client = self.client().await?;
+        let exact_entry = self.exact_entry_with_client(&client, path).await?;
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        let rows = self
+            .child_entries_with_client(&client, path, FilesystemOperation::ListDir)
+            .await?;
+        let children = direct_children(path, rows);
+        if matches!(exact_entry, Some((_, FileType::Directory, _))) && is_not_found(&children) {
+            return Ok(Vec::new());
+        }
+        children
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        let client = self.client().await?;
+        postgres_stat_with_client(&client, path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        postgres_delete_with_client(&client, path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Round-B review: validate `expected_version` before taking the
+        // pool checkout, mirroring the libsql backend's Round-A fix — an
+        // out-of-range version can never match a real row, so failing
+        // closed here avoids holding a contended pool connection for a
+        // call destined to error.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
+        let client = self.client().await?;
+        postgres_delete_if_version_with_client(&client, path, expected_version, expected_raw).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let client = self.client().await?;
+        client
+            .batch_execute("BEGIN")
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::BeginTxn, error))?;
+        Ok(Box::new(PostgresStorageTxn {
+            client: Some(client),
+            prefix: path.clone(),
+            active: true,
+        }))
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let client = self.client().await?;
+        let row = cached_query_one(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_events (path, payload)
+                VALUES ($1, $2)
+                RETURNING id
+                "#,
+            &[&path.as_str(), &payload],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let id: i64 = row.get("id");
+        seq_no_from_i64(path, id, FilesystemOperation::Append)
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.client().await?;
+        // One multi-row INSERT via `unnest` so the SQL text is FIXED regardless
+        // of batch size (keeps `prepare_cached` to a single statement) while
+        // still collapsing N appends into one round-trip. `WITH ORDINALITY`
+        // tags each unnested element with its 1-based position; `ORDER BY ord`
+        // forces the planner to process rows in array order so BIGSERIAL ids
+        // are assigned in payload order. Sorting the RETURNING ids ASC then
+        // deterministically recovers that order (Postgres does not guarantee
+        // RETURNING row order).
+        let rows = cached_query(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_events (path, payload)
+                SELECT $1, payload
+                FROM unnest($2::bytea[]) WITH ORDINALITY AS t(payload, ord)
+                ORDER BY ord
+                RETURNING id
+                "#,
+            &[&path.as_str(), &payloads],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let mut ids: Vec<i64> = rows.iter().map(|row| row.get("id")).collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .map(|id| seq_no_from_i64(path, id, FilesystemOperation::Append))
+            .collect()
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.tail_bounded(path, from, usize::MAX).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        if max_records == 0 {
+            return Ok(Vec::new());
+        }
+        let client = self.client().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| {
+            backend_error(
+                path.clone(),
+                FilesystemOperation::Tail,
+                "tail cursor exceeds i64",
+            )
+        })?;
+        // silent-ok: callers can request an unbounded tail; saturating keeps the
+        // SQL LIMIT representable without changing the public trait contract.
+        let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
+        let rows = cached_query(
+            &client,
+            r#"
+                SELECT id, payload
+                FROM root_filesystem_events
+                WHERE path = $1 AND id > $2
+                ORDER BY id ASC
+                LIMIT $3
+                "#,
+            &[&path.as_str(), &from_raw, &limit_raw],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let id: i64 = row.get("id");
+                let payload: Vec<u8> = row.get("payload");
+                Ok(EventRecord {
+                    seq: seq_no_from_i64(path, id, FilesystemOperation::Tail)?,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        let client = self.client().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| {
+            backend_error(
+                path.clone(),
+                FilesystemOperation::HeadSeq,
+                "head_seq cursor exceeds i64",
+            )
+        })?;
+        let row = cached_query_one(
+            &client,
+            r#"
+                SELECT MAX(id) AS head
+                FROM root_filesystem_events
+                WHERE path = $1 AND id > $2
+                "#,
+            &[&path.as_str(), &from_raw],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::HeadSeq, error))?;
+        // `MAX(...)` over an empty match set yields SQL NULL.
+        let head_raw: Option<i64> = row.get("head");
+        match head_raw {
+            Some(id) => Ok(Some(seq_no_from_i64(
+                path,
+                id,
+                FilesystemOperation::HeadSeq,
+            )?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let client = self.client().await?;
+        postgres_reserve_sequence_with_client(&client, path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let mut client = self.client().await?;
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+        let prefixes = virtual_path_prefixes(path)?;
+        let prefix_paths: Vec<&str> = prefixes.iter().map(VirtualPath::as_str).collect();
+
+        // Keep conflict detection inside the insert statement. `ON CONFLICT`
+        // waits for concurrent writers on the unique path key; if a file wins,
+        // the conditional no-op update returns that row as `is_dir = false`
+        // and the surrounding transaction rolls back.
+        let rows = transaction
+            .query(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents, is_dir)
+                SELECT prefix.path, ''::bytea, TRUE
+                FROM UNNEST($1::text[]) AS prefix(path)
+                ON CONFLICT (path) DO UPDATE
+                    SET is_dir = root_filesystem_entries.is_dir
+                    WHERE root_filesystem_entries.is_dir = FALSE
+                RETURNING path, is_dir
+                "#,
+                &[&prefix_paths],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+
+        for row in rows {
+            let is_dir = row.try_get::<_, bool>("is_dir").map_err(|error| {
+                db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+            })?;
+            if !is_dir {
+                let raw_path = row.try_get::<_, String>("path").map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+                })?;
+                let conflict_path = VirtualPath::new(raw_path.clone()).map_err(|error| {
+                    FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::CreateDirAll,
+                        reason: format!("invalid backend conflict path {raw_path:?}: {error}"),
+                    }
+                })?;
+                return Err(FilesystemError::Backend {
+                    path: conflict_path,
+                    operation: FilesystemOperation::CreateDirAll,
+                    reason: "file exists where directory is required".to_string(),
+                });
+            }
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+        Ok(())
+    }
+}
+impl PostgresRootFilesystem {
+    async fn exact_entry_with_client(
+        &self,
+        client: &deadpool_postgres::Object,
+        path: &VirtualPath,
+    ) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
+        let row = cached_query_opt(
+            client,
+            "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
+            &[&path.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        Ok(row.map(|row| {
+            let len: i64 = row.get("len");
+            let is_dir: bool = row.get("is_dir");
+            let updated_at_epoch: i64 = row.get("updated_at_epoch");
+            (
+                if is_dir { 0 } else { len.max(0) as u64 },
+                if is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+                system_time_from_unix_seconds(updated_at_epoch),
+            )
+        }))
+    }
+
+    async fn child_entries_with_client(
+        &self,
+        client: &deadpool_postgres::Object,
+        parent: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
+        let rows = cached_query(
+            client,
+            "SELECT path, OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path >= $1 AND path < $2 ORDER BY path",
+            &[&prefix_lower, &prefix_upper],
+        )
+        .await
+        .map_err(|error| db_error(parent.clone(), operation, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let path: String = row.get("path");
+                let len: i64 = row.get("len");
+                let is_dir: bool = row.get("is_dir");
+                Ok((
+                    VirtualPath::new(path)?,
+                    if is_dir { 0 } else { len.max(0) as u64 },
+                    if is_dir {
+                        FileType::Directory
+                    } else {
+                        FileType::File
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    async fn has_child_entry_with_client(
+        &self,
+        client: &deadpool_postgres::Object,
+        parent: &VirtualPath,
+    ) -> Result<bool, FilesystemError> {
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
+        let row = cached_query_opt(
+            client,
+            "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
+            &[&prefix_lower, &prefix_upper],
+        )
+        .await
+        .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+        Ok(row.is_some())
+    }
+
+    /// Brute-force cosine ranker over candidate rows in this prefix whose
+    /// indexed projection has an `IndexValue::Bytes` value at `key`. Used
+    /// when the caller's filter is a top-level `VectorNearest`.
+    ///
+    /// Two-phase to bound memory on large prefixes (review feedback on
+    /// the unified-FS rework): first SELECT `(path, indexed, version)`
+    /// for every candidate, rank by cosine in Rust, then `get()` the
+    /// top-k entries to materialize bodies. Rows outside the cutoff
+    /// never have their `contents` bytea loaded.
+    async fn vector_nearest_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        embedding: &[f32],
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let client = self.client().await?;
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        let rows = client
+            .query(
+                "SELECT path, indexed, version \
+                 FROM root_filesystem_entries \
+                 WHERE is_dir = FALSE AND (path = $1 OR (path >= $2 AND path < $3))",
+                &[&path.as_str(), &prefix_lower, &prefix_upper],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut ranked: Vec<(VirtualPath, RecordVersion, f32)> = Vec::new();
+        for row in rows {
+            let row_path: String = row.get("path");
+            let row_path = VirtualPath::new(row_path)?;
+            let indexed_value: serde_json::Value = row.get("indexed");
+            let version_raw: i64 = row.get("version");
+            let indexed: BTreeMap<IndexKey, IndexValue> = if indexed_value.is_null() {
+                BTreeMap::new()
+            } else {
+                serde_json::from_value(indexed_value).map_err(|_| {
+                    FilesystemError::DeserializeIndexed {
+                        path: row_path.clone(),
+                        operation: FilesystemOperation::Query,
+                    }
+                })?
+            };
+            let Some(IndexValue::Bytes(bytes)) = indexed.get(key) else {
+                continue;
+            };
+            let Some(vec) = decode_embedding_blob(bytes) else {
+                continue;
+            };
+            let Some(score) = cosine_similarity(embedding, &vec) else {
+                continue;
+            };
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            ranked.push((row_path, version, score));
+        }
+        // Sort by descending cosine score, then ascending path for a stable
+        // tie-breaker so equal-score rows truncate deterministically across
+        // runs and across backends. The in-memory reference uses the same
+        // tie-breaker; this keeps cross-backend behavior aligned.
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.as_str().cmp(b.0.as_str()))
+        });
+        ranked.truncate(limit as usize);
+        // Release the client so each `get()` below claims its own
+        // pooled connection rather than serializing through one.
+        drop(client);
+        self.materialize_ranked(ranked).await
+    }
+
+    /// Phase-2 of [`vector_nearest_query`]: load full [`VersionedEntry`]
+    /// bodies for the ranked-and-truncated candidate set. Mirrors the
+    /// libSQL backend's `materialize_ranked`, including the silently-skip
+    /// behaviour when a candidate path disappears between phase-1
+    /// ranking and the phase-2 `get`. Pulled out so the concurrent-delete
+    /// branch has a deterministic test seam.
+    pub(crate) async fn materialize_ranked(
+        &self,
+        ranked: Vec<(VirtualPath, RecordVersion, f32)>,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let mut out = Vec::with_capacity(ranked.len());
+        for (row_path, _version, _score) in ranked {
+            let Some(versioned) = self.get(&row_path).await? else {
+                // Concurrent delete between the ranking SELECT and
+                // the body fetch — skip rather than error so the
+                // search doesn't blow up on a race.
+                continue;
+            };
+            out.push(versioned);
+        }
+        Ok(out)
+    }
+}
+struct PostgresStorageTxn {
+    client: Option<deadpool_postgres::Object>,
+    prefix: VirtualPath,
+    active: bool,
+}
+impl PostgresStorageTxn {
+    fn client(&self) -> Result<&deadpool_postgres::Object, FilesystemError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| FilesystemError::Backend {
+                path: self.prefix.clone(),
+                operation: FilesystemOperation::BeginTxn,
+                reason: "postgres transaction already finished".to_string(),
+            })
+    }
+
+    fn check_path(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if crate::path_prefix_matches(self.prefix.as_str(), path.as_str()) {
+            Ok(())
+        } else {
+            Err(FilesystemError::PathOutsideMount { path: path.clone() })
+        }
+    }
+}
+#[async_trait]
+impl StorageTxn for PostgresStorageTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.check_path(path)?;
+        postgres_put_with_client(self.client()?, path, entry, cas).await
+    }
+
+    async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.check_path(path)?;
+        postgres_get_with_client(self.client()?, path).await
+    }
+
+    async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.check_path(path)?;
+        postgres_delete_with_client(self.client()?, path).await
+    }
+
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        postgres_reserve_sequence_with_client(self.client()?, path).await
+    }
+
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        postgres_reserve_sequence_range_with_client(self.client()?, path, count).await
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
+        let client = self.client.take().ok_or_else(|| FilesystemError::Backend {
+            path: self.prefix.clone(),
+            operation: FilesystemOperation::BeginTxn,
+            reason: "postgres transaction already finished".to_string(),
+        })?;
+        match client.batch_execute("COMMIT").await {
+            Ok(()) => {
+                self.active = false;
+                Ok(())
+            }
+            Err(error) => {
+                let mapped = db_error(self.prefix.clone(), FilesystemOperation::BeginTxn, error);
+                let _ = client.batch_execute("ROLLBACK").await;
+                self.active = false;
+                Err(mapped)
+            }
+        }
+    }
+
+    async fn rollback(mut self: Box<Self>) {
+        if let Some(client) = self.client.take()
+            && self.active
+        {
+            let _ = client.batch_execute("ROLLBACK").await;
+            self.active = false;
+        }
+    }
+}
+async fn postgres_reserve_sequence_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<SeqNo, FilesystemError> {
+    let row = cached_query_one(
+        client,
+        r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES ($1, 2, NOW())
+            ON CONFLICT (path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + 1,
+                updated_at = NOW()
+            RETURNING next_seq - 1 AS reserved
+            "#,
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let reserved: i64 = row.get("reserved");
+    seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+}
+
+async fn postgres_reserve_sequence_range_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    count: u64,
+) -> Result<SeqNo, FilesystemError> {
+    if count == 0 {
+        return Ok(SeqNo::ZERO);
+    }
+    let count = i64::try_from(count).map_err(|_| {
+        backend_error(
+            path.clone(),
+            FilesystemOperation::ReserveSeq,
+            "sequence reservation range exceeds i64",
+        )
+    })?;
+    let row = cached_query_one(
+        client,
+        r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES ($1, CAST($2 AS BIGINT) + 1, NOW())
+            ON CONFLICT (path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + CAST($2 AS BIGINT),
+                updated_at = NOW()
+            RETURNING next_seq - 1 AS reserved
+            "#,
+        &[&path.as_str(), &count],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let reserved: i64 = row.get("reserved");
+    seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+}
+impl Drop for PostgresStorageTxn {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(client) = self.client.take() {
+            tokio::spawn(async move {
+                let _ = client.batch_execute("ROLLBACK").await;
+            });
+        }
+    }
+}
+
+/// Prepare-cached variants of the hot fixed-SQL query paths.
+///
+/// `deadpool_postgres` keeps a per-connection statement cache, so issuing a
+/// fixed SQL string through `prepare_cached` pays the `Parse` round-trip once
+/// per connection instead of on every call (~2.8ms RTT to remote Postgres in
+/// production). The pooled connection is held for less time per op, which is
+/// what keeps the small hosted pool from starving the heartbeat/webui and
+/// wedging the runner lease.
+///
+/// Prefer these with static or low-cardinality query-shape SQL. Filesystem
+/// `query` SQL is generated from the filter shape and indexed key names while
+/// paths and values stay bound parameters, so it uses `prepare_cached` directly
+/// at the call site. Index DDL remains uncached. The error type stays
+/// `tokio_postgres::Error` so existing `db_error` mapping at call sites is
+/// unchanged.
+async fn cached_query_opt(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query_opt(&statement, params).await
+}
+async fn cached_query(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query(&statement, params).await
+}
+async fn cached_query_one(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query_one(&statement, params).await
+}
+async fn cached_execute(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<u64, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.execute(&statement, params).await
+}
+
+async fn postgres_create_subtree_with_transaction(
+    transaction: &tokio_postgres::Transaction<'_>,
+    prefix: &VirtualPath,
+    entries: Vec<AtomicSubtreeEntry>,
+) -> Result<Vec<RecordVersion>, FilesystemError> {
+    transaction
+        .query_one(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&prefix.as_str()],
+        )
+        .await
+        .map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+
+    let (lower, upper) = descendant_path_range(prefix);
+    if let Some(row) = transaction
+        .query_opt(
+            "SELECT version FROM root_filesystem_entries \
+             WHERE path = $1 OR (path >= $2 AND path < $3) LIMIT 1",
+            &[&prefix.as_str(), &lower, &upper],
+        )
+        .await
+        .map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?
+    {
+        let version_raw: i64 = row.get("version");
+        return Err(FilesystemError::VersionMismatch {
+            path: prefix.clone(),
+            expected: None,
+            found: Some(record_version_from_i64(prefix, version_raw)?),
+        });
+    }
+
+    let mut versions = Vec::with_capacity(entries.len());
+    for item in entries {
+        let indexed_json = serde_json::to_value(&item.entry.indexed).map_err(|_| {
+            FilesystemError::SerializeIndexed {
+                path: item.path.clone(),
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+            }
+        })?;
+        let kind = item
+            .entry
+            .kind
+            .as_ref()
+            .map(|record_kind| record_kind.as_str().to_string());
+        let content_type = item.entry.content_type.as_str().to_string();
+        let body = item.entry.body;
+        let path = item.path.as_str();
+        let (child_lower, child_upper) = descendant_path_range(&item.path);
+        let rows = transaction
+            .execute(
+                PUT_ABSENT_SQL,
+                &[
+                    &path,
+                    &body,
+                    &content_type,
+                    &kind,
+                    &indexed_json,
+                    &child_lower,
+                    &child_upper,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                db_error(
+                    item.path.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+        if rows == 0 {
+            return Err(FilesystemError::VersionMismatch {
+                path: item.path,
+                expected: None,
+                found: None,
+            });
+        }
+        versions.push(RecordVersion::from_backend(1));
+    }
+    Ok(versions)
+}
+
+/// `CasExpectation::Absent` put: insert iff `path` is not an implicit directory
+/// (no descendant in the half-open `[prefix/, prefix0)` range); the `ON CONFLICT
+/// DO NOTHING` also blocks an explicit directory or existing file at `path`.
+const PUT_ABSENT_SQL: &str = r#"
+    INSERT INTO root_filesystem_entries
+        (path, contents, is_dir, content_type, kind, indexed, version)
+    SELECT $1, $2, FALSE, $3, $4, $5, 1
+    WHERE NOT EXISTS (
+        SELECT 1 FROM root_filesystem_entries
+        WHERE path >= $6 AND path < $7
+        LIMIT 1
+    )
+    ON CONFLICT (path) DO NOTHING
+    "#;
+
+/// `CasExpectation::Version` put: update the file row at the expected version,
+/// rejecting an explicit directory (`is_dir = FALSE`) and — for parity with the
+/// insert arms — any implicit-directory descendant.
+const PUT_VERSION_SQL: &str = r#"
+    UPDATE root_filesystem_entries
+    SET contents = $1,
+        content_type = $2,
+        kind = $3,
+        indexed = $4,
+        version = version + 1,
+        updated_at = NOW()
+    WHERE path = $5 AND is_dir = FALSE AND version = $6
+      AND NOT EXISTS (
+          SELECT 1 FROM root_filesystem_entries AS child
+          WHERE child.path >= $7 AND child.path < $8
+          LIMIT 1
+      )
+    "#;
+
+/// `CasExpectation::Any` put: upsert unless a descendant makes `path` an
+/// implicit directory; the `ON CONFLICT` guard rejects an explicit directory.
+/// `RETURNING version` removes the separate version read-back.
+const PUT_ANY_SQL: &str = r#"
+    INSERT INTO root_filesystem_entries
+        (path, contents, is_dir, content_type, kind, indexed, version)
+    SELECT $1, $2, FALSE, $3, $4, $5, 1
+    WHERE NOT EXISTS (
+        SELECT 1 FROM root_filesystem_entries
+        WHERE path >= $6 AND path < $7
+        LIMIT 1
+    )
+    ON CONFLICT (path) DO UPDATE SET
+        contents = EXCLUDED.contents,
+        content_type = EXCLUDED.content_type,
+        kind = EXCLUDED.kind,
+        indexed = EXCLUDED.indexed,
+        version = root_filesystem_entries.version + 1,
+        updated_at = NOW()
+    WHERE root_filesystem_entries.is_dir = FALSE
+    RETURNING version
+    "#;
+
+/// CAS put for the Postgres backend.
+///
+/// **Round-trip budget: 1 statement on the happy path.** The directory
+/// invariant — reject writing a file where (a) an explicit directory exists at
+/// the exact path or (b) an implicit-directory child exists — is folded into the
+/// single write statement rather than issued as two separate `SELECT`
+/// pre-checks. Each CAS arm guards the write with a `NOT EXISTS` descendant scan
+/// over the half-open `[prefix/, prefix0)` range (rejecting implicit
+/// directories). An explicit directory at `path` is rejected by the
+/// `ON CONFLICT` clause in the INSERT arms and by `is_dir = FALSE` in the UPDATE
+/// arm, so a successful put costs exactly one round-trip (previously:
+/// exact-entry `SELECT` + child-scan `SELECT` + the write = three).
+///
+/// On the *rare* 0-row outcome we make follow-up reads
+/// (`diagnose_put_failure`, up to three: `is_dir`, child-scan, then current
+/// version) to reproduce the exact error the old pre-check and version read
+/// would have produced: `directory_write_error` for a directory conflict,
+/// `VersionMismatch` otherwise. The happy path never pays for it.
+async fn postgres_put_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<RecordVersion, FilesystemError> {
+    let indexed_json =
+        serde_json::to_value(&entry.indexed).map_err(|_| FilesystemError::SerializeIndexed {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+        })?;
+    let kind_str = entry.kind.as_ref().map(|k| k.as_str().to_string());
+    let content_type_str = entry.content_type.as_str().to_string();
+    let body = entry.body;
+    let path_str = path.as_str();
+    let (child_lower, child_upper) = descendant_path_range(path);
+
+    match cas {
+        CasExpectation::Absent => {
+            // INSERT only when no descendant (implicit directory) exists; the
+            // half-open range excludes `path` itself, so it never sees the row
+            // being inserted. ON CONFLICT DO NOTHING also yields 0 rows when an
+            // explicit directory already occupies `path` — disambiguated below.
+            let rows = cached_execute(
+                client,
+                PUT_ABSENT_SQL,
+                &[
+                    &path_str,
+                    &body,
+                    &content_type_str,
+                    &kind_str,
+                    &indexed_json,
+                    &child_lower,
+                    &child_upper,
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+            if rows == 0 {
+                return Err(diagnose_put_failure(client, path, None).await?);
+            }
+            Ok(RecordVersion::from_backend(1))
+        }
+        CasExpectation::Version(expected) => {
+            let expected_raw = record_version_to_i64(path, expected)?;
+            // A `Version` CAS implies the file row already exists, so a child
+            // under a file path is impossible by construction; the `NOT EXISTS`
+            // descendant guard is carried for defense-in-depth parity with the
+            // INSERT arms. `is_dir = FALSE` rejects an explicit directory.
+            let rows = cached_execute(
+                client,
+                PUT_VERSION_SQL,
+                &[
+                    &body,
+                    &content_type_str,
+                    &kind_str,
+                    &indexed_json,
+                    &path_str,
+                    &expected_raw,
+                    &child_lower,
+                    &child_upper,
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+            if rows == 0 {
+                return Err(diagnose_put_failure(client, path, Some(expected)).await?);
+            }
+            Ok(expected.next())
+        }
+        CasExpectation::Any => {
+            // Upsert unless a descendant makes `path` an implicit directory; the
+            // ON CONFLICT guard rejects an explicit directory at `path`. A 0-row
+            // RETURNING is therefore always a directory conflict for `Any`.
+            let row = cached_query_opt(
+                client,
+                PUT_ANY_SQL,
+                &[
+                    &path_str,
+                    &body,
+                    &content_type_str,
+                    &kind_str,
+                    &indexed_json,
+                    &child_lower,
+                    &child_upper,
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+            let Some(row) = row else {
+                return Err(directory_write_error(path.clone()));
+            };
+            let version: i64 = row.get("version");
+            record_version_from_i64(path, version)
+        }
+    }
+}
+
+/// Diagnose the precise error for a CAS put that wrote 0 rows.
+///
+/// Only reached on the (rare) failure path. Distinguishes a directory conflict
+/// (explicit directory at `path`, or an implicit-directory child) from a CAS
+/// version mismatch — exactly the information the old pre-check + version read
+/// produced, but issued only when the write actually failed.
+///
+/// The return type is `Result<FilesystemError, FilesystemError>` because the
+/// diagnosis itself issues reads: the **`Ok`** value is the diagnosed error to
+/// surface to the caller, and the **`Err`** value is a backend failure that
+/// occurred *while* diagnosing. Call sites therefore wrap the result as
+/// `Err(diagnose_put_failure(..).await?)` — the `?` propagates a diagnosis-time
+/// backend error, and the `Err(..)` surfaces the diagnosed error.
+///
+/// **Classification is best-effort: it only reflects what these follow-up reads
+/// observe, not the exact snapshot that failed the write.** This diagnosis runs
+/// purely to pick *which error variant* to report on an already-failed write —
+/// it never writes, so it cannot itself corrupt state. A concurrent writer
+/// mutating the directory/child row between the failed write and these reads can
+/// flip the variant; the reported variant reflects the reads' observed state,
+/// which is sufficient for the canonical CAS-retry caller's next attempt. We
+/// deliberately do not wrap the write + diagnosis in a transaction or higher
+/// isolation: that would add a serialization-retry error mode (and cost) to a
+/// rare path for no gain in *this* classification.
+///
+/// Scope note: the put write statement evaluates its directory guard against a
+/// single snapshot, which removes the old separate-pre-check-then-write TOCTOUs
+/// for the *same* path. It does NOT serialize concurrent writes to *different*
+/// parent/child paths (e.g. `put(/a)` racing `put(/a/b)`), so the file-vs-dir
+/// invariant can still be violated under cross-path write-skew. That gap is
+/// pre-existing (the old 3-read pre-check had a wider window) and tracked
+/// separately — see `put_statements_are_single_round_trip` for the boundary of
+/// what the single-statement guard does and does not guarantee.
+async fn diagnose_put_failure(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    expected: Option<RecordVersion>,
+) -> Result<FilesystemError, FilesystemError> {
+    if postgres_is_dir_with_client(client, path).await?
+        || postgres_has_child_entry_with_client(client, path).await?
+    {
+        return Ok(directory_write_error(path.clone()));
+    }
+    let found = postgres_current_version_with_client(client, path).await?;
+    Ok(FilesystemError::VersionMismatch {
+        path: path.clone(),
+        expected,
+        found,
+    })
+}
+async fn postgres_get_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<Option<VersionedEntry>, FilesystemError> {
+    let row = cached_query_opt(
+        client,
+        r#"
+            SELECT contents, is_dir, content_type, kind, indexed, version
+            FROM root_filesystem_entries
+            WHERE path = $1
+            "#,
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let is_dir: bool = row.get("is_dir");
+    if is_dir {
+        return Ok(None);
+    }
+    let body: Vec<u8> = row.get("contents");
+    let content_type_raw: String = row.get("content_type");
+    let kind_raw: Option<String> = row.get("kind");
+    let indexed_value: serde_json::Value = row.get("indexed");
+    let version_raw: i64 = row.get("version");
+    let entry = build_entry(path, body, content_type_raw, kind_raw, indexed_value)?;
+    Ok(Some(VersionedEntry {
+        path: path.clone(),
+        entry,
+        version: record_version_from_i64(path, version_raw)?,
+    }))
+}
+async fn postgres_stat_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<FileStat, FilesystemError> {
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let row = cached_query_opt(
+        client,
+        r#"
+            WITH exact AS (
+                SELECT OCTET_LENGTH(contents)::bigint AS len,
+                       is_dir,
+                       EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch
+                FROM root_filesystem_entries
+                WHERE path = $1
+            ),
+            child AS (
+                SELECT 1
+                FROM root_filesystem_entries
+                WHERE path >= $2 AND path < $3
+                LIMIT 1
+            )
+            SELECT len, is_dir, updated_at_epoch, TRUE AS exact_match
+            FROM exact
+            UNION ALL
+            SELECT NULL::bigint AS len, TRUE AS is_dir, NULL::bigint AS updated_at_epoch,
+                   FALSE AS exact_match
+            FROM child
+            WHERE NOT EXISTS (SELECT 1 FROM exact)
+            LIMIT 1
+            "#,
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let Some(row) = row else {
+        return Err(not_found(path.clone(), FilesystemOperation::Stat));
+    };
+    let exact_match: bool = row.get("exact_match");
+    if !exact_match {
+        return Ok(FileStat {
+            path: path.clone(),
+            file_type: FileType::Directory,
+            len: 0,
+            modified: None,
+            sensitive: false,
+        });
+    }
+    let len: Option<i64> = row.get("len");
+    let is_dir: bool = row.get("is_dir");
+    let updated_at_epoch: Option<i64> = row.get("updated_at_epoch");
+    Ok(FileStat {
+        path: path.clone(),
+        file_type: if is_dir {
+            FileType::Directory
+        } else {
+            FileType::File
+        },
+        len: if is_dir {
+            0
+        } else {
+            len.unwrap_or_default().max(0) as u64
+        },
+        modified: updated_at_epoch.and_then(system_time_from_unix_seconds),
+        sensitive: false,
+    })
+}
+async fn postgres_delete_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let deleted = cached_execute(
+        client,
+        "DELETE FROM root_filesystem_entries WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted == 0 {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
+    }
+    // Sweep the append-event log for this path and its subtree. Append-only
+    // finalized assistant messages live in `root_filesystem_events`, so a
+    // delete/recreate of the same thread would otherwise replay stale history
+    // from the old log. Mirrors the entries-delete predicate above.
+    cached_execute(
+        client,
+        "DELETE FROM root_filesystem_events WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    // Sweep any reserved sequence counter for this path and its subtree so a
+    // delete/recreate restarts sequences from 1 rather than resuming stale
+    // state. Mirrors the entries-delete predicate above.
+    cached_execute(
+        client,
+        "DELETE FROM root_filesystem_sequences WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    Ok(())
+}
+
+/// Guarded delete: remove the single file row at `path` only when it still
+/// holds the expected version. Single-key by design — no subtree band,
+/// unlike blind delete's `path = $1 OR (path >= $2 ...)`.
+///
+/// Review fix (PR #5749): the conditional DELETE and the zero-rows
+/// diagnosis run as ONE statement (one round trip), not two. Two separate
+/// statements left a window between them in which an external transaction
+/// could commit a full delete-then-recreate on the same path; the second
+/// statement (a fresh READ COMMITTED snapshot) would then observe the *new*
+/// incarnation and misclassify the outcome.
+///
+/// The `candidate` and `candidate_state` CTEs are deliberately
+/// `MATERIALIZED`: they record the row/version visible at statement start
+/// before `locked` waits on a contended tuple. Under READ COMMITTED,
+/// `SELECT ... FOR UPDATE` can follow a concurrent delete+recreate to the
+/// new path row after waiting. Comparing the current row's `created_at` with
+/// the initial candidate prevents the DELETE from removing that replacement,
+/// even when its per-incarnation version restarted at the expected value. The
+/// Rust classifier then treats "expected row was deleted and a later
+/// incarnation now exists" as NotFound, while still reporting
+/// VersionMismatch for ordinary updates that preserve `created_at`. This
+/// relies on `created_at` being immutable after row creation; if a future
+/// writer mutates it on update, replacement detection would classify that
+/// update as a new incarnation.
+const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
+    WITH candidate AS MATERIALIZED (
+        SELECT version, created_at
+        FROM root_filesystem_entries
+        WHERE path = $1
+          AND is_dir = FALSE
+    ),
+    candidate_state AS MATERIALIZED (
+        SELECT
+            MAX(version) AS candidate_version,
+            MAX(created_at) AS candidate_created_at,
+            COUNT(*) AS candidate_rows
+        FROM candidate
+    ),
+    locked AS (
+        SELECT
+            locked_row.path,
+            locked_row.version,
+            locked_row.created_at,
+            candidate_state.candidate_version,
+            candidate_state.candidate_created_at
+        FROM candidate_state
+        -- `candidate_state` is materialized and always one row, so this
+        -- carries the statement-start snapshot alongside the post-lock row
+        -- without multiplying rows. The lateral dependency forces that state
+        -- to be available before the lock wait begins.
+        LEFT JOIN LATERAL (
+            SELECT path, version, created_at
+            FROM root_filesystem_entries AS entry
+            WHERE path = $1
+              AND is_dir = FALSE
+              -- Intentional tautology: keep the LATERAL subquery correlated
+              -- to `candidate_state` so it cannot run before that state is
+              -- materialized.
+              AND candidate_state.candidate_rows >= 0
+            FOR UPDATE OF entry
+        ) AS locked_row ON TRUE
+    ),
+    deleted AS (
+        DELETE FROM root_filesystem_entries
+        WHERE path = $1
+          AND is_dir = FALSE
+          AND version = $2
+          AND path IN (
+              SELECT path
+              FROM locked
+              WHERE candidate_version = $2
+                AND candidate_created_at IS NOT DISTINCT FROM created_at
+          )
+        RETURNING TRUE AS ok
+    )
+    SELECT
+        EXISTS (SELECT 1 FROM deleted) AS was_deleted,
+        (SELECT version FROM locked) AS locked_version,
+        EXISTS (
+            SELECT 1
+            FROM locked
+            WHERE candidate_version = $2
+              AND candidate_created_at IS DISTINCT FROM created_at
+        ) AS expected_incarnation_was_replaced
+    "#;
+
+/// CAS delete for the Postgres backend: one statement, one round trip,
+/// mirroring the put round-trip budget. Classifies from the same query that
+/// performed the delete attempt: no row at `path` → NotFound (already gone,
+/// benign); row present at another version → VersionMismatch (gone stale).
+/// `diagnose_put_failure` / `postgres_current_version_with_client` are
+/// deliberately not reused here: reusing them would require a second
+/// statement, reopening the race this fix closes.
+async fn postgres_delete_if_version_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    expected_version: RecordVersion,
+    expected_raw: i64,
+) -> Result<(), FilesystemError> {
+    let row = cached_query_one(
+        client,
+        DELETE_IF_VERSION_ATOMIC_SQL,
+        &[&path.as_str(), &expected_raw],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    let was_deleted: bool = row.get("was_deleted");
+    if was_deleted {
+        return Ok(());
+    }
+    let expected_incarnation_was_replaced: bool = row.get("expected_incarnation_was_replaced");
+    if expected_incarnation_was_replaced {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
+    }
+    let locked_version: Option<i64> = row.get("locked_version");
+    if let Some(raw) = locked_version {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(record_version_from_i64(path, raw)?),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
+}
+async fn postgres_current_version_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<Option<RecordVersion>, FilesystemError> {
+    let row = cached_query_opt(
+        client,
+        "SELECT version FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE",
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    row.map(|row| {
+        let version: i64 = row.get("version");
+        record_version_from_i64(path, version)
+    })
+    .transpose()
+}
+
+/// Whether an explicit directory row exists at the exact `path`.
+///
+/// Used only on the rare CAS-put failure path. Selects the `is_dir` flag alone
+/// and never reads `OCTET_LENGTH(contents)`, so it does not touch the
+/// (potentially TOAST'd) body to answer a question that only needs one boolean.
+async fn postgres_is_dir_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<bool, FilesystemError> {
+    let row = cached_query_opt(
+        client,
+        "SELECT is_dir FROM root_filesystem_entries WHERE path = $1",
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    Ok(row.is_some_and(|row| row.get::<_, bool>("is_dir")))
+}
+async fn postgres_has_child_entry_with_client(
+    client: &deadpool_postgres::Object,
+    parent: &VirtualPath,
+) -> Result<bool, FilesystemError> {
+    let (prefix_lower, prefix_upper) = descendant_path_range(parent);
+    let row = cached_query_opt(
+        client,
+        "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
+        &[&prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+    Ok(row.is_some())
+}
+fn descendant_path_range(path: &VirtualPath) -> (String, String) {
+    let prefix = path.as_str().trim_end_matches('/');
+    // Descendants share the literal "{prefix}/" component boundary. The
+    // exclusive upper bound "{prefix}0" works because '/' sorts before '0'
+    // in the normalized virtual path alphabet used by these storage paths.
+    (format!("{prefix}/"), format!("{prefix}0"))
+}
+async fn ensure_postgres_ordered_projection(
+    client: &mut deadpool_postgres::Object,
+    path: &VirtualPath,
+    spec: &IndexSpec,
+) -> Result<(), FilesystemError> {
+    if spec.keys.len() > crate::index::MAX_ORDERED_INDEX_KEYS {
+        return Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::EnsureIndex,
+        });
+    }
+    ensure_postgres_static_ordered_projection(client, path).await
+}
+
+/// Projection triggers are static: three triggers sharing one function, whose
+/// body projects by joining the spec catalog on prefix containment. The
+/// previous design installed a plpgsql function plus three row triggers per
+/// (declaration prefix, spec); every entries write then evaluated every
+/// trigger ever declared — O(total declarations) per statement, the same
+/// accumulation pathology measured on libSQL (3,750 triggers after a 50-user
+/// run). The catalog join is O(catalog rows); declaration becomes a pure
+/// catalog insert.
+///
+/// Semantics are unchanged, including "declaration never backfills": triggers
+/// only fire on writes after the fact, and a spec projects exactly the
+/// subtree of its declared prefix.
+async fn ensure_postgres_static_ordered_projection(
+    client: &mut deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let map_err = |error: tokio_postgres::Error| {
+        db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+    };
+    // Fast path: the static trigger set is installed and no legacy
+    // per-declaration triggers remain. Re-running the DDL would take
+    // ShareRowExclusive locks on the entries table on every declaration and
+    // convoy concurrent writers.
+    let ensured = client
+        .query_opt(
+            "SELECT 1              FROM pg_trigger t              JOIN pg_class c ON c.oid = t.tgrelid              WHERE c.relname = 'root_filesystem_entries'                AND t.tgname = 'rfs_ordered_projection_v3_ai'                AND NOT EXISTS (                 SELECT 1 FROM pg_trigger l                  JOIN pg_class lc ON lc.oid = l.tgrelid                  WHERE lc.relname = 'root_filesystem_entries'                    AND NOT l.tgisinternal                    AND (l.tgname LIKE 'idx\\_rfs\\_%' \
+                        OR (l.tgname LIKE 'rfs\\_ordered\\_projection\\_%' \
+                            AND l.tgname NOT LIKE 'rfs\\_ordered\\_projection\\_v3\\_%')))",
+            &[],
+        )
+        .await
+        .map_err(map_err)?;
+    if ensured.is_some() {
+        return Ok(());
+    }
+    let transaction = client.transaction().await.map_err(map_err)?;
+    // One writer at a time for projection DDL, matching the per-declaration
+    // design's advisory lock.
+    transaction
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&"rfs_ordered_projection_v3"],
+        )
+        .await
+        .map_err(map_err)?;
+
+    // Sweep the legacy per-declaration generation: every trigger this crate
+    // ever installed on the entries table is `idx_rfs_`-prefixed (FTS and
+    // vector never used triggers on PostgreSQL), and its function is resolved
+    // through the trigger row rather than by name pattern because
+    // sql_index_name hash-truncates long identifiers.
+    let legacy = transaction
+        .query(
+            "SELECT t.tgname, p.proname \
+             FROM pg_trigger t \
+             JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_proc p ON p.oid = t.tgfoid \
+             WHERE c.relname = 'root_filesystem_entries' \
+               AND NOT t.tgisinternal \
+               AND (t.tgname LIKE 'idx\\_rfs\\_%' \
+                    OR (t.tgname LIKE 'rfs\\_ordered\\_projection\\_%' \
+                        AND t.tgname NOT LIKE 'rfs\\_ordered\\_projection\\_v3\\_%'))",
+            &[],
+        )
+        .await
+        .map_err(map_err)?;
+    let mut drops = String::new();
+    let mut functions = std::collections::BTreeSet::new();
+    for row in &legacy {
+        let trigger: String = row.get(0);
+        let function: String = row.get(1);
+        if trigger
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            drops.push_str(&format!(
+                "DROP TRIGGER IF EXISTS {trigger} ON root_filesystem_entries;"
+            ));
+        }
+        if (function.starts_with("idx_rfs_")
+            || (function.starts_with("rfs_ordered_projection_")
+                && function != "rfs_ordered_projection_v3"))
+            && function
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            functions.insert(function);
+        }
+    }
+    for function in functions {
+        drops.push_str(&format!("DROP FUNCTION IF EXISTS {function}();"));
+    }
+    if !drops.is_empty() {
+        transaction.batch_execute(&drops).await.map_err(map_err)?;
+    }
+
+    // Containment: spec.prefix is the path itself or a proper ancestor. The
+    // half-open band `(prefix || '/', prefix || '0')` matches
+    // descendant_path_range; '/' needs its own arm because '//' breaks the
+    // band trick.
+    // Ancestors of the written path, so the catalog is joined by equality on
+    // its `(prefix, name)` key rather than compared row by row. A containment
+    // predicate scans every declaration ever made, and an upgraded database
+    // keeps its per-thread declaration rows forever.
+    let ancestors = "WITH RECURSIVE rfs_ancestors(prefix) AS ( \
+           SELECT NEW.path \
+           UNION ALL \
+           SELECT CASE \
+             WHEN length(prefix) - strpos(reverse(prefix), '/') <= 0 THEN '/' \
+             ELSE left(prefix, length(prefix) - strpos(reverse(prefix), '/')) \
+           END \
+           FROM rfs_ancestors WHERE prefix <> '/' \
+         )";
+    let mut key_values = Vec::new();
+    let mut key_presence = Vec::new();
+    for i in 0..crate::index::MAX_ORDERED_INDEX_KEYS {
+        key_values.push(format!(
+            "CASE WHEN jsonb_array_length(s.keys) > {i} \
+             THEN NEW.indexed -> (s.keys ->> {i}) END"
+        ));
+        key_presence.push(format!(
+            "(jsonb_array_length(s.keys) <= {i} \
+             OR ((NEW.indexed -> (s.keys ->> {i})) IS NOT NULL \
+                 AND (NEW.indexed -> (s.keys ->> {i})) <> 'null'::jsonb))"
+        ));
+    }
+    let key_values = key_values.join(", ");
+    let key_presence = key_presence.join(" AND ");
+    let updates = (0..crate::index::MAX_ORDERED_INDEX_KEYS)
+        .map(|position| format!("k{position} = EXCLUDED.k{position}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // DROP + CREATE rather than CREATE OR REPLACE TRIGGER: the latter needs
+    // PostgreSQL 14+, and this whole block runs in one advisory-locked
+    // transaction, so the drop is never observable to another writer.
+    let ddl = format!(
+        "CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_rows_path \
+           ON root_filesystem_ordered_index_rows(path); \
+         CREATE OR REPLACE FUNCTION rfs_ordered_projection_v3() RETURNS trigger \
+         LANGUAGE plpgsql AS $projection$ \
+         BEGIN \
+           IF TG_OP IN ('UPDATE', 'DELETE') THEN \
+             DELETE FROM root_filesystem_ordered_index_rows WHERE path = OLD.path; \
+           END IF; \
+           IF TG_OP = 'DELETE' THEN \
+             RETURN OLD; \
+           END IF; \
+           IF NEW.is_dir = FALSE AND NEW.indexed IS NOT NULL THEN \
+             INSERT INTO root_filesystem_ordered_index_rows(\
+               index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
+             ) \
+             {ancestors} \
+             SELECT DISTINCT ON (s.name) s.name, NEW.path, {key_values} \
+             FROM rfs_ancestors a \
+             JOIN root_filesystem_index_specs s ON s.prefix = a.prefix \
+             WHERE s.kind IN ('exact', 'prefix') \
+               AND {key_presence} \
+             ORDER BY s.name, length(s.prefix) DESC \
+             ON CONFLICT (index_name, path) DO UPDATE SET {updates}; \
+           END IF; \
+           RETURN NEW; \
+         END; \
+         $projection$; \
+         DROP TRIGGER IF EXISTS rfs_ordered_projection_v3_ai ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS rfs_ordered_projection_v3_au ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS rfs_ordered_projection_v3_ad ON root_filesystem_entries; \
+         CREATE TRIGGER rfs_ordered_projection_v3_ai \
+           AFTER INSERT ON root_filesystem_entries \
+           FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3(); \
+         CREATE TRIGGER rfs_ordered_projection_v3_au \
+           AFTER UPDATE ON root_filesystem_entries \
+           FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3(); \
+         CREATE TRIGGER rfs_ordered_projection_v3_ad \
+           AFTER DELETE ON root_filesystem_entries \
+           FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3();"
+    );
+    transaction.batch_execute(&ddl).await.map_err(map_err)?;
+    transaction.commit().await.map_err(map_err)
+}
+
+/// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
+/// Bound parameters use `$N` placeholders sized from `params.len() + 1`.
+///
+/// PR #3661 fixes carried over from the libsql translator:
+/// - `Filter::All` emits `TRUE`; empty `And` → `TRUE`, empty `Or` →
+///   `FALSE` (matching in-memory `all`/`any` semantics).
+/// - `Filter::Range` on `IndexValue::I64` bounds casts both sides to
+///   `BIGINT` so the comparison is numeric, not lexicographic on text.
+fn translate_filter(
+    path: &VirtualPath,
+    filter: &Filter,
+    out: &mut String,
+    params: &mut Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
+) -> Result<(), FilesystemError> {
+    match filter {
+        Filter::All => {
+            out.push_str("TRUE");
+            Ok(())
+        }
+        Filter::Eq { key, value } => {
+            let placeholder = bind_index_value(path, value, params)?;
+            out.push_str(&format!("(indexed->>'{}' = ${placeholder})", key.as_str()));
+            Ok(())
+        }
+        Filter::PrefixOn { key, value } => {
+            let IndexValue::Text(prefix_value) = value else {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            };
+            let escaped = escape_like_literal(prefix_value);
+            params.push(Box::new(format!("{escaped}%")));
+            out.push_str(&format!(
+                "(indexed->>'{}' LIKE ${} ESCAPE '!')",
+                key.as_str(),
+                params.len()
+            ));
+            Ok(())
+        }
+        Filter::Range { key, lo, hi } => {
+            // Mixed-variant bounds have no meaningful BETWEEN. Reject rather
+            // than fall through to a lexicographic-on-text comparison that
+            // silently produces wrong results. Matches the in-memory
+            // backend's `discriminant(lo) == discriminant(hi)` requirement.
+            if std::mem::discriminant(lo) != std::mem::discriminant(hi) {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            }
+            // PR #3661 reviewer fix: when both bounds are `I64`, cast both
+            // the extracted JSON text and bound params to `BIGINT` so the
+            // BETWEEN comparison is numeric. Otherwise `'2' BETWEEN '10'
+            // AND '99'` would compare lexicographically and miss values.
+            //
+            // PR #3659 review fix: guard each cast with a `jsonb_typeof`
+            // check so a row whose stored value at `'{key}'` is a different
+            // variant (e.g. text under a numeric range) is filtered out
+            // BEFORE the cast — otherwise one stored text value can fail
+            // the whole query with a `bigint` cast error.
+            match (lo, hi) {
+                (IndexValue::I64(lo_val), IndexValue::I64(hi_val)) => {
+                    params.push(Box::new(*lo_val));
+                    let lo_idx = params.len();
+                    params.push(Box::new(*hi_val));
+                    let hi_idx = params.len();
+                    out.push_str(&format!(
+                        "(jsonb_typeof(indexed->'{}') = 'number' \
+                         AND (indexed->>'{}')::bigint BETWEEN ${lo_idx} AND ${hi_idx})",
+                        key.as_str(),
+                        key.as_str(),
+                    ));
+                }
+                _ => {
+                    let lo_idx = bind_index_value(path, lo, params)?;
+                    let hi_idx = bind_index_value(path, hi, params)?;
+                    let expected_json_type = index_value_jsonb_typeof(lo);
+                    out.push_str(&format!(
+                        "(jsonb_typeof(indexed->'{}') = '{expected_json_type}' \
+                         AND indexed->>'{}' BETWEEN ${lo_idx} AND ${hi_idx})",
+                        key.as_str(),
+                        key.as_str(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Filter::Fts { key, query } => {
+            // `plainto_tsquery` is the user-input-safe parser; we never
+            // splice the user query into SQL. Match against an expression
+            // identical to the `to_tsvector(...)` used by the GIN index in
+            // ensure_index so the planner can use it.
+            params.push(Box::new(query.clone()));
+            out.push_str(&format!(
+                "(to_tsvector('english', COALESCE(indexed->>'{}', '')) @@ plainto_tsquery('english', ${}))",
+                key.as_str(),
+                params.len()
+            ));
+            Ok(())
+        }
+        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
+            // Same reason as libsql: VectorNearest is a ranking operation
+            // and is evaluated at the top-level `query` method, not as a
+            // WHERE-clause predicate. Nested usage is unsupported.
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        }),
+        Filter::And(children) => translate_compound(path, children, " AND ", "TRUE", out, params),
+        Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
+    }
+}
+fn translate_compound(
+    path: &VirtualPath,
+    children: &[Filter],
+    joiner: &str,
+    empty_identity: &str,
+    out: &mut String,
+    params: &mut Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
+) -> Result<(), FilesystemError> {
+    if children.is_empty() {
+        out.push_str(empty_identity);
+        return Ok(());
+    }
+    out.push('(');
+    for (i, child) in children.iter().enumerate() {
+        if i > 0 {
+            out.push_str(joiner);
+        }
+        translate_filter(path, child, out, params)?;
+    }
+    out.push(')');
+    Ok(())
+}
+
+/// Maps an [`IndexValue`] variant to its Postgres `jsonb_typeof` string.
+/// Used to guard `Filter::Range` so cross-variant stored values are filtered
+/// out before any cast/comparison (PR #3659 review fix). Postgres returns:
+/// `"string"` / `"number"` / `"boolean"` / `"null"` / `"object"` / `"array"`.
+fn index_value_jsonb_typeof(value: &IndexValue) -> &'static str {
+    match value {
+        IndexValue::Text(_) | IndexValue::Bytes(_) => "string",
+        IndexValue::I64(_) => "number",
+        IndexValue::Bool(_) => "boolean",
+    }
+}
+fn bind_index_value(
+    path: &VirtualPath,
+    value: &IndexValue,
+    params: &mut Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
+) -> Result<usize, FilesystemError> {
+    // `indexed->>'key'` returns text regardless of the underlying JSON type,
+    // so we bind every supported variant as text. This keeps the index
+    // (which is also an expression on the text form) usable for all three
+    // variants without dialect branches.
+    let bound: Box<dyn tokio_postgres::types::ToSql + Sync + Send> = match value {
+        IndexValue::Text(s) => Box::new(s.clone()),
+        IndexValue::I64(n) => Box::new(n.to_string()),
+        IndexValue::Bool(b) => Box::new(if *b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
+        IndexValue::Bytes(_) => {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        }
+    };
+    params.push(bound);
+    Ok(params.len())
+}
+
+fn bind_ordered_index_value(
+    path: &VirtualPath,
+    value: &IndexValue,
+    params: &mut Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
+) -> Result<usize, FilesystemError> {
+    if matches!(value, IndexValue::Bytes(_)) {
+        return Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        });
+    }
+    let value = serde_json::to_value(value).map_err(|_| FilesystemError::SerializeIndexed {
+        path: path.clone(),
+        operation: FilesystemOperation::Query,
+    })?;
+    params.push(Box::new(value));
+    Ok(params.len())
+}
+fn build_entry(
+    path: &VirtualPath,
+    body: Vec<u8>,
+    content_type_raw: String,
+    kind_raw: Option<String>,
+    indexed_value: serde_json::Value,
+) -> Result<Entry, FilesystemError> {
+    let content_type = ContentType::new(content_type_raw).map_err(FilesystemError::Contract)?;
+    let kind = kind_raw
+        .map(RecordKind::new)
+        .transpose()
+        .map_err(FilesystemError::Contract)?;
+    let indexed: BTreeMap<IndexKey, IndexValue> = if indexed_value.is_null() {
+        BTreeMap::new()
+    } else {
+        serde_json::from_value(indexed_value).map_err(|_| FilesystemError::DeserializeIndexed {
+            path: path.clone(),
+            operation: FilesystemOperation::ReadFile,
+        })?
+    };
+    Ok(Entry {
+        body,
+        content_type,
+        kind,
+        indexed,
+    })
+}
+fn seq_no_from_i64(
+    path: &VirtualPath,
+    raw: i64,
+    operation: FilesystemOperation,
+) -> Result<SeqNo, FilesystemError> {
+    u64::try_from(raw)
+        .map(SeqNo::from_backend)
+        .map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation,
+            reason: format!("event seq {raw} is not representable"),
+        })
+}
+fn backend_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    reason: impl Into<String>,
+) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: reason.into(),
+    }
+}
+const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
+    include_str!("../../../../migrations/V26__root_filesystem_entries.sql"),
+    "\n",
+    include_str!("../../../../migrations/V27__root_filesystem_entries_directories.sql"),
+    "\n",
+    include_str!("../../../../migrations/V28__root_filesystem_records.sql"),
+    "\n",
+    include_str!("../../../../migrations/V29__root_filesystem_index_specs.sql"),
+    "\n",
+    include_str!("../../../../migrations/V30__root_filesystem_events.sql"),
+    "\n",
+    include_str!("../../../../migrations/V31__root_filesystem_path_collation.sql"),
+    "\n",
+    include_str!("../../../../migrations/V32__root_filesystem_sequences.sql"),
+    "\n",
+    include_str!("../../../../migrations/V33__root_filesystem_ordered_index_rows.sql"),
+    "\n",
+    include_str!("../../../../migrations/V34__root_filesystem_ordered_index_path_collation.sql"),
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_migration_connect_backoff_is_capped() {
+        assert_eq!(
+            postgres_migration_connect_backoff(0),
+            POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF
+        );
+        assert_eq!(
+            postgres_migration_connect_backoff(20),
+            POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF
+        );
+    }
+
+    /// Returns the number of top-level statements in a SQL string by counting
+    /// statement terminators (`;`) that are not inside a quoted literal. The
+    /// put statements use no string literals containing `;`, so a simple
+    /// non-empty trailing-segment count is exact here.
+    fn top_level_statement_count(sql: &str) -> usize {
+        sql.split(';').filter(|s| !s.trim().is_empty()).count()
+    }
+
+    /// The CAS put round-trip fix: each `CasExpectation` arm must issue exactly
+    /// ONE statement. Before the fix, a put ran three round-trips — an
+    /// exact-entry `SELECT`, a child-scan `SELECT`, then the write. The
+    /// directory invariant is now folded into the single write statement, so a
+    /// successful put costs one round-trip. This guards against a regression
+    /// re-splitting the pre-check back out into separate queries.
+    ///
+    /// What this pins, precisely: the directory guard is evaluated in the *same*
+    /// statement that performs the write (one round-trip), against one snapshot —
+    /// rather than as a separate pre-check `SELECT` followed by the write. That
+    /// is the property the PR delivers, and keeping the guard folded in is what
+    /// makes the rare-path error classification in `diagnose_put_failure`
+    /// coherent (same-snapshot guard, no separate-pre-check window for the same
+    /// path).
+    ///
+    /// What this does NOT pin — read before relying on it: single-statement
+    /// evaluation is not isolation. `NOT EXISTS` is a snapshot predicate with no
+    /// range lock, so concurrent writes to *different* parent/child paths
+    /// (`put(/a)` racing `put(/a/b)`) can each pass their own guard and both
+    /// commit, leaving `/a` a file with a descendant — the file-vs-directory
+    /// invariant violated by write-skew. This gap is pre-existing (the old
+    /// 3-read pre-check had a wider window) and closing it requires path-prefix
+    /// serialization across all backends (advisory lock / SERIALIZABLE + retry),
+    /// which is out of scope for a round-trip optimization. Tracked separately;
+    /// do not read this test as a concurrency guarantee.
+    #[test]
+    fn put_statements_are_single_round_trip() {
+        for (name, sql) in [
+            ("absent", PUT_ABSENT_SQL),
+            ("version", PUT_VERSION_SQL),
+            ("any", PUT_ANY_SQL),
+        ] {
+            assert_eq!(
+                top_level_statement_count(sql),
+                1,
+                "{name} put must be a single statement (one round-trip); a split \
+                 back into a separate pre-check + write reintroduces the same-path \
+                 check-then-write window this PR removed. Got: {sql}"
+            );
+        }
+    }
+
+    /// Each put statement must carry the folded directory invariant guard so it
+    /// rejects writing a file over a directory without a separate pre-check
+    /// round-trip. Every arm guards implicit directories with a `NOT EXISTS`
+    /// descendant scan. Explicit directories are rejected differently per arm:
+    /// the INSERT arms (`PUT_ABSENT_SQL`, `PUT_ANY_SQL`) rely on `ON CONFLICT`
+    /// (the existing directory row collides on the `path` primary key), while
+    /// the UPDATE arm (`PUT_VERSION_SQL`) and the `PUT_ANY_SQL` conflict clause
+    /// use an explicit `is_dir = FALSE` predicate.
+    #[test]
+    fn put_statements_fold_in_directory_guard() {
+        // Implicit-directory (descendant) guard — every arm.
+        assert!(PUT_ABSENT_SQL.contains("NOT EXISTS"));
+        assert!(PUT_VERSION_SQL.contains("NOT EXISTS"));
+        assert!(PUT_ANY_SQL.contains("NOT EXISTS"));
+        // Explicit-directory: INSERT arms reject via ON CONFLICT on the path PK.
+        assert!(PUT_ABSENT_SQL.contains("ON CONFLICT (path)"));
+        assert!(PUT_ANY_SQL.contains("ON CONFLICT (path)"));
+        // Explicit-directory: the UPDATE arm and the upsert conflict clause use
+        // an explicit is_dir = FALSE predicate.
+        assert!(PUT_VERSION_SQL.contains("is_dir = FALSE"));
+        assert!(PUT_ANY_SQL.contains("is_dir = FALSE"));
+    }
+
+    /// `delete_if_version` must stay one single-key statement: one round-trip
+    /// on the happy path (matching the put budget), scoped to the record plane
+    /// (`is_dir = FALSE`), and with no `OR`-joined subtree band — re-adding
+    /// blind delete's sweep would let a version guard on one path silently
+    /// cascade to unguarded descendants.
+    ///
+    /// Review fix (PR #5749): also pins the atomicity fix — the conditional
+    /// delete and the zero-rows diagnosis must be ONE statement (`locked`
+    /// CTE + `FOR UPDATE`, `deleted` CTE depending on it), not two separate
+    /// round trips. Two statements reopens the race where an external
+    /// delete+recreate commits in the gap between them.
+    #[test]
+    fn delete_if_version_statements_are_single_round_trip_and_single_key() {
+        let sql = DELETE_IF_VERSION_ATOMIC_SQL;
+        assert_eq!(
+            top_level_statement_count(sql),
+            1,
+            "delete_if_version must be a single statement. Got: {sql}"
+        );
+        assert!(
+            !sql.contains(" OR "),
+            "delete_if_version must stay single-key (no subtree band): {sql}"
+        );
+        assert!(sql.contains("is_dir = FALSE"));
+        assert!(sql.contains("version = $2"));
+        assert!(
+            sql.contains("FOR UPDATE"),
+            "delete_if_version must lock the row before deciding NotFound vs \
+             VersionMismatch, or a concurrent delete+recreate can race the \
+             classification: {sql}"
+        );
+        assert!(
+            sql.contains("candidate AS MATERIALIZED"),
+            "delete_if_version must materialize the statement-start \
+             candidate before FOR UPDATE waits, or a concurrent \
+             delete+recreate can be mistaken for the new incarnation: {sql}"
+        );
+        assert!(
+            sql.contains("expected_incarnation_was_replaced"),
+            "delete_if_version must classify a replaced expected \
+             incarnation as NotFound rather than VersionMismatch against \
+             the replacement row: {sql}"
+        );
+        assert!(
+            sql.contains("candidate_created_at IS NOT DISTINCT FROM created_at"),
+            "delete_if_version must not delete a replacement incarnation \
+             whose version happens to equal the expected version: {sql}"
+        );
+        assert!(
+            sql.contains("FROM locked\n              WHERE candidate_version = $2"),
+            "the delete CTE must depend on the locked CTE so Postgres \
+             sequences lock-then-incarnation-check-then-delete instead of \
+             running them independently: {sql}"
+        );
+        // Round-C review: a bare `contains("FOR UPDATE")` / `contains("version
+        // = $2")` check is fooled by two concrete, semantically-broken
+        // mutants that keep those substrings intact. Guard against both
+        // directly instead of relying on substring presence alone.
+        assert!(
+            !sql.contains("SKIP LOCKED"),
+            "delete_if_version's FOR UPDATE must block on a contending row, \
+             not skip it — `FOR UPDATE SKIP LOCKED` still satisfies a bare \
+             `contains(\"FOR UPDATE\")` check but would let a concurrent \
+             delete+recreate slip past the lock entirely, reopening the \
+             atomicity race this fix closes: {sql}"
+        );
+        let locked_clause_end = sql
+            .find("deleted AS (")
+            .expect("SQL must have a deleted CTE");
+        assert!(
+            !sql[..locked_clause_end].contains("version = $2"),
+            "the version guard must live in the `deleted` CTE's WHERE \
+             clause, not `locked`'s — moving it there still satisfies a \
+             bare `contains(\"version = $2\")` check, but would make \
+             `locked` (and thus the whole statement) find no row at all for \
+             a present-but-stale-version path, misclassifying a stale \
+             version as NotFound instead of VersionMismatch: {sql}"
+        );
+    }
+
+    /// The descendant range is the half-open `[prefix/, prefix0)` band that the
+    /// folded `NOT EXISTS` child guard scans. A wrong bound would silently
+    /// mis-scope the directory invariant, so pin the exact bytes and the
+    /// sort-order invariant (`'/'` < real children < `'0'`).
+    #[test]
+    fn descendant_path_range_is_half_open_child_band() {
+        let path = VirtualPath::new("/secrets/a/b").unwrap();
+        let (lower, upper) = descendant_path_range(&path);
+        assert_eq!(lower, "/secrets/a/b/");
+        assert_eq!(upper, "/secrets/a/b0");
+        let (lower, upper) = (lower.as_str(), upper.as_str());
+        assert!(lower < upper);
+        // A real descendant sorts inside the band; the path itself and a
+        // sibling sharing the prefix do not.
+        assert!("/secrets/a/b/child" >= lower && "/secrets/a/b/child" < upper);
+        assert!("/secrets/a/b" < lower); // the path itself is excluded
+        assert!("/secrets/a/bb" >= upper); // prefix-sharing sibling excluded
+    }
+
+    #[test]
+    fn quote_postgres_identifier_doubles_embedded_quotes() {
+        assert_eq!(quote_postgres_identifier("idx_simple"), "\"idx_simple\"");
+        assert_eq!(
+            quote_postgres_identifier("idx_\"quoted\""),
+            "\"idx_\"\"quoted\"\"\""
+        );
+    }
+}

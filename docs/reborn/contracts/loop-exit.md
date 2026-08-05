@@ -41,7 +41,7 @@ For rolling compatibility, `LoopFailed` still accepts and ignores the retired
 serializes it. Older readers treated that field as optional, so exits written
 without it remain readable during rollback; no store migration is required.
 
-`crates/ironclaw_turns/src/loop_exit/tests/mod.rs` test
+`crates/kernel/ironclaw_turns/src/loop_exit/tests/mod.rs` test
 `loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it`
 owns this rolling-compatibility assertion, including both the historical string
 and `null` forms. Run:
@@ -97,7 +97,7 @@ compatibility.
 
 This contract is pinned by
 `turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/ironclaw_turn_runner/tests/loop_driver_host.rs`:
+in `crates/loop/ironclaw_turn_runner/tests/loop_driver_host.rs`:
 
 ```bash
 cargo test -p ironclaw_turn_runner --test loop_driver_host \

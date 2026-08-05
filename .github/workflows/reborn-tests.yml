@@ -50,7 +50,7 @@ concurrency:
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
-  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
+  # crates/substrates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -293,12 +293,15 @@ jobs:
           # (verified against the pinned commit's bundled dist/setup/index.js:
           # `hashFiles` walks one globber built from every newline-separated
           # pattern and only throws when the COMBINED walk finds nothing), so
-          # the flat line stays live for today's tree and the nested line picks
-          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
-          # without either one needing to be conditional.
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
@@ -732,12 +735,15 @@ jobs:
           # (verified against the pinned commit's bundled dist/setup/index.js:
           # `hashFiles` walks one globber built from every newline-separated
           # pattern and only throws when the COMBINED walk finds nothing), so
-          # the flat line stays live for today's tree and the nested line picks
-          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
-          # without either one needing to be conditional.
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
@@ -1050,12 +1056,15 @@ jobs:
           # (verified against the pinned commit's bundled dist/setup/index.js:
           # `hashFiles` walks one globber built from every newline-separated
           # pattern and only throws when the COMBINED walk finds nothing), so
-          # the flat line stays live for today's tree and the nested line picks
-          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
-          # without either one needing to be conditional.
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm

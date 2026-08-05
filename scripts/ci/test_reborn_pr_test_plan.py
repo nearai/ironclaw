@@ -488,24 +488,24 @@ class RebornPrTestPlanTests(unittest.TestCase):
         for path in (
             "Dockerfile.sandbox-worker",
             "docker/reborn/entrypoint.sh",
-            "crates/ironclaw_cli/src/runtime/mod.rs",
-            "crates/ironclaw_sandbox/src/sandbox_process.rs",
-            "crates/ironclaw_sandbox/tests/support/docker_gate.rs",
-            "crates/ironclaw_composition/src/sandbox.rs",
-            "crates/ironclaw_composition/src/builtin_capability_policy.rs",
-            "crates/ironclaw_composition/src/deployment.rs",
-            "crates/ironclaw_composition/src/factory/production_backend_assembly.rs",
-            "crates/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
-            "crates/ironclaw_composition/src/input.rs",
-            "crates/ironclaw_config/src/profile.rs",
-            "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
-            "crates/ironclaw_host_runtime/src/invocation_services.rs",
-            "crates/ironclaw_host_runtime/src/process_port.rs",
-            "crates/ironclaw_host_runtime/src/services.rs",
-            "crates/ironclaw_host_runtime/src/services/builder.rs",
-            "crates/ironclaw_runtime_policy/src/planner.rs",
-            "crates/ironclaw_runtime_policy/src/resolver.rs",
-            "crates/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+            "crates/app/ironclaw_cli/src/runtime/mod.rs",
+            "crates/lanes/ironclaw_sandbox/src/sandbox_process.rs",
+            "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
+            "crates/app/ironclaw_composition/src/sandbox.rs",
+            "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
+            "crates/app/ironclaw_composition/src/deployment.rs",
+            "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+            "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
+            "crates/app/ironclaw_composition/src/input.rs",
+            "crates/app/ironclaw_config/src/profile.rs",
+            "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+            "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
+            "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+            "crates/kernel/ironclaw_host_runtime/src/services.rs",
+            "crates/kernel/ironclaw_host_runtime/src/services/builder.rs",
+            "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
+            "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
+            "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
             "tests/integration/reborn_sandbox_shell_turn.rs",
             "tests/e2e_trace_runtime_policy_serde.rs",
             "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
@@ -653,6 +653,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "none")
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
+
+    def test_workspace_excluded_helper_selects_nothing(self) -> None:
+        """`tools/ironclaw_silk_decoder/**` is `[workspace]`-rooted and named in
+        the root `exclude`, and has no workflow of its own either.
+
+        Two things are pinned here, and the second is the interesting one.
+        First, it must be *classified* — WS7 moved it out of `crates/`
+        (PROPOSAL §12.13 D-O), and an unclassified path fails the planner
+        closed, skipping every downstream Reborn lane. Second, it must select
+        **nothing**: under its old `crates/` home the crate-attribution
+        fall-through selected the ENTIRE workspace for a one-line edit to a
+        helper nothing builds. Asserting emptiness is what stops a future
+        "classification" from quietly restoring that over-selection.
+        """
+        for path in (
+            "tools/ironclaw_silk_decoder/src/main.rs",
+            "tools/ironclaw_silk_decoder/Cargo.toml",
+            "tools/ironclaw_silk_decoder/AGENTS.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["affected_packages"], [])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["integration_lanes"], [])
 
     def test_repo_root_metadata_class_is_owned_by_other_lanes(self) -> None:
         """The repo-root metadata class de-escalates instead of failing closed.

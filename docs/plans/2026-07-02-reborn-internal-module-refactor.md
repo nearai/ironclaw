@@ -107,7 +107,7 @@ Optional; schedule when loop work next opens both crates anyway.
 |---|---|
 | ironclaw_architecture_tests | **tests-only crate** — boundary tests (`reborn_dependency_boundaries.rs`, `reborn_composition_boundaries.rs`, 3.8k test lines). Load-bearing for this refactor's eval. |
 | ironclaw_hooks_parity | **tests-only crate** — postgres/libsql parity oracle + adversarial matrix (2.1k test lines) |
-| ironclaw_silk_decoder | standalone binary |
+| ironclaw_silk_decoder (now `tools/`) | standalone binary |
 | ironclaw_cli | binary (12.4k + 3.7k tests) |
 
 ## 3. Composition dissection — 10 internal modules, 11 PRs

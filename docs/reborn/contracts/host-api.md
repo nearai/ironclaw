@@ -2,9 +2,9 @@
 
 **Status:** Draft v0 contract
 **Date:** 2026-04-24
-**Target crate:** `crates/ironclaw_host_api`
-**Source of truth:** this contract, `crates/ironclaw_host_api/CLAUDE.md`, and
-the architecture tests in `crates/ironclaw_architecture_tests`.
+**Target crate:** `crates/contracts/ironclaw_host_api`
+**Source of truth:** this contract, `crates/contracts/ironclaw_host_api/CLAUDE.md`, and
+the architecture tests in `crates/app/ironclaw_architecture_tests`.
 
 ---
 
@@ -28,7 +28,7 @@ Concrete listener behavior and framework-specific router carriers are outside
 this contract crate. `ironclaw_host_ingress` defines the Axum route-mount
 carriers consumed by host assembly at the HTTP boundary:
 `PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount` in
-`crates/ironclaw_host_ingress/src/lib.rs`.
+`crates/product/ironclaw_host_ingress/src/lib.rs`.
 
 The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extension_registry`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
 
@@ -71,7 +71,7 @@ ironclaw_host_api -> no system-service or runtime crates
 ## 3. Proposed module layout
 
 ```text
-crates/ironclaw_host_api/src/
+crates/contracts/ironclaw_host_api/src/
   lib.rs
   ids.rs
   path.rs
@@ -139,7 +139,7 @@ field on their next serialization.
 
 Owning regression coverage:
 
-- `crates/ironclaw_host_api/src/resolution.rs` test
+- `crates/contracts/ironclaw_host_api/src/resolution.rs` test
   `resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic`
   pins the structurally required inline diagnostic and the legacy host-api
   verdict fallback. Run:
@@ -148,7 +148,7 @@ Owning regression coverage:
   cargo test -p ironclaw_host_api --lib resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic -- --exact
   ```
 
-- `crates/ironclaw_loop_contracts/src/host/capability.rs` test
+- `crates/contracts/ironclaw_loop_contracts/src/host/capability.rs` test
   `host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback`
   pins the reconstructed loop failure fallback and next-write upgrade. Run:
 
@@ -757,12 +757,12 @@ pub enum DispatchError;
 pub enum RuntimeDispatchErrorKind;
 ```
 
-Implementation evidence: `crates/ironclaw_host_api/src/authorized.rs`
+Implementation evidence: `crates/contracts/ironclaw_host_api/src/authorized.rs`
 defines `Authorized`, `ProcessAuthorizedContinuation`, and the exhaustive
-`ProcessAuthorizedContinuation::from_authorized` conversion; `crates/ironclaw_host_api/src/dispatch.rs`
-defines `CapabilityDispatcher::dispatch_json(Authorized)`; `crates/ironclaw_capabilities/src/trust.rs`
+`ProcessAuthorizedContinuation::from_authorized` conversion; `crates/contracts/ironclaw_host_api/src/dispatch.rs`
+defines `CapabilityDispatcher::dispatch_json(Authorized)`; `crates/kernel/ironclaw_capabilities/src/trust.rs`
 writes process continuations during authorization, and
-`crates/ironclaw_host_runtime/src/services/process_executor.rs` re-mints through
+`crates/kernel/ironclaw_host_runtime/src/services/process_executor.rs` re-mints through
 the process-record-backed port.
 
 Rules:
@@ -1223,7 +1223,7 @@ If an implementation detail requires one of those, stop and move it to the ownin
 
 The host API contract is ready when:
 
-- `crates/ironclaw_host_api` builds as a standalone workspace crate
+- `crates/contracts/ironclaw_host_api` builds as a standalone workspace crate
 - no runtime/system-service crate dependency is introduced
 - public types in this document exist or have a documented v0 substitute
 - validation constructors exist for authority-bearing strings

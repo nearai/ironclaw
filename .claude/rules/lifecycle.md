@@ -1,10 +1,10 @@
 ---
 paths:
-  - "crates/ironclaw_extension_registry/**"
+  - "crates/extensions/ironclaw_extension_registry/**"
   - "crates/extensions/ironclaw_extension_support/**"
-  - "crates/ironclaw_composition/**"
-  - "crates/ironclaw_mcp/**"
-  - "crates/ironclaw_wasm/**"
+  - "crates/app/ironclaw_composition/**"
+  - "crates/lanes/ironclaw_mcp/**"
+  - "crates/lanes/ironclaw_wasm/**"
 ---
 # Discovery, installation, and activation
 
@@ -63,6 +63,6 @@ succeeds, and shutdown paths that drop a handle without awaiting owned work.
 
 ```bash
 rg -n "discover|install|activate|deactivate|remove" \
-  crates/ironclaw_extension_registry crates/extensions/ironclaw_extension_support \
-  crates/ironclaw_composition crates/ironclaw_extension_host
+  crates/extensions/ironclaw_extension_registry crates/extensions/ironclaw_extension_support \
+  crates/app/ironclaw_composition crates/extensions/ironclaw_extension_host
 ```

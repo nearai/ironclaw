@@ -690,8 +690,14 @@ DOCKER_WORKFLOW = ".github/workflows/docker.yml"
 NIGHTLY_DEEP_CI_WORKFLOW = ".github/workflows/nightly-deep-ci.yml"
 
 WEBUI_FRONTEND_CRATE = "ironclaw_webui"
+# One directory level deeper than the crate sits TODAY. WS7 moved the crate
+# into `crates/product/`, so the single-`*` form now matches its real location
+# and stopped being a depth probe — the gate below rejects exactly that ("not
+# depth-tolerant, just broad"). Two `*` segments keep the spare one level below
+# wherever the crate actually is; `*` does not cross `/` in a GitHub glob, so
+# this cannot collapse back onto the flat line.
 WEBUI_NESTED_LOCKFILE_PATTERN = (
-    f"crates/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+    f"crates/*/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
 )
 
 
@@ -746,8 +752,12 @@ def validate_webui_frontend_sites(
         )
     flat_pattern = github_glob_to_regex(flat_lockfile)
     nested_pattern = github_glob_to_regex(WEBUI_NESTED_LOCKFILE_PATTERN)
+    # Two family segments, matching WEBUI_NESTED_LOCKFILE_PATTERN's depth: the
+    # probe has to be one level below where the crate sits today, and today it
+    # already sits inside a family directory (WS7).
     nested_probe = (
-        f"crates/{NESTED_FAMILY}/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+        f"crates/{NESTED_FAMILY}/{NESTED_FAMILY}/"
+        f"{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
     )
     if not flat_pattern.match(flat_lockfile):
         errors.append(

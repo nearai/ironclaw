@@ -82,8 +82,8 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-COPY crates/ironclaw_webui/frontend/ crates/ironclaw_webui/frontend/
-WORKDIR /app/crates/ironclaw_webui/frontend
+COPY crates/product/ironclaw_webui/frontend/ crates/product/ironclaw_webui/frontend/
+WORKDIR /app/crates/product/ironclaw_webui/frontend
 RUN pnpm install --frozen-lockfile
 WORKDIR /app
 RUN cargo chef cook \
@@ -102,7 +102,7 @@ RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
 
-WORKDIR /app/crates/ironclaw_webui/frontend
+WORKDIR /app/crates/product/ironclaw_webui/frontend
 RUN pnpm install --frozen-lockfile
 WORKDIR /app
 

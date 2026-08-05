@@ -31,17 +31,17 @@ For each open PR, determine the primary module it touches by examining the `file
 
 | Category | Directories |
 |----------|------------|
-| **Reborn stack (most current work)** | `crates/ironclaw_turn_runner/`, `crates/ironclaw_cli/`, `crates/ironclaw_composition/`, `crates/ironclaw_event_store/`, `crates/ironclaw_identity/`, `crates/ironclaw_openai_compat*/`, `crates/ironclaw_trace_commons/`, `crates/ironclaw_webui/`, `crates/ironclaw_assistant/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
-| **LLM & Inference** | `crates/ironclaw_llm/` |
-| **Agent Core** | `crates/ironclaw_skills/` |
-| **Tools & Extensions** | `crates/extensions/ironclaw_extension_support/`, `crates/ironclaw_extension_host/`, `crates/ironclaw_extension_registry/` |
+| **Reborn stack (most current work)** | `crates/loop/ironclaw_turn_runner/`, `crates/app/ironclaw_cli/`, `crates/app/ironclaw_composition/`, `crates/events/ironclaw_event_store/`, `crates/domains/ironclaw_identity/`, `crates/product/ironclaw_openai_compat*/`, `crates/domains/ironclaw_trace_commons/`, `crates/product/ironclaw_webui/`, `crates/product/ironclaw_assistant/`, `crates/kernel/ironclaw_turns/`, `crates/domains/ironclaw_threads/`, `crates/loop/ironclaw_agent_loop/`, `crates/kernel/ironclaw_host_runtime/`, `crates/loop/ironclaw_loop_host/`, `crates/kernel/ironclaw_capabilities/` |
+| **LLM & Inference** | `crates/domains/ironclaw_llm/` |
+| **Agent Core** | `crates/domains/ironclaw_skills/` |
+| **Tools & Extensions** | `crates/extensions/ironclaw_extension_support/`, `crates/extensions/ironclaw_extension_host/`, `crates/extensions/ironclaw_extension_registry/` |
 | **Channels** | `crates/extensions/packages/slack/`, `crates/extensions/packages/telegram/` |
-| **Storage & Memory** | `crates/ironclaw_filesystem/`, `crates/ironclaw_memory*/`, `crates/ironclaw_libsql_runtime/`, `migrations/` |
-| **Security** | `crates/ironclaw_safety/`, `crates/ironclaw_secrets/`, `crates/ironclaw_trust/`, `crates/ironclaw_authorization/`, `crates/ironclaw_approvals/` |
-| **Config & Setup** | `crates/ironclaw_config/` |
-| **Sandbox & Processes** | `crates/ironclaw_sandbox/`, `crates/ironclaw_processes/`, `crates/ironclaw_wasm*/` |
-| **Hooks** | `crates/ironclaw_hooks/` |
-| **Events & Projections** | `crates/ironclaw_event_log/`, `crates/ironclaw_event_projections/`, `crates/ironclaw_event_streams/` |
+| **Storage & Memory** | `crates/substrates/ironclaw_filesystem/`, `crates/domains/ironclaw_memory*/`, `crates/substrates/ironclaw_libsql_runtime/`, `migrations/` |
+| **Security** | `crates/substrates/ironclaw_safety/`, `crates/substrates/ironclaw_secrets/`, `crates/kernel/ironclaw_trust/`, `crates/kernel/ironclaw_authorization/`, `crates/kernel/ironclaw_approvals/` |
+| **Config & Setup** | `crates/app/ironclaw_config/` |
+| **Sandbox & Processes** | `crates/lanes/ironclaw_sandbox/`, `crates/kernel/ironclaw_processes/`, `crates/lanes/ironclaw_wasm*/` |
+| **Hooks** | `crates/loop/ironclaw_hooks/` |
+| **Events & Projections** | `crates/events/ironclaw_event_log/`, `crates/events/ironclaw_event_projections/`, `crates/events/ironclaw_event_streams/` |
 | **CI/CD & Docs** | `.github/`, `README.md`, `CLAUDE.md`, `*.md` (no src) |
 | **Other** | Anything else |
 
