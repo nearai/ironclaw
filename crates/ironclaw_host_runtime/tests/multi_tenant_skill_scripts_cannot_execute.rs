@@ -41,7 +41,10 @@ fn capability_ids(backend: ProcessBackendKind) -> Vec<String> {
 #[test]
 fn a_backend_that_cannot_execute_has_no_shell_so_skill_scripts_are_inert() {
     // `None` is what `HostedMultiTenant` resolves to today, via `RuntimeProfile::SecureDefault`.
-    for backend in [ProcessBackendKind::None] {
+    // Asserted directly rather than looped: there is exactly one backend that cannot execute, and the
+    // anti-vacuity arm below covers the ones that can.
+    {
+        let backend = ProcessBackendKind::None;
         let ids = capability_ids(backend);
         assert!(
             !ids.iter().any(|id| id == SHELL_CAPABILITY),

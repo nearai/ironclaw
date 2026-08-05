@@ -502,7 +502,8 @@ mod per_caller_workspace_tests {
             .expect("workspace alias scopes");
 
         assert_eq!(
-            resolve_local_host_workdir(Some("/workspace"), &[scoped.clone()]).expect("resolves"),
+            resolve_local_host_workdir(Some("/workspace"), std::slice::from_ref(&scoped))
+                .expect("resolves"),
             PathBuf::from(format!(
                 "/srv/workspace/tenants/{}/users/ada",
                 scope.tenant_id.as_str()
@@ -513,8 +514,11 @@ mod per_caller_workspace_tests {
         // A path inside the command string is rewritten against the same narrowed root, so
         // `cd /workspace && python3 scripts/x.py` and `write_file scripts/x.py` agree.
         assert!(
-            rewrite_local_host_command_aliases("cd /workspace && ls", &[scoped])
-                .contains(&format!("/users/{}", "ada")),
+            rewrite_local_host_command_aliases(
+                "cd /workspace && ls",
+                std::slice::from_ref(&scoped)
+            )
+            .contains(&format!("/users/{}", "ada")),
             "command-string rewriting must use the same per-caller root"
         );
     }

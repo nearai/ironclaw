@@ -736,20 +736,22 @@ where
         // Same rule on the active-plan path: only short-circuit to bodies when something is
         // actually active, otherwise fall through to the listing so the model can still see
         // what it could activate.
-        if self.config.injection_mode == SkillInjectionMode::Full
-            && plan
-                .as_ref()
-                .is_some_and(|plan| !plan.selection.activations.is_empty())
-        {
-            let plan = plan.expect("checked above");
+        // Bind the plan by pattern rather than re-asserting it: the previous shape tested
+        // `is_some_and(...)` and then `expect`ed the same Option, which the production panic gate
+        // rightly rejects -- the invariant lived in a comment instead of the types.
+        let active_full_plan = plan.as_ref().filter(|plan| {
+            self.config.injection_mode == SkillInjectionMode::Full
+                && !plan.selection.activations.is_empty()
+        });
+        if let Some(plan) = active_full_plan {
             let candidate_set = self
-                .load_active_plan_candidate_set(run_context, &plan)
+                .load_active_plan_candidate_set(run_context, plan)
                 .await?;
             let body = self
                 .body_context(run_context, &candidate_set.candidates)
                 .await;
             return Ok(context_candidates_for_plan(
-                &plan,
+                plan,
                 candidate_set.candidates,
                 &body,
             ));
@@ -2127,11 +2129,11 @@ fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Config for tests whose SUBJECT is criteria selection.
-    ///
-    /// The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer
-    /// does not. These tests exercise the scorer itself, so they opt in explicitly rather than
-    /// inheriting it. That is the point of the new default: nothing gets the scorer by accident.
+    // Tests whose SUBJECT is criteria selection opt into it explicitly.
+    //
+    // The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer does
+    // not. These tests exercise the scorer itself, so they ask for it rather than inheriting it. That
+    // is the point of the new default: nothing gets the scorer by accident.
 
     /// Assert no skill BODY reached the model, allowing the listing.
     ///

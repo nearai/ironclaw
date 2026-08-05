@@ -23,10 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{
-    path::{ScopedPath, VirtualPath},
-    resource::ResourceScope,
-};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 /// Workspace-relative directory holding staged skill bundles.
 ///
@@ -68,13 +65,6 @@ where
     F: RootFilesystem + 'static,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    /// The backend-facing root the SHELL's `/workspace` alias resolves to.
-    ///
-    /// Not the same place this stager writes. Under per-caller scoping the file tools address
-    /// `<this>/tenants/<t>/users/<u>` while the shell's alias -- registered once at composition, with
-    /// no notion of a caller -- addresses `<this>`. The staged directory has to be expressed against
-    /// the shell's root or the model is handed a path that silently resolves somewhere else.
-    shell_workspace_root: VirtualPath,
 }
 
 impl<F> std::fmt::Debug for WorkspaceSkillBundleStager<F>
@@ -97,11 +87,8 @@ where
     /// The read-only workspace handle the activation path already holds (it backs setup-marker reads)
     /// fails closed on write, so it cannot be reused here. Composition supplies
     /// `read_write_workspace_filesystem`, which is the documented single owner of that recipe.
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>, shell_workspace_root: VirtualPath) -> Self {
-        Self {
-            filesystem,
-            shell_workspace_root,
-        }
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self { filesystem }
     }
 
     fn staged_path(skill_name: &str, relative_path: &str) -> Option<ScopedPath> {
@@ -225,10 +212,7 @@ mod runnable_dir_tests {
             Arc::new(InMemoryBackend::default()),
             view,
         ));
-        let stager = WorkspaceSkillBundleStager::new(
-            filesystem,
-            VirtualPath::new("/projects/workspace").expect("shell workspace root"),
-        );
+        let stager = WorkspaceSkillBundleStager::new(filesystem);
         let scope = ironclaw_host_api::resource::ResourceScope::local_default(
             UserId::new("ada").expect("user"),
             InvocationId::new(),

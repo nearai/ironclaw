@@ -17,12 +17,6 @@ pub(crate) use ironclaw_attachments::WORKSPACE_ALIAS;
 
 const WORKSPACE_TARGET: &str = "/projects/workspace";
 
-/// The same target, exposed for callers that must express a path against the SHELL's `/workspace`.
-///
-/// `host_access_assembly` registers the shell's workdir alias against this root, with no per-caller
-/// segment, while the file tools scope `/workspace` per caller. Anything handing the model a path it
-/// will pass to the shell has to measure against this one.
-pub(crate) const WORKSPACE_TARGET_FOR_SHELL: &str = WORKSPACE_TARGET;
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";
 const MEMORY_ALIAS: &str = "/memory";

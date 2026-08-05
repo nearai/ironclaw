@@ -104,7 +104,7 @@ fn resolve_path(
             if !writable.is_empty() {
                 reason.push_str(&format!(" (writable roots: {writable})"));
             }
-            if is_skill_alias(&grant) {
+            if is_skill_alias(grant) {
                 reason.push_str(
                     ". Skills change through skill_install or skill_update, which validate the \
                      manifest that discovery requires",

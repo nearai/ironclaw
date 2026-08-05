@@ -4637,16 +4637,6 @@ fn filesystem_skill_context_source(
             selector_config,
             Arc::clone(workspace_filesystem),
             staging_filesystem,
-            // The root the SHELL's `/workspace` alias resolves to. Composition owns this constant
-            // (`host_access_assembly` registers the alias against the same target), so the staged path
-            // handed to the model is expressed against the shell's idea of the workspace, not the
-            // file tools' per-caller subtree.
-            ironclaw_host_api::path::VirtualPath::new(
-                crate::runtime_mounts::WORKSPACE_TARGET_FOR_SHELL,
-            )
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("workspace target: {error}"),
-            })?,
             Arc::clone(skill_auto_activate_learned),
         ),
         // No writable workspace (hosted multi-tenant today) -- skills still activate, and a body that

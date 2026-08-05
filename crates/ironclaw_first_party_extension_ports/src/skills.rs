@@ -256,7 +256,6 @@ where
         config: SkillActivationSelectorConfig,
         workspace_filesystem: Arc<ScopedFilesystem<W>>,
         staging_filesystem: Arc<ScopedFilesystem<S>>,
-        shell_workspace_root: ironclaw_host_api::path::VirtualPath,
         auto_activate_flag: Arc<AtomicBool>,
     ) -> FirstPartySelectableSkillsRuntime<F>
     where
@@ -264,10 +263,7 @@ where
         S: RootFilesystem + 'static,
     {
         let setup_marker_source = Arc::new(FilesystemSetupMarkerSource::new(workspace_filesystem));
-        let stager = Arc::new(crate::WorkspaceSkillBundleStager::new(
-            staging_filesystem,
-            shell_workspace_root,
-        ));
+        let stager = Arc::new(crate::WorkspaceSkillBundleStager::new(staging_filesystem));
         let activation_source = Arc::new(
             SelectableSkillContextSource::new(Arc::clone(&self.bundle_source), config)
                 .with_auto_activate_flag(auto_activate_flag)

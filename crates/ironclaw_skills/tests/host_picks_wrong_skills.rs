@@ -262,7 +262,7 @@ fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
     );
 
     let mut offenders: Vec<_> = offender_counts.into_iter().collect();
-    offenders.sort_by(|a, b| b.1.cmp(&a.1));
+    offenders.sort_by_key(|offender| std::cmp::Reverse(offender.1));
     println!("\n  skills the host wrongly picked most often:");
     for (name, count) in offenders.iter().take(10) {
         println!("    {count:2} tasks  {name}");
@@ -274,7 +274,7 @@ fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
         println!("  PERTASK {task} {picked} {correct}");
     }
 
-    worst.sort_by(|a, b| b.3.len().cmp(&a.3.len()));
+    worst.sort_by_key(|case| std::cmp::Reverse(case.3.len()));
     println!("\n  worst tasks:");
     for (task, picked, correct, wrong) in worst.iter().take(6) {
         println!(
