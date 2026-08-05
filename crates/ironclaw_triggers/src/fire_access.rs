@@ -2,7 +2,7 @@
 //! pure trigger-scope policy.
 //!
 //! Trigger-fire authorization is not a persisted parallel access table (it
-//! replaced `ironclaw_runner::local_trigger_access`, arch-simplification §4.4).
+//! replaced `ironclaw_turn_runner::local_trigger_access`, arch-simplification §4.4).
 //! It is a decision about *this crate's own noun* — may the user who created a
 //! persisted trigger still fire it for the exact tenant/agent/project scope
 //! stored on it — so the contract and the scope comparison live beside the
@@ -10,7 +10,7 @@
 //! (CHECKLIST WS6, PROPOSAL §6.10.1: "approval/authorization/trigger-fire
 //! policy → … `triggers`").
 //!
-//! Two things deliberately stay in `ironclaw_reborn_composition`:
+//! Two things deliberately stay in `ironclaw_composition`:
 //!
 //! - **`TriggerFireAccessPolicy`/`TriggerFireAccessGrant`** — the deployment
 //!   config value the `serve`/`run` edge resolves and the build turns into a
@@ -315,6 +315,64 @@ mod tests {
             .await
             .expect("check");
         assert_eq!(decision, TriggerFireAccessDecision::Allowed);
+    }
+
+    /// A checker whose backend is down. Stands in for the identity-directory
+    /// checker composition wires, which maps a `RebornUserDirectory` fault to
+    /// `TriggerFireAccessError::Unavailable`.
+    struct UnavailableChecker;
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for UnavailableChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            _request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            Err(TriggerFireAccessError::Unavailable {
+                reason: "identity store down".to_string(),
+            })
+        }
+    }
+
+    /// The unavailable-precedence rule: a recorded backend fault outranks a
+    /// stable denial, but never outranks a grant.
+    ///
+    /// This is the fail-closed decision the composite exists to make. A
+    /// transient identity-store fault must reach the caller as retryable
+    /// (`Err(Unavailable)`) rather than as a permanent `Denied` that a poller
+    /// would treat as a settled answer — while a fault alongside a real grant
+    /// is not a reason to withhold access the user actually has. Both
+    /// directions are pinned because collapsing either one is silent: the
+    /// all-static tests below cannot see the fault path at all.
+    #[tokio::test]
+    async fn composite_prefers_unavailable_over_denial_but_never_over_a_grant() {
+        // Fault recorded, final checker denies -> retryable error, not a denial.
+        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
+            vec![Arc::new(UnavailableChecker), Arc::new(static_checker())];
+        let error = CompositeTriggerFireChecker::new(checkers)
+            .check_trigger_fire_access(check("stranger", Some("agent"), Some("project")))
+            .await
+            .expect_err("a recorded backend fault must surface as retryable");
+        assert!(matches!(error, TriggerFireAccessError::Unavailable { .. }));
+
+        // Fault recorded, but a later grant allows -> still Allowed.
+        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
+            vec![Arc::new(UnavailableChecker), Arc::new(static_checker())];
+        let decision = CompositeTriggerFireChecker::new(checkers)
+            .check_trigger_fire_access(check("owner", Some("agent"), Some("project")))
+            .await
+            .expect("a backend fault must not withhold a grant that allows");
+        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
+
+        // The fault in the *last* position propagates directly — the `Err`
+        // arm of the final match, which the two cases above never reach.
+        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
+            vec![Arc::new(static_checker()), Arc::new(UnavailableChecker)];
+        let error = CompositeTriggerFireChecker::new(checkers)
+            .check_trigger_fire_access(check("stranger", Some("agent"), Some("project")))
+            .await
+            .expect_err("a fault from the final checker must surface as retryable");
+        assert!(matches!(error, TriggerFireAccessError::Unavailable { .. }));
     }
 
     #[tokio::test]

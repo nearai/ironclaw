@@ -1,6 +1,6 @@
 //! Tenant-scoped durable state for manifest-declared admin configuration.
 //!
-//! The manifest descriptor remains in `ironclaw_extensions`; this module owns
+//! The manifest descriptor remains in `ironclaw_extension_registry`; this module owns
 //! only the host-side configured values and their visibility transition. A
 //! save is deliberately two phase:
 //!
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use ironclaw_extensions::AdminConfigurationGroupId;
+use ironclaw_extension_registry::AdminConfigurationGroupId;
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, RecordKind,
     RootFilesystem, ScopedFilesystem, cas_update,

@@ -26,12 +26,12 @@ use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extension_support::coding::{
-    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
-};
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
+use ironclaw_extension_support::coding::{
+    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},

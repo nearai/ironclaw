@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
@@ -279,8 +279,8 @@ pub fn prepare_install(
 fn manifest_record_for_available(
     available: &AvailableExtensionPackage,
     host_ports: &ironclaw_host_api::host_port::HostPortCatalog,
-    contracts: &ironclaw_extensions::HostApiContractRegistry,
-    manifest_hash: Option<ironclaw_extensions::ManifestHash>,
+    contracts: &ironclaw_extension_registry::HostApiContractRegistry,
+    manifest_hash: Option<ironclaw_extension_registry::ManifestHash>,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     let _ = (host_ports, contracts);
     let mut resolved = available.resolved_manifest.as_ref().clone();
@@ -412,7 +412,9 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 #[cfg(test)]
 mod tests {
     use super::{map_extension_error, map_extension_installation_error};
-    use ironclaw_extensions::{ExtensionError, ExtensionInstallationError, InstallationOwner};
+    use ironclaw_extension_registry::{
+        ExtensionError, ExtensionInstallationError, InstallationOwner,
+    };
     use ironclaw_product_contracts::error::ProductOperationFailure;
 
     /// Restore runs at boot over every persisted installation. Misclassifying
@@ -478,17 +480,17 @@ default_permission = "ask"
 effects = ["network", "use_secret"]
 "#
         );
-        let manifest_hash = ironclaw_extensions::ManifestHash::new(
+        let manifest_hash = ironclaw_extension_registry::ManifestHash::new(
             ironclaw_host_api::approval::sha256_digest_token(raw.as_bytes()),
         )
         .expect("manifest hash");
         super::ExtensionManifestRecord::from_toml_with_root_binding(
             raw,
-            ironclaw_extensions::ManifestSource::UserRegistered,
+            ironclaw_extension_registry::ManifestSource::UserRegistered,
             &ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
             Some(manifest_hash),
             &crate::product_extension_host_api_contract_registry().expect("host contracts"),
-            ironclaw_extensions::PackageRootBinding::Virtual,
+            ironclaw_extension_registry::PackageRootBinding::Virtual,
         )
         .expect("fixture manifest parses")
     }

@@ -27,6 +27,6 @@ Pick the tier first; everything else follows. The repo's tier knowledge lives in
 
 ## Verify
 
-`cargo test -p <crate>` → `cargo test --test reborn_<harness>` (offline) → `cargo test -p ironclaw_architecture` if edges changed → `cargo test --features integration` locally for DB-shaped changes → `bash scripts/reborn-e2e-rust.sh` when touching contract behavior.
+`cargo test -p <crate>` → `cargo test --test reborn_<harness>` (offline) → `cargo test -p ironclaw_architecture_tests` if edges changed → `cargo test --features integration` locally for DB-shaped changes → `bash scripts/reborn-e2e-rust.sh` when touching contract behavior.
 
 **Exemplar tests to open and imitate, per tier**: [references/exemplar-tests.md](references/exemplar-tests.md) — the living copies; update as the suite evolves.

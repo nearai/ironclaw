@@ -740,7 +740,7 @@ def server_env(
             "RUST_BACKTRACE": "1",
             "RUST_LOG": os.environ.get(
                 "RUST_LOG",
-                "ironclaw=warn,ironclaw_runner=warn,ironclaw_webui=info",
+                "ironclaw=warn,ironclaw_turn_runner=warn,ironclaw_webui=info",
             ),
         }
     )

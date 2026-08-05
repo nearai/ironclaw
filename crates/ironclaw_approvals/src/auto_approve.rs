@@ -6,7 +6,7 @@
 //! default/seeded ask behaviour — while the hard floor (never-auto-approve
 //! effects), explicit per-tool overrides, missing-grant denials, and trust
 //! ceilings are all still enforced above it (see the authorizer in
-//! `ironclaw_reborn_composition`).
+//! `ironclaw_composition`).
 //!
 //! Scope is deliberately `(tenant, user)` only — agent/project/thread are
 //! dropped — so a single user-level toggle applies across every agent and

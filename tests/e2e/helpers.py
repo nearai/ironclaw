@@ -453,6 +453,16 @@ SEL_V2 = {
     "automation_name_button_for": (
         "[data-testid='automation-name-button'][data-automation-id='{id}']"
     ),
+    "automation_action_for": (
+        "[data-testid='automation-action-button'][data-automation-id='{id}']"
+    ),
+    "automation_delete_for": (
+        "[data-testid='automation-delete-button'][data-automation-id='{id}']"
+    ),
+    "automation_delete_dialog_for": (
+        "[data-testid='automation-delete-dialog'][data-automation-id='{id}'] "
+        "[role='dialog']"
+    ),
     "automation_filter_for": (
         "[data-testid='automation-filter'][data-filter='{filter}']"
     ),

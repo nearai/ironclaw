@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, Fault, FaultInjecting, FaultKind, FileStat, FileType,
     FilesystemError, FilesystemOperation, RootFilesystem,

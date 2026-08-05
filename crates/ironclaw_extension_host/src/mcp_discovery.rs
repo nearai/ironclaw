@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry,
     package_with_discovered_hosted_mcp_tools,
 };
@@ -184,14 +184,16 @@ fn classify_mcp_client_error(error: ironclaw_mcp::McpClientError) -> HostedMcpDi
     }
 }
 
-pub use ironclaw_extensions::is_hosted_http_mcp_package;
+pub use ironclaw_extension_registry::is_hosted_http_mcp_package;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, PackageRootBinding};
+    use ironclaw_extension_registry::{
+        ExtensionManifestRecord, ManifestSource, PackageRootBinding,
+    };
     use ironclaw_host_api::{
         http::{RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
         ids::{InvocationId, UserId},

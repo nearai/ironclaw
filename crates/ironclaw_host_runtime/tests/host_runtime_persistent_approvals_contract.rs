@@ -13,7 +13,9 @@ use ironclaw_approvals::{
     test_support::in_memory_backed_persistent_approval_policy_store,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
@@ -994,11 +996,11 @@ fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
 }
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

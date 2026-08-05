@@ -18,7 +18,7 @@ test-support = []
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
-ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 # Both arrived with the profile approval gate evicted from the composition root

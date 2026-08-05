@@ -19,7 +19,6 @@ chrono = { version = "0.4", features = ["serde"] }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,7 +32,7 @@ ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0", features
 # Dev-only, and deliberately not a normal dependency (WS5 port inversion). This
 # crate's production code no longer names the turn kernel at all — the
 # orchestration reaches it through the `ConversationTurnSubmitter` port that
-# `ironclaw_reborn_composition` implements. The test fakes stand in for that
+# `ironclaw_composition` implements. The test fakes stand in for that
 # composition adapter, so they mint the same `SubmitTurnRequest`
 # (`product_context` included, via `product_context::resolve_inbound`) the real
 # adapter mints. Keeping the fakes on the real request shape is what lets the

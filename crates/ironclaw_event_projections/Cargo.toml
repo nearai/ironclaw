@@ -9,7 +9,7 @@ layer = "substrates"
 
 [dependencies]
 async-trait = "0.1"
-ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
@@ -17,10 +17,10 @@ thiserror = "2"
 [dev-dependencies]
 # Only the contract tests build timestamps; the library takes them from callers.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 # FaultInjecting decorator: test the projection source-error path through the real store
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
+ironclaw_event_store = { path = "../ironclaw_event_store" }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

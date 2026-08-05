@@ -10,6 +10,14 @@
   model-visible token set stays enumerable in one file), and **`discovery` owns
   the catalog rules while `client` owns the paging loop** (both read the same
   constants, so the two enforcement points cannot drift).
+- **The failure-string rule is armed, and its carve-out is enumerated.**
+  `tests/module_charter.rs` fails on any new `reason: "…"` / `reason: format!(…)`
+  outside `diagnostics.rs`, and on a re-added `impl From<String> for
+  McpClientError` (the implicit bypass — any `?` could mint a model-visible
+  reason). The only grandfathered inline reasons are `runtime.rs`'s two
+  `McpError` descriptor/invocation strings, which echo the manifest's own ids
+  instead of classifying a failure; they are rows in that test, not a wildcard.
+  Classify in your module, name in `diagnostics`.
 - The submodules are private and every public item is re-exported from
   `lib.rs`, so `ironclaw_mcp::X` stays the single import path for consumers and
   a module rename is never a breaking change.
@@ -20,4 +28,4 @@
 - Resource reservations supplied by host/runtime dispatch must be reconciled or released exactly once; do not create secondary reservations when a prepared reservation is present.
 - **No budget authority (#7067).** The lane takes `ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile / release, and nothing else — never `ResourceGovernor`. The kernel implements the port over its governor (`ironclaw_resources::GovernorRuntimeBudget`), so the lane cannot set limits, read account state, or name an account. `ironclaw_resources` is a **dev**-dependency only (the lane suites drive the port over the real governor); do not re-add it under `[dependencies]`, and do not widen the port.
 - Surface only stable, sanitized client/runtime error categories. Do not expose upstream URLs with secrets, raw credentials, response bodies, or transport internals in runtime-visible errors.
-- Keep MCP protocol concerns here; extension discovery belongs in `ironclaw_extensions`, network enforcement in `ironclaw_network`/host runtime egress, and product workflow outside this crate.
+- Keep MCP protocol concerns here; extension discovery belongs in `ironclaw_extension_registry`, network enforcement in `ironclaw_network`/host runtime egress, and product workflow outside this crate.

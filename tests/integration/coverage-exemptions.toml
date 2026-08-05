@@ -28,7 +28,7 @@
 # remains accounted for in the owned implementation modules. Tracked by #6524.
 
 [[exemption]]
-module = "crates/ironclaw_product/src/lib.rs"
+module = "crates/ironclaw_assistant/src/lib.rs"
 reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable product behavior remains covered in the owned implementation modules."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
@@ -93,17 +93,17 @@ reason = "Declarative crate facade: module declarations and re-exports only; exe
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_product/src/lib.rs"
+module = "crates/ironclaw_assistant/src/lib.rs"
 reason = "Declarative crate facade: module declarations and re-exports only; executable product modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_product/src/scoped_fs/mod.rs"
+module = "crates/ironclaw_assistant/src/scoped_fs/mod.rs"
 reason = "Declarative scoped-filesystem facade and documentation only; executable scoped filesystem modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_reborn_composition/src/support/fs/mod.rs"
+module = "crates/ironclaw_composition/src/support/fs/mod.rs"
 reason = "Declarative composition support facade: module declarations and re-exports only; executable filesystem adapters remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 

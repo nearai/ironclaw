@@ -11,7 +11,7 @@ use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 
 pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     let runtime_policy =
-        ironclaw_reborn_composition::hosted_single_tenant_volume_sandboxed_runtime_policy()?;
+        ironclaw_composition::hosted_single_tenant_volume_sandboxed_runtime_policy()?;
     let tenant_id = TenantId::new("tenant-itest")?;
     let user_id = UserId::new("host-user")?;
     let options = HostRuntimeHarnessOptions::new(

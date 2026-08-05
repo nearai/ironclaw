@@ -13,7 +13,7 @@
 ## Agent-loop touch points
 
 - Production wiring validates the `TurnRunWakeNotifier` handle consumed by
-  `ironclaw_runner` (`ProductionWiringComponent::TurnRunWakeNotifier`); it does
+  `ironclaw_turn_runner` (`ProductionWiringComponent::TurnRunWakeNotifier`); it does
   not construct or own the scheduler/executor.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
@@ -39,7 +39,7 @@
 - Add a first-party tool file per capability, except for tightly-coupled
   v1-compatible coding-tool families that share one legacy surface contract.
 - Keep readiness checks near the runtime service they validate; driver/product
-  readiness belongs in `ironclaw_runner`.
+  readiness belongs in `ironclaw_turn_runner`.
 
 ## Common mistakes
 

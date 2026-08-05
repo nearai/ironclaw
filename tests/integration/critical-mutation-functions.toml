@@ -95,12 +95,12 @@ watch_paths = [
 
 [[invariant]]
 domain = "delivery deduplication"
-package = "ironclaw_product"
-path = "crates/ironclaw_product/src/run_delivery/observer.rs"
+package = "ironclaw_assistant"
+path = "crates/ironclaw_assistant/src/run_delivery/observer.rs"
 function = "try_claim"
 rationale = "Only one live or already-settled delivery loop may own a run's final reply."
 test_args = ["--lib", "delivery_run_ledger_distinguishes_active_and_delivered_claims"]
-watch_paths = ["crates/ironclaw_product/Cargo.toml"]
+watch_paths = ["crates/ironclaw_assistant/Cargo.toml"]
 
 [[invariant]]
 domain = "delivery routing registration"

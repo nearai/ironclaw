@@ -7,7 +7,7 @@
 use ironclaw_auth::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, ProviderScope,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallationError, ExtensionManifestRecord, ExtensionPackage, ManifestHash,
 };
 use ironclaw_host_api::{approval::sha256_digest_token, ids::SecretHandle};

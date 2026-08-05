@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_assistant::{
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest,
+};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthProductError, CredentialAccountLabel,
     CredentialAccountSelectionRequest, RebornAuthProductError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornProductAuthServices,
     RuntimeCredentialAccountSelectionRequest,
-};
-use ironclaw_product::{
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest,
 };
 use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 use ironclaw_product_contracts::surface::{
@@ -226,6 +226,7 @@ mod tests {
 
     use super::{ProductAuthExtensionCredentialSetup, map_auth_error};
     use async_trait::async_trait;
+    use ironclaw_assistant::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
     use ironclaw_auth::{
         AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
         CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
@@ -236,7 +237,6 @@ mod tests {
         ids::{ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
         resource::ResourceScope,
     };
-    use ironclaw_product::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
     use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 
     struct NoopDispatcher;

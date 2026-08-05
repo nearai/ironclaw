@@ -1,6 +1,6 @@
 //! Manifest-driven service for tenant administrator configuration.
 //!
-//! Descriptors remain declarative data owned by `ironclaw_extensions`. This
+//! Descriptors remain declarative data owned by `ironclaw_extension_registry`. This
 //! service folds that catalog, validates operator input against it, stages
 //! secret material in the tenant-shared managed scope, and publishes only
 //! redacted value references through the durable configuration store.
@@ -8,7 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor};
+use ironclaw_extension_registry::{
+    AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};

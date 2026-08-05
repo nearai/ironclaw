@@ -11,7 +11,7 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_events::AuditSink;
+use ironclaw_event_log::AuditSink;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, EventRecord, FileStat, FilesystemError,
     FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, StorageTxn,

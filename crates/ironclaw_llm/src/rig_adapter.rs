@@ -58,6 +58,13 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Default additional parameters merged into every request.
     /// Used by providers that need extra top-level fields (e.g., Ollama `think: true`).
     default_additional_params: Option<serde_json::Value>,
+    /// Provider-specific fallback used when the caller omits `max_tokens`.
+    /// Anthropic requires this field on every request; other rig-backed
+    /// providers preserve their existing omission semantics by leaving it unset.
+    default_max_tokens: Option<u32>,
+    /// Whether this provider has been live-validated for rig-core streaming.
+    /// Untested rig-backed providers retain the buffered trait fallback.
+    native_streaming: bool,
     /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
     /// issues a `GET` instead of returning the empty default. rig-core's
     /// `CompletionModel` does not expose model discovery, so this is wired
@@ -256,6 +263,8 @@ impl<M: CompletionModel> RigAdapter<M> {
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
             default_additional_params: None,
+            default_max_tokens: None,
+            native_streaming: false,
             models_endpoint: None,
         }
     }
@@ -324,6 +333,16 @@ impl<M: CompletionModel> RigAdapter<M> {
     pub fn with_additional_params(mut self, params: serde_json::Value) -> Self {
         self.default_additional_params = Some(params);
         self
+    }
+
+    /// Set a provider-required fallback for requests that omit `max_tokens`.
+    pub(crate) fn with_default_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.default_max_tokens = Some(max_tokens);
+        self
+    }
+
+    fn max_tokens_or_default(&self, max_tokens: Option<u32>) -> Option<u32> {
+        max_tokens.or(self.default_max_tokens)
     }
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
@@ -1178,7 +1197,7 @@ where
             Vec::new(),
             None,
             request.temperature,
-            request.max_tokens,
+            self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
         )?;
 
@@ -1224,6 +1243,10 @@ where
         mut request: CompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<CompletionResponse, LlmError> {
+        if !self.native_streaming {
+            return self.complete(request).await;
+        }
+
         let model_override = request.take_model_override();
 
         self.strip_unsupported_completion_params(&mut request);
@@ -1238,7 +1261,7 @@ where
             Vec::new(),
             None,
             request.temperature,
-            request.max_tokens,
+            self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
         )?;
 
@@ -1298,7 +1321,7 @@ where
             tools,
             tool_choice,
             request.temperature,
-            request.max_tokens,
+            self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
         )?;
 
@@ -1369,6 +1392,10 @@ where
         mut request: ToolCompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        if !self.native_streaming {
+            return self.complete_with_tools(request).await;
+        }
+
         let model_override = request.take_model_override();
 
         self.strip_unsupported_tool_params(&mut request);
@@ -1388,7 +1415,7 @@ where
             tools,
             tool_choice,
             request.temperature,
-            request.max_tokens,
+            self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
         )?;
 
@@ -1536,6 +1563,11 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     const LOOPBACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn with_native_streaming<M: CompletionModel>(mut adapter: RigAdapter<M>) -> RigAdapter<M> {
+        adapter.native_streaming = true;
+        adapter
+    }
 
     async fn capture_one_http_request() -> (String, oneshot::Receiver<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2191,7 +2223,91 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct StreamingOnlyCompletionModel;
+    struct MaxTokensCompletionModel {
+        expected_max_tokens: Option<u64>,
+    }
+
+    impl CompletionModel for MaxTokensCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            unimplemented!("constructed directly in tests")
+        }
+
+        async fn completion(
+            &self,
+            request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            assert_eq!(request.max_tokens, self.expected_max_tokens);
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("ok")),
+                usage: RigUsage::new(),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                }),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "streaming path must not be used".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_applies_provider_default_max_tokens() {
+        const DEFAULT_MAX_TOKENS: u32 = 8192;
+        let adapter = RigAdapter::new(
+            MaxTokensCompletionModel {
+                expected_max_tokens: Some(u64::from(DEFAULT_MAX_TOKENS)),
+            },
+            "default-max-tokens",
+        )
+        .with_default_max_tokens(DEFAULT_MAX_TOKENS);
+
+        let response = adapter
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect("completion uses provider default max_tokens");
+
+        assert_eq!(response.content, "ok");
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_preserves_explicit_max_tokens_over_provider_default() {
+        let adapter = RigAdapter::new(
+            MaxTokensCompletionModel {
+                expected_max_tokens: Some(4096),
+            },
+            "explicit-max-tokens",
+        )
+        .with_default_max_tokens(8192);
+        let request = ToolCompletionRequest::new(vec![ChatMessage::user("hello")], Vec::new())
+            .with_max_tokens(4096);
+
+        let response = adapter
+            .complete_with_tools(request)
+            .await
+            .expect("tool completion preserves explicit max_tokens");
+
+        assert_eq!(response.content.as_deref(), Some("ok"));
+    }
+
+    #[derive(Clone)]
+    struct StreamingOnlyCompletionModel {
+        expected_max_tokens: Option<u64>,
+    }
 
     impl CompletionModel for StreamingOnlyCompletionModel {
         type Response = serde_json::Value;
@@ -2199,7 +2315,9 @@ mod tests {
         type Client = ();
 
         fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
-            Self
+            Self {
+                expected_max_tokens: None,
+            }
         }
 
         async fn completion(
@@ -2213,8 +2331,9 @@ mod tests {
 
         async fn stream(
             &self,
-            _request: RigRequest,
+            request: RigRequest,
         ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            assert_eq!(request.max_tokens, self.expected_max_tokens);
             let stream = futures::stream::iter(vec![
                 Ok(RawStreamingChoice::Message("Hel".to_string())),
                 Ok(RawStreamingChoice::ReasoningDelta {
@@ -2248,8 +2367,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_methods_use_buffered_fallback_until_explicitly_enabled() {
+        let adapter = RigAdapter::new(
+            ReplayingCompletionModel {
+                choice: OneOrMany::one(AssistantContent::text("buffered")),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "buffered"},
+                        "finish_reason": "stop",
+                    }],
+                }),
+            },
+            "untested-provider",
+        );
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let text_response = adapter
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                sink.clone(),
+            )
+            .await
+            .expect("buffered text fallback succeeds");
+        let tool_response = adapter
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(vec![ChatMessage::user("hello")], Vec::new()),
+                sink,
+            )
+            .await
+            .expect("buffered tool fallback succeeds");
+
+        assert_eq!(text_response.content, "buffered");
+        assert_eq!(tool_response.content.as_deref(), Some("buffered"));
+        assert!(
+            delta_rx.try_recv().is_err(),
+            "buffered fallback must not emit deltas"
+        );
+    }
+
+    #[tokio::test]
     async fn complete_streaming_preserves_reasoning_deltas() {
-        let adapter = RigAdapter::new(StreamingOnlyCompletionModel, "streaming-only");
+        let adapter = with_native_streaming(RigAdapter::new(
+            StreamingOnlyCompletionModel {
+                expected_max_tokens: None,
+            },
+            "streaming-only",
+        ));
         let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
@@ -2269,7 +2434,12 @@ mod tests {
 
     #[tokio::test]
     async fn complete_with_tools_streaming_uses_rig_stream_and_emits_deltas() {
-        let adapter = RigAdapter::new(StreamingOnlyCompletionModel, "streaming-only");
+        let adapter = with_native_streaming(RigAdapter::new(
+            StreamingOnlyCompletionModel {
+                expected_max_tokens: None,
+            },
+            "streaming-only",
+        ));
         let request = ToolCompletionRequest::new(
             vec![ChatMessage::user("search")],
             vec![IronToolDefinition {
@@ -2298,6 +2468,62 @@ mod tests {
         assert_eq!(response.reasoning.as_deref(), Some("thinking"));
         assert_eq!(response.input_tokens, 3);
         assert_eq!(response.output_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_applies_provider_default_max_tokens() {
+        const DEFAULT_MAX_TOKENS: u32 = 8192;
+
+        let adapter = with_native_streaming(RigAdapter::new(
+            StreamingOnlyCompletionModel {
+                expected_max_tokens: Some(u64::from(DEFAULT_MAX_TOKENS)),
+            },
+            "streaming-only",
+        ))
+        .with_default_max_tokens(DEFAULT_MAX_TOKENS);
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search")],
+            vec![IronToolDefinition {
+                name: "search".to_string(),
+                description: "Search the index".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                }),
+            }],
+        );
+        let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
+
+        adapter
+            .complete_with_tools_streaming(
+                request,
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            )
+            .await
+            .expect("streaming completion succeeds with provider default");
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_preserves_explicit_max_tokens_over_provider_default() {
+        let adapter = with_native_streaming(RigAdapter::new(
+            StreamingOnlyCompletionModel {
+                expected_max_tokens: Some(4096),
+            },
+            "streaming-only",
+        ))
+        .with_default_max_tokens(8192);
+        let request =
+            CompletionRequest::new(vec![ChatMessage::user("hello")]).with_max_tokens(4096);
+        let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
+
+        adapter
+            .complete_streaming(
+                request,
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            )
+            .await
+            .expect("explicit max_tokens takes precedence");
     }
 
     // The finish-reason conformance suite — provider fixtures, payload

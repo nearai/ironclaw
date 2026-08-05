@@ -5,7 +5,7 @@
 //! **Why here.** Every type in these signatures is this crate's own vocabulary
 //! — [`AuthProviderId`], [`CredentialAccountLabel`], [`OAuthAuthorizationUrl`],
 //! [`AuthProductError`] — and the ports have implementors on both sides of the
-//! product boundary: `ironclaw_product`'s `RebornProductAuthServices` and
+//! product boundary: `ironclaw_assistant`'s `RebornProductAuthServices` and
 //! `ironclaw_extension_host`'s `RecipeAuthChallengeProvider`. Declaring them in
 //! `ironclaw_product_contracts` would mean narrowing four validated auth types
 //! down to `String` to satisfy that crate's `host_api` + `extension_contracts`

@@ -253,19 +253,19 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw|ironclaw_reborn_composition|ironclaw_webui)
+              ironclaw|ironclaw_composition|ironclaw_webui)
                 needs_webui_node=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw_reborn_composition|ironclaw_triggers)
+              ironclaw_composition|ironclaw_triggers)
                 needs_postgres_image=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)
+              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_assistant|ironclaw_turn_runner|ironclaw_composition|ironclaw_webui|ironclaw_wasm)
                 sccache_dist_enabled=false
                 ;;
             esac
@@ -376,7 +376,7 @@ jobs:
                 feature_args+=(--features "${package}/${feature}")
               done
             fi
-            if [[ "$package" == "ironclaw_reborn_composition" ]]; then
+            if [[ "$package" == "ironclaw_composition" ]]; then
               incremental_env=(env CARGO_INCREMENTAL=0)
             fi
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
@@ -657,7 +657,7 @@ jobs:
         run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
 
       - name: Run full-turn sandbox shell integration
-        run: cargo test -p ironclaw_reborn_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
+        run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
 
   reborn-integration-coverage:
     name: Reborn integration tests (${{ matrix.lane }})
@@ -1100,7 +1100,7 @@ jobs:
             scripts/ci/run-hermetic-deterministic-suite.sh \
             command \
             cargo test \
-            -p ironclaw_reborn_integration_tests \
+            -p ironclaw_integration_tests \
             --test reborn_qa_recorded_behavior \
             -- \
             --nocapture

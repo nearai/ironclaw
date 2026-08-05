@@ -5,7 +5,7 @@ Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
 > The v1 engine's legacy `Project` type is gone with `ironclaw_engine`; this is
 > now the only `Project` in the tree. This crate
-> serves the Reborn stack (`ironclaw_product` → composition →
+> serves the Reborn stack (`ironclaw_assistant` → composition →
 > `ironclaw_webui`).
 
 ## W2 crate-count decision
@@ -14,7 +14,7 @@ Keep `ironclaw_projects` as a standalone substrate crate for W2. It owns the
 durable project entity, live membership ACL, and repository contract over
 `ScopedFilesystem`; folding that into composition would put domain persistence
 behind the wiring layer. If this boundary is revisited later, the only plausible
-consumer-side target is `ironclaw_product` (which owns the
+consumer-side target is `ironclaw_assistant` (which owns the
 `ProjectService` service), and only if the project repository/domain contract can
 move there without forcing lower substrate crates to depend upward.
 
@@ -45,13 +45,13 @@ move there without forcing lower substrate crates to depend upward.
 - This crate persists data; it does **not** authorize callers, expose HTTP, or
   know about the service. Authorization gating that combines `resolve_access`
   with a required role lives in the product workflow
-  (`ironclaw_product::RebornProjectService`), not here.
+  (`ironclaw_assistant::RebornProjectService`), not here.
 
 ## Storage
 
 `FilesystemProjectRepository` persists JSON records over a `ScopedFilesystem`
 under a control-plane mount the agent cannot reach (the same substrate the
-`ironclaw_reborn_identity` store rides). Backend selection — Postgres / libSQL /
+`ironclaw_identity` store rides). Backend selection — Postgres / libSQL /
 JSONL / in-memory — is the host's `RootFilesystem` concern, so this crate is
 backend-agnostic and carries no SQL or `libsql`/`postgres` features.
 

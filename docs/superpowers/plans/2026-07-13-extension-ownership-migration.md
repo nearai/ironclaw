@@ -26,8 +26,8 @@
 - Modify: `crates/ironclaw_reborn_migration/src/lib.rs`
 - Modify: `crates/ironclaw_reborn_migration/src/target.rs`
 - Modify: `crates/ironclaw_reborn_migration/Cargo.toml`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/lib.rs`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
+- Modify: `crates/ironclaw_composition/src/lib.rs`
 - Test: `crates/ironclaw_reborn_migration/src/extension_ownership.rs`
 
 **Interfaces:**
@@ -96,8 +96,8 @@ Expected: PASS with no warnings.
 ### Task 2: Cleanup on Non-Final Member Removal
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
-- Test: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
+- Test: `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
 
 **Interfaces:**
 - Consumes: existing `ExtensionRemovalCleanupRegistry`, `revoke_exclusive_credentials`, and `RemoveDecision`.
@@ -115,7 +115,7 @@ Bob remains, and package/manifest/runtime state remains.
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_composition --all-features non_final_member_remove
+cargo test -p ironclaw_composition --all-features non_final_member_remove
 ```
 
 Expected: FAIL because the current `RemoveDecision::LeaveMembers` early return
@@ -133,9 +133,9 @@ non-final leave and performs full teardown for the final member.
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_composition --all-features non_final_member_remove
-cargo test -p ironclaw_reborn_composition --all-features extension_remove
-cargo clippy -p ironclaw_reborn_composition --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_composition --all-features non_final_member_remove
+cargo test -p ironclaw_composition --all-features extension_remove
+cargo clippy -p ironclaw_composition --all-targets --all-features -- -D warnings
 ```
 
 Expected: PASS with no warnings.
@@ -181,8 +181,8 @@ Run:
 
 ```bash
 cargo test -p ironclaw_reborn_migration --all-features
-cargo test -p ironclaw_reborn_composition --all-features
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_composition --all-features
+cargo test -p ironclaw_architecture_tests
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 scripts/pre-commit-safety.sh
 ```

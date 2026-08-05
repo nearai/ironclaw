@@ -17,13 +17,17 @@ use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispa
 use ironclaw_capabilities::{
     CapabilityObligationHandler, RuntimeAdapterResult, RuntimeDispatcher, ToolResolver,
 };
-use ironclaw_events::{
+use ironclaw_event_log::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
     SecurityAuditSink,
 };
+use ironclaw_event_store::{
+    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
+    RebornEventStores, RebornProfile, build_reborn_event_stores,
+};
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
@@ -45,10 +49,6 @@ use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
     BackgroundFailureStage, ProcessExecutor, ProcessInvocationStatePort, ProcessManager,
     ProcessServices,
-};
-use ironclaw_reborn_event_store::{
-    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
-    RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_sandbox::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};

@@ -16,7 +16,7 @@ edge stays one-way. A back-edge of **any** kind, including a `[dev-dependencies]
 entry for a test fixture, puts the two crates in a cycle the layer flip cannot
 satisfy.
 
-`crates/ironclaw_architecture/tests/reborn_extension_manager_split.rs` enforces
+`crates/ironclaw_architecture_tests/tests/reborn_extension_manager_split.rs` enforces
 this at the manifest *and* the source level. If you need host code to reach
 something here, the answer is to move that code here or to invert it behind a
 port the host declares — never to add the dependency.
@@ -58,11 +58,11 @@ structural rather than effort:
   `channel_host.rs` and `channel_subject_routes.rs`. §6.8.3 assigns the
   *capability handlers* to the manager, not the store.
 
-## The `ironclaw_product` dependency is residue, not the design
+## The `ironclaw_assistant` dependency is residue, not the design
 
 `docs/reborn/target-architecture/families/extensions.md` gives this crate
 `product_contracts` + `extension_contracts` + `extension_registry` +
-`extension_host`. It also depends on `ironclaw_product` today, in exactly seven
+`extension_host`. It also depends on `ironclaw_assistant` today, in exactly seven
 files, and every one is a **product DTO, a capability-id constant, or one of
 two port-inversion residues** (the `ExtensionCredentialSetupService` port and
 the auth-continuation fixture wiring) — never a workflow call. Those symbols

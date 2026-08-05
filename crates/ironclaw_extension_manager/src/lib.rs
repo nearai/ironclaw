@@ -13,7 +13,7 @@
 //! by `reborn_extension_manager_split.rs`: **the manager calls the host, and
 //! the host never calls the manager.** That is what lets `extension_host`
 //! move below product in WS2's layer flip while this crate stays at
-//! `products`, where naming `ironclaw_product` is legal.
+//! `products`, where naming `ironclaw_assistant` is legal.
 //!
 //! Nothing here may write installation state directly — every mutation goes
 //! through `ironclaw_extension_host::ExtensionLifecycleManager`.

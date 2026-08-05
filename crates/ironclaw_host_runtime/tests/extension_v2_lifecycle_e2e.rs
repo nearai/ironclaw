@@ -10,7 +10,7 @@ use ironclaw_capabilities::{
     ToolResolver,
 };
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
     ExtensionPackage, ExtensionRegistry, ManifestSource, ManifestV2Error,
     default_host_api_contract_registry,
@@ -252,7 +252,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     // Parse through the single record entry point (the github asset is a
     // manifest v3 document).
     let root = VirtualPath::new("/system/extensions/github").unwrap();
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),

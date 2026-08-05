@@ -5,9 +5,9 @@ hooks across the Reborn loop. It does not own:
 
 - The runner-facing `AgentLoopDriver` trait — that stays in `ironclaw_turns`.
 - The concrete `LoopCapabilityPort` / `LoopPromptPort` / `LoopModelPort` impls —
-  those stay in `ironclaw_loop_host` and `ironclaw_runner`.
+  those stay in `ironclaw_loop_host` and `ironclaw_turn_runner`.
 - The Reborn-side middleware composition that wraps host ports — that lives in
-  `ironclaw_runner::loop_driver_host` and consumes types from this crate.
+  `ironclaw_turn_runner::loop_driver_host` and consumes types from this crate.
 - Extension bundle loading and installation. Installed-tier WASM hooks execute
   here once their module bytes are resolved, but the extension installer remains
   the authority for sourcing those bytes.
@@ -17,10 +17,10 @@ hooks across the Reborn loop. It does not own:
 ```
 ironclaw_turns       -> no dependency on ironclaw_hooks
 ironclaw_hooks       -> depends on ironclaw_turns + ironclaw_host_api
-ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-up)
+ironclaw_turn_runner      -> depends on ironclaw_hooks for host composition (follow-up)
 ```
 
-Architecture test in `ironclaw_architecture::tests::reborn_dependency_boundaries`
+Architecture test in `ironclaw_architecture_tests::tests::reborn_dependency_boundaries`
 proves the `ironclaw_turns -> ironclaw_hooks` edge stays absent.
 
 ## Trust model
@@ -69,7 +69,7 @@ type-level fact that an `Installed`-tier installer cannot accept a
 `PrivilegedBeforeCapabilityHook`.
 
 What the type system **does not** enforce is *origin*. If loader code inside
-`ironclaw_runner` (or any other internal crate) reads a hook from the
+`ironclaw_turn_runner` (or any other internal crate) reads a hook from the
 extension registry and accidentally routes it through
 `install_builtin_before_capability`, the trust-class ↔ impl-tier pairing at
 the registry-binding boundary breaks — the dispatcher will happily install
@@ -193,10 +193,10 @@ Run 1 fails closed and poisons its slot; run 2 must get a clean slot, fire the
 hook **again**, and re-apply the deny. Under the legacy shared-dispatcher
 adapter run 2 would skip the poisoned hook and let the capability reach the
 wire, so both the fire count and the egress count flip — verified red by
-temporarily pointing `ironclaw_runner::runtime` at `with_hook_dispatcher`.
+temporarily pointing `ironclaw_turn_runner::runtime` at `with_hook_dispatcher`.
 
 ⚠ **Read the history before trusting any claim in this section.** It previously
-named `crates/ironclaw_runner/tests/hooks_integration.rs` and two tests
+named `crates/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests
 (`per_build_dispatcher_state_does_not_leak_across_runs`,
 `legacy_with_hook_dispatcher_shares_state_across_builds`) that **never
 existed**; #6944 corrected the false claim and #6945 tracked the real gap it

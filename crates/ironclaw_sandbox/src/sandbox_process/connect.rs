@@ -18,7 +18,7 @@
 //! Ships unwired. `sandbox_process`'s own `connect_docker` is still the
 //! single-attempt path the live transport uses; this module is re-exported at
 //! the crate root for its two real future consumers in
-//! `ironclaw_reborn_composition`: `sandbox_reaper_task`, which calls
+//! `ironclaw_composition`: `sandbox_reaper_task`, which calls
 //! [`connect_docker_with_retry`] before entering the reaper loop, and
 //! `sandbox_composition`'s boot diagnostic, which calls
 //! [`sandbox_docker_readiness`]. Repointing `connect_docker` at the retrying

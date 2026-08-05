@@ -393,7 +393,7 @@ For ported WASM tools:
 
 This guide is useful for planning and initial ports, but several production paths still depend on follow-up work:
 
-- Extension Manifest v2 hard cutover in `ironclaw_extensions`.
+- Extension Manifest v2 hard cutover in `ironclaw_extension_registry`.
 - `ManifestSource`-aware validation for installed vs host-bundled manifests.
 - Host-port vocabulary and scoped `HostPortView` handoff through `CapabilityHost`.
 - Hot Capability Surface construction from `visibility`, `prompt_doc_ref`, profiles, trust, grants, and surface policy.

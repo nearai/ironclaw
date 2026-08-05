@@ -7,10 +7,10 @@
 //!
 //! **Why here.** Every input and output is `ironclaw_host_api` vocabulary plus
 //! this crate's own view family, and there are two consumers that must not
-//! import one another: `ironclaw_product`'s projection layer and
+//! import one another: `ironclaw_assistant`'s projection layer and
 //! `ironclaw_extension_host`'s `ApprovalPromptContextSource` implementation
 //! (`crate::prompt_source`). Before WS2.5 the extension host reached *up* into
-//! `ironclaw_product::projection::approval_prompt_context_view` for exactly
+//! `ironclaw_assistant::projection::approval_prompt_context_view` for exactly
 //! this, and product carried the projection twice — once in `approval_prompt.rs`
 //! and again in `projection/turn_events.rs`. One definition, here.
 //!
@@ -43,7 +43,7 @@ pub fn is_approval_gate_ref(gate_ref: &str) -> bool {
 ///
 /// Deliberately `Option`, not `Result`: this crate has no approval-rejection
 /// vocabulary, and both prompt readers already discard the reason. Callers that
-/// need a typed rejection wrap it — `ironclaw_product`'s
+/// need a typed rejection wrap it — `ironclaw_assistant`'s
 /// `approval_request_id_from_gate_ref` does exactly that.
 pub fn approval_request_id_from_gate_ref(gate_ref: &TurnGateRef) -> Option<ApprovalRequestId> {
     let value = gate_ref.as_str().strip_prefix(APPROVAL_GATE_PREFIX)?;
@@ -54,7 +54,7 @@ pub fn approval_request_id_from_gate_ref(gate_ref: &TurnGateRef) -> Option<Appro
 ///
 /// An explicit turn owner (a shared/team subject) wins over the acting user,
 /// matching `ApprovalInteractionScope::from_turn`; the equivalence of the two
-/// is pinned in `ironclaw_product`
+/// is pinned in `ironclaw_assistant`
 /// (`approval_prompt_lookup_scope_matches_the_interaction_scope_projection`).
 pub fn approval_prompt_lookup_scope(
     turn_scope: &TurnScope,

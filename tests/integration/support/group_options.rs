@@ -20,7 +20,7 @@ use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_loop_host::ToolDisclosureMode;
-use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::InMemoryTurnEventSink;
 
 use super::super::builder::StorageMode;
@@ -113,11 +113,11 @@ impl RebornIntegrationGroupBuilder {
     /// (default forces `All`) so a test can reproduce a narrowed profile atop
     /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     /// Mirrors the production resolve-once wiring in
-    /// `crates/ironclaw_runner/src/runtime.rs`:
+    /// `crates/ironclaw_turn_runner/src/runtime.rs`:
     /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
     /// resolved allow-set between `ToolDisclosureCapabilityDecorator` and the
     /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
-    /// in `crates/ironclaw_runner/src/loop_driver_host.rs` calls
+    /// in `crates/ironclaw_turn_runner/src/loop_driver_host.rs` calls
     /// `build_text_only_host_with_capabilities`. The explicit
     /// `build_text_only_host_with_profiled_capabilities` form is for test
     /// construction.
@@ -169,7 +169,7 @@ impl RebornIntegrationGroupBuilder {
     /// capability-port factory. Defaults `None`.
     pub fn with_raw_trajectory_observer(
         mut self,
-        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+        observer: Arc<dyn ironclaw_composition::RebornTrajectoryObserver>,
     ) -> Self {
         self.trajectory_observer = Some(observer);
         self

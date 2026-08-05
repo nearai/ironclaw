@@ -64,14 +64,14 @@ pub trait PredicateStateBackend: Send + Sync {
 in-memory backend that already shipped in PR #3635 uses `Instant`
 because it's process-local and monotonic. Durable backends serialize
 across processes, so they must use `chrono::DateTime<Utc>` to match
-the rest of the project (`src/db/mod.rs`, `ironclaw_events`). The
+the rest of the project (`src/db/mod.rs`, `ironclaw_event_log`). The
 trait will accept `DateTime<Utc>` and the existing in-memory backend
 will gain a thin shim mapping `Instant`-driven callers to a fixed
 reference point.
 
 **Run scope:** the trait does NOT carry `run_id` directly. The
 sliding-window state is per-tenant + per-hook-id; replay refusal is
-driven by `event_id` (which is `RuntimeEventId` from `ironclaw_events`,
+driven by `event_id` (which is `RuntimeEventId` from `ironclaw_event_log`,
 itself already keyed to the current run's emission). An earlier draft
 mentioned storing `run_id` alongside; that's redundant given the event
 id's uniqueness contract and was removed in this revision.

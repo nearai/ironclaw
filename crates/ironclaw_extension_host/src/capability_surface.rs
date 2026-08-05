@@ -276,7 +276,7 @@ mod tests {
             capability(
                 "market-data.snp500",
                 "market-data",
-                ironclaw_extensions::InstallationOwner::users(
+                ironclaw_extension_registry::InstallationOwner::users(
                     [alice.clone(), bob.clone()].into_iter().collect(),
                 )
                 .expect("member set"),
@@ -284,7 +284,7 @@ mod tests {
             capability(
                 "hacker-news.top_stories",
                 "hacker-news",
-                ironclaw_extensions::InstallationOwner::Tenant,
+                ironclaw_extension_registry::InstallationOwner::Tenant,
             ),
         ]);
 
@@ -337,7 +337,7 @@ mod tests {
             runtime_credentials: Vec::new(),
             network_targets: vec![https(EXA_MCP_HOST)],
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -357,7 +357,7 @@ mod tests {
             runtime_credentials: Vec::new(),
             network_targets: vec![https(EXA_MCP_HOST)],
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -384,7 +384,7 @@ mod tests {
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -413,7 +413,7 @@ mod tests {
             runtime_credentials: Vec::new(),
             network_targets: vec![https("news.ycombinator.com")],
             max_egress_bytes: None,
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -449,7 +449,7 @@ mod tests {
             }],
             network_targets: vec![https(EXA_MCP_HOST)],
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -485,7 +485,7 @@ mod tests {
             }],
             network_targets: google_api_network_targets(),
             max_egress_bytes: Some(GSUITE_EGRESS_LIMIT),
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -519,7 +519,7 @@ mod tests {
             }],
             network_targets: google_api_network_targets(),
             max_egress_bytes: Some(GSUITE_EGRESS_LIMIT),
-            owner: ironclaw_extensions::InstallationOwner::Tenant,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);

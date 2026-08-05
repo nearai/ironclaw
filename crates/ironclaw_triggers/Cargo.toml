@@ -22,6 +22,10 @@ deadpool-postgres = "0.14"
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_libsql_runtime = { path = "../ironclaw_libsql_runtime" }
+# Host-trusted ingress minting (PROPOSAL §6.4.3) validates the prompt it seals
+# into a `TrustedTriggerSubmitRequest`. `ironclaw_safety` is a same-layer,
+# I/O-free `substrates` leaf, so this is a peer edge, not a reach upward.
+ironclaw_safety = { path = "../ironclaw_safety" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 tokio-postgres = "0.7"
 serde = { version = "1", features = ["derive"] }

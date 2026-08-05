@@ -189,7 +189,7 @@ pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
     /// [`ProductSurfaceCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
-    /// `crates/ironclaw_product/CLAUDE.md`.
+    /// `crates/ironclaw_assistant/CLAUDE.md`.
     pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
@@ -777,7 +777,7 @@ struct AuthLayerState {
 /// the grant source is not even nameable outside the crate: the only place a
 /// `HostAuthenticationGrant` can come from is a few lines below, immediately
 /// after `authenticator.authenticate(&token)` returned `Some`. Before WS1.5 the
-/// same mint was reached through `ironclaw_product`'s re-export behind a
+/// same mint was reached through `ironclaw_assistant`'s re-export behind a
 /// `host-auth-mint` cargo feature that cargo's feature unification made
 /// vacuous — see `ironclaw_host_api::product_adapter::auth`.
 impl HostProtocolAuthenticator for AuthLayerState {}
@@ -829,7 +829,7 @@ async fn authenticate_request(
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     {
-        let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
+        let scope = ironclaw_openai_compat::OpenAiCompatActorScope::new(
             state.tenant_id.clone(),
             openai_user_id.clone(),
             state.default_agent_id.clone(),
@@ -843,7 +843,7 @@ async fn authenticate_request(
             openai_user_id.as_str(),
             state.tenant_id.clone(),
         );
-        let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
+        let caller = match ironclaw_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,
         ) {

@@ -35,7 +35,7 @@ Verified against the working tree (see memory note `slack-push-approval-diagnosi
 - **Adapter-agnostic core.** The fix must work for any future product
   adapter (Telegram, Discord, …), not just Slack. Generic pieces land in
   `ironclaw_product_adapters`, `ironclaw_outbound`, and
-  `ironclaw_product`. Slack-specific pieces are confined to two
+  `ironclaw_assistant`. Slack-specific pieces are confined to two
   touchpoints every adapter will have anyway: (a) render rejected-ack
   feedback, (b) record the conversation ref a gate prompt was delivered
   into.
@@ -66,7 +66,7 @@ Verified against the working tree (see memory note `slack-push-approval-diagnosi
 
 ### A2. Slack rejected-ack feedback
 
-`crates/ironclaw_reborn_composition/src/slack_delivery.rs`, in
+`crates/ironclaw_composition/src/slack_delivery.rs`, in
 `observe_workflow_ack` (before the `deliver_final_reply` call or inside
 it ahead of `should_deliver_after_ack`):
 
@@ -135,7 +135,7 @@ error posts the notice. Unit test the kind→hint mapping for exhaustive
 
 ### B2. Record routes on the live delivery path (Slack)
 
-`crates/ironclaw_reborn_composition/src/slack_delivery.rs`:
+`crates/ironclaw_composition/src/slack_delivery.rs`:
 
 - `notification_for_actionable_state`: set
   `gate_ref_for_routing: Some(gate_ref)` in the `BlockedApproval` branch
@@ -163,7 +163,7 @@ error posts the notice. Unit test the kind→hint mapping for exhaustive
 
 ### B3. Workflow fallback (generic — this is what future adapters inherit)
 
-`crates/ironclaw_product/src/workflow.rs` (crate already
+`crates/ironclaw_assistant/src/workflow.rs` (crate already
 depends on `ironclaw_outbound` and `ironclaw_conversations`):
 
 - `DispatchPorts` gains `delivered_gate_routes: &dyn DeliveredGateRouteStore`

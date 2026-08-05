@@ -23,11 +23,13 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest, CapabilitySpawnRequest, CredentialPresence, HostPolicyFacts,
     PolicyAction,
 };
-use ironclaw_events::{
+use ironclaw_event_log::{
     DurableAuditLog, EventCursor, EventError, EventReplay, EventStreamKey, InMemoryAuditSink,
     InMemoryEventSink, ReadScope,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
@@ -797,7 +799,7 @@ impl DurableAuditLog for FailingDurableAuditLog {
     async fn append(
         &self,
         _record: AuditEnvelope,
-    ) -> Result<ironclaw_events::EventLogEntry<AuditEnvelope>, EventError> {
+    ) -> Result<ironclaw_event_log::EventLogEntry<AuditEnvelope>, EventError> {
         Err(EventError::DurableLog {
             reason: "simulated audit backend failure at /tmp/audit-backend-secret".to_string(),
         })
@@ -2585,11 +2587,11 @@ pub(crate) const HTTP_TOOL_WAT: &str = r#"
 )
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

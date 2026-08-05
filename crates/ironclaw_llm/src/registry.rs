@@ -380,7 +380,7 @@ pub struct ProviderRegistry {
 }
 
 fn builtin_provider_definitions() -> Vec<ProviderDefinition> {
-    serde_json::from_str(include_str!("../../../providers.json"))
+    serde_json::from_str(include_str!("../assets/providers.json"))
         .expect("built-in providers.json must be valid JSON") // safety: compile-time embedded file
 }
 
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn test_builtin_registry_loads() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert!(
             registry.all().len() >= 5,
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn test_find_by_id() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         let openai = registry.find("openai").expect("openai should exist");
         assert_eq!(openai.id, "openai");
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn test_find_by_alias() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         let openai = registry
             .find("open_ai")
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn test_find_case_insensitive() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert!(registry.find("OpenAI").is_some());
         assert!(registry.find("GROQ").is_some());
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn test_find_unknown_returns_none() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert!(registry.find("nonexistent_provider").is_none());
     }
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn test_selectable_has_setup_hints() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         let selectable = registry.selectable();
         assert!(!selectable.is_empty());
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn test_user_override_wins() {
         let builtins: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap();
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap();
         let mut all = builtins;
         // Simulate user overriding tinfoil with a different default model
         all.push(ProviderDefinition {
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn test_nearai_setup_hint_can_list_models() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         let def = registry.find("nearai").expect("nearai should exist");
         let setup = def
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn test_model_env_var_nearai() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert_eq!(registry.model_env_var("nearai"), "NEARAI_MODEL");
         assert_eq!(registry.model_env_var("near_ai"), "NEARAI_MODEL");
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn test_model_env_var_registry_provider() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert_eq!(registry.model_env_var("groq"), "GROQ_MODEL");
         assert_eq!(registry.model_env_var("tinfoil"), "TINFOIL_MODEL");
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn test_model_env_var_unknown_fallback() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert_eq!(registry.model_env_var("nonexistent"), "LLM_MODEL");
     }
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn test_is_known() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         assert!(registry.is_known("nearai"));
         assert!(registry.is_known("openai"));
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn test_all_providers_have_required_fields() {
         let providers: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap();
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap();
         for def in &providers {
             assert!(!def.id.is_empty(), "provider must have an id");
             assert!(!def.model_env.is_empty(), "{}: model_env required", def.id);
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn reasoning_aware_providers_use_dedicated_protocol_not_openai_compat() {
         let providers: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap();
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap();
         let by_id = |id: &str| providers.iter().find(|p| p.id == id).cloned();
 
         let deepseek = by_id("deepseek").expect("deepseek entry must exist");
@@ -850,7 +850,7 @@ mod tests {
     #[test]
     fn test_openai_compatible_providers_have_base_url() {
         let providers: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap();
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap();
         for def in &providers {
             if def.protocol == ProviderProtocol::OpenAiCompletions
                 && def.id != "openai"
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn test_models_filter_accessor() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
         // Groq has models_filter: "chat"
         let groq = registry.find("groq").expect("groq should exist");
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn test_unsupported_params_deserialized() {
         let providers: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap();
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap();
 
         // Tinfoil should have temperature in unsupported_params
         let tinfoil = providers.iter().find(|p| p.id == "tinfoil").unwrap();
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn dedicated_config_backends_are_in_registry_and_selectable() {
         let registry = ProviderRegistry::new(
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap(),
         );
 
         for (id, expected_protocol, alias_to_check, model_env, expected_hint) in [
@@ -1294,7 +1294,7 @@ mod tests {
         // Every built-in provider with SetupHint::ApiKey must have api_key_env
         // set, otherwise inject_llm_keys_from_secrets can't map the secret.
         let providers: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json")).unwrap();
+            serde_json::from_str(include_str!("../assets/providers.json")).unwrap();
         for def in &providers {
             if let Some(SetupHint::ApiKey { .. }) = &def.setup {
                 assert!(

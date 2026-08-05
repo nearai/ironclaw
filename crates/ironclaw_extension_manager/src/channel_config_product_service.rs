@@ -132,7 +132,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigReactivationError};
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
         ExtensionManifestRef, MembershipDeactivation,
@@ -189,7 +189,8 @@ mod tests {
             Arc::clone(&backend) as Arc<dyn RootFilesystem>,
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
             ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
-            ironclaw_extensions::default_host_api_contract_registry().expect("host contracts"),
+            ironclaw_extension_registry::default_host_api_contract_registry()
+                .expect("host contracts"),
         )
         .await
         .expect("filesystem extension installation store");
@@ -455,7 +456,8 @@ mod tests {
                     .expect("valid test path"),
                 ironclaw_host_api::host_port::default_host_port_catalog()
                     .expect("host port catalog"),
-                ironclaw_extensions::default_host_api_contract_registry().expect("host contracts"),
+                ironclaw_extension_registry::default_host_api_contract_registry()
+                    .expect("host contracts"),
             )
             .await
             .expect("filesystem extension installation store"),
@@ -463,10 +465,11 @@ mod tests {
         for (manifest_toml, id) in manifests {
             let record = ExtensionManifestRecord::from_toml(
                 *manifest_toml,
-                ironclaw_extensions::ManifestSource::HostBundled,
+                ironclaw_extension_registry::ManifestSource::HostBundled,
                 &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
                 None,
-                &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+                &ironclaw_extension_registry::default_host_api_contract_registry()
+                    .expect("contracts"),
                 None,
             )
             .expect("fixture manifest parses");
@@ -480,7 +483,7 @@ mod tests {
                         ExtensionManifestRef::new(extension_id, None),
                         Vec::new(),
                         chrono::Utc::now(),
-                        ironclaw_extensions::InstallationOwner::Tenant,
+                        ironclaw_extension_registry::InstallationOwner::Tenant,
                     )
                     .expect("installation"),
                 )

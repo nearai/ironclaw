@@ -11,7 +11,7 @@ use ironclaw_auth::{
 };
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
 };
 use ironclaw_filesystem::{
@@ -266,16 +266,17 @@ async fn build_lifecycle_test_services_over_backing(
         ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog");
     let extension_host_api_contracts =
         product_extension_host_api_contract_registry().expect("host contracts");
-    let installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> = Arc::new(
-        ExtensionInstallationStore::load_at(
-            Arc::clone(&extension_filesystem),
-            ExtensionInstallationStore::default_state_path().expect("default state path"),
-            extension_host_ports,
-            extension_host_api_contracts,
-        )
-        .await
-        .expect("extension installation store"),
-    );
+    let installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort> =
+        Arc::new(
+            ExtensionInstallationStore::load_at(
+                Arc::clone(&extension_filesystem),
+                ExtensionInstallationStore::default_state_path().expect("default state path"),
+                extension_host_ports,
+                extension_host_api_contracts,
+            )
+            .await
+            .expect("extension installation store"),
+        );
     // Keep lifecycle publication and capability preflight on the same shared
     // registry, exactly as production composition does. The active snapshot
     // resolver is dispatch-only; `CapabilityHost` resolves the descriptor
@@ -409,7 +410,7 @@ async fn build_lifecycle_test_services_over_backing(
                 product_auth.runtime_credential_account_selection_service(),
             );
     let lifecycle_service = Arc::new(lifecycle_service);
-    let lifecycle_product_continuation = ironclaw_product::lifecycle_auth_continuation_dispatcher(
+    let lifecycle_product_continuation = ironclaw_assistant::lifecycle_auth_continuation_dispatcher(
         Arc::clone(&lifecycle_service) as Arc<dyn LifecycleProductService>,
         terminal_continuation,
     );

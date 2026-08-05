@@ -18,14 +18,14 @@
 > 2. **`ExternalActorRef` / `ExternalConversationRef` are no longer owned here.**
 >    Their one home is `ironclaw_extension_contracts::external`;
 >    `ironclaw_conversations` consumes them. It used to declare a second,
->    field-divergent copy, and `ironclaw_product` bridged the two with
+>    field-divergent copy, and `ironclaw_assistant` bridged the two with
 >    hand-written translators that are now deleted.
 > 3. **The route's third field is `topic_id`, not `thread_id`** — it is the
 >    *channel's* sub-conversation, never a canonical `ThreadId`. Only the Rust
 >    spelling changed: the durable record keeps `thread_id`, deliberately, so a
 >    rollback can still read it. See `ironclaw_conversations::stored_refs`.
 >
-> `crates/ironclaw_architecture/tests/reborn_conversations_threads_attachments.rs`
+> `crates/ironclaw_architecture_tests/tests/reborn_conversations_threads_attachments.rs`
 > pins 1 and 2 — the first rule by discovery, not enumeration.
 
 ---

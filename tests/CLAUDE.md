@@ -370,7 +370,7 @@ entries.
 ### 6.6 Automations, routines & projects
 | The user can… | Evidence |
 |---|---|
-| Create/rename/filter automations in the UI, retry failed runs, dismiss error toasts | `test_reborn_webui_v2_smoke.py` (automation tests), `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
+| Create an automation through chat; rename, pause, resume, reload, and delete it through the UI with persisted API state; filter automations, retry failed runs, and dismiss error toasts | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, other automation tests in that file, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
 | Create event-triggered routines, have them fire on match, respect cooldown, pause/resume | `test_routine_event_batch.py` (8) |
 | Run a full-job routine end-to-end with tools, trigger it manually, see failures in the UI | `test_routine_full_job.py` (3) |
 | Have routines run with injected OAuth credentials | `test_routine_oauth_credential_injection.py` (3) |

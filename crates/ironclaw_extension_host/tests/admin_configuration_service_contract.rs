@@ -5,7 +5,7 @@ use ironclaw_extension_host::{
     AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationServiceError,
     AdminConfigurationSubmittedValue, FilesystemAdminConfigurationStore,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     AdminConfigurationField, AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};

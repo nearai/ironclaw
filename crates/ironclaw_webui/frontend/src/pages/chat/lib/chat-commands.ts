@@ -99,7 +99,7 @@ export const COMMAND_RESULT_KIND = Object.freeze({
   DENIAL: "denial",
   // Defensive only: `product.commands.execute` always answers with exactly
   // one of `result`/`rejection` (see `execute_product_command` in
-  // `ironclaw_product/src/reborn_services/product_commands.rs`) — this never
+  // `ironclaw_assistant/src/reborn_services/product_commands.rs`) — this never
   // fires against a real backend. `CommandResult` renders nothing for it so a
   // response shaped like neither falls back to the legacy markdown notice
   // instead of an empty card.

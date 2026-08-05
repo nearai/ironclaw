@@ -244,9 +244,15 @@ where
             planned.plan.response_body_limit,
             request.max_output_bytes,
         );
+        // Explicit `McpClientError::client`, not `?`: the removed
+        // `impl From<String> for McpClientError` used to make this conversion
+        // invisible, which is how the crate charter's "no module builds a
+        // failure string of its own" rule lost its one enforceable seam. The
+        // reason itself already comes from `diagnostics::request_denied`.
         let credential_injections = planned
             .method
-            .credential_injections(planned.plan.credential_injections)?;
+            .credential_injections(planned.plan.credential_injections)
+            .map_err(McpClientError::client)?;
         let response = self
             .http
             .request(CapabilityHostHttpRequest {

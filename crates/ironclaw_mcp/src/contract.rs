@@ -60,7 +60,7 @@ pub struct McpExecutionRequest<'a> {
     /// The lane deliberately does **not** receive the `ExtensionPackage`: it
     /// read only the id, the capability descriptors, and the runtime stanza,
     /// and taking the package forced a `runtimes -> loops` dependency on the
-    /// registry crate (the W7 `ironclaw_mcp -> ironclaw_extensions` exception).
+    /// registry crate (the W7 `ironclaw_mcp -> ironclaw_extension_registry` exception).
     /// The caller, which owns the package, projects those three.
     ///
     /// **Caller obligation (the cost of that carve-out).** `extension`,
@@ -199,12 +199,6 @@ impl McpClientError {
             Self::Client { reason } | Self::InvalidToolCatalog { reason } => reason,
             Self::AuthRequired | Self::AuthChallenge { .. } => "auth_required",
         }
-    }
-}
-
-impl From<String> for McpClientError {
-    fn from(reason: String) -> Self {
-        Self::client(reason)
     }
 }
 

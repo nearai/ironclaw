@@ -438,7 +438,7 @@ where
     /// Attaches a pre-built Reborn durable event/audit store pair to the host
     /// runtime graph. This is the production composition seam for store
     /// selection: callers choose Postgres/libSQL/accepted-JSONL through
-    /// `ironclaw_reborn_event_store`, then this method adapts the durable logs
+    /// `ironclaw_event_store`, then this method adapts the durable logs
     /// into the live sink traits consumed by runtime services.
     pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
         self.with_reborn_event_stores_verified(stores, false)

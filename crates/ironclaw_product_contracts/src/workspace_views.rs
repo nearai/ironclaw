@@ -3,7 +3,7 @@
 //!
 //! The WebUI Projects page and the read-only Workspace/Files explorer both
 //! serialize these. The read *ports* that serve them stayed in
-//! `ironclaw_product`, for two different reasons worth keeping straight:
+//! `ironclaw_assistant`, for two different reasons worth keeping straight:
 //! `ProjectFilesystemReader` **cannot** move — every method takes an
 //! `ironclaw_threads::ThreadScope`, outside this crate's allowlist — while
 //! `ProjectService` and `FilesystemBrowseReader` merely **have not**: §6.1.3's
@@ -240,7 +240,7 @@ pub enum ProjectFsEntryKind {
 ///
 /// `path` is the scoped path (`/workspace/...`) the consumer passes back to
 /// `ProjectFilesystemReader::read_file` / `::stat` — the port stayed in
-/// `ironclaw_product::reborn_services::project_fs` because every method takes
+/// `ironclaw_assistant::reborn_services::project_fs` because every method takes
 /// an `ironclaw_threads::ThreadScope`, so these are code spans, not links. The
 /// path is reconstructed by the implementation from the request directory plus
 /// the entry name so a host or virtual path is never serialized.
@@ -374,7 +374,7 @@ impl FsMount {
     /// All mounts known to the product layer, in display order. Which of these
     /// a given deployment actually serves is reported by
     /// `FilesystemBrowseReader::available_mounts` (the port stayed in
-    /// `ironclaw_product::reborn_services::fs_browse`) — a mount may be known
+    /// `ironclaw_assistant::reborn_services::fs_browse`) — a mount may be known
     /// here but unwired in a particular composition.
     pub const ALL: &'static [FsMount] = &[FsMount::Memory, FsMount::Workspace, FsMount::Skills];
 

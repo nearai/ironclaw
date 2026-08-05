@@ -14,7 +14,7 @@ secret coverage is "mostly wiring" (§3.8).
 
 The integration harness builds **one `CompositeRootFilesystem`** exactly as
 production's `build_default_local_dev_database_roots`
-(`crates/ironclaw_reborn_composition/src/factory.rs:2238`) does. `StorageMode`
+(`crates/ironclaw_composition/src/factory.rs:2238`) does. `StorageMode`
 selects **only the durable backend mounted into that composite** — an
 `InMemoryBackend` (default) or a `LibSqlRootFilesystem` over a per-`build()` tmp
 `.db` — handed to the production `mount_local_dev_database_roots` helper.
@@ -114,18 +114,18 @@ keeps `/engine/tenants/...`** (it is out of scope; see Blast radius).
 
 ## File-by-file
 
-### 1. `crates/ironclaw_reborn_composition/src/factory.rs` (production, DONE)
+### 1. `crates/ironclaw_composition/src/factory.rs` (production, DONE)
 `mount_local_dev_database_roots` promoted `fn` → `pub(crate) fn` with a doc-comment
 naming production callers + the test accessor. Behavior-preserving. **On-branch.**
 
-### 2. `crates/ironclaw_reborn_composition/src/test_support.rs` (production, DONE + 2b)
+### 2. `crates/ironclaw_composition/src/test_support.rs` (production, DONE + 2b)
 - (DONE) `mount_local_dev_database_roots_for_test<F>(...)` — `#[cfg(feature = "test-support")]`
   accessor forwarding to the `pub(crate)` mount helper. **On-branch.**
 - **(2b, new) Avoid duplicating the libsql ctor sequence.** Promote
   `build_default_local_dev_database_roots` to `pub(crate)` and add
   `#[cfg(feature = "test-support")] pub async fn build_default_local_dev_database_roots_for_test(root: &Path, composite: &mut CompositeRootFilesystem) -> Result<(), RebornBuildError>`
   forwarding to it (doc-comment naming the production call site, per
-  `ironclaw_reborn_composition/CLAUDE.md`). The harness's `LibSql` arm calls this
+  `ironclaw_composition/CLAUDE.md`). The harness's `LibSql` arm calls this
   instead of re-implementing `libsql::Builder::new_local + LibSqlRootFilesystem::new +
   run_migrations + mount` (maintainability finding — single source of the
   database-roots truth). (The `#[cfg(not(feature="libsql"))]` branch of that
@@ -258,7 +258,7 @@ no proc-macro of our own (design §2).
    and the binary-E2E reborn tests that exercise `RebornBinaryE2EHarness` /
    `RebornHarnessSharedStorage` (e.g. `reborn_turn_state_lock_free_submit_parity`,
    `reborn_recorded_trace_parity`). **Commit.**
-3. `cargo test -p ironclaw_reborn_composition` — production promotions
+3. `cargo test -p ironclaw_composition` — production promotions
    behavior-preserving.
 4. `cargo fmt --check`.
 5. **Open the PR before the long gate** (survives a watchdog kill on the gate).
