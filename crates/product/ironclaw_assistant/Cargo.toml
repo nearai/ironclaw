@@ -47,7 +47,6 @@ ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0
 # The blocked-auth resume fan-out (WS6 eviction from the composition root)
 # reads durable process-gate records to find the caller's other parked runs.
 ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.0" }
-ironclaw_projects = { path = "../../ironclaw_projects", version = "0.1.0" }
 # The admin user-directory adapter (WS6 eviction from the composition root)
 # reads the identity directory and provisions per-user secrets through it.
 ironclaw_identity = { path = "../../domains/ironclaw_identity", version = "0.1.0" }

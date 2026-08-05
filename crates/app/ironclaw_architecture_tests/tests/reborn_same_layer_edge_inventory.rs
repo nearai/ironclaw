@@ -570,13 +570,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS6",
     },
     SameLayerEdge {
-        crate_name: "ironclaw_projects",
-        dependency_name: "ironclaw_filesystem",
-        layer: "substrates",
-        owner: "domains/",
-        decided_in: "WS6",
-    },
-    SameLayerEdge {
         crate_name: "ironclaw_event_store",
         dependency_name: "ironclaw_event_log",
         layer: "substrates",
@@ -706,6 +699,18 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// The equality is what made the second half loud — under a `<=` ratchet the
 /// stale row would have sat green as one entry of slack.
 ///
+/// ✎ **72 → 71 (WS10, the `projects` → `identity` merge, 2026-08-05).** The
+/// §12.10 consolidation audit's single clear merge verdict landed:
+/// `ironclaw_projects` is gone and its records are `ironclaw_identity`'s
+/// `projects` module, so `projects → filesystem` died and `identity →
+/// filesystem` — already inventoried — absorbed it. **One** row deleted, none
+/// added: the merged module's only workspace dependencies were
+/// `ironclaw_host_api` and `ironclaw_filesystem`, exactly the two
+/// `reborn_dependency_boundaries.rs` already pins `ironclaw_identity` to, which
+/// is why the fold costs no edge. Found by this gate's stale-row arm rather than
+/// by reading the diff, and recounted on the merged tree (65 layered crates,
+/// 387 workspace edges, 71 same-layer) rather than derived by subtracting one.
+///
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
@@ -716,8 +721,10 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 const SAME_LAYER_EDGE_BASELINE: usize = 71;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
-/// read as success; these are deliberately far below the live values (67
-/// layered crates, 391 workspace edges) so they catch a broken walk without
+/// read as success; these are deliberately far below the live values (✎ **65**
+/// layered crates, **387** workspace edges, re-measured 2026-08-05 after the
+/// `projects` → `identity` merge; the 67/391 this note used to quote was a
+/// snapshot of `origin/main` @ `676d86ce02`) so they catch a broken walk without
 /// tripping on ordinary growth or deletion.
 const MIN_LAYERED_CRATES: usize = 50;
 const MIN_WORKSPACE_EDGES: usize = 250;
@@ -726,6 +733,16 @@ const MIN_WORKSPACE_EDGES: usize = 250;
 /// `Cargo.toml`. Rows are append-only and a row's origin layer is immutable —
 /// editing one to match a demotion is the one way to defeat the check below,
 /// and it is a visible diff in a file whose entire subject is that rule.
+///
+/// **Append-only is not "never deleted."** The one sanctioned removal is a
+/// crate leaving the workspace, and the gate below states it rather than leaving
+/// it to judgement: `vanished` fails with *"CRATE_LAYER_ORIGINS names crates the
+/// workspace no longer has … Delete the rows — a stale origin row is a demotion
+/// detector aimed at nothing."* A row may therefore be dropped **only** in the
+/// change that deletes or merges away its crate, and only because the gate is
+/// already red on it. ✎ Exercised 2026-08-05 by the `projects` → `identity`
+/// merge (WS10, PROPOSAL §12.10): `ironclaw_projects` left the workspace, the
+/// gate named it by that message, and its row went with it.
 ///
 /// `ironclaw_integration_tests` predates the layer metadata (its
 /// `Cargo.toml` carried no `layer` when introduced); it is recorded at its
@@ -775,7 +792,6 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_processes", "runtimes"),
     ("ironclaw_assistant", "products"),
     ("ironclaw_product_contracts", "contracts"),
-    ("ironclaw_projects", "substrates"),
     ("ironclaw_prompt_envelope", "contracts"),
     ("ironclaw_composition", "app"),
     ("ironclaw_config", "substrates"),

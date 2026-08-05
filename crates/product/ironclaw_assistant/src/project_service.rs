@@ -1,11 +1,17 @@
-//! Composition adapter implementing the product-workflow [`ProjectService`]
-//! port over the durable [`ProjectRepository`].
+//! Product-workflow adapter implementing the [`ProjectService`] port over the
+//! durable [`ProjectRepository`].
 //!
 //! This is where access-control gating lives: every read/mutation resolves the
 //! caller's effective role through `resolve_access` and enforces a minimum role
 //! before touching the repository. The product boundary's coarse enums are
-//! mapped to/from the `ironclaw_projects` domain types here so neither side
-//! depends on the other's vocabulary.
+//! mapped to/from the `ironclaw_identity::projects` domain types here so
+//! neither side depends on the other's vocabulary.
+//!
+//! It lives here rather than beside the records it gates because
+//! `trait ProjectService` is a `products`-layer declaration and
+//! `ironclaw_identity` is `substrates`: the gating half can only follow the
+//! records once that port moves to `ironclaw_product_contracts` (PROPOSAL
+//! §6.4.11's 2026-08-04 correction; the WS5 `product` row owns the hoist).
 
 use std::sync::Arc;
 
@@ -19,7 +25,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{ProjectId, TenantId, UserId};
-use ironclaw_projects::{
+use ironclaw_identity::projects::{
     ProjectError, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord, ProjectRepository,
     ProjectRole, ProjectState,
 };
@@ -206,7 +212,7 @@ impl ProjectService for RebornProjectService {
         if let Some(state) = request.state {
             record.state = project_state_from_product(state);
         }
-        record.updated_at = ironclaw_projects_now();
+        record.updated_at = project_now();
         record.validate().map_err(map_repo_error)?;
         self.repository
             .update_project(record.clone())
@@ -276,7 +282,7 @@ impl ProjectService for RebornProjectService {
         )
         .await?;
         let member_user = parse_user_id(&request.user_id)?;
-        let now = ironclaw_projects_now();
+        let now = project_now();
         let record = ProjectMemberRecord {
             tenant_id: caller.tenant_id.clone(),
             project_id,
@@ -324,7 +330,7 @@ impl ProjectService for RebornProjectService {
             role: project_role_from_product(request.role),
             status: ProjectMemberStatus::Active,
             granted_by: caller.user_id.clone(),
-            updated_at: ironclaw_projects_now(),
+            updated_at: project_now(),
             ..existing
         };
         self.repository
@@ -357,7 +363,7 @@ impl ProjectService for RebornProjectService {
     }
 }
 
-fn ironclaw_projects_now() -> ironclaw_host_api::Timestamp {
+fn project_now() -> ironclaw_host_api::Timestamp {
     chrono::Utc::now()
 }
 
@@ -479,7 +485,7 @@ fn map_repo_error(error: ProjectError) -> ProjectServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_projects::ProjectList;
+    use ironclaw_identity::projects::ProjectList;
 
     /// Repository fake with canned responses, so tests drive the real
     /// access-control path (`require_role` → `resolve_access`) of the service.

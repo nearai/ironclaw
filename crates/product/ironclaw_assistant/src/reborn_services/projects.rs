@@ -9,7 +9,7 @@
 //! Identity is authority-bearing: the service derives [`ProjectCaller`] from the
 //! authenticated caller (tenant + user), never from the request body. Roles and
 //! states are product-level enums here so this boundary stays free of the
-//! `ironclaw_projects` substrate types — the composition adapter maps between
+//! `ironclaw_identity::projects` substrate types — `project_service` maps between
 //! the two (mirrors how [`ProjectFsEntryKind`](super::ProjectFsEntryKind) shadows
 //! `ironclaw_filesystem::FileType`).
 

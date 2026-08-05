@@ -541,12 +541,13 @@ pub(super) async fn build_backend_production(
                 reason: format!("invalid project agent id: {error}"),
             }
         })?;
-    let project_repository: Arc<dyn ProjectRepository> =
-        Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
+    let project_repository: Arc<dyn ProjectRepository> = Arc::new(
+        ironclaw_identity::projects::FilesystemProjectRepository::new(
             Arc::clone(&stores.scoped_filesystem),
             owner_user_id.clone(),
             project_agent_id,
-        ));
+        ),
+    );
     let project_service: Arc<dyn ProjectService> =
         Arc::new(RebornProjectService::new(project_repository));
     let trigger_conversation_services =

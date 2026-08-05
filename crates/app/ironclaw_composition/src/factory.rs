@@ -170,6 +170,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
+use ironclaw_identity::projects::ProjectRepository;
 use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntentPort};
 use ironclaw_outbound::{
@@ -180,7 +181,6 @@ use ironclaw_product_contracts::account_setup::{
     ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
-use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, BudgetGateStorePort, FilesystemResourceGovernor,

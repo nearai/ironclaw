@@ -1404,7 +1404,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
     ),
-    ("crates/ironclaw_projects/src/lib.rs", "github"),
+    // ✎ 2026-08-05: was `crates/ironclaw_projects/src/lib.rs`. The crate merged
+    // into `ironclaw_identity` as its `projects` module (WS10 / PROPOSAL
+    // §12.10), so the same doc-comment hit moved with the file. A 1-for-1
+    // repoint: the count is unchanged and this stays a `lane-4: doc-str` row
+    // awaiting the owner's reword-or-leave call, not a new debt.
+    ("crates/domains/ironclaw_identity/src/projects.rs", "github"),
     (
         "crates/ironclaw_composition/src/automation/trigger_poller.rs",
         "slack",

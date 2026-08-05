@@ -203,6 +203,22 @@ class TargetTreeGateTests(unittest.TestCase):
         self.assertIn("Delete the row", output)
 
     def test_exception_row_describing_a_different_delta_fails(self) -> None:
+        """Keyed on whichever rows are live, not on a package name.
+
+        Exception rows are *meant* to close and be deleted, so a case that names
+        one by hand stops testing anything the day that disposition lands — the
+        `ironclaw_projects` merge deleted its row on 2026-08-05 and this case
+        went red for that reason, not for a real defect. It now doctors every row
+        whose package is a live workspace member, and refuses to pass vacuously
+        if no such row remains.
+        """
+        members = {package["name"] for package in self.metadata["packages"]}
+        live = [row for row in GATE.EXCEPTIONS if row.package in members]
+        self.assertTrue(
+            live,
+            "no EXCEPTIONS row names a live workspace member, so this case would "
+            "assert nothing — retarget it rather than letting it pass vacuously",
+        )
         rows = tuple(
             GATE.Exception_(
                 package=row.package,
@@ -211,7 +227,7 @@ class TargetTreeGateTests(unittest.TestCase):
                 owner=row.owner,
                 why=row.why,
             )
-            if row.package == "ironclaw_projects"
+            if row in live
             else row
             for row in GATE.EXCEPTIONS
         )

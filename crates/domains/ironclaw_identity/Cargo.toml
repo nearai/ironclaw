@@ -3,7 +3,7 @@ name = "ironclaw_identity"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Canonical Reborn identity resolver: maps OAuth and external-channel actors to stable UserIds"
+description = "Canonical Reborn identity resolver: maps OAuth and external-channel actors to stable UserIds, and owns the Project entity + membership ACL"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -16,13 +16,17 @@ layer = "substrates"
 [dependencies]
 async-trait = "0.1"
 base64 = "0.23"
-chrono = "0.4"
+# `serde` feature: the `projects` module's records serialize `Timestamp`
+# (`chrono::DateTime<Utc>`) fields directly.
+chrono = { version = "0.4", features = ["serde"] }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+# `projects` mints ProjectIds; identity mints UserIds with uuid.
+ulid = { version = "3", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

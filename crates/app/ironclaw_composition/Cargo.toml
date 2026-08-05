@@ -95,7 +95,6 @@ ironclaw_secrets = { path = "../../substrates/ironclaw_secrets" }
 ironclaw_skills = { path = "../../domains/ironclaw_skills" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads" }
 ironclaw_triggers = { path = "../../domains/ironclaw_triggers" }
-ironclaw_projects = { path = "../../ironclaw_projects" }
 ironclaw_trust = { path = "../../kernel/ironclaw_trust" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns" }

@@ -53,8 +53,85 @@ and `ironclaw_filesystem` (the durable substrate). It must never reach upstream
 (`ironclaw_composition`, `ironclaw_assistant`) or onto the v1
 legacy enclave. This is machine-enforced: `reborn_crate_dependency_boundaries_hold`
 in `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` allows
-exactly those two edges. The only external consumer is
-`ironclaw_composition`, which re-exports a curated subset via its service.
+exactly those two edges. Its consumers are `ironclaw_composition` (which
+re-exports a curated subset via its service) and `ironclaw_assistant` (the
+admin-user directory and the project-gating service).
+
+The 2026-08-05 `projects` merge below **did not widen that allowlist** — the
+merged module's only workspace dependencies were `ironclaw_host_api` and
+`ironclaw_filesystem`, the same two, which is one of the reasons the
+consolidation audit ruled it was never its own trust unit. Re-measured at the
+merge, not assumed.
+
+## The `projects` module
+
+`src/projects/` is this crate's second principal-scoped record family, merged in
+from the former standalone `ironclaw_projects` crate (PROPOSAL §6.4.11 /
+§12.10, decided 2026-07-30, executed 2026-08-05). It rides the same
+control-plane `ScopedFilesystem` mount as `identity_store`.
+
+**What it owns**
+
+- `ProjectRecord` — the durable project entity. `metadata: serde_json::Value`
+  is an **extensible bag** (goals, GitHub links, …); add new soft fields
+  there rather than new columns unless they need to be queried/indexed.
+- `ProjectMemberRecord` + `ProjectRole` (`Owner > Editor > Viewer`) +
+  `ProjectMemberStatus` — the ACL model.
+- `ProjectRepository` — the persistence contract.
+- `FilesystemProjectRepository` — the **sole** implementation, persisting over
+  the Reborn `ScopedFilesystem` substrate. There is no SQL in this crate.
+
+**Invariants**
+
+- **Identity is typed.** Use `ProjectId` / `TenantId` / `UserId` from
+  `ironclaw_host_api`; never raw `String`. Enums are wire-stable
+  (`#[serde(rename_all = "snake_case")]`) with `as_str` / `parse` helpers — do
+  not `format!("{:?}", …)` an enum onto the wire.
+- **Authorization is live.** `resolve_access` is the read primitive; callers
+  must call it per request and must not cache the result (revocation is
+  immediate). The owner always resolves to `Owner`; otherwise the active grant
+  wins; unknown project ⇒ `None`. Pinned in both directions by
+  `tests/project_repository_contract.rs` — a revoke and a re-grant are each
+  visible on the very next call, so neither a positive nor a negative decision
+  can be memoized.
+- **No silent failures.** Backend errors carry their cause
+  (`ProjectError::backend("op", e)`); do not `map_err(|_| …)` away the source
+  (see `.claude/rules/error-handling.md`).
+- The module persists data; it does **not** authorize callers, expose HTTP, or
+  know about the service. Authorization gating that combines `resolve_access`
+  with a required role lives in the product workflow
+  (`ironclaw_assistant::RebornProjectService`), **not here** — and that is a
+  layer fact, not a preference: `trait ProjectService` is declared at
+  `products` and this crate is `substrates`, so the gating half can only follow
+  the records once the port moves to `ironclaw_product_contracts` (PROPOSAL
+  §6.4.11's 2026-08-04 correction; the WS5 `product` row owns that hoist).
+
+**Storage layout** (opaque key parts base64url-encoded per segment, the same
+encoding `identity_store` uses):
+
+```text
+/tenant-shared/reborn-projects/<tenant>/records/<project_id>.json
+/tenant-shared/reborn-projects/<tenant>/members/<project_id>/<user_id>.json
+```
+
+Tenant isolation is twofold: a per-call `ResourceScope` carries the tenant (so a
+real mount resolver maps to a per-tenant virtual path) **and** the tenant is a
+path segment (so isolation also holds under a fixed-view resolver, as in tests).
+Concurrency uses the substrate's compare-and-swap: create uses
+`CasExpectation::Absent` (conflict ⇒ `AlreadyExists`); delete is keyed off the
+record's presence so a losing racer observes `None`. `created_at` is immutable
+across updates.
+
+Why not the agent workspace VFS or raw SQL: the ACL is authorization data the
+agent must not be able to write, so it lives on the control-plane substrate, not
+the `/workspace` mount; and routing through `ScopedFilesystem` (rather than raw
+`deadpool_postgres`/`libsql` handles) keeps one backend-dispatch seam for every
+durable Reborn store.
+
+`tests/project_repository_contract.rs` runs the full contract against
+`FilesystemProjectRepository` over an in-memory `RootFilesystem`. Backend
+correctness (Postgres / libSQL / JSONL) is `ironclaw_filesystem`'s concern, so a
+single in-memory run covers all repository logic.
 
 ## Canonical key
 
