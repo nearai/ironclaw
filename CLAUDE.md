@@ -6,11 +6,11 @@
 
 This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains. A WebUI feature normally crosses `webui → ProductSurface → product → composition → runtime`, with the frontend inside `ironclaw_webui`.
 
-**Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
+**Where it lives:** `.codebase-memory/graph.db.zst` is a committed, compressed bootstrap snapshot shared by the team. The MCP imports it and incrementally catches up to the current checkout; local databases and `.codebase-memory/artifact.json` remain git-ignored per-environment state. Refresh the shared snapshot from a clean `main` checkout with `index_repository(repo_path=".", persistence=true)`.
 
 **Freshness (check at the start of a discovery task):** run `bash scripts/codebase-graph.sh status` — it compares the graph's indexed commit against `HEAD`. Then:
-- **Missing** → `index_repository(repo_path=".")` once to build it.
-- **Stale** → `detect_changes(since="<indexed-commit>")` for the changed symbols + blast radius, or re-run `index_repository` to fully refresh.
+- **Missing** → `index_repository(repo_path=".", persistence=true)` once to build it.
+- **Stale** → `detect_changes(since="<indexed-commit>")` for the changed symbols + blast radius, or re-run `index_repository(repo_path=".", persistence=true)` to fully refresh the shared snapshot.
 - The graph is a point-in-time index — verify anything it asserts against live code before acting.
 
 **Discovery recipes (use these instead of `Grep` for code structure):**

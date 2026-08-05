@@ -2,10 +2,10 @@
 #
 # codebase-graph.sh — freshness status for the codebase-memory knowledge graph.
 #
-# The graph (.codebase-memory/graph.db.zst) is a git-ignored build artifact indexed
-# by the codebase-memory MCP server. This script only INSPECTS freshness; the actual
-# (re)indexing is done through the MCP tools invoked by an agent:
-#   - build:        index_repository(repo_path=".")
+# The graph (.codebase-memory/graph.db.zst) is a committed bootstrap snapshot indexed
+# by the codebase-memory MCP server. Local artifact metadata remains git-ignored. This
+# script only INSPECTS freshness; the actual (re)indexing is done through MCP tools:
+#   - build/refresh: index_repository(repo_path=".", persistence=true)
 #   - delta/impact: detect_changes(since="<indexed-commit>")
 #
 # Usage: bash scripts/codebase-graph.sh [status]
@@ -20,7 +20,7 @@ read_field() { python3 -c "import json,sys;print(json.load(open('$artifact')).ge
 status() {
   if [ ! -f "$artifact" ]; then
     echo "graph:   MISSING (no .codebase-memory/artifact.json)"
-    echo "action:  build it once — call index_repository(repo_path=\".\") via the codebase-memory MCP"
+    echo "action:  import/build it — call index_repository(repo_path=\".\", persistence=true) via the codebase-memory MCP"
     return 2
   fi
 
@@ -39,17 +39,26 @@ status() {
     return 0
   fi
 
+  # Publishing a persisted snapshot necessarily creates the commit after the
+  # source commit recorded inside it. Treat that one-step publication as fresh.
+  if [ "$(git rev-parse HEAD^ 2>/dev/null || true)" = "$indexed" ] &&
+     [ "$(git diff-tree --no-commit-id --name-only -r HEAD -- \
+       .codebase-memory/graph.db.zst)" = ".codebase-memory/graph.db.zst" ]; then
+    echo "status:  FRESH (shared snapshot indexes the publication commit's parent)"
+    return 0
+  fi
+
   if git merge-base --is-ancestor "$indexed" HEAD 2>/dev/null; then
     local n
     n="$(git rev-list --count "$indexed"..HEAD 2>/dev/null || echo '?')"
     echo "status:  STALE — ${n} commit(s) behind HEAD"
     echo "action:  delta — detect_changes(since=\"$indexed\")   (changed symbols + blast radius)"
-    echo "         or full refresh — index_repository(repo_path=\".\")"
+    echo "         or full refresh — index_repository(repo_path=\".\", persistence=true)"
     return 1
   fi
 
   echo "status:  DIVERGED — indexed commit is not in current history (rebase/force-push?)"
-  echo "action:  full re-index — index_repository(repo_path=\".\")"
+  echo "action:  full re-index — index_repository(repo_path=\".\", persistence=true)"
   return 1
 }
 
