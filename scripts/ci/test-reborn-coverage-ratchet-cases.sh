@@ -24,7 +24,7 @@
 # lcov tracefiles, no cargo-llvm-cov shellout.
 
 cat > "${fixtures_dir}/r_composition.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_reborn_composition/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_composition/src/a.rs
 LF:1000
 LH:400
 end_of_record
@@ -66,12 +66,12 @@ enforce = true
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 90.0
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r3_floor.toml"
 assert_exit_code "R3: crate below floor_percent exits 1" 1 "${CAP_RC}"
-assert_contains "R3: names the failing crate" "${CAP_OUT}" "RATCHET FAIL: ironclaw_reborn_composition"
+assert_contains "R3: names the failing crate" "${CAP_OUT}" "RATCHET FAIL: ironclaw_composition"
 
 # R4: crate holds floor_percent (40% >= 39.5% effective) but drops below
 # floor_covered_lines (400 < 430 effective) -> exit 1, proving the two
@@ -82,7 +82,7 @@ enforce = true
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 40.0
 floor_covered_lines = 450
 tolerance_percent = 0.5
@@ -90,7 +90,7 @@ tolerance_lines = 20
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r4_floor.toml"
 assert_exit_code "R4: crate holds percent floor but fails lines floor exits 1 (ANDed, not ORed)" 1 "${CAP_RC}"
-assert_contains "R4: names the failing crate" "${CAP_OUT}" "RATCHET FAIL: ironclaw_reborn_composition"
+assert_contains "R4: names the failing crate" "${CAP_OUT}" "RATCHET FAIL: ironclaw_composition"
 assert_contains "R4: percent line present and would itself pass" "${CAP_OUT}" \
   "floor:    40% (tolerance 0.5pp -> effective floor 39.5%)"
 assert_contains "R4: lines floor line shows the violated effective floor" "${CAP_OUT}" \
@@ -104,7 +104,7 @@ enforce = true
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_covered_lines = 500
 tolerance_lines = 20
 TOML
@@ -115,7 +115,7 @@ assert_contains "R5: lines floor line rendered" "${CAP_OUT}" \
 # Scope the "no percent floor line" check to just this crate's own block (the
 # [global] entry above it legitimately prints its own "floor:" line) — slice
 # from the crate's header down to the next blank line.
-r5_crate_block="$(printf '%s\n' "${CAP_OUT}" | sed -n '/^RATCHET FAIL: ironclaw_reborn_composition$/,/^$/p')"
+r5_crate_block="$(printf '%s\n' "${CAP_OUT}" | sed -n '/^RATCHET FAIL: ironclaw_composition$/,/^$/p')"
 assert_not_contains "R5: no percent floor line rendered for a lines-only entry" "${r5_crate_block}" "  floor:    "
 
 # R6: floor entry missing both floor_percent and floor_covered_lines -> exit
@@ -126,7 +126,7 @@ enforce = false
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r6_floor.toml"
 assert_exit_code "R6: crate entry missing both floor forms exits 1" 1 "${CAP_RC}"
@@ -137,7 +137,7 @@ assert_contains "R6: reports the missing-both-fields schema error" "${CAP_ERR}" 
 # coverage-exemptions.toml -> exit 1, conflict error.
 cat > "${fixtures_dir}/r7_exemptions.toml" <<'TOML'
 [[exemption]]
-crate = "ironclaw_reborn_composition"
+crate = "ironclaw_composition"
 reason = "test-only whole-crate exemption"
 issue = "https://github.com/nearai/ironclaw/issues/1"
 TOML
@@ -147,7 +147,7 @@ enforce = false
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 10.0
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${fixtures_dir}/r7_exemptions.toml" "${fixtures_dir}/r7_floor.toml"
@@ -161,11 +161,11 @@ enforce = false
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 10.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 20.0
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r8_floor.toml"
@@ -181,7 +181,7 @@ enforce = false
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 90.0
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r9_floor.toml"
@@ -204,13 +204,13 @@ enforce = true
 floor_percent = 0.0
 
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 10.0
 captured_total_lines = 800
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r11_floor.toml"
 assert_exit_code "R11: crate with diverged denominator still PASSES (percent floor holds)" 0 "${CAP_RC}"
-assert_contains "R11: crate reported as PASS" "${CAP_OUT}" "RATCHET PASS: ironclaw_reborn_composition"
+assert_contains "R11: crate reported as PASS" "${CAP_OUT}" "RATCHET PASS: ironclaw_composition"
 assert_contains "R11: denominator note flags the >5% material change" "${CAP_OUT}" \
   "denominator: 1000 lines now vs 800 at floor capture (+200 lines, +25%) — material change (>5%)"
 
@@ -267,7 +267,7 @@ enforce = true
 floor_percent = 0.0
 
 [crate]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 90.0
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r15_floor.toml"
@@ -278,7 +278,7 @@ assert_contains "R15: reports the [[crate]] array-of-tables schema error" "${CAP
 # (existing branch had no regression case). Pins PR #5718 user comment.
 cat > "${fixtures_dir}/r16_floor.toml" <<'TOML'
 [[crate]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 floor_percent = 90.0
 TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r16_floor.toml"

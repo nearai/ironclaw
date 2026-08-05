@@ -25,8 +25,8 @@ test-support = []
 # Internal IronClaw crates: the neutral memory contract + the host-api id/scope
 # substrate ONLY. This is the same internal-dependency boundary as the contract
 # crate `ironclaw_memory_native`, enforced by the architecture boundary test.
-ironclaw_host_api = { path = "../../../ironclaw_host_api", version = "0.1.0" }
-ironclaw_memory = { path = "../../../ironclaw_memory", version = "0.1.0" }
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_memory = { path = "../../../domains/ironclaw_memory", version = "0.1.0" }
 # External crates (unrestricted by the boundary test, which only inspects
 # `ironclaw_*` workspace edges). `reqwest` powers the real HTTP transport the
 # same way the embedding providers make their outbound calls.
@@ -43,5 +43,5 @@ tracing = "0.1"
 ironclaw_memory_mem0 = { path = ".", features = ["test-support"] }
 # The provider-level MemoryService contract suite this crate wires in
 # tests/memory_service_contract.rs (over a stateful fake mem0 server).
-ironclaw_memory = { path = "../../../ironclaw_memory", features = ["test-support"] }
+ironclaw_memory = { path = "../../../domains/ironclaw_memory", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt"] }

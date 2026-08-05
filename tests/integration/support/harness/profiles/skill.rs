@@ -31,7 +31,7 @@ pub(crate) fn skill_management_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
@@ -59,7 +59,7 @@ pub(crate) async fn skill_management_tools() -> HarnessResult<HostRuntimeCapabil
 pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![CapabilityId::new(
-            ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
+            ironclaw_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
         )?],
         effect_kinds: vec![
             EffectKind::DispatchCapability,
@@ -69,7 +69,7 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_skill_activation_tenant(tenant.clone())
         .with_system_skill_fixture(

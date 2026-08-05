@@ -1,0 +1,44 @@
+[package]
+name = "ironclaw_approvals"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "kernel"
+
+[features]
+# In-memory-backed approval store constructors for this crate's own tests and
+# downstream integration tiers. The stores themselves are the production
+# `Filesystem*Store<InMemoryBackend>`; the helpers just wire the in-memory
+# backend seam. Ships zero bytes in production binaries.
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_event_log = { path = "../../events/ironclaw_event_log" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
+# Both arrived with the profile approval gate evicted from the composition root
+# (WS6). The gate implements `ironclaw_authorization`'s
+# `TrustAwareCapabilityDispatchAuthorizer`, whose signature names
+# `ironclaw_trust::TrustDecision`, and it consumes the `MinimalApprovalBypass`
+# classification `ironclaw_runtime_policy` owns (§4.4: the one place that
+# classification lives). Both are inventoried same-layer kernel edges.
+ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# FaultInjecting decorator: test store fault paths through the real store
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

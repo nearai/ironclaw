@@ -30,8 +30,8 @@
 - Modify: `crates/ironclaw_event_projections/src/runtime_projection.rs`
 - Test: `crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs`
 - Test: `crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/projection/tests.rs`
-- Test: `crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs`
+- Modify: `crates/ironclaw_composition/src/projection/tests.rs`
+- Test: `crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs`
 - Modify: `docs/reborn/contracts/events.md`
 - Modify: `docs/reborn/contracts/events-projections.md`
 - Modify: `scripts/reborn-e2e-rust.sh`
@@ -85,7 +85,7 @@ assert_eq!(
 );
 ```
 
-In `crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs`, reproduce the same durable event sequence through the real `build_reborn_projection_services(...).product_event_stream().drain(...)` caller path for both snapshots and cursor resumes. Assert the product projection contains the completed parent `RunStatus` and failed child `CapabilityActivity`, and contains no failed `RunStatus` for the child invocation.
+In `crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs`, reproduce the same durable event sequence through the real `build_reborn_projection_services(...).product_event_stream().drain(...)` caller path for both snapshots and cursor resumes. Assert the product projection contains the completed parent `RunStatus` and failed child `CapabilityActivity`, and contains no failed `RunStatus` for the child invocation.
 
 - [ ] **Step 4: Run the projection tests to verify RED**
 
@@ -93,7 +93,7 @@ Run:
 
 ```bash
 cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract -- --nocapture
-cargo test -p ironclaw_reborn_composition --lib projection::tests::nested_dispatch_stream -- --nocapture
+cargo test -p ironclaw_composition --lib projection::tests::nested_dispatch_stream -- --nocapture
 ```
 
 Expected: FAIL because the child `DispatchFailed` is currently inserted into `RuntimeProjectionState.runs` and serialized as a failed product run status.
@@ -133,7 +133,7 @@ Run:
 ```bash
 cargo test -p ironclaw_dispatcher --test event_dispatch_contract dispatcher_marks_loop_dispatch_events_with_parent_run -- --nocapture
 cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract -- --nocapture
-cargo test -p ironclaw_reborn_composition --lib projection::tests::nested_dispatch_stream -- --nocapture
+cargo test -p ironclaw_composition --lib projection::tests::nested_dispatch_stream -- --nocapture
 ```
 
 Expected: PASS. The child capability remains failed, while only the completed parent appears as a run.
@@ -147,8 +147,8 @@ Update `docs/reborn/contracts/events-projections.md` to state that parented disp
 ```text
 crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs::runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status
 crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs::runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status
-crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs::product_event_stream_snapshot_keeps_nested_dispatch_failure_out_of_run_status
-crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs::product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run_status
+crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs::product_event_stream_snapshot_keeps_nested_dispatch_failure_out_of_run_status
+crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs::product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run_status
 ```
 
 - [ ] **Step 9: Run task validation**
@@ -159,11 +159,11 @@ Run:
 cargo fmt --all -- --check
 cargo test -p ironclaw_dispatcher
 cargo test -p ironclaw_event_projections
-cargo test -p ironclaw_reborn_composition
+cargo test -p ironclaw_composition
 cargo clippy -p ironclaw_dispatcher --all-targets --all-features -- -D warnings
 cargo clippy -p ironclaw_event_projections --all-targets --all-features -- -D warnings
-cargo clippy -p ironclaw_reborn_composition --all-targets --all-features -- -D warnings
-cargo test -p ironclaw_architecture
+cargo clippy -p ironclaw_composition --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_architecture_tests
 bash scripts/reborn-e2e-rust.sh
 scripts/pre-commit-safety.sh
 ```
@@ -194,8 +194,8 @@ git add \
   crates/ironclaw_event_projections/src/runtime_projection.rs \
   crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs \
   crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs \
-  crates/ironclaw_reborn_composition/src/projection/tests.rs \
-  crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs \
+  crates/ironclaw_composition/src/projection/tests.rs \
+  crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs \
   docs/reborn/contracts/events.md \
   docs/reborn/contracts/events-projections.md \
   docs/superpowers/plans/2026-07-24-nested-dispatch-run-projection.md \

@@ -1,8 +1,8 @@
 # Unified Extension Runtime — Overview
 
 **Status:** Current extension-runtime model.
-**Implementation source of truth:** `crates/ironclaw_extensions`,
-`crates/ironclaw_extension_host`, `crates/ironclaw_product`, and the first-party
+**Implementation source of truth:** `crates/extensions/ironclaw_extension_registry`,
+`crates/extensions/ironclaw_extension_host`, `crates/product/ironclaw_assistant`, and the first-party
 extension crates. The former implementation/checklist documents are historical
 migration records and are not current build instructions.
 **Baseline:** the unified extension taxonomy this branch already contains (extension as the only installable product object).
@@ -60,7 +60,7 @@ restated so this document stands alone.
 
 The retired vocabulary (`slack_bot`, `slack_personal`, channel-as-product,
 extension `kind` strings) stays pinned at zero by
-`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs`.
+`crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs`.
 
 ## 3. The manifest
 

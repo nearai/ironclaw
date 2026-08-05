@@ -35,7 +35,7 @@ picks one per profile"* — is **false for hooks**, and stating it would have pu
 an untrue claim in an ADR. Composition hard-codes the in-memory backend:
 
 ```rust
-// crates/ironclaw_reborn_composition/src/observability/hooks/factory.rs:322-328
+// crates/ironclaw_composition/src/observability/hooks/factory.rs:322-328
 // In-memory predicate-state backend for v1. Swappable: a durable
 // Postgres/libSQL backend (#3933) drops in here without touching the rest
 // of the wiring.
@@ -130,14 +130,14 @@ No extension was required here; the suite is the house pattern.
 
 The CHECKLIST row attached a warning: `crates/ironclaw_hooks/CLAUDE.md` claimed
 cross-run hook isolation was regression-tested, naming
-`crates/ironclaw_runner/tests/hooks_integration.rs` and two tests **that never
+`crates/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests **that never
 existed**. #6944 corrected the false claim; #6945 tracks the gap it was hiding.
 A guardrail that does not exist reads, from the guidance, exactly like one that
 does — so the ADR ships with the test.
 
 **The semantic.** `RebornLoopDriverHostFactory` offers hook seams with two
 deliberately different lifetimes. `with_hook_dispatcher_builder_factory`
-(`crates/ironclaw_runner/src/loop_driver_host.rs:1289`) invokes its closure once
+(`crates/ironclaw_turn_runner/src/loop_driver_host.rs:1289`) invokes its closure once
 per `build_text_only_host*` call — i.e. once per run — so dispatcher-owned state
 (slot poisoning, registry mutations, the run-scoped milestone sink) is scoped to
 one run. The legacy `with_hook_dispatcher` adapter (`:1390`) deliberately does
@@ -198,7 +198,7 @@ Reopen when **any** of the following becomes true:
 ## Consequences
 
 - `ironclaw_hooks` stays on `DRIVER_LINKED_CRATES`
-  (`crates/ironclaw_architecture/tests/reborn_persistence_driver_boundary.rs:37`),
+  (`crates/ironclaw_architecture_tests/tests/reborn_persistence_driver_boundary.rs:37`),
   which is asserted as bidirectional set equality and can only ratchet down.
   This ADR is the justification that entry's doc comment asks for; it does not
   widen the list.

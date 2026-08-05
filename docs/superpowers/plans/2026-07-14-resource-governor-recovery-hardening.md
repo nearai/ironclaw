@@ -73,13 +73,13 @@ cargo test -p ironclaw_filesystem --all-features
 cargo test -p ironclaw_resources --all-features
 cargo test -p ironclaw_loop_host --all-features
 cargo test -p ironclaw_turns --all-features --test agent_loop_host_contract
-cargo test -p ironclaw_agent_loop -p ironclaw_runner --all-features
-cargo test -p ironclaw_reborn_composition --all-features --lib
-cargo test -p ironclaw_reborn_composition --all-features --test resource_governor_libsql_contract
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_agent_loop -p ironclaw_turn_runner --all-features
+cargo test -p ironclaw_composition --all-features --lib
+cargo test -p ironclaw_composition --all-features --test resource_governor_libsql_contract
+cargo test -p ironclaw_architecture_tests
 bash scripts/reborn-e2e-rust.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build -p ironclaw_reborn_cli --all-features
+cargo build -p ironclaw_cli --all-features
 scripts/pre-commit-safety.sh
 ```
 
