@@ -57,6 +57,14 @@ assert_empty_scope() {
 }
 
 assert_scope \
+  "family-level guidance file (direct child of a family dir, owned by no crate)" \
+  "crates/app/AGENTS.md" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=false"
+
+assert_scope \
   "reborn binary crate" \
   "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
