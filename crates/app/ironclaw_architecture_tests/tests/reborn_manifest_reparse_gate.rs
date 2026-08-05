@@ -20,7 +20,7 @@ mod ratchet_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ratchet_support::{resolve_crate_relative, workspace_root};
+use ratchet_support::{resolve_crate_relative, strip_line_anchored_cfg_test_items, workspace_root};
 
 /// Why a reparse site is *not* a projection reparse. Every allowlisted entry
 /// names one of these.
@@ -74,46 +74,10 @@ fn is_test_source_path(path: &Path) -> bool {
         || name.contains(".spec.")
 }
 
-/// Strip `#[cfg(test)]` items (inline `mod tests { … }` blocks and `mod tests;`
-/// declarations) before matching — the same brace-counting heuristic
-/// `reborn_extension_specificity.rs` uses.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    let mut kept = String::with_capacity(source.len());
-    let mut lines = source.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !line.trim_start().starts_with("#[cfg(test)]") {
-            kept.push_str(line);
-            kept.push('\n');
-            continue;
-        }
-        let mut depth: i64 = 0;
-        let mut opened = false;
-        for skipped in lines.by_ref() {
-            let trimmed = skipped.trim_start();
-            if !opened && trimmed.starts_with("#[") {
-                continue;
-            }
-            depth += skipped.matches('{').count() as i64;
-            depth -= skipped.matches('}').count() as i64;
-            if !opened {
-                if skipped.contains('{') {
-                    opened = true;
-                } else if trimmed.ends_with(';') {
-                    break;
-                }
-            }
-            if opened && depth <= 0 {
-                break;
-            }
-        }
-    }
-    kept
-}
-
 /// Count reparse calls in a production source file, ignoring comment lines so a
 /// doc-comment mention of the API is not a false positive.
 fn count_reparse_calls(source: &str) -> usize {
-    let stripped = strip_cfg_test_blocks(source);
+    let stripped = strip_line_anchored_cfg_test_items(source);
     stripped
         .lines()
         .filter(|line| {

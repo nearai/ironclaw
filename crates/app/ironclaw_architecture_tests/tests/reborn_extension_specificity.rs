@@ -71,7 +71,8 @@ use serde_json::Value;
 // ~215 literals below without a lockstep edit. On today's tree resolution is
 // the identity - pinned by `reborn_crate_inventory.rs`.
 use ratchet_support::{
-    crate_dir, crate_directories, crate_path, try_resolve_crate_relative, workspace_root,
+    crate_dir, crate_directories, crate_path, strip_line_anchored_cfg_test_items,
+    try_resolve_crate_relative, workspace_root,
 };
 
 /// Resolve a listed path through the crate inventory, falling back to the
@@ -903,45 +904,6 @@ fn is_test_source_path(path: &Path) -> bool {
         || name.contains(".spec.")
 }
 
-/// Remove `#[cfg(test)]` items (inline `mod tests { … }` blocks and
-/// `mod tests;` declarations) before matching: tests may name concrete
-/// products (overview §8). Line-based brace counting — the same heuristic
-/// `scripts/pre-commit-safety.sh` uses for its test-stripping.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    let mut kept = String::with_capacity(source.len());
-    let mut lines = source.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !line.trim_start().starts_with("#[cfg(test)]") {
-            kept.push_str(line);
-            kept.push('\n');
-            continue;
-        }
-        // Skip attribute lines, then the annotated item.
-        let mut depth: i64 = 0;
-        let mut opened = false;
-        for skipped in lines.by_ref() {
-            let trimmed = skipped.trim_start();
-            if !opened && trimmed.starts_with("#[") {
-                continue;
-            }
-            depth += skipped.matches('{').count() as i64;
-            depth -= skipped.matches('}').count() as i64;
-            if !opened {
-                if skipped.contains('{') {
-                    opened = true;
-                } else if trimmed.ends_with(';') {
-                    // `mod tests;` — single-line item, nothing else to skip.
-                    break;
-                }
-            }
-            if opened && depth <= 0 {
-                break;
-            }
-        }
-    }
-    kept
-}
-
 /// Mask non-extension references before matching:
 ///
 /// - GitHub *repository URLs* (issue/PR citations, upstream repo links) so
@@ -990,7 +952,7 @@ fn scan_file(path: &Path, kind: FileKind, terms: &BTreeSet<String>) -> Vec<Strin
         return Vec::new();
     };
     let contents = match kind {
-        FileKind::Rust => strip_cfg_test_blocks(&contents),
+        FileKind::Rust => strip_line_anchored_cfg_test_items(&contents),
         FileKind::Frontend | FileKind::Toml => contents,
     };
     let haystack = mask_non_extension_references(&contents).to_ascii_lowercase();
