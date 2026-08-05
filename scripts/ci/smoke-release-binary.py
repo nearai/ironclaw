@@ -63,6 +63,15 @@ def _run_command(
             check=False,
             capture_output=True,
             text=True,
+            # The binary emits UTF-8 on every platform. Without an explicit
+            # encoding, `text=True` decodes with Python's locale encoding —
+            # the ANSI code page on Windows — which mangles any non-ASCII
+            # character in a JSON payload we are about to parse. `replace`
+            # keeps a decode problem visible as replacement characters in the
+            # failure message instead of raising an opaque UnicodeDecodeError
+            # from inside the runner.
+            encoding="utf-8",
+            errors="replace",
             env=environment,
             timeout=120,
         )
@@ -86,6 +95,17 @@ def _checked_output(
             f"{binary.name} {' '.join(args)} exited {result.returncode}\n"
             f"stdout:\n{stdout}\nstderr:\n{stderr}"
         )
+    # Every command this smoke runs is asserted on its stdout, so a silent
+    # success is always a failure. Catching it here — while stderr is still in
+    # hand — turns "exited 0 and printed nothing" into a report that says so,
+    # rather than a downstream decoder error that has already discarded the
+    # only evidence of what the binary did.
+    if not result.stdout.strip():
+        stderr = result.stderr[-4000:]
+        raise SmokeFailure(
+            f"{binary.name} {' '.join(args)} exited 0 but wrote nothing to stdout\n"
+            f"stderr:\n{stderr}"
+        )
     return result.stdout
 
 
@@ -93,7 +113,14 @@ def _parse_json_object(output: str, label: str) -> dict[str, object]:
     try:
         value = json.loads(output)
     except json.JSONDecodeError as error:
-        raise SmokeFailure(f"{label} did not emit valid JSON: {error}") from error
+        # Show what actually arrived. A bare decoder message cannot distinguish
+        # a leading BOM from a log line ahead of the payload from truncated
+        # output, and on a platform that only reproduces in CI that ambiguity
+        # costs a full release-preflight cycle to resolve.
+        raise SmokeFailure(
+            f"{label} did not emit valid JSON: {error}\n"
+            f"received {len(output)} characters: {output[:2000]!r}"
+        ) from error
     if not isinstance(value, dict):
         raise SmokeFailure(f"{label} must emit a JSON object")
     return value

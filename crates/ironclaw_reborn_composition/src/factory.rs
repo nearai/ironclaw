@@ -992,22 +992,37 @@ fn write_standalone_secret_master_key(path: &Path, key: &str) -> Result<(), Rebo
                 reason: "standalone secrets master key could not be restricted: USERNAME is unset"
                     .to_string(),
             })?;
-        let status = std::process::Command::new("icacls")
+        // `output()` rather than `status()` because `status()` lets the child
+        // inherit our stdio, and `icacls` announces itself on success:
+        //
+        //     processed file: C:\...\reborn-local-dev-secrets-master-key
+        //     Successfully processed 1 files; Failed processing 0 files
+        //
+        // Runtime assembly happens before a CLI command prints its own result,
+        // so on Windows that banner landed at the front of `ironclaw.exe`'s
+        // stdout and corrupted every `--json` command that boots a runtime —
+        // `extension search --json` emitted `processed file: ...` ahead of the
+        // JSON document. Capturing the pipes keeps the child's chatter out of
+        // our contract, and gives us its message to report when it fails.
+        let output = std::process::Command::new("icacls")
             .arg(path)
             .arg("/inheritance:r")
             .arg("/grant:r")
             .arg(format!("{account}:F"))
-            .status()
+            .output()
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!(
                     "standalone secrets master key permissions could not be set: {error}"
                 ),
             })?;
-        if !status.success() {
+        if !output.status.success() {
             let _ = std::fs::remove_file(path);
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let detail = detail.trim();
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "standalone secrets master key permissions could not be set: icacls exited with {status}"
+                    "standalone secrets master key permissions could not be set: icacls exited with {}: {detail}",
+                    output.status
                 ),
             });
         }

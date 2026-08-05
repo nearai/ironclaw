@@ -332,3 +332,69 @@ class IsolatedEnvironmentTests(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", environment)
         self.assertNotIn("IRONCLAW_REBORN_PROFILE", environment)
         self.assertEqual(environment["IRONCLAW_DISABLE_OS_KEYCHAIN"], "1")
+
+
+class SmokeDiagnosticsTests(unittest.TestCase):
+    """When the binary misbehaves, the failure must carry the evidence.
+
+    These paths only ever reproduce on a platform we cannot run locally, so a
+    failure message that discards the binary's actual output costs a full
+    ~35-minute release-preflight cycle to re-learn what it already knew.
+    """
+
+    def setUp(self) -> None:
+        self.runner = FakeRunner()
+        self.temp = tempfile.TemporaryDirectory()
+        self.binary = Path(self.temp.name) / "ironclaw"
+        self.binary.write_text("#!/bin/sh\n")
+        self.binary.chmod(0o755)
+        self.addCleanup(self.temp.cleanup)
+
+    def test_silent_success_names_the_command_and_shows_stderr(self) -> None:
+        # Exit 0 with empty stdout is always a contract violation here: every
+        # command the smoke runs is asserted on its output.
+        self.runner.responses[("extension", "search", "--json")] = (
+            subprocess.CompletedProcess([], 0, stdout="   \n", stderr="runtime warning: catalog empty")
+        )
+
+        with self.assertRaises(SMOKE.SmokeFailure) as caught:
+            SMOKE.smoke_release_binary(self.binary, self.runner)
+
+        message = str(caught.exception)
+        self.assertIn("wrote nothing to stdout", message)
+        self.assertIn("extension search --json", message)
+        self.assertIn("runtime warning: catalog empty", message)
+
+    def test_unparseable_json_reports_what_was_actually_received(self) -> None:
+        # A leading BOM and a log line ahead of the payload produce the same
+        # bare decoder message; only the echoed output tells them apart.
+        self.runner.responses[("extension", "search", "--json")] = completed(
+            '﻿{"extensions": []}'
+        )
+
+        with self.assertRaises(SMOKE.SmokeFailure) as caught:
+            SMOKE.smoke_release_binary(self.binary, self.runner)
+
+        message = str(caught.exception)
+        self.assertIn("did not emit valid JSON", message)
+        self.assertIn("\\ufeff", message)
+        self.assertIn("characters", message)
+
+    def test_subprocess_banner_before_the_payload_is_shown_verbatim(self) -> None:
+        # The real Windows failure: `icacls`, spawned during runtime assembly,
+        # inherited the process's stdout and printed its success banner ahead
+        # of the JSON document. The old message said only "Expecting value:
+        # line 1 column 1 (char 0)", which named neither the intruder nor the
+        # fact that valid JSON followed it.
+        self.runner.responses[("extension", "search", "--json")] = completed(
+            "processed file: C:\\Users\\runneradmin\\key\n"
+            "Successfully processed 1 files; Failed processing 0 files\n"
+            '{"extensions": []}'
+        )
+
+        with self.assertRaises(SMOKE.SmokeFailure) as caught:
+            SMOKE.smoke_release_binary(self.binary, self.runner)
+
+        message = str(caught.exception)
+        self.assertIn("did not emit valid JSON", message)
+        self.assertIn("processed file", message)
