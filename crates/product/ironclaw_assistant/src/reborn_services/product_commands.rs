@@ -224,14 +224,7 @@ where
                     .await?;
                 Ok(RebornExecuteProductCommandResponse {
                     command: command_name,
-                    result: Some(CommandResultView {
-                        title: "New conversation".to_string(),
-                        fields: Vec::new(),
-                        lines: vec![
-                            "Started a fresh conversation. The previous conversation is still available in history."
-                                .to_string(),
-                        ],
-                    }),
+                    result: Some(new_conversation_started_view()),
                     rejection: None,
                     effect: Some(RebornProductCommandEffect::OpenThread {
                         thread_id: result.thread.thread_id.to_string(),

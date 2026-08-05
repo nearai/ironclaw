@@ -1757,7 +1757,12 @@ async fn reset_conversation_binding_rotates_once_and_preserves_old_message_histo
         reset.resolution.turn_scope.thread_id,
         reset.previous_thread_id
     );
-    assert_eq!(services.accepted_messages().await.len(), 1);
+    let retained = services.accepted_messages().await;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].accepted.thread_id, reset.previous_thread_id,
+        "reset must retain prior messages on the previous thread, not move them"
+    );
     let resolved = services
         .lookup_binding(resolve_request(
             telegram(),

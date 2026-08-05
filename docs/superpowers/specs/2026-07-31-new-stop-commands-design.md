@@ -6,7 +6,9 @@
 ## Goal
 
 Add `/new`, `/stop`, and `/interrupt` to the shared product-command system.
-Commands remain available only while a WebUI task is active. WebUI `/new`
+In the WebUI, commands remain available only while a task is active; channel
+availability is governed separately by command admission and each channel
+manifest's command allowlist. WebUI `/new`
 creates and opens a new task, while continuous channel surfaces rotate their
 external conversation binding to a fresh canonical thread without deleting the
 old thread, transcript, or accepted-message audit records.

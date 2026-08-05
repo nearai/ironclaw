@@ -1058,6 +1058,62 @@ test("Chat navigates an active-thread command to a different response thread", a
   assert.equal(selections[0][1].replace, true);
 });
 
+test("Chat drops a stale command navigation after the user opens another thread", async () => {
+  const selections = [];
+  const refs = [];
+  const chatProps = (activeThreadId, runCommand) => ({
+    activeThreadId,
+    onSelectThread: (...args) => selections.push(args),
+    refs,
+    contextOverrides: {
+      useChatCommands: () => [{ name: "new", usage: "/new" }],
+      matchCommand: (text) => (text === "/new" ? { name: "new" } : null),
+    },
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => {
+        throw new Error("new command must not submit a turn");
+      },
+      runCommand,
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+  // The command resolves only after the user has already opened thread-2:
+  // mid-flight, re-render the same component instance (shared `refs`) at the
+  // newer selection, the way a navigation-triggered rerender would.
+  const { tree, components } = renderChat(
+    chatProps("thread-1", async () => {
+      renderChat(chatProps("thread-2", async () => ({})));
+      return { thread_id: "thread-3" };
+    })
+  );
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  await props.onSend("/new", {});
+
+  assert.equal(
+    selections.length,
+    0,
+    "a command that resolved after the user navigated elsewhere must not steal the newer selection"
+  );
+});
+
 test("Chat landing view renders no command menu and submits a known command as an ordinary message", async () => {
   // Homepage commands are intentionally OFF for now (see the interception
   // guard comment in chat.tsx's `handleSend`). A prior change let the

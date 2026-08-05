@@ -664,6 +664,20 @@ fn nothing_to_stop_command_view() -> CommandResultView {
     }
 }
 
+/// The one `/new` success copy, shared by the channel preflight
+/// (`execute_product_new_command`) and the WebUI execute door so the two
+/// renderings cannot drift.
+fn new_conversation_started_view() -> CommandResultView {
+    CommandResultView {
+        title: "New conversation".to_string(),
+        fields: Vec::new(),
+        lines: vec![
+            "Started a fresh conversation. The previous conversation is still available in history."
+                .to_string(),
+        ],
+    }
+}
+
 fn rejected_busy_notice(status: TurnStatus) -> String {
     match status {
         TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
@@ -2990,14 +3004,7 @@ where
         }
         Ok(ProductNewCommandOutput {
             can_reset: true,
-            result: CommandResultView {
-                title: "New conversation".to_string(),
-                fields: Vec::new(),
-                lines: vec![
-                    "Started a fresh conversation. The previous conversation is still available in history."
-                        .to_string(),
-                ],
-            },
+            result: new_conversation_started_view(),
         })
     }
 

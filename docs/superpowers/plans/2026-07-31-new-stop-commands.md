@@ -6,7 +6,7 @@
 
 **Architecture:** Extend the shared typed command registry and reuse the existing create-thread and cancel-run ProductSurface paths. Channel `/new` performs a caller-scoped run preflight and then compare-and-rotates the canonical external conversation binding under the existing conversation-store mutation/CAS boundary, preserving old thread data while fencing late delivery.
 
-**Tech Stack:** Rust 2024, Tokio, serde, `ironclaw_product`, `ironclaw_conversations`, `ironclaw_turns`, React 19, TypeScript 6, Vitest.
+**Tech Stack:** Rust 2024, Tokio, serde, `ironclaw_assistant`, `ironclaw_conversations`, `ironclaw_turns`, React 19, TypeScript 6, Vitest.
 
 ## Global Constraints
 
@@ -23,13 +23,13 @@
 ### Task 1: Atomic conversation-binding rotation
 
 **Files:**
-- Modify: `crates/ironclaw_conversations/src/types.rs`
-- Modify: `crates/ironclaw_conversations/src/traits.rs`
-- Modify: `crates/ironclaw_conversations/src/memory.rs`
-- Modify: `crates/ironclaw_conversations/src/conversation_state_store.rs`
-- Modify: `crates/ironclaw_conversations/src/lib.rs`
-- Test: `crates/ironclaw_conversations/tests/inbound_contract.rs`
-- Test: `crates/ironclaw_conversations/tests/conversation_state_store_contract.rs`
+- Modify: `crates/domains/ironclaw_conversations/src/types.rs`
+- Modify: `crates/domains/ironclaw_conversations/src/traits.rs`
+- Modify: `crates/domains/ironclaw_conversations/src/memory.rs`
+- Modify: `crates/domains/ironclaw_conversations/src/conversation_state_store.rs`
+- Modify: `crates/domains/ironclaw_conversations/src/lib.rs`
+- Test: `crates/domains/ironclaw_conversations/tests/inbound_contract.rs`
+- Test: `crates/domains/ironclaw_conversations/tests/conversation_state_store_contract.rs`
 
 **Interfaces:**
 - Produces: `ResetConversationRequest { resolve, expected_thread_id }` and `ResetConversationOutcome { previous_thread_id, resolution }`.
@@ -46,16 +46,16 @@
 ### Task 2: Shared product command vocabulary and operations
 
 **Files:**
-- Modify: `crates/ironclaw_product/src/commands.rs`
-- Modify: `crates/ironclaw_product/src/binding.rs`
-- Modify: `crates/ironclaw_product/src/conversation_binding.rs`
-- Modify: `crates/ironclaw_product/src/reborn_services/types.rs`
-- Modify: `crates/ironclaw_product/src/reborn_services/product_commands.rs`
-- Modify: `crates/ironclaw_product/src/reborn_services/product_capability_handlers.rs`
-- Modify: `crates/ironclaw_product/src/reborn_services.rs`
-- Modify: `crates/ironclaw_product/src/lib.rs`
-- Test: `crates/ironclaw_product/tests/product_commands_contract.rs`
-- Test: `crates/ironclaw_product/tests/reborn_services_contract.rs`
+- Modify: `crates/product/ironclaw_assistant/src/commands.rs`
+- Modify: `crates/product/ironclaw_assistant/src/binding.rs`
+- Modify: `crates/product/ironclaw_assistant/src/conversation_binding.rs`
+- Modify: `crates/product/ironclaw_assistant/src/reborn_services/types.rs`
+- Modify: `crates/product/ironclaw_assistant/src/reborn_services/product_commands.rs`
+- Modify: `crates/product/ironclaw_assistant/src/reborn_services/product_capability_handlers.rs`
+- Modify: `crates/product/ironclaw_assistant/src/reborn_services.rs`
+- Modify: `crates/product/ironclaw_assistant/src/lib.rs`
+- Test: `crates/product/ironclaw_assistant/tests/product_commands_contract.rs`
+- Test: `crates/product/ironclaw_assistant/tests/reborn_services_contract.rs`
 
 **Interfaces:**
 - Produces: `ProductCommand::New` and `ProductCommand::Stop { invocation: ProductStopInvocation }`.
@@ -68,14 +68,14 @@
 - [ ] Add RebornServices tests proving channel-new preflight refuses a nonterminal latest run, stop requests canonical cancellation, repeated/no-run stop is safe, and WebUI new creates a caller-owned thread with an open-thread effect; run them red.
 - [ ] Implement the new/stop operation handlers by reusing thread history, `create_thread`, `get_run_state`, and `cancel_run`.
 - [ ] Extend the product binding adapter with caller/retry-safe reset forwarding.
-- [ ] Run `cargo test -p ironclaw_product --test product_commands_contract` and the focused `reborn_services_contract` tests.
+- [ ] Run `cargo test -p ironclaw_assistant --test product_commands_contract` and the focused `reborn_services_contract` tests.
 
 ### Task 3: Channel dispatch and non-destructive reset
 
 **Files:**
-- Modify: `crates/ironclaw_product/src/workflow.rs`
-- Test: `crates/ironclaw_product/tests/product_command_surface_contract.rs`
-- Test: `crates/ironclaw_extension_host/src/channel_host/e2e_tests.rs`
+- Modify: `crates/product/ironclaw_assistant/src/workflow.rs`
+- Test: `crates/product/ironclaw_assistant/tests/product_command_surface_contract.rs`
+- Test: `crates/extensions/ironclaw_extension_host/src/channel_host/e2e_tests.rs`
 
 **Interfaces:**
 - Consumes: new/stop ProductSurface operations and reset-capable product binding service.
@@ -90,10 +90,10 @@
 ### Task 4: WebUI generic navigation effect
 
 **Files:**
-- Modify: `crates/ironclaw_webui/frontend/src/pages/chat/hooks/useChat.ts`
-- Modify: `crates/ironclaw_webui/frontend/src/pages/chat/chat.tsx`
-- Test: `crates/ironclaw_webui/frontend/src/pages/chat/lib/useChat-send.test.ts`
-- Test: `crates/ironclaw_webui/frontend/src/pages/chat/lib/chat.test.ts`
+- Modify: `crates/product/ironclaw_webui/frontend/src/pages/chat/hooks/useChat.ts`
+- Modify: `crates/product/ironclaw_webui/frontend/src/pages/chat/chat.tsx`
+- Test: `crates/product/ironclaw_webui/frontend/src/pages/chat/lib/useChat-send.test.ts`
+- Test: `crates/product/ironclaw_webui/frontend/src/pages/chat/lib/chat.test.ts`
 
 **Interfaces:**
 - Consumes: `effect: { type: "open_thread", thread_id: string }` from Task 2.
@@ -107,8 +107,8 @@
 ### Task 5: Manifests, contracts, and final verification
 
 **Files:**
-- Modify: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`
-- Modify: `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`
+- Modify: `crates/extensions/packages/slack/manifest.toml`
+- Modify: `crates/extensions/packages/telegram/manifest.toml`
 - Modify: `docs/reborn/contracts/conversation-binding.md`
 - Modify: `docs/superpowers/specs/2026-07-29-product-command-train-design.md`
 

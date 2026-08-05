@@ -436,6 +436,30 @@ impl ProductConversationBindingService {
             reason: "external actor binding was revoked while resolving this message".into(),
         })
     }
+
+    /// The reset authorization triple, shared by `reset_binding`'s pre- and
+    /// post-rotation checks so the two cannot drift: shared-route subject
+    /// match, resolved-actor match, and resolver-backed actor currency.
+    async fn ensure_reset_resolution_authorized(
+        &self,
+        installation_scope: &ProductInstallationScope,
+        resolve_request: &ResolveBindingRequest,
+        current_subject_user_id: Option<&UserId>,
+        expected_actor: Option<&ResolvedProductActorUser>,
+        resolution: &ironclaw_conversations::ConversationBindingResolution,
+    ) -> Result<(), ProductOperationFailure> {
+        ensure_existing_shared_binding_matches_current_subject(
+            current_subject_user_id,
+            resolution,
+        )?;
+        ensure_resolved_actor_matches_expected_user(expected_actor, resolution)?;
+        self.ensure_resolved_actor_binding_still_current(
+            installation_scope,
+            resolve_request,
+            expected_actor,
+        )
+        .await
+    }
 }
 
 fn actor_user_resolution_request(
@@ -633,6 +657,10 @@ impl ProductBindingResolver for ProductConversationBindingService {
             } else {
                 None
             };
+        // Gate the pairing write below on the shared-route subject before any
+        // mutation; the full triple re-runs through
+        // `ensure_reset_resolution_authorized` (this first check is pure, so
+        // the re-run cannot change the outcome).
         ensure_existing_shared_binding_matches_current_subject(
             current_subject_user_id.as_ref(),
             &existing,
@@ -647,11 +675,12 @@ impl ProductBindingResolver for ProductConversationBindingService {
             )
             .await?;
         }
-        ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &existing)?;
-        self.ensure_resolved_actor_binding_still_current(
+        self.ensure_reset_resolution_authorized(
             &installation_scope,
             &resolve_request,
+            current_subject_user_id.as_ref(),
             expected_actor.as_ref(),
+            &existing,
         )
         .await?;
 
@@ -663,15 +692,12 @@ impl ProductBindingResolver for ProductConversationBindingService {
             })
             .await
             .map_err(map_conversation_error)?;
-        ensure_existing_shared_binding_matches_current_subject(
-            current_subject_user_id.as_ref(),
-            &outcome.resolution,
-        )?;
-        ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &outcome.resolution)?;
-        self.ensure_resolved_actor_binding_still_current(
+        self.ensure_reset_resolution_authorized(
             &installation_scope,
             &resolve_request,
+            current_subject_user_id.as_ref(),
             expected_actor.as_ref(),
+            &outcome.resolution,
         )
         .await?;
         let binding =

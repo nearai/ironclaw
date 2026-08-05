@@ -229,7 +229,16 @@ export function Chat({
         const responseThreadId = response?.thread_id || activeThreadId;
         if (!responseThreadId || !onSelectThread) return;
         if (activeThreadId) {
-          if (responseThreadId !== activeThreadId) {
+          // `previousActiveThreadIdRef` is reassigned on every render, so
+          // between renders it holds the LATEST selection. A command that
+          // resolves after the user already opened another thread no longer
+          // matches its origin selection and must not steal the newer one
+          // (the landing path gets the same protection from the cycle fence
+          // below).
+          if (
+            responseThreadId !== activeThreadId &&
+            previousActiveThreadIdRef.current === activeThreadId
+          ) {
             onSelectThread(responseThreadId, { replace: true });
           }
           return;
