@@ -7310,6 +7310,118 @@ const TENANT: &str = "two-thread-tenant";
 const OWNER: &str = "two-thread-owner";
 const AGENT: &str = "two-thread-agent";
 
+/// A mocked model that does what the demo's second thread does: read the activated skill body, take
+/// the working directory the body ADVERTISES, and run the skill's own command there through the real
+/// `builtin.shell` tool.
+///
+/// The point is the path provenance. The sibling fixture locates the staged script by walking the
+/// workspace and then runs it with `std::process::Command`, which proves the bytes landed but says
+/// nothing about the string handed to the model -- and a wrong string is exactly what shipped once
+/// (`/workspace/tenants/<t>/users/<u>/.skills/<name>`, resolved a second time beneath the per-caller
+/// root, so every command died with `Failed to spawn command`). Here the workdir is parsed out of the
+/// injected body, so if the advertised path is wrong the shell fails and this fails with it.
+#[derive(Debug, Default)]
+struct SkillShellGateway {
+    calls: StdMutex<usize>,
+    /// The workdir the body advertised, as the model read it.
+    advertised_workdir: StdMutex<Option<String>>,
+    /// The shell's own stdout, replayed back to the model on the following call.
+    shell_output: StdMutex<Option<String>>,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for SkillShellGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "expected capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("skill shell gateway lock");
+            let index = *calls;
+            *calls += 1;
+            index
+        };
+
+        if call_index > 0 {
+            // Second call: the shell has run, so capture what it returned for the assertions.
+            if let Some(tool_result) = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+            {
+                *self.shell_output.lock().expect("shell output lock") =
+                    Some(tool_result.content.clone());
+            }
+            return Ok(HostManagedModelResponse::assistant_reply("done"));
+        }
+
+        // First call: find the staged-files note in whatever the model was actually given.
+        let corpus = request
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let workdir = staged_workdir_from_body(&corpus).unwrap_or_else(|| {
+            panic!("the activated skill body must advertise a staged workdir; got:\n{corpus}")
+        });
+        *self.advertised_workdir.lock().expect("workdir lock") = Some(workdir.clone());
+
+        let shell_id = CapabilityId::new("builtin.shell").expect("shell id");
+        let shell_tool = capabilities
+            .tool_definitions()
+            .map_err(model_capability_error)?
+            .into_iter()
+            .find(|definition| definition.capability_id == shell_id)
+            .expect("builtin.shell must be offered under a policy with a process backend");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("skill-shell-turn".to_string()),
+                id: "call-skill-shell".to_string(),
+                name: shell_tool.name,
+                // Exactly the shape the note tells the model to use.
+                arguments: serde_json::json!({
+                    "command": "python3 scripts/egfr.py --scr 1.3 --age 62 --female",
+                    "workdir": workdir,
+                }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_capability_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+/// Pull the advertised directory out of the staged-files note, the way a model reading it would.
+///
+/// Parsed rather than reconstructed: reconstructing it here would assert the fixture's own idea of
+/// the path instead of the one the body carries.
+fn staged_workdir_from_body(body: &str) -> Option<String> {
+    let marker = "This skill's files are staged at `";
+    let start = body.find(marker)? + marker.len();
+    let rest = &body[start..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
 fn two_thread_caller() -> ProductSurfaceCaller {
     ProductSurfaceCaller::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -7460,6 +7572,90 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
     assert!(
         stdout.contains("FIXTURE-OK") && stdout.contains("stage=G3a"),
         "the answer must come from the script itself, not re-derived arithmetic; got {stdout:?}"
+    );
+
+    runtime.shutdown().await.expect("thread two shutdown");
+}
+
+/// The demo, end to end, with the model mocked and everything around it real.
+///
+/// Thread 1 installs a skill carrying a script. Thread 2 is a NEW runtime over the same store: it
+/// activates the skill, and a mocked model reads the working directory the injected body ADVERTISES
+/// and runs the skill's own command there through the real `builtin.shell` capability.
+///
+/// The sibling fixture proves the bytes land somewhere runnable; it says so itself, and it executes
+/// them with `std::process::Command`. This one closes the other half -- the path the model is TOLD --
+/// by parsing the workdir out of the body and letting the host's own process port resolve it. When
+/// that string was wrong (`/workspace/tenants/<t>/users/<u>/.skills/<name>`, resolved a second time
+/// beneath the per-caller root) every command failed with `Failed to spawn command: No such file or
+/// directory`, and nothing in the previous fixture noticed.
+#[tokio::test]
+async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+
+    // ── Thread 1: author the skill, script and all ─────────────────────────────────────────────
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root.clone()))
+        .await
+        .expect("runtime builds");
+    let bundle = runtime.product_surface(None).expect("product surface");
+    invoke_product_capability(
+        bundle.as_ref(),
+        two_thread_caller(),
+        ironclaw_assistant::SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": "egfr-calc",
+            "content": SKILL_MD,
+            "files": [{"path": "scripts/egfr.py", "text": SKILL_SCRIPT}],
+        }),
+    )
+    .await
+    .expect("skill install dispatches");
+    runtime.shutdown().await.expect("thread one shutdown");
+
+    // ── Thread 2: a later conversation, driven by the mocked model ─────────────────────────────
+    let gateway = Arc::new(SkillShellGateway::default());
+    let runtime = build_reborn_runtime(
+        two_thread_runtime_input(storage_root.clone()).with_model_gateway_override(gateway.clone()),
+    )
+    .await
+    .expect("runtime rebuilds over the same store");
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("thread two opens a conversation");
+    runtime
+        .execute_skill_message(&conversation, "$egfr-calc")
+        .await
+        .expect("thread two executes a skill message");
+
+    let workdir = gateway
+        .advertised_workdir
+        .lock()
+        .expect("workdir lock")
+        .clone()
+        .expect("the model must have been given a staged workdir");
+    assert_eq!(
+        workdir, "/workspace/.skills/egfr-calc",
+        "the body must advertise the plain workspace spelling; any per-caller segment here is \
+         resolved a second time by the shell and the directory does not exist"
+    );
+
+    let shell_output = gateway
+        .shell_output
+        .lock()
+        .expect("shell output lock")
+        .clone()
+        .expect("the shell call must have produced a result the model could read");
+    assert!(
+        !shell_output.contains("Failed to spawn command")
+            && !shell_output.contains("No such file or directory"),
+        "the shell must resolve the advertised workdir; got {shell_output}"
+    );
+    assert!(
+        shell_output.contains("FIXTURE-OK") && shell_output.contains("stage=G3a"),
+        "the answer must come from the staged script itself, through the shell the model called, \
+         not from re-derived arithmetic; got {shell_output}"
     );
 
     runtime.shutdown().await.expect("thread two shutdown");
