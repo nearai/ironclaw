@@ -23,7 +23,8 @@ renamed later.
 | 0.4 | Confirm **skip list** (backend MVVM rules, kit CI/hooks, N/A modules) with reviewers. | — |
 
 **Exit:** a short decisions note (can live in this folder's README) that Phases
-1–4 reference. No code yet.
+1–4 reference — and that **records the resolved `DESIGN.md` and feature-docs
+paths, which the Rollback manifest then lists verbatim**. No code yet.
 
 ---
 
@@ -57,17 +58,17 @@ hallucinates props), and a11y/token/interaction tests in the existing Vitest.
 
 | Step | Action | Target |
 |---|---|---|
-| 2.1 | Add Storybook via **pnpm** (`pnpm@11.7.0`, the repo's declared package manager) as **pinned `devDependencies`** — `storybook`, the **React/Vite framework adapter `@storybook/react-vite`**, and the addons in 2.2 — commit the updated `pnpm-lock.yaml`, then run init/config. Storybook is a declared dependency of **neither `package.json` nor the lockfile** today, so treat this as a fresh, pinned install and **verify from a clean `pnpm install --frozen-lockfile`** — do not rely on any stray copy in the local (gitignored) `node_modules`. | `crates/product/ironclaw_webui/frontend` |
-| 2.2 | Configure `.storybook/main.ts`: set **`framework: '@storybook/react-vite'`** (required for a React/Vite project) and register addons `@storybook/addon-vitest`, `-a11y`, `-docs`, `-mcp` (+ `@chromatic-com/storybook` deferred to Phase 4). | `.storybook/` |
+| 2.1 | Add Storybook via **pnpm** (`pnpm@11.7.0`, the repo's declared package manager) as **pinned `devDependencies`** — `storybook`, the **React/Vite framework adapter `@storybook/react-vite`**, the **browser-mode test provider `@vitest/browser` + `playwright`** (the addon runs axe/interaction in a real Chromium, not happy-dom), and the addons in 2.2 — commit the updated `pnpm-lock.yaml`, then run init/config. Storybook is a declared dependency of **neither `package.json` nor the lockfile** today, so treat this as a fresh, pinned install and **verify from a clean `pnpm install --frozen-lockfile`** — do not rely on any stray copy in the local (gitignored) `node_modules`. | `crates/product/ironclaw_webui/frontend` |
+| 2.2 | Configure `.storybook/main.ts`: set **`framework: '@storybook/react-vite'`** (required for a React/Vite project) and register addons `@storybook/addon-vitest`, `-a11y`, `-docs`, `-mcp` (+ `@chromatic-com/storybook` deferred to Phase 4). Define the addon's **browser-mode Vitest project** — `@vitest/browser` with the `playwright` provider and `browser: { name: 'chromium' }` — as a project **separate** from the existing VM/happy-dom `vitest run`. | `.storybook/` + vitest config |
 | 2.3 | `.storybook/preview.ts`: import the global stylesheet (tokens load) and wrap stories in the app theme provider decorator. **a11y mode:** covered stories run at **`test: 'error'`** (fail on any violation); only not-yet-triaged stories sit at `'todo'` — see the CI gate in 2.6. | `.storybook/preview.ts` |
 | 2.4 | Author stories for **Tier-2 primitives first** (buttons, inputs, the items in `src/components/`): a smoke play test, a **token/CSS check** (computed style == token), and variant stories per visual state. | `src/**/*.stories.tsx` |
 | 2.5 | Wire the **Storybook MCP** (`http://localhost:6006/mcp`) and add a CLAUDE.md / design-rule line: "query Storybook MCP `get-documentation` before using any component — never guess props." | `CLAUDE.md` + rule |
-| 2.6 | Add the **Storybook test job to `reborn-tests.yml`** (the existing WebUI frontend lane). That lane today runs `vitest run` (VM/happy-dom) + `pnpm build` — **not browser-based** — so the Storybook Vitest addon needs its **own browser-mode Vitest project** (Playwright Chromium), separate from `vitest run`. **CI-observable a11y gate:** `test: 'todo'` prints nothing in CI and so cannot gate; instead run **covered stories at `test: 'error'`** (a violation fails the job) and leave only untriaged stories at `'todo'`, and emit the axe results as a job artifact for visibility. This `error`-on-covered job *is* the "passing a11y (axe) checks" success criterion in PROPOSAL.md. **Coverage contract:** the CI gate runs the **full covered-story set** every run (that is what backs the "every covered story passes" guarantee); changed-story filtering is an optional **local / pre-push fast path only**, never the gate. | `.github/workflows/reborn-tests.yml` |
+| 2.6 | Add the **Storybook a11y/test step to the `webui-v2-js-lint` job in `.github/workflows/code_style.yml`** — the actual WebUI frontend lane (it resolves the frontend dir via `scripts/ci/crate-dir.sh ironclaw_webui`, installs frozen deps, runs `pnpm test` = `vitest run` VM/happy-dom, and `pnpm build`, and is an aggregated **required** check). Because the Storybook addon runs in **browser mode** (`@vitest/browser` + Playwright Chromium), the job must also run **`pnpm exec playwright install --with-deps chromium`** (cache `~/.cache/ms-playwright`) before the browser project — separate from the existing VM-mode `pnpm test`. **Covered-story set (one definition, used everywhere):** every Phase-2-authored primitive story; Phase 2 exits only when that whole set runs at **`test: 'error'`** with zero axe violations. `test: 'todo'` prints nothing in CI and so cannot gate — it is reserved for stories authored by *later* work (post-Phase-2) pending their own triage, **never** a Phase-2 escape hatch. The gate runs the **full covered set** every run (emit axe results as a job artifact); changed-story filtering is a **local / pre-push fast path only**. | `.github/workflows/code_style.yml` (`webui-v2-js-lint`) |
 
-**Exit:** `pnpm storybook` works **from a `--frozen-lockfile` install**;
-primitives have stories that run in the **browser-mode Vitest project**; **every
-covered story passes axe at `test: 'error'`** in CI (untriaged stories stay
-`'todo'`); the agent can introspect real props via MCP.
+**Exit:** `pnpm storybook` works **from a `--frozen-lockfile` install** with
+Chromium provisioned; **every story in the covered set (all Phase-2 primitives)
+passes axe at `test: 'error'`** in the `webui-v2-js-lint` CI job — no covered
+story left at `'todo'`; the agent can introspect real props via MCP.
 
 **Risks:** (a) Storybook version drift vs. React 19 / Tailwind v4 — pin every
 Storybook package (incl. `@storybook/react-vite`) and smoke-test the build.
@@ -163,25 +164,30 @@ deleting only the added docs would leave stale pointers and active rules behind.
 
 **Added files to delete** — delete **only the exact files this rollout added**,
 never a blanket glob (each phase records the files it introduces; do not delete
-feature docs or stories authored by other work):
-- `docs/design/DESIGN.md`
+feature docs or stories authored by other work). Paths below assume the Phase 0
+defaults (§0.1 `docs/design/DESIGN.md`, §0.2 `docs/features/`); **if Phase 0
+resolves a different location, record it in the decisions note and list that
+exact path here instead**:
+- `docs/design/DESIGN.md` *(or the §0.1-resolved location)*
 - `.claude/rules/design.md` (and `design-a11y.md` if created), `.claude/rules/feature-workflow.md`, `.claude/rules/critical-flows.md`
 - `docs/qa/CRITICAL_FLOWS.md`
-- the `docs/features/_templates/` scaffold and the specific piloted `docs/features/<slug>/` folder(s) this rollout created — **not** a blanket `docs/features/` delete
+- the `docs/features/_templates/` scaffold and the specific piloted `docs/features/<slug>/` folder(s) this rollout created *(or the §0.2-resolved location)* — **not** a blanket `docs/features/` delete
 - `crates/product/ironclaw_webui/frontend/.storybook/` and the specific `*.stories.tsx` files this rollout added — **not** every `*.stories.tsx`
 
 **Edits to existing files to revert with targeted patches** (revert only the
 rollout's hunks — do not wholesale-revert a file that other work also touched):
 - `CLAUDE.md` — the DESIGN.md pointer, the Storybook-MCP line, and the consolidated invariant list (Phase 1.4/1.5, 2.5)
 - `crates/product/ironclaw_webui/frontend/package.json` + `pnpm-lock.yaml` — the pinned Storybook `devDependencies`
-- `.github/workflows/reborn-tests.yml` — the Storybook/a11y test job
+- `.github/workflows/code_style.yml` — the Storybook a11y/browser **step added to the existing `webui-v2-js-lint` job** (remove the step; do **not** delete the job)
 
 **Compatibility / hidden side effects:** reverting `package.json` +
-`pnpm-lock.yaml` together keeps a `--frozen-lockfile` install reproducible;
-removing the `reborn-tests.yml` job must not orphan a required status check
-(the job should be additive and non-required until deliberately promoted);
-deleting `.claude/rules/*` immediately stops those rules auto-loading, which is
-the intended effect. Each phase is independently revertible in this way.
+`pnpm-lock.yaml` together keeps a `--frozen-lockfile` install reproducible; the
+Storybook step is added to the **already-required** `webui-v2-js-lint` job, so
+rollback removes just that step — it introduces no new required check and must
+not disturb the job's existing `pnpm test` / `pnpm build` steps or the shared
+`crate-dir.sh` dir resolution; deleting `.claude/rules/*` immediately stops
+those rules auto-loading, which is the intended effect. Each phase is
+independently revertible in this way.
 
 **After any rollback, verify no dangling references remain** — use a
 **hidden-file-aware** search, because plain `rg` skips dotfiles/dirs and
@@ -191,7 +197,7 @@ lists** (including the lower-case rule files and the workflow):
 
 ```bash
 rg --hidden --glob '!.git' -n \
-  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|feature-workflow\.md|critical-flows\.md|reborn-tests\.yml'
+  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|feature-workflow\.md|critical-flows\.md'
 ```
 
 Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
