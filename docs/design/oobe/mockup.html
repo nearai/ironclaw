@@ -214,6 +214,10 @@ h1,h2,h3,p{margin:0}
 .drawer-on #carouselBlock{border:1px solid var(--v2-panel-border);border-bottom:0;border-radius:15px 15px 0 0;background:var(--v2-surface);padding:12px 12px 8px;margin-bottom:0;box-shadow:var(--v2-card-shadow)}
 .drawer-on #carouselBlock .carousel{margin:0}
 .drawer-on .composer.flagwrap{margin-top:0;border-top-left-radius:0;border-top-right-radius:0;box-shadow:none}
+/* Foundational: tighten the gap between the cards/pills and the composer */
+.v-foundational .composer.flagwrap{margin-top:11px}
+.v-foundational #carouselBlock{margin-bottom:0}
+.v-foundational .strip{padding-bottom:2px}
 /* condensed pills (logo + title + dismiss X) */
 .tpill{flex:none;display:inline-flex;align-items:center;gap:8px;max-width:230px;border:1px solid var(--v2-panel-border);border-radius:11px;background:var(--v2-card-bg);box-shadow:0 1px 2px rgba(15,18,25,.04);padding:6px 8px 6px 12px;cursor:pointer;font:inherit;text-align:left}
 .tpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border))}
@@ -770,10 +774,17 @@ h1,h2,h3,p{margin:0}
   connCloseBtn.onclick=function(){ setConnectState('pill'); };
   connPill.onclick=function(){ setConnectState('open'); };
   connPillX.onclick=function(e){ e.stopPropagation(); setConnectState('gone'); };
+  // each card carries a suggested (proposal) phrasing and a completed (result) phrasing
   var CARDS=[
-    {app:'gmail',brand:'gmail',label:'Gmail',accent:'#ea4335',title:'Triaged your inbox',when:'2m ago',metrics:[['12','replied'],['40','archived']]},
-    {app:'calendar',brand:'calendar',label:'Calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
-    {app:'file',brand:'docs',label:'Google Docs',accent:'#3b82f6',title:'Doc insights ready',when:'just now',metrics:[['5','insights'],['2','docs']]}
+    {app:'gmail',brand:'gmail',label:'Gmail',accent:'#ea4335',when:'2m ago',
+      sug:{title:'Triage your inbox',metrics:[['40','unread'],['12','need replies']]},
+      done:{title:'Triaged your inbox',metrics:[['12','replied'],['40','archived']]}},
+    {app:'calendar',brand:'calendar',label:'Calendar',accent:'#4285f4',when:'just now',
+      sug:{title:'Accept 3 invites',metrics:[['3','invites'],['0','conflicts']]},
+      done:{title:'Accepted 3 invites',metrics:[['3','accepted'],['0','conflicts']]}},
+    {app:'file',brand:'docs',label:'Google Docs',accent:'#3b82f6',when:'just now',
+      sug:{title:'Summarize 2 docs',metrics:[['2','docs'],['5','key points']]},
+      done:{title:'Doc insights ready',metrics:[['5','insights'],['2','docs']]}}
   ];
   function badgeFor(state){
     if(state==='suggested') return '<span class="badge accent">Suggested</span>';
@@ -785,9 +796,10 @@ h1,h2,h3,p{margin:0}
   var CARD_X='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   function cardHTML(c,idx,state,opts){
     opts=opts||{};
-    var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
-    var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span><b class="ttl">'+c.title+'</b></div>';
-    var body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+' · '+c.when+'</div>';
+    var v=(state==='completed')?c.done:c.sug;
+    var m=v.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
+    var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span><b class="ttl">'+v.title+'</b></div>';
+    var body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
     var acts;
     if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
     else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
@@ -820,7 +832,7 @@ h1,h2,h3,p{margin:0}
         var a=b.getAttribute('data-act');
         if(a==='refresh'){ resetCardStates(); render(); return; }
         var i=+b.getAttribute('data-i');
-        if(a==='modify'){ openModify(CARDS[i].title); return; }
+        if(a==='modify'){ openModify(CARDS[i].sug.title); return; }
         if(a==='approve'){ cardStates[i]='running'; render(); setTimeout(function(){ if(cardStates[i]==='running'){ cardStates[i]='completed'; render(); } },950); return; }
         if(a==='cancel') cardStates[i]='dismissed';
         else if(a==='revert') cardStates[i]='suggested';
@@ -831,20 +843,21 @@ h1,h2,h3,p{margin:0}
   }
   // condensed pill for the collapsed drawer (typing / returning user); each pill carries an X to dismiss
   function pillHTML(c,i,state){
-    return '<div class="tpill" data-i="'+i+'"><span class="tplogo">'+brandLogo(c.brand)+'</span><span class="tpt">'+c.title+'</span><button class="pillx" data-act="cancel" data-i="'+i+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button></div>';
+    var v=(state==='completed')?c.done:c.sug;
+    return '<div class="tpill" data-i="'+i+'"><span class="tplogo">'+brandLogo(c.brand)+'</span><span class="tpt">'+v.title+'</span><button class="pillx" data-act="cancel" data-i="'+i+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button></div>';
   }
   function bindDrawer(){
     taskDrawer.querySelectorAll('.pillx,.tpill.fallback').forEach(function(b){
       b.onclick=function(e){ e.stopPropagation(); var a=b.getAttribute('data-act'); if(a==='refresh'){ resetCardStates(); render(); return; } cardStates[+b.getAttribute('data-i')]='dismissed'; render(); };
     });
-    taskDrawer.querySelectorAll('.tpill:not(.fallback)').forEach(function(p){ p.onclick=function(){ if(version==='vision'){ drawerState='open'; applyDrawer(); } }; });
+    taskDrawer.querySelectorAll('.tpill:not(.fallback)').forEach(function(p){ p.onclick=function(){ drawerState='open'; autoCollapseSuppressed=true; applyDrawer(); }; });
   }
   function applyDrawer(){
     if(!carouselBlock||!taskDrawer) return;
     var isVision=(version==='vision');
     var active=(scene==='first') && (isVision ? step>=2 : true);
     var typing=(!!(field&&field.value.trim())||composerAttach)&&taskDrawer.children.length>0;
-    var collapsed=active && ((isVision&&drawerState==='collapsed') || (typing && (!isVision || drawerState==='open')));
+    var collapsed=active && (drawerState==='collapsed' || (typing && !autoCollapseSuppressed));
     carouselBlock.classList.toggle('collapsed',collapsed);
     root.classList.toggle('drawer-on', isVision && active);
     if(drawerToggle){ drawerToggle.title=collapsed?'Expand':'Collapse'; drawerToggle.setAttribute('aria-label',collapsed?'Expand suggestions':'Collapse suggestions'); }
@@ -882,7 +895,7 @@ h1,h2,h3,p{margin:0}
   // Foundational: enterprise deploy — tools pre-connected by an admin, no name unless derivable
   var version='vision';
   var drawerState='open'; // Vision drawer: 'open' (cards) | 'collapsed' (pills)
-  var lastFoundStep=-1, composerAttach=false;
+  var lastFoundStep=-1, composerAttach=false, autoCollapseSuppressed=false;
   var HERO_FOUND=[
     ['Welcome to IronClaw.',"Your workspace tools are connected. Tell me what to take off your plate — or I'll start with a few suggestions."],
     ['Welcome to IronClaw.',"Your workspace tools are connected. Tell me what to take off your plate — or I'll start with a few suggestions."],
@@ -966,7 +979,7 @@ h1,h2,h3,p{margin:0}
   function advance(){ if(step>=MAX){stop();return;} step++; render(); if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
   function play(){ if(step>=MAX){step=0;render();} playing=true; setPlay(true); timer=setTimeout(advance, 700); }
   function stop(){ playing=false; setPlay(false); if(timer){clearTimeout(timer);timer=null;} }
-  function resetFirst(){ stop(); step=0; nearStart=0; lastFoundStep=-1; resetCardStates(); connectState='open'; drawerState='open'; render(); }
+  function resetFirst(){ stop(); step=0; nearStart=0; lastFoundStep=-1; composerAttach=false; autoCollapseSuppressed=false; var f=document.getElementById('composerField'); if(f)f.value=''; var ar=document.getElementById('attachRow'); if(ar)ar.hidden=true; resetCardStates(); connectState='open'; drawerState='open'; render(); }
   function setPlay(on){ document.getElementById('playTxt').textContent=on?'Pause':'Play the first run';
     document.getElementById('playIco').innerHTML=on?'<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>':'<path d="M8 5v14l11-7z"/>'; }
   document.getElementById('playBtn').onclick=function(){ playing?stop():play(); };
@@ -987,8 +1000,8 @@ h1,h2,h3,p{margin:0}
   var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
   var attachBtn=document.getElementById('attachBtn'),attachRow=document.getElementById('attachRow'),attachX=document.getElementById('attachX');
   function syncRun(){runBtn.disabled=!(field.value.trim()||composerAttach);}
-  function setAttach(on){ composerAttach=on; if(attachRow) attachRow.hidden=!on; syncRun(); applyDrawer(); }
-  field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();applyDrawer();});
+  function setAttach(on){ composerAttach=on; if(attachRow) attachRow.hidden=!on; autoCollapseSuppressed=false; syncRun(); applyDrawer(); }
+  field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';autoCollapseSuppressed=false;syncRun();applyDrawer();});
   if(attachBtn) attachBtn.onclick=function(){ setAttach(true); };
   if(attachX) attachX.onclick=function(){ setAttach(false); };
   // Modify opens a modification modal (both versions)
@@ -998,7 +1011,7 @@ h1,h2,h3,p{margin:0}
   ['modifyBack','modifyCancel','modifyCancel2','modifySave'].forEach(function(id){ var el=document.getElementById(id); if(el) el.onclick=closeModify; });
   // Vision drawer controls: collapse/expand + dismiss (with a restore bar)
   var drawerToggle=document.getElementById('drawerToggle');
-  if(drawerToggle) drawerToggle.onclick=function(){ drawerState=(drawerState==='collapsed')?'open':'collapsed'; applyDrawer(); };
+  if(drawerToggle) drawerToggle.onclick=function(){ if(drawerState==='collapsed'){ drawerState='open'; autoCollapseSuppressed=true; } else { drawerState='collapsed'; } applyDrawer(); };
 
   // ================= THREAD scene (calendar reschedule) =================
   var CAL_ACCENT='#4285f4', TIMES=['4:15 – 4:45 PM','5:00 – 5:30 PM'];
