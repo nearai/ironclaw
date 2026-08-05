@@ -3002,7 +3002,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_id: None,
         invocation_id: InvocationId::new(),
     };
-    let mut services = build_runtime_substrate(services_input).await?;
+    // Substrate assembly owns many backend-specific futures. Keep that state
+    // off the caller's stack so current-thread runtimes do not inherit the
+    // composition root's full future size.
+    let mut services = Box::pin(build_runtime_substrate(services_input)).await?;
     // The stored key no longer feeds the model gateway here (see the
     // post-construction reload below); the NEAR AI MCP bootstrap check is a
     // separate consumer that inspects `llm.config.nearai.api_key` directly,

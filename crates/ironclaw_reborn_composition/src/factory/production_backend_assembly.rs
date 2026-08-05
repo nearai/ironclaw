@@ -208,11 +208,13 @@ where
     let process_journal_store = Arc::new(ProcessJournalStore::new(
         crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
     ));
-    let core_migration = match ironclaw_release_migration::migrate_core_release_pair(
+    // Keep the cross-domain migration future off this already-large assembly
+    // future's stack; current-thread runtimes may have a small caller stack.
+    let core_migration = match Box::pin(ironclaw_release_migration::migrate_core_release_pair(
         Arc::clone(&filesystem),
         Arc::clone(&scoped_filesystem),
         process_journal_store,
-    )
+    ))
     .await
     {
         Ok(migration) => migration,
@@ -525,11 +527,13 @@ pub(super) async fn build_backend_production(
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
-    let core_migration = match ironclaw_release_migration::migrate_core_release_pair(
+    // Keep the cross-domain migration future off this already-large assembly
+    // future's stack; current-thread runtimes may have a small caller stack.
+    let core_migration = match Box::pin(ironclaw_release_migration::migrate_core_release_pair(
         Arc::clone(&stores.filesystem),
         Arc::clone(&stores.scoped_filesystem),
         process_journal_store,
-    )
+    ))
     .await
     {
         Ok(migration) => migration,
@@ -709,21 +713,22 @@ pub(super) async fn build_backend_production(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension installation state could not be loaded: {error}"),
     })?;
-    let extension_installation_migration =
-        match ironclaw_release_migration::migrate_rc1_hosted_extension_snapshots(
+    let extension_installation_migration = match Box::pin(
+        ironclaw_release_migration::migrate_rc1_hosted_extension_snapshots(
             extension_filesystem.as_ref(),
             &mut extension_installation_store,
-        )
-        .await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                release_pair_lease.fail_and_log().await;
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("hosted rc1 extension state could not be restored: {error}"),
-                });
-            }
-        };
+        ),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            release_pair_lease.fail_and_log().await;
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("hosted rc1 extension state could not be restored: {error}"),
+            });
+        }
+    };
     let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> =
         Arc::new(extension_installation_store);
     let admin_configuration_credential_slot = AdminConfigurationCredentialSlot::default();

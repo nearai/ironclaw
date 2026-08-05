@@ -190,10 +190,14 @@ where
             .map_err(backend_error)?;
             let mut offset = 0u64;
             loop {
-                let page = root
+                let page = match root
                     .query(&auth_root, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
                     .await
-                    .map_err(map_filesystem_error)?;
+                {
+                    Ok(page) => page,
+                    Err(FilesystemError::NotFound { .. }) => break,
+                    Err(error) => return Err(map_filesystem_error(error)),
+                };
                 if page.is_empty() {
                     break;
                 }
@@ -228,10 +232,14 @@ async fn bounded_directories<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    let entries = root
+    let entries = match root
         .list_dir_bounded(path, max_entries.saturating_add(1))
         .await
-        .map_err(map_filesystem_error)?;
+    {
+        Ok(entries) => entries,
+        Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(map_filesystem_error(error)),
+    };
     if entries.len() > max_entries {
         return Err(OAuthProviderAliasMigrationError::Backend);
     }
@@ -679,6 +687,27 @@ mod tests {
                 .expect("flow exists"),
             flow_after_first
         );
+    }
+
+    #[tokio::test]
+    async fn empty_backend_has_no_oauth_alias_state_to_migrate() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = Arc::new(ScopedFilesystem::new(
+            Arc::clone(&backend),
+            invocation_mount_view,
+        ));
+
+        let report = migrate_legacy_oauth_provider_alias(
+            backend,
+            scoped,
+            Utc.with_ymd_and_hms(2026, 8, 5, 12, 0, 0)
+                .single()
+                .expect("timestamp"),
+        )
+        .await
+        .expect("an empty installation has no legacy OAuth state");
+
+        assert_eq!(report, OAuthProviderAliasMigrationReport::default());
     }
 
     #[tokio::test]
