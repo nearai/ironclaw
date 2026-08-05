@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     turn::TurnRunId,
 };
 use ironclaw_product_contracts::inspector::{
-    DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_MODEL_CALLS_PER_RUN,
+    DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_LIVE_UPDATE_SCOPES, DEFAULT_MAX_MODEL_CALLS_PER_RUN,
     DEFAULT_MAX_RETAINED_RUNS_PER_SESSION, DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
     DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN, DEFAULT_MAX_TRACKED_SESSIONS, DiagnosticActivityEntry,
     DiagnosticActivityEvent, DiagnosticCursor, DiagnosticScope, DiagnosticSequence,
@@ -31,6 +31,7 @@ pub struct DiagnosticStoreLimits {
     pub max_tool_executions_per_run: usize,
     pub max_activity_entries_per_run: usize,
     pub max_updates_per_run: usize,
+    pub max_live_update_scopes: usize,
     pub live_update_capacity: usize,
 }
 
@@ -43,6 +44,7 @@ impl Default for DiagnosticStoreLimits {
             max_tool_executions_per_run: DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN,
             max_activity_entries_per_run: DEFAULT_MAX_ACTIVITY_ENTRIES,
             max_updates_per_run: DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
+            max_live_update_scopes: DEFAULT_MAX_LIVE_UPDATE_SCOPES,
             live_update_capacity: DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
         }
     }
@@ -59,6 +61,7 @@ impl DiagnosticStoreLimits {
             max_tool_executions_per_run,
             max_activity_entries_per_run,
             max_updates_per_run,
+            max_live_update_scopes,
             live_update_capacity,
         } = self;
         let values = [
@@ -87,6 +90,11 @@ impl DiagnosticStoreLimits {
                 "max_updates_per_run",
                 max_updates_per_run,
                 DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
+            ),
+            (
+                "max_live_update_scopes",
+                max_live_update_scopes,
+                DEFAULT_MAX_LIVE_UPDATE_SCOPES,
             ),
             (
                 "live_update_capacity",
@@ -180,6 +188,7 @@ struct DiagnosticStoreState {
     sessions: HashMap<DiagnosticSessionKey, DiagnosticSessionState>,
     session_order: VecDeque<DiagnosticSessionKey>,
     live_updates: HashMap<DiagnosticScope, broadcast::Sender<Arc<DiagnosticUpdateEnvelope>>>,
+    live_update_order: VecDeque<DiagnosticScope>,
 }
 
 impl DiagnosticStoreState {
@@ -238,13 +247,27 @@ impl DiagnosticStoreState {
         &mut self,
         scope: DiagnosticScope,
         capacity: usize,
-    ) -> broadcast::Receiver<Arc<DiagnosticUpdateEnvelope>> {
+        max_scopes: usize,
+    ) -> Result<broadcast::Receiver<Arc<DiagnosticUpdateEnvelope>>, DiagnosticStoreError> {
         self.prune_inactive_live_updates();
-        let sender = self.live_updates.entry(scope).or_insert_with(|| {
+        if !self.live_updates.contains_key(&scope) {
+            while self.live_updates.len() >= max_scopes {
+                let evicted = self
+                    .live_update_order
+                    .pop_front()
+                    .ok_or(DiagnosticStoreError::Invariant)?;
+                self.live_updates
+                    .remove(&evicted)
+                    .ok_or(DiagnosticStoreError::Invariant)?;
+            }
             let (sender, _) = broadcast::channel(capacity);
-            sender
-        });
-        sender.subscribe()
+            self.live_updates.insert(scope.clone(), sender);
+        }
+        touch(&mut self.live_update_order, scope.clone());
+        self.live_updates
+            .get(&scope)
+            .map(broadcast::Sender::subscribe)
+            .ok_or(DiagnosticStoreError::Invariant)
     }
 
     fn send_live_update(&mut self, envelope: DiagnosticUpdateEnvelope) {
@@ -255,12 +278,21 @@ impl DiagnosticStoreState {
             .is_some_and(|sender| sender.send(Arc::new(envelope)).is_err());
         if has_no_receivers {
             self.live_updates.remove(&scope);
+            if let Some(index) = self
+                .live_update_order
+                .iter()
+                .position(|entry| entry == &scope)
+            {
+                self.live_update_order.remove(index);
+            }
         }
     }
 
     fn prune_inactive_live_updates(&mut self) {
         self.live_updates
             .retain(|_, sender| sender.receiver_count() > 0);
+        self.live_update_order
+            .retain(|scope| self.live_updates.contains_key(scope));
     }
 }
 
@@ -449,7 +481,11 @@ impl InMemoryDiagnosticStore {
             .state
             .lock()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
-        let receiver = state.subscribe(scope, self.limits.live_update_capacity);
+        let receiver = state.subscribe(
+            scope,
+            self.limits.live_update_capacity,
+            self.limits.max_live_update_scopes,
+        )?;
         Ok(DiagnosticSubscription { receiver })
     }
 
@@ -599,6 +635,7 @@ mod tests {
             max_tool_executions_per_run: 2,
             max_activity_entries_per_run: 2,
             max_updates_per_run: 2,
+            max_live_update_scopes: 2,
             live_update_capacity: 8,
         }
     }
@@ -656,6 +693,13 @@ mod tests {
                 "max_updates_per_run",
                 DiagnosticStoreLimits {
                     max_updates_per_run: 0,
+                    ..valid
+                },
+            ),
+            (
+                "max_live_update_scopes",
+                DiagnosticStoreLimits {
+                    max_live_update_scopes: 0,
                     ..valid
                 },
             ),
@@ -947,6 +991,44 @@ mod tests {
         let update = subscription.recv().await.expect("matching update");
         assert_eq!(update.scope, allowed);
         assert_eq!(update.sequence, DiagnosticSequence::new(1));
+    }
+
+    #[tokio::test]
+    async fn live_scope_limit_evicts_the_least_recently_subscribed_scope() {
+        let mut limits = tiny_limits();
+        limits.max_live_update_scopes = 2;
+        let store = InMemoryDiagnosticStore::new(limits).expect("store");
+        let first_scope = scope("tenant", "user", "thread-a", TurnRunId::new());
+        let second_scope = scope("tenant", "user", "thread-b", TurnRunId::new());
+        let third_scope = scope("tenant", "user", "thread-c", TurnRunId::new());
+        let mut first = store
+            .subscribe(first_scope.clone())
+            .expect("first subscription");
+        let mut second = store.subscribe(second_scope).expect("second subscription");
+        let _refreshed_first = store
+            .subscribe(first_scope.clone())
+            .expect("refresh first subscription");
+        let mut third = store
+            .subscribe(third_scope.clone())
+            .expect("third subscription");
+
+        assert_eq!(
+            second.recv().await,
+            Err(DiagnosticStoreError::SubscriptionClosed)
+        );
+        store
+            .record_activity(first_scope.clone(), activity("first"))
+            .expect("record first");
+        store
+            .record_activity(third_scope.clone(), activity("third"))
+            .expect("record third");
+
+        assert_eq!(first.recv().await.expect("first update").scope, first_scope);
+        assert_eq!(third.recv().await.expect("third update").scope, third_scope);
+        assert_eq!(
+            store.state.lock().expect("state").live_updates.len(),
+            limits.max_live_update_scopes
+        );
     }
 
     #[tokio::test]
