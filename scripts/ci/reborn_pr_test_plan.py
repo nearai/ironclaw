@@ -51,7 +51,14 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # the only satisfiable behaviour for that class was "never edit it", which is
 # not a policy anyone chose. Classifying it is the fix; loosening the
 # fail-closed arm is not.
-IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
+IGNORED_PREFIXES = (
+    "docs/",
+    ".claude/",
+    ".github/ISSUE_TEMPLATE/",
+    # Agent bootstrap data only. The compressed graph and its attributes do
+    # not change an Ironclaw crate, test, or runtime surface.
+    ".codebase-memory/",
+)
 IGNORED_GUIDANCE_PATHS = {
     "tests/CLAUDE.md",
     "tests/integration/CLAUDE.md",
@@ -168,6 +175,8 @@ PR_STATIC_CONTROL_PATHS = {
     #   * `run-reborn-webui.sh` is a local developer launcher for the WebUI dev
     #     server. It is referenced by no workflow at all (a search over
     #     `.github/` finds nothing), so no lane can be selected for it.
+    #   * `codebase-graph.sh` inspects agent-only graph metadata. It does not
+    #     execute or select a Reborn product test surface.
     #   * `build-wasm-extensions.sh` is named in the same
     #     `has_direct_wasm_abi_risk` classifier, which both scopes and runs it,
     #     and additionally has a Code Style self-test
@@ -178,6 +187,7 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
+    "scripts/codebase-graph.sh",
     # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
     # off exactly this pair and owns the image build; Code Style additionally
     # proves every `include_str!` target is inside each build context
