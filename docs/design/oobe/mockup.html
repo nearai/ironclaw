@@ -419,7 +419,8 @@ h1,h2,h3,p{margin:0}
 .composer .iconbtn{width:34px;height:34px;flex:none;border-radius:9px;display:grid;place-items:center;border:1px solid transparent;background:transparent;color:var(--v2-text-muted);cursor:pointer}
 .composer .iconbtn:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
 .composer .iconbtn svg{width:18px;height:18px}
-.composer .runbtn{display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 13px;margin-left:2px;border-radius:10px;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%);font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;line-height:1}
+.composer .runbtn{display:grid;place-items:center;flex:none;width:36px;height:36px;padding:0;margin-left:2px;border-radius:999px;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%);cursor:pointer}
+.composer .runbtn svg{width:18px;height:18px}
 .composer .runbtn:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
 .composer .runbtn kbd{font-family:inherit;font-size:14px;line-height:1;color:rgba(255,255,255,.9)}
 .composer .runbtn:disabled{background:var(--v2-surface-muted);border-color:transparent;color:var(--v2-text-faint);cursor:default}
@@ -449,12 +450,13 @@ h1,h2,h3,p{margin:0}
    sans hero, full-width suggestion rows with a round leading icon + top divider,
    20px card-bg composer with round icon buttons. Vision keeps its north-star look. */
 .v-foundational .hero h2{font-family:var(--font-sans);font-weight:640;font-size:clamp(30px,4.4vw,52px);letter-spacing:-.02em;max-width:16ch}
-.v-foundational .suggs{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:0;margin-top:20px}
+.v-foundational .suggs{width:100%;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:0;margin-top:20px}
 .v-foundational .sugg{justify-content:flex-start;gap:12px;border:0;border-top:1px solid var(--v2-panel-border);border-radius:0;background:transparent;padding:14px 6px;font-size:14px;font-weight:560;color:var(--v2-text-strong)}
 .v-foundational .sugg svg{width:16px;height:16px;box-sizing:content-box;padding:8px;border-radius:999px;border:1px solid var(--v2-panel-border);background:var(--v2-surface-soft);color:var(--v2-text-muted)}
 .v-foundational .sugg:hover{border-top-color:color-mix(in srgb,var(--v2-accent) 35%,var(--v2-panel-border));color:var(--v2-text-strong)}
 .v-foundational .sugg:hover svg{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border));color:var(--v2-accent-text)}
-.v-foundational .composer{border-radius:20px;background:var(--v2-card-bg)}
+.v-foundational .composer{border-radius:20px;background:var(--v2-card-bg);min-height:120px;padding:14px 16px}
+.v-foundational .composer .field{min-height:62px;font-size:15px}
 .v-foundational .composer .iconbtn{border-radius:999px;width:36px;height:36px}
 
 /* ============================================================
@@ -669,9 +671,8 @@ h1,h2,h3,p{margin:0}
             <button class="connpill" id="connPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="pt">Connect your tools</span><span class="px" id="connPillX" role="button" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             <button class="connpill" id="showSuggPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/></svg><span class="pt">Show suggestions</span><span class="px" id="showSuggX" role="button" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             <div class="rightcluster">
-              <button class="iconbtn" title="Dictate" aria-label="Dictate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
               <button class="iconbtn" id="attachBtn" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16M4 12h16"/></svg></button>
-              <button class="runbtn" id="runBtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
+              <button class="runbtn" id="runBtn" disabled aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg></button>
             </div>
           </div>
         </div>
@@ -700,8 +701,7 @@ h1,h2,h3,p{margin:0}
         <div class="actions">
           <div class="modebtn" style="pointer-events:none"><span class="dot"></span>Suggest<svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></div>
           <div class="rightcluster">
-            <button class="iconbtn" aria-label="Dictate" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
-            <button class="runbtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
+            <button class="runbtn" disabled aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg></button>
           </div>
         </div>
       </div>
@@ -720,8 +720,7 @@ h1,h2,h3,p{margin:0}
         <div class="actions">
           <div class="modebtn" style="pointer-events:none"><span class="dot"></span>Plan<svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></div>
           <div class="rightcluster">
-            <button class="iconbtn" aria-label="Dictate" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
-            <button class="runbtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
+            <button class="runbtn" disabled aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg></button>
           </div>
         </div>
       </div>
