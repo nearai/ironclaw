@@ -46,6 +46,7 @@ use ironclaw_host_api::turn::{
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
@@ -58,11 +59,11 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfacePolicy,
-    CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
-    HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
+    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{

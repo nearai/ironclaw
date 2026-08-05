@@ -1,14 +1,15 @@
 use std::sync::{Arc, OnceLock};
 
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
     LoopRunContext, PromptMode,
 };
 use ironclaw_loop_host::{
-    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfacePolicy,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
+    CapabilityWriteResult, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_product::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,

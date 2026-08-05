@@ -56,7 +56,9 @@ use std::time::Duration;
 
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
+use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy, ids::UserId, resource::ResourceScope,
+};
 use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_contracts::{
@@ -65,9 +67,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    CapabilitySurfacePolicy, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
-    HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
-    ZeroCostTable,
+    CapabilitySurfaceProfileResolver, HostManagedModelGateway, HostUserProfileSource,
+    JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ZeroCostTable,
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product::ProductTriggerReason;

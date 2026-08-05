@@ -1,8 +1,7 @@
 use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_loop_contracts::LoopRunContext;
-use ironclaw_loop_host::{
-    CapabilityResolveError, CapabilitySurfacePolicy, CapabilitySurfaceProfileResolver,
-};
+use ironclaw_loop_host::{CapabilityResolveError, CapabilitySurfaceProfileResolver};
 
 pub(crate) struct StaticCapabilitySurfaceProfileResolver {
     pub(crate) policy: CapabilitySurfacePolicy,

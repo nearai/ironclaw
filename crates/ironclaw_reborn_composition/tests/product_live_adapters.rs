@@ -6,6 +6,7 @@ use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -20,9 +21,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,

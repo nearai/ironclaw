@@ -13,6 +13,7 @@ use chrono::Utc;
 use thiserror::Error;
 use uuid::Uuid;
 
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     capability::{CapabilitySet, EffectKind},
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
@@ -20,9 +21,7 @@ use ironclaw_host_api::{
     runtime::{RuntimeKind, TrustClass},
     scope::ExecutionContext,
 };
-use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
-};
+use ironclaw_host_runtime::{HostRuntime, SurfaceKind, VisibleCapabilityRequest};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InstructionSafetyContext,
     LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,

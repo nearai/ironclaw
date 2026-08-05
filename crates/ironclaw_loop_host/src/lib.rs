@@ -110,7 +110,6 @@ pub use input_queue::{
     HostInputQueue, HostInputQueueError, HostInputQueueReconcile, InMemoryHostInputQueue,
     MAX_QUEUED_INPUTS_PER_RUN, RejectingInputEnqueue,
 };
-pub use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ModelRouteProviderPool,

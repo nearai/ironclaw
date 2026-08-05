@@ -201,7 +201,10 @@ ironclaw_reborn_composition
                          streak cap in thread-harness-design.md §8.3
                        ~ runtime.rs wiring
 
-ironclaw_host_runtime / ironclaw_host_api   — unchanged
+ironclaw_host_runtime                        — unchanged for subagent execution
+ironclaw_host_api                            + owns `CapabilitySurfacePolicy`; subagent
+                                              attenuation removes `builtin.spawn_subagent`
+                                              from that neutral visible ceiling
 ```
 
 ### 5.4 Considered alternative — why not `Process`

@@ -24,6 +24,7 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
@@ -48,9 +49,9 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    DefaultHostRuntime, HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth,
-    RuntimeStatusRequest, RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
+    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, DefaultHostRuntime,
+    HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth, RuntimeStatusRequest,
+    RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,

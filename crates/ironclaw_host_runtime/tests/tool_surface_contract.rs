@@ -22,6 +22,7 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::trust::TrustPolicyInput;
@@ -52,8 +53,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
-    HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, SurfaceKind,
+    CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID, HostRuntime,
+    MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, SurfaceKind,
     VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
     builtin_first_party_package, publish_hot_capability_catalog,
 };

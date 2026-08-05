@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_contracts::LoopInput;
 use ironclaw_loop_contracts::{
@@ -16,14 +17,14 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_loop_host::{
-    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfacePolicy,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, InMemoryHostInputQueue,
-    JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
+    CapabilityWriteResult, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostInputBatch, HostInputEnqueuePort, HostInputEnvelope, HostInputQueue, HostInputQueueError,
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, InMemoryHostInputQueue, JsonSpawnSubagentInputCodec,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,

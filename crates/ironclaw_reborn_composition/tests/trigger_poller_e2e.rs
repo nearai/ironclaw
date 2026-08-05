@@ -2062,7 +2062,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // scheduled_trigger policy turns that entry's assertion here into a
     // `Some(Ok(()))` and one of the repository-state assertions below into a
     // failure — both catch the regression independently, per mutator.
-    const DENIED_SUMMARY: &str = "provider tool call is outside the resolved capability surface";
+    const DENIED_SUMMARY: &str = "provider tool call is outside the visible capability surface";
     assert_eq!(
         registration_outcomes.get(TRIGGER_CREATE_CAPABILITY_ID),
         Some(&Err(DENIED_SUMMARY.to_string())),

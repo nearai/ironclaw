@@ -423,6 +423,7 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
+        use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
         use ironclaw_host_api::{
             ids::CapabilityId,
             resolution::{Resolution, ResolutionBatch},
@@ -435,7 +436,7 @@ mod tests {
             VisibleCapabilitySurface, resolution,
         };
         use ironclaw_loop_host::{
-            CapabilityResolveError, CapabilitySurfacePolicy, CapabilitySurfacePolicyFilter,
+            CapabilityResolveError, CapabilitySurfacePolicyFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};

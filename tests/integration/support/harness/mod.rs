@@ -36,6 +36,7 @@ use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     capability::{CapabilityGrant, EffectKind, GrantConstraints},
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgressRequest,
     ids::{
         AgentId, ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId,
@@ -53,8 +54,8 @@ use ironclaw_loop_contracts::{
     LoopRequest, LoopRunContext,
 };
 use ironclaw_loop_host::{
-    CapabilityResolveError, CapabilitySurfacePolicy, CapabilitySurfaceProfileResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    CapabilityResolveError, CapabilitySurfaceProfileResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{ProjectService, ResolvedBinding};

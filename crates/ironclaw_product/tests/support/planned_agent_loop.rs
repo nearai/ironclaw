@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -19,7 +20,7 @@ use ironclaw_host_api::{
     runtime::{RuntimeKind, TrustClass},
     scope::Principal,
 };
-use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
+use ironclaw_host_runtime::SurfaceKind;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
     CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,

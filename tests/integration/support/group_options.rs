@@ -16,9 +16,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
 use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
-use ironclaw_loop_host::CapabilitySurfacePolicy;
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::InMemoryTurnEventSink;
@@ -110,8 +109,9 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// #5647 RED-pin seam: override the Bridged-mode `CapabilitySurfacePolicy`
-    /// (default forces `All`) so a test can reproduce a narrowed profile atop
-    /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
+    /// (default uses `CapabilitySurfacePolicy::allow_all()`) so a test can
+    /// reproduce a narrowed profile atop bridged deferral; requires
+    /// `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     /// Mirrors the production resolve-once wiring in
     /// `crates/ironclaw_runner/src/runtime.rs`:
     /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the

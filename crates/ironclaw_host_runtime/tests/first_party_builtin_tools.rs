@@ -18,6 +18,7 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -50,9 +51,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,

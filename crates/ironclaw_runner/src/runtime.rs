@@ -938,6 +938,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
+        capability_surface::CapabilitySurfacePolicy,
         ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
         resolution::{Resolution, ResolutionBatch},
         runtime::RuntimeKind,
@@ -955,7 +956,7 @@ mod tests {
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use ironclaw_loop_host::{
-        CapabilityResolveError, CapabilitySurfacePolicy, CapabilitySurfaceProfileResolver,
+        CapabilityResolveError, CapabilitySurfaceProfileResolver,
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory,
     };

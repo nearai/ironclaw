@@ -303,6 +303,8 @@ impl SyntheticSurfaceCapabilitySnapshot {
                             effective_capability_ids.push(target.capability_id.clone());
                         }
                     }
+                    // silent-ok: invalid capability_info inputs remain stageable so invoke
+                    // can return the intended recoverable model-visible failure.
                     Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {}
                     Err(error) => return Err(error),
                 }
