@@ -56,6 +56,24 @@ pub struct ConversationBindingResolution {
     pub access: ThreadAccessDecision,
 }
 
+/// Compare-and-rotate request for an already-bound external conversation.
+///
+/// `resolve_request.external_event_id` is the durable idempotency key. The
+/// expected thread fences concurrent or stale reset attempts without allowing
+/// callers to silently retarget an unrelated binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetConversationRequest {
+    pub resolve_request: ResolveConversationRequest,
+    pub expected_thread_id: ThreadId,
+}
+
+/// Durable result of one non-destructive binding rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetConversationOutcome {
+    pub previous_thread_id: ThreadId,
+    pub resolution: ConversationBindingResolution,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkConversationRequest {
     pub tenant_id: TenantId,

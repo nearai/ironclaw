@@ -1130,7 +1130,12 @@ export function useChat(threadId) {
         appendNotice(renderCommandResultMarkdown(response), threadId, {
           commandResult: response,
         });
-        return { ...response, thread_id: threadId };
+        const responseThreadId =
+          response?.effect?.type === "open_thread" &&
+          response.effect.thread_id
+            ? response.effect.thread_id
+            : threadId;
+        return { ...response, thread_id: responseThreadId };
       } catch {
         // A thrown error here has no server-shaped `result`/`rejection` to
         // render (network failure, timeout, or an unexpected client-side

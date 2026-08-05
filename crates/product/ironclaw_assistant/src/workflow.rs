@@ -56,15 +56,18 @@ use crate::command_dispatch::{
 };
 use crate::commands::{
     PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductLifecycleCommandInput,
-    ProductModelCommandInput, ProductStatusCommandInput,
+    PRODUCT_NEW_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
+    PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand, ProductLifecycleCommandInput,
+    ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
+    ProductStatusCommandInput, ProductStopCommandInput,
 };
 use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
 use ironclaw_product_contracts::binding::{
-    ProductBindingResolver, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    ProductBindingResolver, ProductConversationRouteKind, ResetBindingRequest,
+    ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 
@@ -1723,12 +1726,13 @@ async fn dispatch_product_command(
     let binding = binding_service
         .resolve_binding(resolve_binding_request(envelope))
         .await?;
+    let is_new_command = matches!(&command, ProductCommand::New);
     let (operation_id, input, command_name) = product_command_operation(command, &binding)?;
     let caller = ProductSurfaceCaller::new(
-        binding.tenant_id,
-        binding.actor_user_id,
-        binding.agent_id,
-        binding.project_id,
+        binding.tenant_id.clone(),
+        binding.actor_user_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
     );
     let response = command_surface
         .invoke(
@@ -1741,9 +1745,24 @@ async fn dispatch_product_command(
         )
         .await
         .map_err(product_surface_failure)?;
+    let output = if is_new_command {
+        let output: ProductNewCommandOutput =
+            serde_json::from_value(response.output).map_err(product_command_internal_error)?;
+        if output.can_reset {
+            binding_service
+                .reset_binding(ResetBindingRequest {
+                    resolve_request: resolve_binding_request(envelope),
+                    expected_thread_id: binding.thread_id,
+                })
+                .await?;
+        }
+        serde_json::to_value(output.result).map_err(product_command_internal_error)?
+    } else {
+        response.output
+    };
     Ok(ProductInboundAck::CommandResult {
         command: command_name,
-        payload: ProductCommandResultPayload::new(response.output),
+        payload: ProductCommandResultPayload::new(output),
     })
 }
 
@@ -1767,6 +1786,14 @@ fn product_command_operation(
                 .map_err(product_command_internal_error)?,
             "model".to_string(),
         )),
+        ProductCommand::New => Ok((
+            command_operation_id(PRODUCT_NEW_COMMAND_OPERATION_ID)?,
+            serde_json::to_value(ProductNewCommandInput {
+                thread_id: binding.thread_id.to_string(),
+            })
+            .map_err(product_command_internal_error)?,
+            "new".to_string(),
+        )),
         ProductCommand::Status => Ok((
             command_operation_id(PRODUCT_STATUS_COMMAND_OPERATION_ID)?,
             serde_json::to_value(ProductStatusCommandInput {
@@ -1774,6 +1801,15 @@ fn product_command_operation(
             })
             .map_err(product_command_internal_error)?,
             "status".to_string(),
+        )),
+        ProductCommand::Stop { invocation } => Ok((
+            command_operation_id(PRODUCT_STOP_COMMAND_OPERATION_ID)?,
+            serde_json::to_value(ProductStopCommandInput {
+                thread_id: binding.thread_id.to_string(),
+                invocation,
+            })
+            .map_err(product_command_internal_error)?,
+            invocation.command_name().to_string(),
         )),
         ProductCommand::Unknown { name, .. } => Err(ProductSurfaceFailure::UnsupportedActionKind {
             kind: format!("unknown_product_command:{name}"),

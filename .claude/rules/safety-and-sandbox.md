@@ -6,7 +6,7 @@ paths:
   - "crates/kernel/ironclaw_host_runtime/**"
   - "crates/kernel/ironclaw_processes/**"
   - "crates/lanes/ironclaw_sandbox/**"
-  - "crates/ironclaw_wasm/**"
+  - "crates/lanes/ironclaw_wasm/**"
   - "crates/lanes/ironclaw_mcp/**"
   - "crates/product/ironclaw_webui/**"
   - "crates/contracts/ironclaw_prompt_envelope/**"

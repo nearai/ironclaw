@@ -66,6 +66,7 @@ pub use types::{
     ConversationBindingResolution, ConversationMessageRecord, ConversationRouteKind,
     ExpectedExternalActorOwner, InboundTurnRequest, InboundTurnResponse, LinkConversationRequest,
     LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
-    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
-    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
+    ResetConversationOutcome, ResetConversationRequest, ResolveConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, StoredReplyTargetBinding,
+    ThreadAccessDecision, ValidateReplyTargetRequest,
 };

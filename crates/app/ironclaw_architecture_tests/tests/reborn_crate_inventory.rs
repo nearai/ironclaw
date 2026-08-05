@@ -76,11 +76,12 @@ fn reborn_crate_inventory_measures_the_real_tree() {
     }
 
     // The separate-workspace exclusion is a real exclusion, not an empty rule:
-    // the silk decoder and the six wasm-src guests are the members today.
+    // the six wasm-src guests are the members today (the silk decoder was the
+    // seventh until WS7 moved it to `tools/`, out of this walk's scope).
     let guests = nested_workspace_roots(&root);
     assert!(
         guests.len() >= 2,
-        "expected the separate-workspace roots (silk decoder + wasm-src guests) to be \
+        "expected the separate-workspace roots (the wasm-src guests) to be \
          excluded by construction, found {guests:?}"
     );
     for guest in &guests {

@@ -14,7 +14,7 @@ IronClaw build does **not** need `libclang`.
 ## Build
 
 ```bash
-./crates/ironclaw_silk_decoder/build.sh
+./tools/ironclaw_silk_decoder/build.sh
 ```
 
 The build script runs `cargo build --release` with this crate's manifest

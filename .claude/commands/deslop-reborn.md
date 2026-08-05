@@ -26,7 +26,7 @@ a legitimate Reborn target. Otherwise pick one per §1.
   Reborn crates. It must **skip the legacy enclave** — crates that serve *only* the retiring v1
   monolith. That enclave is now empty — `ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, and
   `ironclaw_oauth` have all been removed, so every crate under `crates/` that the workspace builds
-  is a legitimate target. Two caveats you can check in the root `Cargo.toml`: `ironclaw_silk_decoder`
+  is a legitimate target. Two caveats you can check in the root `Cargo.toml`: `tools/ironclaw_silk_decoder`
   is in `exclude`, so workspace-wide `cargo` commands never see it; and a crate with no consumers
   may be queued for deletion rather than for de-slopping (`grep -rl "<crate>" crates/*/Cargo.toml
   Cargo.toml`). Verify each candidate's status with the orientation recipe (§1) before picking it.

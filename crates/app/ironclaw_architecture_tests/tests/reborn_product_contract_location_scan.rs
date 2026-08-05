@@ -142,7 +142,7 @@ fn is_rust_identifier(ident: &str) -> bool {
 /// (CHECKLIST WS10).
 ///
 /// The only files legitimately owned by nothing are the ones inside a
-/// directory that roots a SEPARATE workspace (`crates/ironclaw_silk_decoder`, the `wasm-src/` guest
+/// directory that roots a SEPARATE workspace (the `wasm-src/` guest
 /// components). This workspace never builds them, so they were never in scope
 /// — the flat first-component idiom simply gave them a name that matched no
 /// owner rule. Anything else under `crates/` with no owner means the walk left
