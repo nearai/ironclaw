@@ -101,7 +101,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print`, not derived by subtracting the diff.
 /// ✎ Union re-record 2026-08-04: the two WS6 evictions above are disjoint and
 /// their deltas add exactly on the merged batch — 45_127 − 2_189 − 2_439 = 40_499.
-/// ✎ Re-recorded 40_499 → 41_414 on 2026-08-05 by the skills stack
+/// ✎ Re-recorded 40_711 → 41_096 on 2026-08-05 by the skills stack
 /// (#6745 → #6938 → #7171), paired with the `[gate].loc_ceiling` raise in the
 /// same commit. This is a RAISE, not a re-ratchet, so it is the reviewed
 /// decision the manifest's own rule requires and is flagged in #7171's body for
@@ -113,7 +113,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// on the merged tree, not derived by adding the diff. Note main sat only 54 LOC
 /// under the effective ceiling, so the next wave close should re-ratchet rather
 /// than inherit this number.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_414;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_096;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

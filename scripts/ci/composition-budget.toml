@@ -123,12 +123,17 @@ observed_date = "2026-07-16"
 # padded. main sat only 54 LOC under the effective ceiling, so this gate currently reds any
 # PR adding more than that to composition; the next wave close should re-ratchet.
 #
-# RAISED 40,711 -> 41,414 on 2026-08-05 by the skills stack (#6745 -> #6938 ->
+# RAISED 40,711 -> 41,096 on 2026-08-05 by the skills stack (#6745 -> #6938 ->
 # #7171). This is a raise, not a re-ratchet, so it is the reviewed decision the
 # rule below requires and not routine wiring -- flagged in #7171's body for the
 # owner to push back on. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`; set to current, not
 # padded.
+#
+# (An earlier revision of this note said 41,414. That figure was measured on a
+# working tree a bad `git stash pop` had polluted; 41,096 is the clean count, and
+# the gate's own C11 self-test caught the difference as 318 LOC of unclaimed
+# headroom -- the anti-slack rule doing exactly its job.)
 #
 # WHY IT IS COMPOSITION'S TO CARRY. The counted growth is +447 production LOC
 # and every line of it is service-graph assembly, which is this crate's charter
@@ -144,7 +149,7 @@ observed_date = "2026-07-16"
 # ironclaw_first_party_extension_ports. Note main sat only 54 LOC under the
 # effective ceiling, so this gate currently reds ANY PR adding more than that to
 # composition; the next wave close should re-ratchet rather than inherit this.
-loc_ceiling = 41414
+loc_ceiling = 41096
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -155,7 +160,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41414
+loc_observed = 41096
 loc_observed_date = "2026-08-05"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
