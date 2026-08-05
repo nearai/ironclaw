@@ -116,7 +116,14 @@ observed_date = "2026-07-16"
 # eviction (-2,189) and the WS6 policy eviction (-2,439) are disjoint; on the
 # merged tree the deltas add exactly: 45,127 - 2,189 - 2,439 = 40,499.
 #
-# RAISED 40,499 -> 41,414 on 2026-08-05 by the skills stack (#6745 -> #6938 ->
+# RAISED 40499 -> 40711 on 2026-08-05 by the skills stack's base layer (#6745). A raise, not a
+# re-ratchet, so it is the reviewed decision this file's own rule requires — flagged in the
+# PR body for the owner. The growth is skill-summary and product-surface assembly wiring, which is composition's charter.
+# Measured with `bash scripts/ci/check-composition-budget.sh --print`; set to current, not
+# padded. main sat only 54 LOC under the effective ceiling, so this gate currently reds any
+# PR adding more than that to composition; the next wave close should re-ratchet.
+#
+# RAISED 40,711 -> 41,414 on 2026-08-05 by the skills stack (#6745 -> #6938 ->
 # #7171). This is a raise, not a re-ratchet, so it is the reviewed decision the
 # rule below requires and not routine wiring -- flagged in #7171's body for the
 # owner to push back on. Measured on the merged tree with
