@@ -178,6 +178,11 @@ removing the `reborn-tests.yml` job must not orphan a required status check
 deleting `.claude/rules/*` immediately stops those rules auto-loading, which is
 the intended effect. Each phase is independently revertible in this way.
 
+**After any rollback, verify no dangling references remain** — grep the tree for
+mentions of the removed governance files (e.g. `rg -n 'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook'`)
+and strip pointers left in `CLAUDE.md`, other `.claude/rules/*`, and docs, so a
+deleted file is never still referenced as authoritative.
+
 ## Open questions for reviewers
 
 1. **`DESIGN.md` at repo root or `docs/design/`?** (Plan assumes `docs/design/`.)
