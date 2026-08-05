@@ -6,25 +6,21 @@ fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
         .expect("production builder exists")
         .1;
     let flattened = production.split_whitespace().collect::<Vec<_>>().join(" ");
+    let migration_begin = flattened
+        .find("Rc1To11Migration::begin")
+        .expect("typed release migration session begins in production startup");
     let channel_migration = flattened
-        .find("migrate_rc1_channel_state")
+        .find("migrate_all_rc1_channel_state")
         .expect("channel state migration remains in production startup");
-    let workspace_migration = flattened
-        .find("migrate_legacy_workspace_snapshot")
-        .expect("workspace artifact migration remains in production startup");
     let completion = flattened
-        .find("release_pair_lease .complete")
+        .find("release_migration .complete(")
         .expect("release-pair completion barrier remains in production startup");
     let first_worker = flattened
         .find("let credential_refresh_worker")
         .expect("credential refresh worker remains in production startup");
     assert!(
-        channel_migration < completion,
-        "channel state migration must run before release-pair completion"
-    );
-    assert!(
-        workspace_migration < completion,
-        "workspace artifact migration must run before release-pair completion"
+        migration_begin < channel_migration && channel_migration < completion,
+        "the typed migration session must cover channel-state migration through completion"
     );
     assert!(
         completion < first_worker,

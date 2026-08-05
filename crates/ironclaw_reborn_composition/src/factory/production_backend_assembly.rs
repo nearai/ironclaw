@@ -199,48 +199,29 @@ where
         surface_version,
     } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-    let release_pair_lease =
-        ironclaw_release_migration::ReleasePairMigrationLease::acquire(Arc::clone(&filesystem))
-            .await
-            .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-                reason: format!("release-pair startup migration preflight failed: {error}"),
-            })?;
     let process_journal_store = Arc::new(ProcessJournalStore::new(
         crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
     ));
-    // Keep the cross-domain migration future off this already-large assembly
-    // future's stack; current-thread runtimes may have a small caller stack.
-    let core_migration = match Box::pin(ironclaw_release_migration::migrate_core_release_pair(
-        Arc::clone(&filesystem),
-        Arc::clone(&scoped_filesystem),
-        process_journal_store,
-    ))
+    let release_migration = ironclaw_release_migration::Rc1To11Migration::begin(
+        ironclaw_release_migration::Rc1To11MigrationInput {
+            filesystem: Arc::clone(&filesystem),
+            scoped_filesystem: Arc::clone(&scoped_filesystem),
+            process_journal_store,
+            workspace: None,
+        },
+    )
     .await
-    {
-        Ok(migration) => migration,
-        Err(error) => {
-            release_pair_lease.fail_and_log().await;
-            return Err(crate::RebornCompositionError::InvalidConfig {
-                reason: error.to_string(),
-            });
-        }
-    };
-    release_pair_lease
-        .complete(ironclaw_release_migration::redacted_core_report(
-            &core_migration.process,
-            &core_migration.threads,
-            &core_migration.channels,
-            &core_migration.oauth,
-            None,
-            None,
-            None,
-        ))
+    .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+        reason: format!("release-pair startup migration failed: {error}"),
+    })?;
+    let process_journal_store = release_migration.process_journal_store();
+    release_migration
+        .complete(ironclaw_release_migration::Rc1To11ExtensionReports::default())
         .await
         .map_err(|error| crate::RebornCompositionError::InvalidConfig {
             reason: format!("release-pair startup migration commit failed: {error}"),
         })?;
-    let processes =
-        ProcessRuntimeSystem::from_process_journal_store(core_migration.process_journal_store);
+    let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
     let turn_state = Arc::new(processes.agent_turn_runtime());
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
@@ -517,13 +498,6 @@ pub(super) async fn build_backend_production(
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
-    let release_pair_lease = ironclaw_release_migration::ReleasePairMigrationLease::acquire(
-        Arc::clone(&stores.filesystem),
-    )
-    .await
-    .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-        reason: format!("release-pair startup migration preflight failed: {error}"),
-    })?;
     let process_journal_store = Arc::new(
         ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::clone(
             &stores.filesystem,
@@ -533,66 +507,39 @@ pub(super) async fn build_backend_production(
     let workspace_migration = match (legacy_workspace_snapshot, workspace_root) {
         (None, _) => None,
         (Some(_), None) => {
-            release_pair_lease.fail_and_log().await;
             return Err(RebornBuildError::InvalidConfig {
                 reason: "legacy workspace migration requires a local workspace root".to_string(),
             });
         }
         (Some(_), Some(_)) if !workspace_scoped_per_caller => {
-            release_pair_lease.fail_and_log().await;
             return Err(RebornBuildError::InvalidConfig {
                 reason: "legacy workspace migration requires per-caller workspace scoping"
                     .to_string(),
             });
         }
         (Some(source), Some(workspace_root)) => {
-            let input = ironclaw_release_migration::LegacyWorkspaceMigrationInput {
+            Some(ironclaw_release_migration::LegacyWorkspaceMigrationInput {
                 source,
                 workspace_root,
                 tenant_id: turn_state_scope.tenant_id.clone(),
                 user_id: turn_state_scope.user_id.clone(),
-            };
-            match ironclaw_release_migration::migrate_legacy_workspace_snapshot(input).await {
-                Ok(report) => {
-                    tracing::info!(
-                        directories_verified = report.directories_verified,
-                        files_migrated = report.files_migrated,
-                        files_unchanged = report.files_unchanged,
-                        bytes_verified = report.bytes_verified,
-                        "workspace artifact startup migration completed"
-                    );
-                    Some(report)
-                }
-                Err(error) => {
-                    release_pair_lease.fail_and_log().await;
-                    return Err(RebornBuildError::InvalidConfig {
-                        reason: format!("workspace artifact startup migration failed: {error}"),
-                    });
-                }
-            }
+            })
         }
     };
-    // Keep the cross-domain migration future off this already-large assembly
-    // future's stack; current-thread runtimes may have a small caller stack.
-    let core_migration = match Box::pin(ironclaw_release_migration::migrate_core_release_pair(
-        Arc::clone(&stores.filesystem),
-        Arc::clone(&stores.scoped_filesystem),
-        process_journal_store,
-    ))
+    let release_migration = ironclaw_release_migration::Rc1To11Migration::begin(
+        ironclaw_release_migration::Rc1To11MigrationInput {
+            filesystem: Arc::clone(&stores.filesystem),
+            scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
+            process_journal_store,
+            workspace: workspace_migration,
+        },
+    )
     .await
-    {
-        Ok(migration) => migration,
-        Err(error) => {
-            release_pair_lease.fail_and_log().await;
-            return Err(crate::RebornCompositionError::InvalidConfig {
-                reason: error.to_string(),
-            }
-            .into());
-        }
-    };
-    let processes = ProcessRuntimeSystem::from_process_journal_store(Arc::clone(
-        &core_migration.process_journal_store,
-    ));
+    .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+        reason: format!("release-pair startup migration failed: {error}"),
+    })?;
+    let processes =
+        ProcessRuntimeSystem::from_process_journal_store(release_migration.process_journal_store());
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
     let process_turn_state = Arc::new(processes.agent_turn_runtime());
@@ -768,7 +715,7 @@ pub(super) async fn build_backend_production(
     {
         Ok(report) => report,
         Err(error) => {
-            release_pair_lease.fail_and_log().await;
+            release_migration.fail_and_log().await;
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!("hosted rc1 extension state could not be restored: {error}"),
             });
@@ -1014,74 +961,28 @@ pub(super) async fn build_backend_production(
         })?,
     );
     let legacy_channel_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
-    let legacy_channel_scopes =
-        match ironclaw_extension_host::discover_rc1_channel_migration_scopes(Arc::clone(
-            &legacy_channel_filesystem,
-        ))
-        .await
-        {
-            Ok(scopes) => scopes,
-            Err(error) => {
-                release_pair_lease.fail_and_log().await;
-                return Err(crate::RebornCompositionError::InvalidConfig {
-                    reason: format!("channel extension-state scope discovery failed: {error}"),
-                }
-                .into());
+    let extension_state_migration = match ironclaw_extension_host::migrate_all_rc1_channel_state(
+        legacy_channel_filesystem,
+        Arc::clone(&extension_installation_store),
+        Arc::clone(&secret_store),
+        Arc::clone(&admin_configuration),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            release_migration.fail_and_log().await;
+            return Err(crate::RebornCompositionError::InvalidConfig {
+                reason: format!("channel extension-state startup migration failed: {error}"),
             }
-        };
-    let mut extension_state_migration =
-        ironclaw_extension_host::Rc1ChannelStateMigrationReport::default();
-    for migration_scope in legacy_channel_scopes {
-        let identity_store = Arc::new(
-            ironclaw_extension_host::FilesystemChannelIdentityStore::new(
-                Arc::clone(&legacy_channel_filesystem),
-                migration_scope.admin_scope.tenant_id.clone(),
-                migration_scope.admin_scope.user_id.clone(),
-            ),
-        );
-        let dm_targets = Arc::new(
-            ironclaw_extension_host::FilesystemChannelDmTargetStore::new(
-                Arc::clone(&legacy_channel_filesystem),
-                migration_scope.admin_scope.tenant_id.clone(),
-                migration_scope.admin_scope.user_id.clone(),
-            ),
-        );
-        let report = match ironclaw_extension_host::migrate_rc1_channel_state(
-            &ironclaw_extension_host::Rc1ChannelStateMigrationInputs {
-                filesystem: Arc::clone(&legacy_channel_filesystem),
-                installation_store: Arc::clone(&extension_installation_store),
-                secret_store: Arc::clone(&secret_store),
-                admin_configuration: Arc::clone(&admin_configuration),
-                oauth_channel_secret_scope: migration_scope.oauth_channel_secret_scope,
-                proof_code_channel_secret_scope: migration_scope.proof_code_channel_secret_scope,
-                admin_scope: migration_scope.admin_scope,
-                identity_store,
-                dm_targets,
-            },
-        )
-        .await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                release_pair_lease.fail_and_log().await;
-                return Err(crate::RebornCompositionError::InvalidConfig {
-                    reason: format!("channel extension-state startup migration failed: {error}"),
-                }
-                .into());
-            }
-        };
-        extension_state_migration.merge(report);
-    }
-    release_pair_lease
-        .complete(ironclaw_release_migration::redacted_core_report(
-            &core_migration.process,
-            &core_migration.threads,
-            &core_migration.channels,
-            &core_migration.oauth,
-            Some(&extension_installation_migration),
-            Some(&extension_state_migration),
-            workspace_migration.as_ref(),
-        ))
+            .into());
+        }
+    };
+    release_migration
+        .complete(ironclaw_release_migration::Rc1To11ExtensionReports {
+            installations: Some(extension_installation_migration),
+            channel_state: Some(extension_state_migration),
+        })
         .await
         .map_err(|error| crate::RebornCompositionError::InvalidConfig {
             reason: format!("release-pair startup migration commit failed: {error}"),

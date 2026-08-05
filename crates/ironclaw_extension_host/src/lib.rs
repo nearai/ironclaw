@@ -207,7 +207,8 @@ pub use legacy_channel_state_migration::{
     Rc1ChannelMigrationScope, Rc1ChannelRootMigrationSpec, Rc1ChannelStateMigrationError,
     Rc1ChannelStateMigrationInputs, Rc1ChannelStateMigrationReport,
     Rc1ChannelStateScopeMigrationReport, discover_rc1_channel_migration_scopes,
-    is_rc1_channel_state_path, migrate_rc1_channel_state, rc1_channel_root_migration_specs,
+    is_rc1_channel_state_path, migrate_all_rc1_channel_state, migrate_rc1_channel_state,
+    rc1_channel_root_migration_specs,
 };
 pub use lifecycle::{
     DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,

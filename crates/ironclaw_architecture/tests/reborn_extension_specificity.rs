@@ -1135,11 +1135,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // Generic storage/copy primitives remain vendor-neutral; delete these two
     // entries with the adapter after the documented rollback release expires.
     (
-        "crates/ironclaw_extension_host/src/legacy_channel_state_migration.rs",
+        "crates/ironclaw_extension_host/src/legacy_channel_state_migration/oauth_channel.rs",
         "slack",
     ),
     (
-        "crates/ironclaw_extension_host/src/legacy_channel_state_migration.rs",
+        "crates/ironclaw_extension_host/src/legacy_channel_state_migration/proof_code_channel.rs",
         "telegram",
     ),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
