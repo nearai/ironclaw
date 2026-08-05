@@ -430,6 +430,51 @@ async def test_inspector_debug_activation_and_responsive_shell(
         await context.close()
 
 
+async def test_inspector_prompt_renders_host_resolved_diagnostics(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """A real model turn reaches the bounded operator-only Prompt tab."""
+    marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+        )
+    run_id = assistant.get("turn_run_id") or submitted.get("run_id")
+    assert run_id, f"completed turn did not expose its run id: {assistant!r}"
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/chat/{thread_id}"
+            f"?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        prompt = page.locator("[data-testid='inspector-prompt-content']")
+        await expect(prompt).to_be_visible(timeout=30000)
+        await expect(prompt.get_by_text("Estimated prompt tokens", exact=True)).to_be_visible()
+        await expect(prompt.get_by_text("mock-model", exact=True).first).to_be_visible()
+
+        conversation = prompt.locator("details").filter(has_text=marker).first
+        await expect(conversation).to_have_count(1)
+        await conversation.locator("summary").click()
+        await expect(conversation.locator("pre")).to_contain_text(marker)
+        await expect(
+            prompt.get_by_text(
+                "Reconstructed content reflects the latest host prompt boundary",
+            )
+        ).to_have_count(1)
+    finally:
+        await context.close()
+
+
 @pytest.mark.parametrize(
     ("locale", "expected_lang", "connect_label"),
     [
