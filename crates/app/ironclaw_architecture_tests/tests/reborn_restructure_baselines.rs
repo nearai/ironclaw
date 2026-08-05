@@ -101,7 +101,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print`, not derived by subtracting the diff.
 /// ✎ Union re-record 2026-08-04: the two WS6 evictions above are disjoint and
 /// their deltas add exactly on the merged batch — 45_127 − 2_189 − 2_439 = 40_499.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_499;
+/// ✎ Re-recorded 40_499 → 40_711 on 2026-08-05 by the skills stack's base layer (#6745), paired with the
+/// `[gate].loc_ceiling` raise in the same commit (this ratchet fails when the two
+/// disagree, which is how it enforces recording in the changing PR). The growth is skill-summary and product-surface assembly wiring, which is composition's charter.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_711;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
