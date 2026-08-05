@@ -50,40 +50,47 @@ impl Default for DiagnosticStoreLimits {
 
 impl DiagnosticStoreLimits {
     fn validate(self) -> Result<Self, DiagnosticStoreError> {
+        // Keep this destructuring exhaustive: adding a limit field must fail
+        // compilation until its validation ceiling is defined below.
+        let Self {
+            max_sessions,
+            max_runs_per_session,
+            max_model_calls_per_run,
+            max_tool_executions_per_run,
+            max_activity_entries_per_run,
+            max_updates_per_run,
+            live_update_capacity,
+        } = self;
         let values = [
-            (
-                "max_sessions",
-                self.max_sessions,
-                DEFAULT_MAX_TRACKED_SESSIONS,
-            ),
+            ("max_sessions", max_sessions, DEFAULT_MAX_TRACKED_SESSIONS),
             (
                 "max_runs_per_session",
-                self.max_runs_per_session,
+                max_runs_per_session,
                 DEFAULT_MAX_RETAINED_RUNS_PER_SESSION,
             ),
             (
                 "max_model_calls_per_run",
-                self.max_model_calls_per_run,
+                max_model_calls_per_run,
                 DEFAULT_MAX_MODEL_CALLS_PER_RUN,
             ),
             (
                 "max_tool_executions_per_run",
-                self.max_tool_executions_per_run,
+                max_tool_executions_per_run,
                 DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN,
             ),
             (
                 "max_activity_entries_per_run",
-                self.max_activity_entries_per_run,
+                max_activity_entries_per_run,
                 DEFAULT_MAX_ACTIVITY_ENTRIES,
             ),
             (
                 "max_updates_per_run",
-                self.max_updates_per_run,
+                max_updates_per_run,
                 DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
             ),
             (
                 "live_update_capacity",
-                self.live_update_capacity,
+                live_update_capacity,
                 DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
             ),
         ];
@@ -172,6 +179,7 @@ struct DiagnosticSessionState {
 struct DiagnosticStoreState {
     sessions: HashMap<DiagnosticSessionKey, DiagnosticSessionState>,
     session_order: VecDeque<DiagnosticSessionKey>,
+    live_updates: HashMap<DiagnosticScope, broadcast::Sender<Arc<DiagnosticUpdateEnvelope>>>,
 }
 
 impl DiagnosticStoreState {
@@ -225,6 +233,32 @@ impl DiagnosticStoreState {
     fn session(&self, scope: &DiagnosticScope) -> Option<&DiagnosticSessionState> {
         self.sessions.get(&DiagnosticSessionKey::from(scope))
     }
+
+    fn subscribe(
+        &mut self,
+        scope: DiagnosticScope,
+        capacity: usize,
+    ) -> broadcast::Receiver<Arc<DiagnosticUpdateEnvelope>> {
+        self.prune_inactive_live_updates();
+        let sender = self.live_updates.entry(scope).or_insert_with(|| {
+            let (sender, _) = broadcast::channel(capacity);
+            sender
+        });
+        sender.subscribe()
+    }
+
+    fn live_update_sender(
+        &mut self,
+        scope: &DiagnosticScope,
+    ) -> Option<broadcast::Sender<Arc<DiagnosticUpdateEnvelope>>> {
+        self.prune_inactive_live_updates();
+        self.live_updates.get(scope).cloned()
+    }
+
+    fn prune_inactive_live_updates(&mut self) {
+        self.live_updates
+            .retain(|_, sender| sender.receiver_count() > 0);
+    }
 }
 
 fn touch<T: PartialEq>(order: &mut VecDeque<T>, value: T) {
@@ -238,17 +272,14 @@ fn touch<T: PartialEq>(order: &mut VecDeque<T>, value: T) {
 pub struct InMemoryDiagnosticStore {
     limits: DiagnosticStoreLimits,
     state: Mutex<DiagnosticStoreState>,
-    updates: broadcast::Sender<Arc<DiagnosticUpdateEnvelope>>,
 }
 
 impl InMemoryDiagnosticStore {
     pub fn new(limits: DiagnosticStoreLimits) -> Result<Self, DiagnosticStoreError> {
         let limits = limits.validate()?;
-        let (updates, _) = broadcast::channel(limits.live_update_capacity);
         Ok(Self {
             limits,
             state: Mutex::new(DiagnosticStoreState::default()),
-            updates,
         })
     }
 
@@ -258,7 +289,7 @@ impl InMemoryDiagnosticStore {
         prompt: PromptDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let update = DiagnosticUpdateKind::PromptUpdated {
-            component_count: prompt.components.len(),
+            component_count: u32::try_from(prompt.components.len()).unwrap_or(u32::MAX),
             total_estimated_tokens: prompt.total_estimated_tokens,
             truncated: prompt.any_content_truncated(),
         };
@@ -328,39 +359,12 @@ impl InMemoryDiagnosticStore {
         stats: SessionDiagnosticStats,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let stats = stats.into_bounded();
-        let session_key = DiagnosticSessionKey::from(&scope);
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
-        let run = state.run_mut(&scope, self.limits)?;
-        let next = run
-            .latest_sequence
-            .as_u64()
-            .checked_add(1)
-            .ok_or(DiagnosticStoreError::SequenceExhausted)?;
-        let sequence = DiagnosticSequence::new(next);
-        let cursor = DiagnosticCursor::new(run.stream_id, sequence);
-        let envelope = DiagnosticUpdateEnvelope {
+        self.record_with_session(
             scope,
-            stream_id: run.stream_id,
-            sequence,
-            emitted_at: Utc::now(),
-            update: DiagnosticUpdateKind::Stats(stats.clone()),
-        };
-        run.latest_sequence = sequence;
-        push_bounded(
-            &mut run.updates,
-            envelope.clone(),
-            self.limits.max_updates_per_run,
-        );
-        let session = state
-            .sessions
-            .get_mut(&session_key)
-            .ok_or(DiagnosticStoreError::Invariant)?;
-        session.stats = stats;
-        let _ = self.updates.send(Arc::new(envelope));
-        Ok(cursor)
+            DiagnosticUpdateKind::Stats(stats.clone()),
+            |_, _| {},
+            move |session| session.stats = stats,
+        )
     }
 
     pub fn snapshot(
@@ -410,6 +414,7 @@ impl InMemoryDiagnosticStore {
         let retention_floor = run.updates.front().map(DiagnosticUpdateEnvelope::cursor);
         let rebase_required = match (after, retention_floor) {
             (Some(after), _) if after.stream_id != run.stream_id => true,
+            (Some(after), _) if after.sequence > run.latest_sequence => true,
             (Some(after), Some(floor)) => {
                 after.sequence.as_u64().saturating_add(1) < floor.sequence.as_u64()
             }
@@ -433,11 +438,16 @@ impl InMemoryDiagnosticStore {
         })
     }
 
-    pub fn subscribe(&self, scope: DiagnosticScope) -> DiagnosticSubscription {
-        DiagnosticSubscription {
-            scope,
-            receiver: self.updates.subscribe(),
-        }
+    pub fn subscribe(
+        &self,
+        scope: DiagnosticScope,
+    ) -> Result<DiagnosticSubscription, DiagnosticStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        let receiver = state.subscribe(scope, self.limits.live_update_capacity);
+        Ok(DiagnosticSubscription { receiver })
     }
 
     fn record(
@@ -446,6 +456,17 @@ impl InMemoryDiagnosticStore {
         update: DiagnosticUpdateKind,
         mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence),
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        self.record_with_session(scope, update, mutate, |_| {})
+    }
+
+    fn record_with_session(
+        &self,
+        scope: DiagnosticScope,
+        update: DiagnosticUpdateKind,
+        mutate_run: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence),
+        mutate_session: impl FnOnce(&mut DiagnosticSessionState),
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        let session_key = DiagnosticSessionKey::from(&scope);
         let mut state = self
             .state
             .lock()
@@ -457,7 +478,7 @@ impl InMemoryDiagnosticStore {
             .checked_add(1)
             .ok_or(DiagnosticStoreError::SequenceExhausted)?;
         let sequence = DiagnosticSequence::new(next);
-        mutate(run, sequence);
+        mutate_run(run, sequence);
         let cursor = DiagnosticCursor::new(run.stream_id, sequence);
         let envelope = DiagnosticUpdateEnvelope {
             scope,
@@ -472,7 +493,16 @@ impl InMemoryDiagnosticStore {
             envelope.clone(),
             self.limits.max_updates_per_run,
         );
-        let _ = self.updates.send(Arc::new(envelope));
+        let session = state
+            .sessions
+            .get_mut(&session_key)
+            .ok_or(DiagnosticStoreError::Invariant)?;
+        mutate_session(session);
+        let live_sender = state.live_update_sender(&envelope.scope);
+        drop(state);
+        if let Some(sender) = live_sender {
+            let _ = sender.send(Arc::new(envelope));
+        }
         Ok(cursor)
     }
 }
@@ -480,11 +510,9 @@ impl InMemoryDiagnosticStore {
 impl Default for InMemoryDiagnosticStore {
     fn default() -> Self {
         let limits = DiagnosticStoreLimits::default();
-        let (updates, _) = broadcast::channel(limits.live_update_capacity);
         Self {
             limits,
             state: Mutex::new(DiagnosticStoreState::default()),
-            updates,
         }
     }
 }
@@ -509,22 +537,18 @@ fn replace_or_push<T>(
 }
 
 pub struct DiagnosticSubscription {
-    scope: DiagnosticScope,
     receiver: broadcast::Receiver<Arc<DiagnosticUpdateEnvelope>>,
 }
 
 impl DiagnosticSubscription {
     pub async fn recv(&mut self) -> Result<Arc<DiagnosticUpdateEnvelope>, DiagnosticStoreError> {
-        loop {
-            match self.receiver.recv().await {
-                Ok(update) if update.scope == self.scope => return Ok(update),
-                Ok(_) => continue,
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    return Err(DiagnosticStoreError::SubscriberLagged(count));
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(DiagnosticStoreError::SubscriptionClosed);
-                }
+        match self.receiver.recv().await {
+            Ok(update) => Ok(update),
+            Err(broadcast::error::RecvError::Lagged(count)) => {
+                Err(DiagnosticStoreError::SubscriberLagged(count))
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                Err(DiagnosticStoreError::SubscriptionClosed)
             }
         }
     }
@@ -590,6 +614,69 @@ mod tests {
     }
 
     #[test]
+    fn zero_validation_covers_every_limit_field_with_its_stable_name() {
+        let valid = tiny_limits();
+        let cases = [
+            (
+                "max_sessions",
+                DiagnosticStoreLimits {
+                    max_sessions: 0,
+                    ..valid
+                },
+            ),
+            (
+                "max_runs_per_session",
+                DiagnosticStoreLimits {
+                    max_runs_per_session: 0,
+                    ..valid
+                },
+            ),
+            (
+                "max_model_calls_per_run",
+                DiagnosticStoreLimits {
+                    max_model_calls_per_run: 0,
+                    ..valid
+                },
+            ),
+            (
+                "max_tool_executions_per_run",
+                DiagnosticStoreLimits {
+                    max_tool_executions_per_run: 0,
+                    ..valid
+                },
+            ),
+            (
+                "max_activity_entries_per_run",
+                DiagnosticStoreLimits {
+                    max_activity_entries_per_run: 0,
+                    ..valid
+                },
+            ),
+            (
+                "max_updates_per_run",
+                DiagnosticStoreLimits {
+                    max_updates_per_run: 0,
+                    ..valid
+                },
+            ),
+            (
+                "live_update_capacity",
+                DiagnosticStoreLimits {
+                    live_update_capacity: 0,
+                    ..valid
+                },
+            ),
+        ];
+
+        for (name, limits) in cases {
+            assert_eq!(
+                limits.validate(),
+                Err(DiagnosticStoreError::InvalidLimit(name))
+            );
+        }
+    }
+
+    #[test]
     fn rejects_limits_above_the_hard_ceiling() {
         let mut limits = tiny_limits();
         limits.max_sessions = DEFAULT_MAX_TRACKED_SESSIONS + 1;
@@ -600,6 +687,14 @@ mod tests {
                 maximum: DEFAULT_MAX_TRACKED_SESSIONS,
             }
         );
+    }
+
+    #[test]
+    fn default_store_limits_pass_the_validated_constructor_contract() {
+        let limits = DiagnosticStoreLimits::default();
+
+        assert_eq!(limits.validate(), Ok(limits));
+        assert_eq!(InMemoryDiagnosticStore::default().limits, limits);
     }
 
     #[test]
@@ -802,19 +897,63 @@ mod tests {
         assert_eq!(batch.latest_cursor, Some(recreated));
     }
 
-    #[tokio::test]
-    async fn subscription_filters_scope_and_preserves_sequence() {
+    #[test]
+    fn future_cursor_in_the_current_stream_requires_rebase() {
         let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let latest = store
+            .record_activity(scope.clone(), activity("first"))
+            .expect("record");
+        let future = DiagnosticCursor::new(
+            latest.stream_id,
+            DiagnosticSequence::new(latest.sequence.as_u64() + 1),
+        );
+
+        let batch = store
+            .updates_after(&scope, Some(future))
+            .expect("future cursor batch");
+
+        assert!(batch.rebase_required);
+        assert!(batch.updates.is_empty());
+        assert_eq!(batch.latest_cursor, Some(latest));
+    }
+
+    #[tokio::test]
+    async fn unrelated_scope_saturation_does_not_lag_scoped_subscription() {
+        let mut limits = tiny_limits();
+        limits.live_update_capacity = 2;
+        let store = InMemoryDiagnosticStore::new(limits).expect("store");
         let allowed = scope("tenant", "user", "thread-a", TurnRunId::new());
         let other = scope("tenant", "user", "thread-b", TurnRunId::new());
-        let mut subscription = store.subscribe(allowed.clone());
+        let mut subscription = store
+            .subscribe(allowed.clone())
+            .expect("scoped subscription");
+        for index in 0..=limits.live_update_capacity {
+            store
+                .record_activity(other.clone(), activity(&format!("other-{index}")))
+                .expect("other");
+        }
         store
-            .record_activity(other, activity("other"))
-            .expect("other");
+            .record_activity(allowed.clone(), activity("allowed"))
+            .expect("allowed");
+
+        let update = subscription.recv().await.expect("matching update");
+        assert_eq!(update.scope, allowed);
+        assert_eq!(update.sequence, DiagnosticSequence::new(1));
+    }
+
+    #[tokio::test]
+    async fn subscription_preserves_sequence_for_its_scope() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let allowed = scope("tenant", "user", "thread-a", TurnRunId::new());
+        let mut subscription = store
+            .subscribe(allowed.clone())
+            .expect("scoped subscription");
         store
-            .record_activity(allowed, activity("allowed"))
+            .record_activity(allowed.clone(), activity("allowed"))
             .expect("allowed");
         let update = subscription.recv().await.expect("matching update");
+        assert_eq!(update.scope, allowed);
         assert_eq!(update.sequence, DiagnosticSequence::new(1));
     }
 
@@ -822,7 +961,7 @@ mod tests {
     async fn stats_are_visible_when_the_update_is_delivered() {
         let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
         let scope = scope("tenant", "user", "thread", TurnRunId::new());
-        let mut subscription = store.subscribe(scope.clone());
+        let mut subscription = store.subscribe(scope.clone()).expect("scoped subscription");
         let stats = SessionDiagnosticStats {
             total_model_calls: 7,
             ..SessionDiagnosticStats::default()

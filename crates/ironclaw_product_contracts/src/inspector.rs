@@ -1,16 +1,17 @@
 //! Operator-only diagnostic vocabulary for the Web Debug Inspector.
 //!
-//! These output-only DTOs cross the product boundary through the dedicated
-//! inspection surface. They are deliberately separate from product projection
-//! events: raw prompt components and tool details must never enter the normal
-//! product stream.
+//! These DTOs cross the product boundary through the dedicated inspection
+//! surface; snapshots and updates flow out, while cursors round-trip to resume
+//! reads. They are deliberately separate from product projection events: raw
+//! prompt components and tool details must never enter the normal product
+//! stream.
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     ids::{TenantId, ThreadId, UserId},
     turn::{CapabilityActivityId, TurnRunId},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const PROMPT_COMPONENT_CONTENT_MAX_BYTES: usize = 64 * 1024;
@@ -62,7 +63,7 @@ impl std::fmt::Display for DiagnosticModelCallId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DiagnosticStreamId(Uuid);
 
@@ -88,7 +89,9 @@ impl std::fmt::Display for DiagnosticStreamId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct DiagnosticSequence(u64);
 
@@ -104,7 +107,7 @@ impl DiagnosticSequence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DiagnosticCursor {
     pub stream_id: DiagnosticStreamId,
     pub sequence: DiagnosticSequence,
@@ -310,18 +313,16 @@ impl PromptDiagnostic {
         let mut remaining = PROMPT_COMPONENT_TOTAL_MAX_BYTES;
         let mut bounded_components =
             Vec::with_capacity(original_component_count.min(MAX_PROMPT_COMPONENTS));
-        let mut components_truncated = original_component_count > MAX_PROMPT_COMPONENTS;
         for mut component in components.into_iter().take(MAX_PROMPT_COMPONENTS) {
             if remaining == 0 {
-                components_truncated = true;
                 break;
             }
             let retained = component.content.content().len().min(remaining);
             component.content = component.content.rebound(retained);
-            components_truncated |= component.content.truncated();
             remaining = remaining.saturating_sub(component.content.content().len());
             bounded_components.push(component);
         }
+        let components_truncated = bounded_components.len() < original_component_count;
 
         let active_skills_truncated = active_skills.len() > MAX_ACTIVE_SKILLS;
         let active_skills = active_skills
@@ -598,7 +599,7 @@ impl SessionDiagnosticStats {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum DiagnosticUpdateKind {
     PromptUpdated {
-        component_count: usize,
+        component_count: u32,
         total_estimated_tokens: Option<u64>,
         truncated: bool,
     },
@@ -661,8 +662,22 @@ mod tests {
         let bounded = BoundedDiagnosticText::tool_result(value.clone());
         assert!(bounded.truncated());
         assert!(bounded.content().len() <= TOOL_RESULT_MAX_BYTES);
-        assert!(std::str::from_utf8(bounded.content().as_bytes()).is_ok());
+        assert_eq!(
+            bounded.content().chars().count(),
+            TOOL_RESULT_MAX_BYTES / '€'.len_utf8()
+        );
         assert_eq!(bounded.original_bytes(), value.len() as u64);
+    }
+
+    #[test]
+    fn diagnostic_cursor_round_trips_through_json() {
+        let cursor = DiagnosticCursor::new(DiagnosticStreamId::new(), DiagnosticSequence::new(42));
+
+        let encoded = serde_json::to_value(cursor).expect("serialize cursor");
+        let decoded: DiagnosticCursor =
+            serde_json::from_value(encoded).expect("deserialize cursor");
+
+        assert_eq!(decoded, cursor);
     }
 
     #[test]
@@ -709,7 +724,95 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_uses_the_fifty_kibibyte_contract() {
+    fn prompt_component_content_truncation_does_not_claim_the_list_was_shortened() {
+        let prompt = PromptDiagnostic::new(
+            Utc::now(),
+            vec![PromptComponentDiagnostic::new(
+                PromptComponentKind::Instruction,
+                "large-component",
+                "x".repeat(PROMPT_COMPONENT_CONTENT_MAX_BYTES + 1),
+                None,
+            )],
+            "prompt",
+            None,
+            1,
+            0,
+            1,
+            Vec::new(),
+            0,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(prompt.components.len(), 1);
+        assert!(!prompt.components_truncated);
+        assert!(prompt.components[0].content.truncated());
+        assert!(prompt.any_content_truncated());
+    }
+
+    #[test]
+    fn prompt_constructor_enforces_the_total_component_byte_budget() {
+        let mut components = (0..3)
+            .map(|index| {
+                PromptComponentDiagnostic::new(
+                    PromptComponentKind::Instruction,
+                    format!("full-{index}"),
+                    "x".repeat(PROMPT_COMPONENT_CONTENT_MAX_BYTES),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        components.push(PromptComponentDiagnostic::new(
+            PromptComponentKind::Instruction,
+            "partial-prefix",
+            "x".repeat(40_000),
+            None,
+        ));
+        components.push(PromptComponentDiagnostic::new(
+            PromptComponentKind::Instruction,
+            "partially-retained",
+            "x".repeat(PROMPT_COMPONENT_CONTENT_MAX_BYTES),
+            None,
+        ));
+        components.push(PromptComponentDiagnostic::new(
+            PromptComponentKind::Instruction,
+            "dropped",
+            "x",
+            None,
+        ));
+
+        let prompt = PromptDiagnostic::new(
+            Utc::now(),
+            components,
+            "prompt",
+            None,
+            1,
+            0,
+            1,
+            Vec::new(),
+            0,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(prompt.components.len(), 5);
+        assert_eq!(
+            prompt
+                .components
+                .iter()
+                .map(|component| component.content.content().len())
+                .sum::<usize>(),
+            PROMPT_COMPONENT_TOTAL_MAX_BYTES
+        );
+        assert_eq!(prompt.components[4].content.content().len(), 25_536);
+        assert!(prompt.components[4].content.truncated());
+        assert!(prompt.components_truncated);
+    }
+
+    #[test]
+    fn tool_result_uses_its_original_length_over_caller_supplied_output_bytes() {
         assert_eq!(TOOL_RESULT_MAX_BYTES, 50 * 1024);
         let tool = ToolExecutionDiagnostic::new(
             CapabilityActivityId::new(),
@@ -719,7 +822,7 @@ mod tests {
             Some("x".repeat(TOOL_RESULT_MAX_BYTES + 1)),
             ToolExecutionStatus::Succeeded,
             None,
-            Some((TOOL_RESULT_MAX_BYTES + 1) as u64),
+            Some(7),
             None,
             None,
         );
