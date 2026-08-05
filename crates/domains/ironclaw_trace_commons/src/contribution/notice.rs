@@ -278,10 +278,18 @@ pub(crate) fn trace_credit_notice_fingerprint(
             .credit_events
             .iter()
             .map(|event| {
+                // `event.kind.as_str()`, never `{:?}`. This fingerprint is
+                // persisted in `submissions.json` and compared on every load to
+                // decide whether an acknowledged or snoozed credit notice stays
+                // suppressed — so deriving it from `Debug` meant a variant
+                // rename resurfaced every user's dismissed notice and pushed a
+                // duplicate outbox item (#7144). The record's own `status` two
+                // lines below already used a stable `as_str()`; the event kind
+                // simply had not.
                 format!(
-                    "{}:{:?}:{:.6}:{}",
+                    "{}:{}:{:.6}:{}",
                     event.event_id,
-                    event.kind,
+                    event.kind.as_str(),
                     event.points_delta,
                     event.created_at.timestamp_millis()
                 )
