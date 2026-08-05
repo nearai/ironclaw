@@ -4560,6 +4560,7 @@ dependencies = [
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
+ "ironclaw_release_migration",
  "ironclaw_resources",
  "ironclaw_runner",
  "ironclaw_runtime_policy",
@@ -4802,6 +4803,27 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_release_migration"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ironclaw_auth",
+ "ironclaw_conversations",
+ "ironclaw_extension_host",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_processes",
+ "ironclaw_product",
+ "ironclaw_threads",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "tokio",
  "tracing",

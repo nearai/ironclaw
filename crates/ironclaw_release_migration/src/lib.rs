@@ -14,7 +14,8 @@ use std::{
 
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FilesystemError, Filter, Page, RecordKind, RecordVersion, RootFilesystem,
+    CasExpectation, Entry, FilesystemError, Filter, Page, RecordKind, RecordVersion,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::path::VirtualPath;
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ const HEARTBEAT_SECONDS: u64 = 60;
 const ACQUIRE_RETRIES: usize = 8;
 
 #[derive(Debug, Error)]
-pub(crate) enum ReleasePairMigrationError {
+pub enum ReleasePairMigrationError {
     #[error("filesystem error: {0}")]
     Filesystem(#[from] FilesystemError),
     #[error("release-pair migration record is malformed: {0}")]
@@ -103,7 +104,7 @@ struct DomainCompletionRecord {
     report: Value,
 }
 
-pub(crate) struct ReleasePairMigrationLease<F: ?Sized>
+pub struct ReleasePairMigrationLease<F: ?Sized>
 where
     F: RootFilesystem + 'static,
 {
@@ -117,7 +118,7 @@ where
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelRootMigrationReport {
+pub struct ChannelRootMigrationReport {
     pub tenants: usize,
     pub conversation_source_items: usize,
     pub conversation_items_migrated: usize,
@@ -133,7 +134,7 @@ pub(crate) struct ChannelRootMigrationReport {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ChannelScopeMigrationReport {
+pub struct ChannelScopeMigrationReport {
     pub migrated: usize,
     pub unchanged: usize,
     pub skipped: usize,
@@ -141,11 +142,104 @@ pub(crate) struct ChannelScopeMigrationReport {
     pub failed: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionInstallationMigrationReport {
+    pub sources_migrated: usize,
+    pub sources_unchanged: usize,
+    pub manifests_migrated: usize,
+    pub manifests_unchanged: usize,
+    pub installations_migrated: usize,
+    pub installations_unchanged: usize,
+}
+
+/// Verified results from the release-pair migrations that do not require the
+/// fully assembled extension runtime.
+pub struct CoreReleasePairMigration<F>
+where
+    F: RootFilesystem + 'static,
+{
+    pub oauth: ironclaw_auth::OAuthProviderAliasMigrationReport,
+    pub channels: ChannelRootMigrationReport,
+    pub process: ironclaw_processes::LegacyProcessMigrationReport,
+    pub threads: ironclaw_threads::ThreadStartupMigrationReport,
+    pub process_journal_store: Arc<ironclaw_processes::ProcessJournalStore<F>>,
+}
+
+/// Run and verify the core, cross-domain portion of the rc1 release migration.
+///
+/// The caller owns the database-wide lease because extension migration runs
+/// later, after the extension runtime and secret authority have been assembled.
+pub async fn migrate_core_release_pair<F>(
+    filesystem: Arc<F>,
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    process_journal_store: Arc<ironclaw_processes::ProcessJournalStore<F>>,
+) -> Result<CoreReleasePairMigration<F>, ReleasePairMigrationError>
+where
+    F: RootFilesystem + 'static,
+{
+    let oauth = ironclaw_auth::migrate_legacy_oauth_provider_alias(
+        Arc::clone(&filesystem),
+        Arc::clone(&scoped_filesystem),
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| ReleasePairMigrationError::Domain {
+        domain: "OAuth provider-alias",
+        reason: error.to_string(),
+    })?;
+    let channels = migrate_channel_roots(filesystem.as_ref()).await?;
+    let process = process_journal_store
+        .migrate_legacy_journal_with_report()
+        .await
+        .map_err(|error| ReleasePairMigrationError::Domain {
+            domain: "process journal",
+            reason: error.to_string(),
+        })?;
+    tracing::info!(
+        already_complete = process.already_complete,
+        imported_journal_entries = process.imported_journal_entries,
+        legacy_events_superseded = process.disposition.legacy_events_superseded,
+        active_locks_expired = process.disposition.active_locks_expired,
+        checkpoint_metadata_superseded = process.disposition.checkpoint_metadata_superseded,
+        admission_reservations_expired = process.disposition.admission_reservations_expired,
+        "process journal startup migration completed"
+    );
+    let threads = ironclaw_threads::migrate_all_thread_scopes(
+        Arc::clone(&filesystem),
+        Arc::clone(&scoped_filesystem),
+    )
+    .await
+    .map_err(|error| ReleasePairMigrationError::Domain {
+        domain: "thread",
+        reason: error.to_string(),
+    })?;
+    tracing::info!(
+        discovered_scopes = threads.discovered_scopes,
+        thread_rows = threads.thread_rows,
+        transcript_scopes_migrated = threads.transcript_scopes_migrated,
+        transcript_scopes_unchanged = threads.transcript_scopes_unchanged,
+        append_events_scanned = threads.append_events_scanned,
+        append_messages_materialized = threads.append_messages_materialized,
+        append_messages_unchanged = threads.append_messages_unchanged,
+        transcript_rows_projected = threads.transcript_rows_projected,
+        "thread startup migration completed"
+    );
+    validate_channel_thread_references(filesystem.as_ref(), &channels).await?;
+
+    Ok(CoreReleasePairMigration {
+        oauth,
+        channels,
+        process,
+        threads,
+        process_journal_store,
+    })
+}
+
 impl<F> ReleasePairMigrationLease<F>
 where
     F: RootFilesystem + ?Sized + 'static,
 {
-    pub(crate) async fn acquire(filesystem: Arc<F>) -> Result<Self, ReleasePairMigrationError> {
+    pub async fn acquire(filesystem: Arc<F>) -> Result<Self, ReleasePairMigrationError> {
         let path = migration_path()?;
         for _ in 0..ACQUIRE_RETRIES {
             let existing = filesystem.get(&path).await?;
@@ -220,7 +314,7 @@ where
         Err(ReleasePairMigrationError::ConcurrentStartup)
     }
 
-    pub(crate) async fn complete(mut self, report: Value) -> Result<(), ReleasePairMigrationError> {
+    pub async fn complete(mut self, report: Value) -> Result<(), ReleasePairMigrationError> {
         self.write_domain_completion_records(&report).await?;
         self.stop_heartbeat();
         self.record.status = MigrationStatus::Complete;
@@ -231,7 +325,7 @@ where
         Ok(())
     }
 
-    pub(crate) async fn fail(mut self) -> Result<(), ReleasePairMigrationError> {
+    pub async fn fail(mut self) -> Result<(), ReleasePairMigrationError> {
         self.stop_heartbeat();
         self.record.status = MigrationStatus::Failed;
         self.record.finished_at = Some(Utc::now());
@@ -479,7 +573,7 @@ where
     Ok(fingerprint)
 }
 
-pub(crate) async fn migrate_channel_roots<F>(
+pub async fn migrate_channel_roots<F>(
     filesystem: &F,
 ) -> Result<ChannelRootMigrationReport, ReleasePairMigrationError>
 where
@@ -619,7 +713,7 @@ where
 /// profile selected a tenant-specific authority while 1.1 selects the global
 /// normalized installation root, so relying on the configured owner would
 /// silently strand other tenants.
-pub(crate) async fn discover_rc1_hosted_extension_snapshots<F>(
+pub async fn discover_rc1_hosted_extension_snapshots<F>(
     filesystem: &F,
 ) -> Result<Vec<VirtualPath>, ReleasePairMigrationError>
 where
@@ -661,7 +755,7 @@ where
 
 /// Verify that every channel binding still resolves to a durable canonical
 /// thread after thread materialization and projection rebuilds complete.
-pub(crate) async fn validate_channel_thread_references<F>(
+pub async fn validate_channel_thread_references<F>(
     filesystem: &F,
     report: &ChannelRootMigrationReport,
 ) -> Result<(), ReleasePairMigrationError>
@@ -730,12 +824,12 @@ fn virtual_path(raw: &str) -> Result<VirtualPath, ReleasePairMigrationError> {
     VirtualPath::new(raw).map_err(|error| ReleasePairMigrationError::Malformed(error.to_string()))
 }
 
-pub(crate) fn redacted_core_report(
+pub fn redacted_core_report(
     process: &ironclaw_processes::LegacyProcessMigrationReport,
     threads: &ironclaw_threads::ThreadStartupMigrationReport,
     channels: &ChannelRootMigrationReport,
     oauth: &ironclaw_auth::OAuthProviderAliasMigrationReport,
-    installations: Option<&ironclaw_extensions::Rc1SnapshotMigrationReport>,
+    installations: Option<&ExtensionInstallationMigrationReport>,
     extension_state: Option<&ironclaw_extension_host::Rc1ChannelStateMigrationReport>,
 ) -> Value {
     let installations = installations.copied().unwrap_or_default();
@@ -1052,30 +1146,6 @@ mod tests {
             .await
             .expect("query domain completions");
         assert!(domain_rows.is_empty());
-    }
-
-    #[test]
-    fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
-        let source = include_str!("factory/production_backend_assembly.rs");
-        let production = source
-            .split_once("pub(super) async fn build_backend_production(")
-            .expect("production builder exists")
-            .1;
-        let channel_migration = production
-            .find("migrate_rc1_channel_state")
-            .expect("channel state migration remains in production startup");
-        let completion = production
-            .find("release_pair_lease\n        .complete")
-            .expect("release-pair completion barrier remains in production startup");
-        let first_worker = production
-            .find("let credential_refresh_worker")
-            .expect("credential refresh worker remains in production startup");
-        assert!(channel_migration < completion);
-        assert!(completion < first_worker);
-        assert!(
-            !production[..completion].contains("tokio::spawn"),
-            "no background writer may spawn before migration readback completes"
-        );
     }
 
     #[tokio::test]

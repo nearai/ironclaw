@@ -189,9 +189,7 @@ use ironclaw_resources::{
 use ironclaw_runner::runtime::ProcessRuntimeSystem;
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_skills::ScopedSkillManagementPort;
-use ironclaw_threads::{
-    FilesystemSessionThreadService, SessionThreadService, migrate_all_thread_scopes,
-};
+use ironclaw_threads::{FilesystemSessionThreadService, SessionThreadService};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,

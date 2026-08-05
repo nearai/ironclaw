@@ -1,0 +1,37 @@
+[package]
+name = "ironclaw_release_migration"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Startup migration coordinator for compatible IronClaw release pairs"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "app"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_extension_host = { path = "../ironclaw_extension_host" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_product = { path = "../ironclaw_product" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
+
+[lints]
+workspace = true

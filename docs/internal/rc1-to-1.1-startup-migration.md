@@ -6,6 +6,13 @@ the 1.1 storage substrate readable, but they are not sufficient: most affected
 state is encoded as versioned records inside `RootFilesystem`, not as SQL
 columns.
 
+`ironclaw_release_migration` owns the bounded release-pair lease, ordered
+cross-domain transforms, read-back checks, and redacted completion evidence.
+`ironclaw_reborn_composition` only wires that service into startup and keeps
+extension restoration and every background writer behind its completion
+barrier. The owning domain crates remain responsible for their persisted wire
+transforms.
+
 ## Migration matrix
 
 | Domain | rc1 authority | 1.1 authority | Startup action | Rollback authority |
