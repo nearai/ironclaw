@@ -218,6 +218,12 @@ correct revert they name none of these, so a match *there* is a real leftover
 belt-and-suspenders complement, also confirm each edited file's reverted diff is
 clean (per the manifest above).
 
+The alternation lists the **default** `DESIGN.md` and `docs/features/` paths;
+if Phase 0 (§0.1 / §0.2) resolved different locations, **add those exact paths
+to the pattern** before running the check — the resolved paths are recorded in
+the Phase 0 decisions note. (They can't be hard-coded here: this is the
+proposal, written before Phase 0 runs.)
+
 Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
 workflows, or docs, so a deleted file is never still referenced as authoritative.
 
