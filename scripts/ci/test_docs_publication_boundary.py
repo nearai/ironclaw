@@ -108,15 +108,23 @@ class DocsPublicationBoundaryTest(unittest.TestCase):
         unfenced, _, _ = boundary.find_violations(docs)
         self.assertEqual(unfenced, [])
 
-    def test_mintignore_literal_file_fences(self) -> None:
+    def test_mintignore_literal_file_pattern_fences_but_fails_frozen_rule(
+        self,
+    ) -> None:
+        # `reborn-binary.md` exercises the literal-filename matching branch,
+        # and is deliberately NOT in FROZEN_MINTIGNORE_PATTERNS: the two
+        # signals are independent — the entry still fences its file (no
+        # publication leak) while the frozen-list rule flags it. Both halves
+        # are asserted so neither regression can hide behind the other.
         docs = make_docs_tree(
             self.root,
             ["index"],
             "reborn-binary.md\n",
             {"index.mdx": "# Home", "reborn-binary.md": "# Internal"},
         )
-        unfenced, _, _ = boundary.find_violations(docs)
+        unfenced, _, unexpected = boundary.find_violations(docs)
         self.assertEqual(unfenced, [])
+        self.assertEqual(unexpected, ["reborn-binary.md"])
 
     def test_hidden_frontmatter_marks_deliberate_page(self) -> None:
         docs = make_docs_tree(
