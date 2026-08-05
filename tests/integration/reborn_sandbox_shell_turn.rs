@@ -19,12 +19,12 @@ const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
     run_with_larger_stack(async {
-        if !docker_gate::docker_available() {
+        if !docker_gate::docker_available().await {
             eprintln!("SKIP: sandbox shell turn requires a Docker daemon");
             return;
         }
         let image = docker_gate::configured_sandbox_image();
-        if !docker_gate::docker_image_available(&image) {
+        if !docker_gate::docker_image_available(&image).await {
             eprintln!("SKIP: sandbox worker image {image:?} is not built");
             return;
         }

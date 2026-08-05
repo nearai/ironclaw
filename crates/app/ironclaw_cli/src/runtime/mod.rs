@@ -2614,6 +2614,9 @@ regex_activation_enabled = false
         let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
         let _environment =
             EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _cli_path = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_CLI_PATH");
+        let _idle_timeout = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES");
+        let _worker_image = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE");
         let _project_token = EnvGuard::set("RAILWAY_TOKEN", "railway-test-token");
         let _api_token = EnvGuard::clear("RAILWAY_API_TOKEN");
         let _docker = EnvGuard::set("DOCKER_HOST", "tcp://127.0.0.1:1");

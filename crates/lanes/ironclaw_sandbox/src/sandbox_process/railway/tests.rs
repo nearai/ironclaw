@@ -22,6 +22,7 @@ struct FakeRailwayCli {
     next_sandbox: AtomicUsize,
     expired_liveness_checks: AtomicUsize,
     failed_liveness_lists: AtomicUsize,
+    failed_bootstrap_execs: AtomicUsize,
     failed_worker_execs: AtomicUsize,
     failed_checkpoint_creates: AtomicUsize,
     failed_destroys: AtomicUsize,
@@ -39,6 +40,7 @@ impl FakeRailwayCli {
             next_sandbox: AtomicUsize::new(1),
             expired_liveness_checks: AtomicUsize::new(0),
             failed_liveness_lists: AtomicUsize::new(0),
+            failed_bootstrap_execs: AtomicUsize::new(0),
             failed_worker_execs: AtomicUsize::new(0),
             failed_checkpoint_creates: AtomicUsize::new(0),
             failed_destroys: AtomicUsize::new(0),
@@ -69,6 +71,10 @@ impl FakeRailwayCli {
 
     fn fail_next_worker_exec(&self) {
         self.failed_worker_execs.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_bootstrap_exec(&self) {
+        self.failed_bootstrap_execs.store(1, Ordering::SeqCst);
     }
 
     fn fail_next_checkpoint_create(&self) {
@@ -153,6 +159,16 @@ impl RailwayCli for FakeRailwayCli {
             && self.failed_worker_execs.swap(0, Ordering::SeqCst) > 0
         {
             return Err(RuntimeProcessError::Timeout(timeout));
+        }
+        if invocation
+            .args
+            .iter()
+            .any(|arg| arg == WORKSPACE_BOOTSTRAP_MARKER)
+            && self.failed_bootstrap_execs.swap(0, Ordering::SeqCst) > 0
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "fake workspace bootstrap failed".into(),
+            ));
         }
         if invocation
             .args
@@ -583,6 +599,29 @@ async fn failed_remote_worker_is_destroyed_before_return_and_reprovisioned() {
         .await
         .unwrap();
     assert_eq!(count_creates(&cli.invocations().await), 2);
+}
+
+#[tokio::test]
+async fn failed_workspace_bootstrap_destroys_the_new_untracked_sandbox() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_bootstrap_exec();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    assert!(matches!(
+        transport
+            .run_command(request("tenant", "user", "true"))
+            .await,
+        Err(RuntimeProcessError::ExecutionFailed(message))
+            if message.contains("workspace bootstrap failed")
+    ));
+    let invocations = cli.invocations().await;
+    assert!(invocations.iter().any(|call| {
+        call.args.starts_with(&["sandbox".into(), "destroy".into()])
+            && call
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--id", "sandbox-1"])
+    }));
 }
 
 #[tokio::test]

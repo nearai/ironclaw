@@ -1,16 +1,17 @@
 //! Docker availability gate for the full-turn sandbox integration test.
 
-use std::process::Command;
+use std::time::Duration;
+
+use tokio::process::Command;
+
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn required() -> bool {
     std::env::var("IRONCLAW_REQUIRE_DOCKER_TESTS").as_deref() == Ok("1")
 }
 
-pub fn docker_available() -> bool {
-    let available = Command::new("docker")
-        .arg("version")
-        .output()
-        .is_ok_and(|output| output.status.success());
+pub async fn docker_available() -> bool {
+    let available = docker_command_succeeds(["version"]).await;
     assert!(
         available || !required(),
         "IRONCLAW_REQUIRE_DOCKER_TESTS=1 but no Docker daemon is reachable"
@@ -18,16 +19,22 @@ pub fn docker_available() -> bool {
     available
 }
 
-pub fn docker_image_available(image: &str) -> bool {
-    let available = Command::new("docker")
-        .args(["image", "inspect", image])
-        .output()
-        .is_ok_and(|output| output.status.success());
+pub async fn docker_image_available(image: &str) -> bool {
+    let available = docker_command_succeeds(["image", "inspect", image]).await;
     assert!(
         available || !required(),
         "IRONCLAW_REQUIRE_DOCKER_TESTS=1 but sandbox image {image:?} is unavailable"
     );
     available
+}
+
+async fn docker_command_succeeds<const N: usize>(args: [&str; N]) -> bool {
+    let mut command = Command::new("docker");
+    command.args(args).kill_on_drop(true);
+    matches!(
+        tokio::time::timeout(DOCKER_PROBE_TIMEOUT, command.output()).await,
+        Ok(Ok(output)) if output.status.success()
+    )
 }
 
 pub fn configured_sandbox_image() -> String {

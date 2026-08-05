@@ -78,7 +78,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 3. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
    gateway or stub internals.
 4. **Zero setup by default.** Ordinary bins pass offline via a plain
-   `cargo test --test reborn_<name>` — no services, API keys, Docker, or special
+   `cargo test --test reborn_integration_<name>` — no services, API keys, Docker, or special
    linker. The sole exception is `reborn_sandbox_shell_turn`, a backend/runtime
    integration test selected by a dedicated Docker CI lane; locally it skips
    visibly unless Docker and the worker image are available, and CI sets

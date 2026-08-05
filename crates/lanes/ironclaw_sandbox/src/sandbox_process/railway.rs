@@ -45,6 +45,7 @@ const MAX_TRACKED_USERS: usize = 4_096;
 const WORKSPACE_ROOT: &str = "/workspace";
 const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
 const EXIT_SENTINEL: &str = "__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=";
+const WORKSPACE_BOOTSTRAP_MARKER: &str = "ironclaw-railway-workspace-bootstrap";
 const CHECKPOINT_FAILURE_WARNING: &str = "[IronClaw warning: command completed, but the Railway workspace checkpoint failed; recent state may not survive sandbox restart.]";
 
 // The complete Docker command arrives as distinct argv values. In particular,
@@ -213,21 +214,30 @@ impl RailwayPreviewSandboxTransport {
             )
             .await?;
         let sandbox_id = parse_sandbox_id(&created.stdout)?;
-        self.execute_cli(
-            RailwayCliInvocation::new(
-                self.config.cli_path.clone(),
-                RailwayCliOperation::ExecuteSandboxCommand,
-                sandbox_exec_argv(
-                    &self.config,
-                    &sandbox_id,
-                    deadline_remaining(deadline)?,
-                    workspace_bootstrap_argv(&railway_workspace_path(key)),
+        let bootstrap = async {
+            let timeout = deadline_remaining(deadline)?;
+            self.execute_cli(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    RailwayCliOperation::ExecuteSandboxCommand,
+                    sandbox_exec_argv(
+                        &self.config,
+                        &sandbox_id,
+                        timeout,
+                        workspace_bootstrap_argv(&railway_workspace_path(key)),
+                    ),
+                    output_limit,
                 ),
-                output_limit,
-            ),
-            deadline,
-        )
-        .await?;
+                deadline,
+            )
+            .await
+        }
+        .await;
+        if let Err(bootstrap_error) = bootstrap {
+            self.destroy_after_failed_execution(&sandbox_id, output_limit, &bootstrap_error)
+                .await?;
+            return Err(bootstrap_error);
+        }
         Ok(sandbox_id)
     }
 
@@ -307,10 +317,10 @@ impl RailwayPreviewSandboxTransport {
             tracing::error!(
                 ?execution_error,
                 ?cleanup_error,
-                "Railway worker execution failed and remote sandbox cleanup was not confirmed"
+                "Railway sandbox execution failed and remote cleanup was not confirmed"
             );
             return Err(RuntimeProcessError::ExecutionFailed(
-                "Railway preview worker failed and remote cleanup could not be confirmed"
+                "Railway preview sandbox execution failed and remote cleanup could not be confirmed"
                     .to_string(),
             ));
         }
@@ -864,7 +874,7 @@ fn workspace_bootstrap_argv(workspace: &str) -> Vec<String> {
         "sh".into(),
         "-c".into(),
         format!("mkdir -p \"$1\" && chown {WORKER_USER} \"$1\""),
-        "ironclaw-railway-workspace-bootstrap".into(),
+        WORKSPACE_BOOTSTRAP_MARKER.into(),
         workspace.into(),
     ]
 }
@@ -1108,7 +1118,11 @@ fn combine_output(stdout: String, stderr: String) -> String {
 fn redact_command_output(output: String) -> String {
     match ironclaw_safety::LeakDetector::new().scan_and_clean(&output) {
         Ok(redacted) => redacted,
-        Err(_) => {
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                "Railway preview command output failed secret scanning"
+            );
             "Railway preview command output was blocked because it may contain secret material."
                 .to_string()
         }
