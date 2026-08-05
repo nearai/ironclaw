@@ -20,12 +20,10 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_assistant::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, ProductCreateThreadRequest, ProductListThreadsRequest,
-    ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
-    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
-    RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
-    RebornTraceCreditsResponse, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_CREDITS_VIEW,
+    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornListThreadsResponse, RebornSetupExtensionResponse,
+    RebornSubmitTurnResponse, RebornTimelineResponse, RebornTraceCreditsResponse,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
 };
 use ironclaw_composition::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
@@ -39,6 +37,10 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCreateThreadRequest, ProductListThreadsRequest, ProductResolveGateRequest,
+    ProductSubmitTurnRequest,
+};
 use ironclaw_product_contracts::ironhub::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
     IronhubLinkService, IronhubRegisterRequest,

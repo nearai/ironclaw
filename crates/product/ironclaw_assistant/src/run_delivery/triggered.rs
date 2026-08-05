@@ -6,9 +6,9 @@ use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 use std::sync::Arc;
 
-use crate::OutboundPart;
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel_adapter::OutboundPart;
 use ironclaw_host_api::ids::AgentId;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,

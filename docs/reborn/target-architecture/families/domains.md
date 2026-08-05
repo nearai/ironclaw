@@ -231,8 +231,8 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
   - Conversation binding — `ironclaw_conversations` consumes an already-resolved user identifier.
   - WebUI ingress logic.
 - **Public surface:** an identity resolver; a user directory; the never-reach-upstream rule — this crate depends on nothing above the filesystem substrate, and nothing above composition may bypass it to touch identity state directly.
-- **Depends on:** `ironclaw_host_api`, `ironclaw_filesystem` — the narrowest dependency set of any crate in the family.
-- **Never depends on:** composition, product, or any crate above the substrate tier.
+- **Depends on:** `ironclaw_host_api`, `ironclaw_filesystem`, `ironclaw_product_contracts` — still among the narrowest dependency sets in the family, and contracts/substrates only. ✎ **The third entry arrived 2026-08-05 (PROPOSAL §12.13 D-Q)**, when the project access-gating service this entry already describes actually landed here; it names the port that service implements. `substrates → contracts` is downward, so the never-reach-upstream rule below is unaffected — D-Q widened what this crate may *name*, not the direction it may point.
+- **Never depends on:** composition, product, or any crate above the substrate tier. The rule is machine-enforced as an **allowlist** (`reborn_dependency_boundaries.rs` forbids every workspace crate not in the three-entry set), so a fourth entry is a documented decision rather than a silent addition.
 - **Security & authority role:** the sole authority deciding when a new user identifier is minted; verified-email linking is restricted to the browser-OAuth surface specifically so a channel actor asserting a verified email can never collide with an OAuth-linked user.
 - **Why a separate crate:** bottom-of-stack identity authority with a strictly enforced, never-reach-upstream dependency rule.
 

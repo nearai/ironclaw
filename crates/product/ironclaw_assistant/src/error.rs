@@ -19,8 +19,10 @@
 //! See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
 //! ownership decision and the alternatives it beat.
 
-use crate::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString};
 use ironclaw_host_api::error::HostApiError;
+use ironclaw_host_api::product_adapter::{
+    ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_turns::{TurnError, TurnErrorCategory};
@@ -142,7 +144,7 @@ pub enum ProductSurfaceFailure {
     /// The action was identified as a duplicate and the prior outcome should be replayed.
     #[error("duplicate action")]
     DuplicateAction {
-        prior_outcome: crate::ProductInboundAck,
+        prior_outcome: ironclaw_product_contracts::inbound::ProductInboundAck,
     },
 
     /// The requested action kind is not supported by this workflow version.

@@ -87,7 +87,6 @@ ironclaw_identity = { path = "../../domains/ironclaw_identity" }
 ironclaw_event_store = { path = "../../events/ironclaw_event_store" }
 ironclaw_openai_compat = { path = "../../product/ironclaw_openai_compat" }
 ironclaw_trace_commons = { path = "../../domains/ironclaw_trace_commons" }
-ironclaw_first_party_extension_ports = { path = "../../ironclaw_first_party_extension_ports" }
 ironclaw_extension_support = { path = "../../extensions/ironclaw_extension_support", optional = true }
 ironclaw_resources = { path = "../../kernel/ironclaw_resources" }
 ironclaw_runtime_policy = { path = "../../kernel/ironclaw_runtime_policy" }
@@ -96,7 +95,6 @@ ironclaw_secrets = { path = "../../substrates/ironclaw_secrets" }
 ironclaw_skills = { path = "../../domains/ironclaw_skills" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads" }
 ironclaw_triggers = { path = "../../domains/ironclaw_triggers" }
-ironclaw_projects = { path = "../../ironclaw_projects" }
 ironclaw_trust = { path = "../../kernel/ironclaw_trust" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns" }

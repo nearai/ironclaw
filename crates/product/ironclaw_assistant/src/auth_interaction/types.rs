@@ -1,8 +1,8 @@
-use crate::ProductSurfaceRejectionKind;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
+use ironclaw_host_api::product_adapter::ProductSurfaceRejectionKind;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_turns::{CancelRunResponse, ResumeTurnResponse};

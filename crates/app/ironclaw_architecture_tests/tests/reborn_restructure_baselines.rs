@@ -101,7 +101,21 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print`, not derived by subtracting the diff.
 /// ✎ Union re-record 2026-08-04: the two WS6 evictions above are disjoint and
 /// their deltas add exactly on the merged batch — 45_127 − 2_189 − 2_439 = 40_499.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_499;
+/// ✎ Re-recorded 40_499 → 40_405 on 2026-08-05 by the WS6 OpenAI-compat
+/// eviction (the re-scoped clause: `openai_compat_serve.rs`'s router-state
+/// assembly, `/v1/models` catalog + error map, projection streamer + envelope
+/// decode, and scope→caller projection move to
+/// `ironclaw_openai_compat::mount`). Measured on the post-eviction tree with
+/// `bash scripts/ci/check-composition-budget.sh --print`; the same command on
+/// this branch's base read **40_595**, so the −94 recorded here is a −190 net
+/// eviction (−199 moved out, +9 back as the module doc-comment recording what
+/// stayed and why) against a base that had drifted +96 over the old ceiling
+/// and was passing on tolerance alone. `[gate].loc_ceiling`/`loc_observed`
+/// move in the same commit, which is what the nudge assertion below exists to
+/// force.
+/// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
+/// repoint added one line in composition; recorded at the measured figure.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_419;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

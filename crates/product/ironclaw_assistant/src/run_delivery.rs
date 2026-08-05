@@ -27,7 +27,9 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError};
+use ironclaw_extension_contracts::channel_adapter::OutboundPart;
+use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
+use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
@@ -40,13 +42,14 @@ use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
 
+use crate::ProductSurfaceFailure;
 use crate::ProjectFilesystemReader;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
 };
-use crate::{ProductSurfaceFailure, ResolvedBinding};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::ResolvedBinding;
 
 mod gate_routes;
 mod observer;

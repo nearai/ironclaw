@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::{ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest};
+use crate::{ProjectCaller, RebornCreateProjectRequest};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::{InvocationId, UserId},
@@ -17,13 +17,14 @@ use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 
 pub const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
 const PROJECT_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__project_create";
 const PROJECT_CREATE_DESCRIPTION: &str = "Create a new first-class project owned by the current \
     user. Use this when the user asks to create, start, or set up a new project. The new project \
     appears in the Projects list once created.";
-/// Mirrors `ironclaw_projects::MAX_PROJECT_NAME_BYTES`; surfaced in the schema so
+/// Mirrors `ironclaw_identity::projects::MAX_PROJECT_NAME_BYTES`; surfaced in the schema so
 /// the model self-limits before the service rejects an oversized name.
 const MAX_PROJECT_NAME_BYTES: usize = 200;
 

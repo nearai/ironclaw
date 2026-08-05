@@ -436,46 +436,19 @@ impl ProtocolAuthEvidence {
 // hold `&impl HostProtocolAuthenticator` — in production, `ironclaw_webui`'s
 // authentication middleware and nothing else.
 
-/// Attest that a session cookie was verified by the host transport.
-pub fn mark_session_verified(
-    _grant: HostAuthenticationGrant,
-    cookie_name: impl Into<String>,
-    subject: impl Into<String>,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified(
-        AuthRequirement::SessionCookie {
-            name: cookie_name.into(),
-        },
-        subject,
-    )
-}
-
-/// Tenant-scoped [`mark_session_verified`], for tenant-scoped product surfaces.
-pub fn mark_session_verified_for_tenant(
-    _grant: HostAuthenticationGrant,
-    cookie_name: impl Into<String>,
-    subject: impl Into<String>,
-    tenant_id: TenantId,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified_for_tenant(
-        AuthRequirement::SessionCookie {
-            name: cookie_name.into(),
-        },
-        subject,
-        tenant_id,
-    )
-}
-
-/// Attest that a bearer token was verified by the host transport.
-pub fn mark_bearer_token_verified(
-    _grant: HostAuthenticationGrant,
-    subject: impl Into<String>,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified(AuthRequirement::BearerToken, subject)
-}
-
-/// Tenant-scoped [`mark_bearer_token_verified`] — what the WebUI gateway's
-/// authentication middleware mints for OpenAI-compatible route mounts.
+/// Attest that a bearer token was verified by the host transport, scoped to the
+/// host-resolved tenant — what the WebUI gateway's authentication middleware
+/// mints for OpenAI-compatible route mounts.
+///
+/// ✎ **WS8, 2026-08-05:** this is the only surviving member of the
+/// bearer/session half. `mark_bearer_token_verified`, `mark_session_verified`,
+/// and `mark_session_verified_for_tenant` had zero callers in any build and
+/// were deleted as dead mint surface — every reachable mint entry point is a
+/// forgeable one, so an unused one is pure liability. The session-cookie
+/// requirement itself stays live: `AuthRequirement::SessionCookie` is still
+/// constructed from manifest sections in
+/// `ironclaw_extension_contracts::product_adapter_section`. Reviving a session
+/// mint means adding it back **with** its caller.
 pub fn mark_bearer_token_verified_for_tenant(
     _grant: HostAuthenticationGrant,
     subject: impl Into<String>,

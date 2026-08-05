@@ -331,13 +331,10 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS3",
     },
     // ---- loops ----
-    SameLayerEdge {
-        crate_name: "ironclaw_first_party_extension_ports",
-        dependency_name: "ironclaw_loop_host",
-        layer: "loops",
-        owner: "dissolved (no target family)",
-        decided_in: "WS8",
-    },
+    // ✎ WS8, 2026-08-05: `first_party_extension_ports -> loop_host` is gone —
+    // the crate dissolved into `ironclaw_loop_host` (PROPOSAL §9 row 55), which
+    // is what "dissolved (no target family)" was waiting for. The baseline
+    // below drops with it; this is the equality doing its job.
     SameLayerEdge {
         crate_name: "ironclaw_turn_runner",
         dependency_name: "ironclaw_agent_loop",
@@ -573,13 +570,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS6",
     },
     SameLayerEdge {
-        crate_name: "ironclaw_projects",
-        dependency_name: "ironclaw_filesystem",
-        layer: "substrates",
-        owner: "domains/",
-        decided_in: "WS6",
-    },
-    SameLayerEdge {
         crate_name: "ironclaw_event_store",
         dependency_name: "ironclaw_event_log",
         layer: "substrates",
@@ -709,14 +699,32 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// The equality is what made the second half loud — under a `<=` ratchet the
 /// stale row would have sat green as one entry of slack.
 ///
+/// ✎ **72 → 71 (WS10, the `projects` → `identity` merge, 2026-08-05).** The
+/// §12.10 consolidation audit's single clear merge verdict landed:
+/// `ironclaw_projects` is gone and its records are `ironclaw_identity`'s
+/// `projects` module, so `projects → filesystem` died and `identity →
+/// filesystem` — already inventoried — absorbed it. **One** row deleted, none
+/// added: the merged module's only workspace dependencies were
+/// `ironclaw_host_api` and `ironclaw_filesystem`, exactly the two
+/// `reborn_dependency_boundaries.rs` already pins `ironclaw_identity` to, which
+/// is why the fold costs no edge. Found by this gate's stale-row arm rather than
+/// by reading the diff, and recounted on the merged tree (65 layered crates,
+/// 387 workspace edges, 71 same-layer) rather than derived by subtracting one.
+///
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 72;
+/// ✎ **2026-08-05 (WS8): 72 → 71; the projects merge in the same batch took it to 70.** The dissolution of
+/// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
+/// `loops` pair the two of them formed. No edge was re-plumbed and none was
+/// added: the crate's five workspace dependencies were already `loop_host`'s.
+const SAME_LAYER_EDGE_BASELINE: usize = 70;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
-/// read as success; these are deliberately far below the live values (67
-/// layered crates, 391 workspace edges) so they catch a broken walk without
+/// read as success; these are deliberately far below the live values (✎ **65**
+/// layered crates, **387** workspace edges, re-measured 2026-08-05 after the
+/// `projects` → `identity` merge; the 67/391 this note used to quote was a
+/// snapshot of `origin/main` @ `676d86ce02`) so they catch a broken walk without
 /// tripping on ordinary growth or deletion.
 const MIN_LAYERED_CRATES: usize = 50;
 const MIN_WORKSPACE_EDGES: usize = 250;
@@ -725,6 +733,16 @@ const MIN_WORKSPACE_EDGES: usize = 250;
 /// `Cargo.toml`. Rows are append-only and a row's origin layer is immutable —
 /// editing one to match a demotion is the one way to defeat the check below,
 /// and it is a visible diff in a file whose entire subject is that rule.
+///
+/// **Append-only is not "never deleted."** The one sanctioned removal is a
+/// crate leaving the workspace, and the gate below states it rather than leaving
+/// it to judgement: `vanished` fails with *"CRATE_LAYER_ORIGINS names crates the
+/// workspace no longer has … Delete the rows — a stale origin row is a demotion
+/// detector aimed at nothing."* A row may therefore be dropped **only** in the
+/// change that deletes or merges away its crate, and only because the gate is
+/// already red on it. ✎ Exercised 2026-08-05 by the `projects` → `identity`
+/// merge (WS10, PROPOSAL §12.10): `ironclaw_projects` left the workspace, the
+/// gate named it by that message, and its row went with it.
 ///
 /// `ironclaw_integration_tests` predates the layer metadata (its
 /// `Cargo.toml` carried no `layer` when introduced); it is recorded at its
@@ -751,7 +769,9 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_extension_registry", "loops"),
     ("ironclaw_extractors", "substrates"),
     ("ironclaw_filesystem", "substrates"),
-    ("ironclaw_first_party_extension_ports", "loops"),
+    // ✎ WS8, 2026-08-05: `ironclaw_first_party_extension_ports`' row is deleted
+    // with the crate, per this table's own stale-row rule — a demotion detector
+    // aimed at a crate that no longer exists detects nothing.
     // Promoted substrates -> loops. Moving UP narrows reach; no pin owed.
     ("ironclaw_hooks", "substrates"),
     ("ironclaw_host_api", "contracts"),
@@ -772,7 +792,6 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_processes", "runtimes"),
     ("ironclaw_assistant", "products"),
     ("ironclaw_product_contracts", "contracts"),
-    ("ironclaw_projects", "substrates"),
     ("ironclaw_prompt_envelope", "contracts"),
     ("ironclaw_composition", "app"),
     ("ironclaw_config", "substrates"),
@@ -854,7 +873,10 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
             "ironclaw_extension_host",
             "ironclaw_extension_manager",
             "ironclaw_extension_support",
-            "ironclaw_first_party_extension_ports",
+            // ✎ WS8, 2026-08-05: `ironclaw_first_party_extension_ports` dropped
+            // off here by dissolving into `ironclaw_loop_host`, which was
+            // already a permitted consumer — the reach did not widen, one of
+            // the two crates holding it stopped existing.
             "ironclaw_loop_host",
             "ironclaw_composition",
         ],
@@ -916,11 +938,22 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
         // runtimes, kernel and loops crate with nothing objecting — the matrix
         // reads the widening as an improvement. Frozen at the four consumers
         // that existed when it merged; a fifth is a reviewed decision.
+        //
+        // ✎ The fifth landed 2026-08-05 and is that reviewed decision, taken
+        // where the rule asks for it: `ironclaw_openai_compat` takes the edge
+        // for CHECKLIST WS6's OpenAI-compat eviction clause, which names
+        // `product_contracts` + `host_ingress` as exactly the two crates the
+        // movable residue is reachable with. The edge carries one type
+        // (`ProtectedRouteMount`) into `src/mount.rs`, the crate's own
+        // route-mount assembly; it is the same shape as `ironclaw_webui`'s and
+        // `ironclaw_operator`'s, a transport naming the carrier it hands back
+        // to composition.
         permitted_consumers: &[
             "ironclaw_extension_host",
             "ironclaw_operator",
             "ironclaw_composition",
             "ironclaw_webui",
+            "ironclaw_openai_compat",
         ],
     },
 ];

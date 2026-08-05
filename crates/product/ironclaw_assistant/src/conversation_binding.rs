@@ -2,9 +2,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 use async_trait::async_trait;
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 
 use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
@@ -798,7 +799,7 @@ fn conversation_installation_id(
 }
 
 fn conversation_event_id(
-    event_id: &crate::ExternalEventId,
+    event_id: &ironclaw_extension_contracts::external::ExternalEventId,
 ) -> Result<ironclaw_conversations::ExternalEventId, ProductOperationFailure> {
     ironclaw_conversations::ExternalEventId::new(event_id.as_str()).map_err(map_conversation_error)
 }

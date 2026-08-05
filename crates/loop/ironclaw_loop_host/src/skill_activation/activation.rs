@@ -9,14 +9,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
-use ironclaw_loop_host::{
+use crate::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
     SkillSourceKind, sort_skill_bundle_descriptors,
 };
+use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt, stream};
+use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
 use ironclaw_skills::{
     LoadedSkill, SkillSelectionOptions, SkillSource, SkillTrust, extract_skill_mentions,
     parse_skill_md, prefilter_skills_with_options, skill_token_cost, validate_skill_name,
@@ -42,7 +42,7 @@ const SKILL_LISTING_CANDIDATE_NAME: &str = "available-skills";
 /// by [`descriptor_context_ordering_key`], so the listing renders after any
 /// loaded skill bodies.
 const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
-const SKILL_LISTING_HEADER: &str = include_str!("../prompts/skill_listing_header.md");
+const SKILL_LISTING_HEADER: &str = include_str!("../../prompts/skill_listing_header.md");
 const MAX_LISTED_SKILLS: usize = 100;
 const MAX_LISTING_DESCRIPTION_CHARS: usize = 250;
 
@@ -1736,11 +1736,11 @@ fn content_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{SkillBundleId, SkillFilePath};
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
-    use ironclaw_loop_host::{SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{TurnActor, TurnId, TurnRunId};
 
@@ -1810,7 +1810,7 @@ mod tests {
                 format!("{name} description"),
             )
             .with_provenance(
-                ironclaw_loop_host::SkillBundleProvenance::new(SkillSourceKind::User)
+                crate::SkillBundleProvenance::new(SkillSourceKind::User)
                     .with_content_hash("stable-test-hash"),
             );
             Self {

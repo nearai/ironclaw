@@ -1,19 +1,46 @@
 //! First-class Project domain contracts for IronClaw Reborn.
 //!
-//! This crate owns the Project entity, project membership / access-control
+//! This module owns the Project entity, project membership / access-control
 //! records, and the [`ProjectRepository`] persistence contract. The single
 //! implementation, [`FilesystemProjectRepository`], persists records over the
 //! Reborn `ScopedFilesystem` substrate, so backend selection (Postgres / libSQL
-//! / JSONL / in-memory) is the host's `RootFilesystem` concern — this crate
-//! contains no SQL.
+//! / JSONL / in-memory) is the host's `RootFilesystem` concern — there is no
+//! SQL here.
 //!
 //! Projects scope threads, automations, and workspace memory. In the Reborn
 //! stack a `project_id` already flows through `ThreadScope`,
 //! `ProductAgentBoundCaller`, and `TriggerRecord` as a scope identifier; this
-//! crate gives that identifier a durable, access-controlled entity.
+//! module gives that identifier a durable, access-controlled entity.
 //!
 //! Authorization is **live** — [`ProjectRepository::resolve_access`] is called
 //! per request and never cached, so revoking a grant takes effect immediately.
+//! `tests/project_repository_contract.rs` drives that property through the
+//! public seam in both directions (a revoke and a re-grant are each visible on
+//! the very next call).
+//!
+//! # Why it lives in `ironclaw_identity`
+//!
+//! Merged here from the former standalone `ironclaw_projects` crate (PROPOSAL
+//! §6.4.11 / §12.10, decided 2026-07-30). It is a principal-scoped access
+//! record with a dependency set identical to identity's pinned allowlist
+//! (`{ironclaw_host_api, ironclaw_filesystem}`), riding the same control-plane
+//! substrate as [`RebornIdentityStore`](crate::RebornIdentityStore) — nothing
+//! distinguished it as its own compilation or trust unit.
+//!
+//! The authorization-gating half followed on 2026-08-05:
+//! [`RebornProjectService`] in [`service`] implements
+//! `ironclaw_product_contracts::project_service::ProjectService` over the
+//! repository below it. It could not travel with the records because the port
+//! was a `products`-layer declaration; §12.13 D-P hoisted the port into
+//! `ironclaw_product_contracts` and D-Q widened this crate's armed allowlist to
+//! `{ironclaw_host_api, ironclaw_filesystem, ironclaw_product_contracts}` so
+//! the adapter could name it.
+//!
+//! Still **not** here, and neither is blocked on this crate: the project-create
+//! capability (`ironclaw_assistant::project_create_capability`, which names
+//! `ironclaw_loop_host` — a `loops` crate no `substrates` crate may hold) and
+//! the multi-mount browse reader (`ironclaw_composition`, which names product
+//! helpers and composition-owned mount aliases). See §6.10.1.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -26,8 +53,10 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 use ulid::Ulid;
 
+pub mod service;
 mod store;
 
+pub use service::RebornProjectService;
 pub use store::FilesystemProjectRepository;
 
 /// Maximum byte length of a project name.
@@ -60,19 +89,19 @@ pub enum ProjectError {
 }
 
 impl ProjectError {
-    pub(crate) fn invalid_record(reason: impl Into<String>) -> Self {
+    fn invalid_record(reason: impl Into<String>) -> Self {
         Self::InvalidRecord {
             reason: reason.into(),
         }
     }
 
-    pub(crate) fn invalid_member(reason: impl Into<String>) -> Self {
+    fn invalid_member(reason: impl Into<String>) -> Self {
         Self::InvalidMember {
             reason: reason.into(),
         }
     }
 
-    pub(crate) fn backend(operation: &str, error: impl std::fmt::Display) -> Self {
+    fn backend(operation: &str, error: impl std::fmt::Display) -> Self {
         Self::Backend {
             reason: format!("{operation}: {error}"),
         }

@@ -24,11 +24,12 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{
-    ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
-};
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
+use ironclaw_extension_contracts::channel_adapter::{
+    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+};
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;

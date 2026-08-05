@@ -123,6 +123,90 @@ secret_value = "123456789:AABBccDDeeFFgg"
     ));
 }
 
+/// The inline-secret guard's vendor token prefixes are a safety **denylist**,
+/// deliberately a **superset** of the bundled package inventory — so it cannot
+/// be sourced from the packages, which is what CHECKLIST WS5's `product` narrows
+/// row asked for under "slack/telegram token heuristics → the packages that own
+/// them". This test is the mechanical half of that refutation: it drives the
+/// real ingestion path with shapes belonging to **no** installed package, and
+/// each must still be rejected. Delete a prefix to "de-hardcode the vendor
+/// names" and this goes red rather than the guard quietly narrowing.
+///
+/// **It also closes a real coverage hole.** The test above it writes its secret
+/// under the key `secret_value`, which `is_secret_key_name` rejects on the *key*
+/// alone — so before this test the entire value-shape half of the guard, every
+/// prefix in it, had no coverage at all. Every case here uses `handle`, a key
+/// the name rule does not match, so only `looks_like_inline_secret` can reject.
+///
+/// The sibling disposition, same shape and same reason, is
+/// `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`
+/// in `ironclaw_trace_commons`. The `PATH_TERM_COLLISIONS` carve-out in
+/// `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`
+/// records why the names stay here.
+#[test]
+fn inline_secret_guard_is_a_safety_denylist_not_package_inventory() {
+    for (label, secret) in [
+        // Three shapes DO belong to bundled packages…
+        ("slack bot token", "xoxb-1111-2222-abcdefghijklmnop"),
+        (
+            "telegram bot token",
+            "123456789:AABBccDDeeFFggHHiiJJkkLLmmNNooPP",
+        ),
+        ("github pat", "ghp_0123456789abcdefghijklmnopqrstuvwxyz"),
+        // …and these belong to NONE. Sourcing the set from the package
+        // inventory would drop every row below and stop rejecting them.
+        (
+            "openai/anthropic api key",
+            "sk-0123456789abcdefghijklmnopqrst",
+        ),
+        ("aws access key id", "AKIAIOSFODNN7EXAMPLE"),
+        (
+            "json web token",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+        ),
+        ("pem private key", "-----BEGIN PRIVATE KEY-----"),
+        ("uri userinfo", "https://user:hunter2@example.com/hook"),
+    ] {
+        let raw = manifest(&format!(
+            r#"
+[[product_adapter.inbound.required_credentials]]
+handle = "{secret}"
+"#
+        ));
+
+        // The guard's rejection reaches the caller wrapped by the manifest
+        // parser (`Manifest(HostApiSectionRejected { reason })`), so match on
+        // the rendered reason and on the field it names. Matching the outer
+        // variant alone would accept a schema rejection and mask a deleted
+        // prefix — which is the exact regression this test exists to catch.
+        let error = parse(&raw).err().unwrap_or_else(|| {
+            panic!(
+                "{label}: accepted inline secret material. The guard is a safety denylist \
+                 and must stay a SUPERSET of the bundled package inventory; if this shape \
+                 was dropped to \"de-hardcode the vendor names\", restore it."
+            )
+        });
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("inline secret material is not allowed in manifest field")
+                && rendered.contains("required_credentials[1].handle"),
+            "{label}: the manifest was rejected, but not by the inline-secret guard on the \
+             `handle` value ({rendered}). A schema or key-name rejection would mask a \
+             deleted prefix — this case must fail on `looks_like_inline_secret`."
+        );
+    }
+
+    // Negative control: a plain handle must still parse, so the cases above are
+    // proving the guard fires rather than proving everything fails.
+    parse(&manifest(
+        r#"
+[[product_adapter.inbound.required_credentials]]
+handle = "other_token"
+"#,
+    ))
+    .expect("a non-secret-looking handle must still parse");
+}
+
 #[test]
 fn rejects_egress_credential_not_declared_as_required() {
     let raw = manifest(

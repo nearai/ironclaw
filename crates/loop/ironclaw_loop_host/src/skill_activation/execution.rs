@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
+use crate::{SkillBundleId, SkillBundleSource};
 use ironclaw_loop_contracts::LoopRunContext;
-use ironclaw_loop_host::{SkillBundleId, SkillBundleSource};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
-use crate::activation::CapturedSkillActivationPlan;
-use crate::{
+use super::activation::CapturedSkillActivationPlan;
+use super::{
     SelectableSkillContextSource, SkillActivationPlan, SkillActivationRequest,
     SkillActivationSelection, SkillActivationSelectionError, SkillBundleAsset,
     SkillBundleAssetReadError, SkillBundleAssetReader,
@@ -160,14 +160,14 @@ pub enum SkillExecutionAdapterError {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::{
+        SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
+        SkillFilePath, SkillSourceKind,
+    };
     use async_trait::async_trait;
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
         SkillVisibility,
-    };
-    use ironclaw_loop_host::{
-        SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
-        SkillFilePath, SkillSourceKind,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};

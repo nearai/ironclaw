@@ -642,13 +642,18 @@ pub(crate) struct AcmeFixtureChannelAdapter;
 impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
-        request: ironclaw_assistant::VerifiedInbound<'_>,
-    ) -> Result<ironclaw_assistant::InboundOutcome, ironclaw_assistant::ChannelError> {
-        use ironclaw_assistant::{
-            ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-            ImmediateResponse, InboundOutcome, ProductTriggerReason,
-        };
+        request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::InboundOutcome,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
         use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, ImmediateResponse, InboundOutcome, ProductTriggerReason,
+        };
+        use ironclaw_extension_contracts::external::{
+            ExternalActorRef, ExternalConversationRef, ExternalEventId,
+        };
         let parse = |reason: String| ChannelError::Parse { reason };
         let value: serde_json::Value =
             serde_json::from_slice(request.body).map_err(|error| parse(error.to_string()))?;
@@ -700,10 +705,15 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
     /// fixture.
     async fn deliver(
         &self,
-        envelope: ironclaw_assistant::OutboundEnvelope,
+        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
         egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<ironclaw_assistant::DeliveryReport, ironclaw_assistant::ChannelError> {
-        use ironclaw_assistant::{ChannelError, OutboundPart, PartDeliveryOutcome};
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, OutboundPart, PartDeliveryOutcome,
+        };
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -755,7 +765,7 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
                 break;
             }
         }
-        Ok(ironclaw_assistant::DeliveryReport { parts })
+        Ok(ironclaw_extension_contracts::channel_adapter::DeliveryReport { parts })
     }
 }
 

@@ -98,7 +98,7 @@ struct SwitchCaller {
 /// Writes the learned-skill auto-activation default.
 ///
 /// **The switch is process-global, not per-user.** What the skill-activation
-/// source reads (`ironclaw_first_party_extension_ports::activation`) is this
+/// source reads (`ironclaw_loop_host::skill_activation::activation`) is this
 /// one `AtomicBool`, shared by every turn of every user in the process; there
 /// is no durable per-user record behind it and the read site takes no user.
 /// So this handler does not pretend the setting is per-user: it binds the

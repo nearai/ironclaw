@@ -1,10 +1,15 @@
-//! Backend-agnostic contract tests for [`ProjectRepository`].
+//! Backend-agnostic contract tests for
+//! [`ProjectRepository`](ironclaw_identity::projects::ProjectRepository).
 //!
 //! The sole implementation is `FilesystemProjectRepository`, which persists over
 //! the Reborn `ScopedFilesystem` substrate. These assertions run it against an
 //! in-memory `RootFilesystem`; backend correctness (Postgres / libSQL / JSONL)
 //! is `ironclaw_filesystem`'s concern, so a single in-memory run exercises all
 //! repository logic with no per-backend duplication.
+//!
+//! Driven from outside the crate on purpose: the `projects` module's guarantee
+//! is about its **public** seam, and `ironclaw_assistant`'s gating service is
+//! the caller that consumes it that way.
 
 use std::sync::Arc;
 
@@ -15,8 +20,8 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
 };
-use ironclaw_projects::{
-    FilesystemProjectRepository, MAX_PROJECT_METADATA_BYTES, ProjectMemberRecord,
+use ironclaw_identity::projects::{
+    FilesystemProjectRepository, MAX_PROJECT_METADATA_BYTES, ProjectError, ProjectMemberRecord,
     ProjectMemberStatus, ProjectRecord, ProjectRepository, ProjectRole, ProjectState,
 };
 
@@ -68,7 +73,7 @@ async fn run_contract(repo: &dyn ProjectRepository) {
     repo.create_project(record.clone()).await.unwrap();
     assert!(matches!(
         repo.create_project(record.clone()).await,
-        Err(ironclaw_projects::ProjectError::AlreadyExists)
+        Err(ProjectError::AlreadyExists)
     ));
 
     // Owner resolves to Owner; stranger has no access.
@@ -183,6 +188,28 @@ async fn run_contract(repo: &dyn ProjectRepository) {
             .is_empty()
     );
 
+    // …and a re-grant is visible on the very next call, through the same handle.
+    // The two directions pin different halves of "resolution is live, never
+    // cached" (PROPOSAL §6.4.11): the revoke above rules out caching a positive
+    // decision, this rules out caching the negative one. A memoizing
+    // implementation passes at most one of them.
+    repo.upsert_member(member(
+        &project_id,
+        &bob,
+        &owner,
+        ProjectRole::Viewer,
+        ProjectMemberStatus::Active,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.resolve_access(&tenant(), &project_id, &bob)
+            .await
+            .unwrap(),
+        Some(ProjectRole::Viewer),
+        "a re-grant must take effect immediately — resolve_access is never cached"
+    );
+
     // Remove the member row entirely.
     assert!(
         repo.remove_member(&tenant(), &project_id, &bob)
@@ -286,7 +313,7 @@ async fn run_contract(repo: &dyn ProjectRepository) {
     assert!(
         matches!(
             repo.create_project(huge).await,
-            Err(ironclaw_projects::ProjectError::InvalidRecord { .. })
+            Err(ProjectError::InvalidRecord { .. })
         ),
         "oversized metadata must be rejected"
     );
@@ -295,7 +322,7 @@ async fn run_contract(repo: &dyn ProjectRepository) {
     let ghost = ProjectRecord::new(tenant(), owner.clone(), "Ghost", "").unwrap();
     assert!(matches!(
         repo.update_project(ghost).await,
-        Err(ironclaw_projects::ProjectError::NotFound)
+        Err(ProjectError::NotFound)
     ));
 
     // Delete removes the project and its membership.

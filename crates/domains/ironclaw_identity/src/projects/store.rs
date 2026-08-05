@@ -1,14 +1,15 @@
 //! [`ProjectRepository`] over the Reborn `ScopedFilesystem` substrate.
 //!
 //! Records are JSON entries under a control-plane mount that the agent cannot
-//! reach (the same substrate the reborn-identity store rides). Backend
+//! reach — the same substrate this crate's
+//! [`RebornIdentityStore`](crate::RebornIdentityStore) rides. Backend
 //! selection — Postgres / libSQL / JSONL / in-memory — is the host's
 //! `RootFilesystem` concern, so this is the single backend-agnostic
-//! implementation; the crate carries no SQL.
+//! implementation; there is no SQL here.
 //!
 //! Layout (opaque key parts are base64url-encoded into their own segments so a
-//! delimiter-like id cannot collide with a path boundary, mirroring
-//! `ironclaw_identity`):
+//! delimiter-like id cannot collide with a path boundary, mirroring the
+//! identity store's own key encoding):
 //!
 //! ```text
 //! /tenant-shared/reborn-projects/<tenant>/records/<project_id>.json
@@ -38,7 +39,7 @@ use ironclaw_host_api::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{
+use super::{
     ProjectError, ProjectList, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord,
     ProjectRepository, ProjectRole, ProjectState,
 };

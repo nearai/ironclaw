@@ -15,7 +15,7 @@ use serde_json::Value;
 // lockstep edit of the ~100 literals below. On today's tree resolution is the
 // identity — pinned by `reborn_crate_inventory.rs`.
 use ratchet_support::{
-    crate_path, owning_crate_name, production_rust_files, resolve_crate_relative,
+    crate_dir, crate_path, owning_crate_name, production_rust_files, resolve_crate_relative,
     strip_comments_and_strings, try_crate_directory, workspace_root,
 };
 
@@ -154,6 +154,76 @@ fn boundary_rule_names_are_package_names_not_crate_directories() {
     );
 }
 
+/// PROPOSAL §11.3: this is an internal-only workspace and **nothing publishes**.
+///
+/// The proposal recorded that as a fact plus one exception —
+/// *"nothing publishes; `skills` is the one manifest missing `publish = false`
+/// — fix"*. Measured 2026-08-05 the exception had grown to **three**
+/// (`ironclaw_skills`, `ironclaw_common`, `ironclaw_safety`), which is what a
+/// prose claim with no gate behind it does: every crate added or renamed since
+/// is a fresh chance to omit the key, and the omission is invisible until
+/// someone runs `cargo publish`. All three now declare it, and this test is why
+/// the count cannot drift back — a new crate that forgets the key fails here
+/// rather than being noticed by the next reader of the proposal.
+///
+/// Read from the manifests rather than from `cargo metadata`, deliberately:
+/// metadata reports `publish: null` both for "key absent" and for
+/// `publish = true`, so the distinction this test exists for is not in it.
+#[test]
+fn reborn_no_workspace_crate_is_publishable() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let mut missing = Vec::new();
+    let mut checked = 0usize;
+    for package in packages {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        let manifest_path = package["manifest_path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} has no manifest_path"));
+        let manifest = std::fs::read_to_string(manifest_path)
+            .unwrap_or_else(|error| panic!("cannot read {manifest_path}: {error}"));
+        checked += 1;
+        // Table-scoped: `publish` is only meaningful in `[package]`. A
+        // `publish = false` under any other table (say, `[package.metadata]`)
+        // is inert to cargo and must not satisfy this gate.
+        let mut in_package_table = false;
+        let mut declared = false;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_package_table = trimmed == "[package]";
+                continue;
+            }
+            if in_package_table && trimmed == "publish = false" {
+                declared = true;
+                break;
+            }
+        }
+        if !declared {
+            missing.push(format!("{name} at {manifest_path}"));
+        }
+    }
+
+    // Fail-closed: a metadata query that returned nothing would otherwise pass
+    // this test having checked no manifest at all.
+    assert!(
+        checked >= 60,
+        "expected to check every workspace manifest; saw only {checked}"
+    );
+    assert!(
+        missing.is_empty(),
+        "every workspace package must declare `publish = false` — this workspace is \
+         internal-only and nothing is released to a registry (PROPOSAL §11.3, CHECKLIST \
+         WS10). Add the key to:\n{}",
+        missing.join("\n")
+    );
+}
+
 #[test]
 fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
     let metadata = cargo_metadata();
@@ -247,26 +317,10 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
             }
         }
 
-        for dependency in
-            workspace_dependency_names(package).filter(|dep| is_normal_dependency(dep))
-        {
-            let Some(dependency_name) = dependency["name"].as_str() else {
-                continue;
-            };
-            let Some(dependency_layer) = layers.get(dependency_name) else {
-                continue;
-            };
-            if dependency_layer == "legacy" && crate_name != "ironclaw_legacy" {
-                if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
-                    used_exceptions.insert((exception.crate_name, exception.dependency_name));
-                    continue;
-                }
-                violations.push(format!(
-                    "{crate_name} ({crate_layer}) must not depend on legacy crate \
-                     {dependency_name} via a normal dependency"
-                ));
-            }
-        }
+        // A second pass rejecting a normal dep on a `legacy`-layer crate used to
+        // sit here. It was deleted with the variant (§11.3, 2026-08-05): no
+        // package has declared `layer = "legacy"` since the v1 tree went, so
+        // `layers` could never hold one and the loop could not fire.
     }
 
     assert!(
@@ -386,15 +440,21 @@ fn reborn_crate_dependency_boundaries_hold() {
 
     // Canonical Reborn identity layer: it maps external identities to a stable
     // `UserId` at the bottom of the stack, so among internal ironclaw crates it
-    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
-    // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
-    // as an allowlist so it can never reach UPSTREAM (into
-    // `ironclaw_composition` / `ironclaw_assistant`) or onto the v1
-    // legacy enclave — the "never reach upstream" property the crate guarantees.
+    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes),
+    // `ironclaw_filesystem` (the durable substrate it persists behind) and
+    // `ironclaw_product_contracts` (the `ProjectService` port its `projects`
+    // module implements — added 2026-08-05 by PROPOSAL §12.13 D-Q, and by
+    // exactly that one entry). Enforced as an allowlist so it can never reach
+    // UPSTREAM (into `ironclaw_composition` / `ironclaw_assistant`) or onto the
+    // v1 legacy enclave — the "never reach upstream" property the crate
+    // guarantees. All three additions are contracts- or substrates-layer, so
+    // the guarantee is unchanged in kind: D-Q widens what this crate may *name*,
+    // never the direction it may point.
     let reborn_identity_allowed = [
         "ironclaw_identity",
         "ironclaw_host_api",
         "ironclaw_filesystem",
+        "ironclaw_product_contracts",
     ];
     assert_no_normal_workspace_deps(
         &dependencies,
@@ -515,6 +575,108 @@ fn reborn_crate_dependency_boundaries_hold() {
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+/// PROPOSAL §11.2.3's **size-ceiling** clause: *"Each contracts crate also
+/// carries a checked size ceiling (a line-count ratchet raised only by explicit
+/// review) alongside its purity allowlist."*
+///
+/// ✎ **Added 2026-08-05 (CHECKLIST WS10, §11.2.3).** The Wave 2 truth audit
+/// recorded this clause as the one part of item 3 that *"does not exist
+/// anywhere"* — and as the clause that would now bite, because the contracts
+/// tier grew past every size a thin trait/DTO layer was supposed to have while
+/// only its *dependencies* were policed. A crate cannot import a framework, and
+/// could absorb an unbounded amount of logic instead; that substitution is
+/// exactly what this ratchet makes visible.
+///
+/// **Ceilings, not equalities**, unlike this file's other ratchets — and
+/// deliberately, because the two failure modes differ. A dependency allowlist
+/// with slack is an unclaimed budget for the specific debt it names (#7147); a
+/// line ceiling with slack just means the crate got smaller, which is the
+/// direction wanted, and equality here would red the build on every routine
+/// deletion. What must not happen silently is *growth*, so each ceiling sits a
+/// bounded `TOLERANCE` above the measured count and a crate that eats through it
+/// forces a reviewer to say so in writing.
+///
+/// The ceiling is also bounded from *below*: a crate more than one tolerance
+/// window under its ceiling has banked slack, which is how a ratchet goes inert
+/// (the exact way `composition-budget.toml`'s share ceiling did — 17.4pp of
+/// slack, constraining nothing, #7151). Re-capture at every wave close.
+///
+/// Measured through [`production_rust_files`], the suite's single definition of
+/// a production source file, so the numbers agree with every sibling gate
+/// rather than with a private walk.
+#[test]
+fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
+    /// How far above the measured count each ceiling sits, and the width of
+    /// the banked-slack window below it.
+    const TOLERANCE: usize = 400;
+
+    /// `(crate, production line ceiling)` — captured 2026-08-05 by running this
+    /// test with every ceiling at `0` and reading the counts out of its own
+    /// failure message. Never counted by eye.
+    const SIZE_CEILINGS: &[(&str, usize)] = &[
+        ("ironclaw_common", 3_793),
+        ("ironclaw_extension_contracts", 7_727),
+        ("ironclaw_host_api", 17_501),
+        ("ironclaw_loop_contracts", 14_479),
+        ("ironclaw_product_contracts", 14_471),
+        ("ironclaw_prompt_envelope", 832),
+    ];
+
+    let root = workspace_root();
+    let mut over = Vec::new();
+    let mut banked = Vec::new();
+    for (crate_name, ceiling) in SIZE_CEILINGS {
+        let src = crate_dir(&root, crate_name).join("src");
+        let files = production_rust_files(&src);
+        assert!(
+            !files.is_empty(),
+            "no production sources found under {} — this ratchet would pass having measured \
+             nothing",
+            src.display()
+        );
+        let lines: usize = files
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                    .lines()
+                    .count()
+            })
+            .sum();
+
+        if lines > *ceiling {
+            over.push(format!(
+                "{crate_name}: {lines} production lines over a ceiling of {ceiling}"
+            ));
+        } else if ceiling.saturating_sub(lines) > TOLERANCE {
+            banked.push(format!(
+                "{crate_name}: {lines} production lines against a ceiling of {ceiling} \
+                 ({} of slack, window is {TOLERANCE})",
+                ceiling - lines
+            ));
+        }
+    }
+
+    assert!(
+        over.is_empty(),
+        "a contracts crate grew past its §11.2.3 size ceiling:\n{}\n\nA contracts crate holds \
+         traits and DTOs. Growing one is how logic reaches the tier the dependency allowlist \
+         above already protects — the allowlist cannot see a crate that imports nothing and \
+         implements everything. Either move the growth to the crate that owns the behavior, or \
+         raise the ceiling HERE with the reason in the PR body, which is what \"raised only by \
+         explicit review\" means.",
+        over.join("\n")
+    );
+    assert!(
+        banked.is_empty(),
+        "a contracts crate is now far enough under its ceiling that the ceiling constrains \
+         nothing:\n{}\n\nRe-capture it in the PR that shrank the crate. A ratchet left above \
+         what it measures is an unclaimed budget for the next unreviewed growth — the specific \
+         way `composition-budget.toml`'s share ceiling went inert with 17.4pp of slack (#7151).",
+        banked.join("\n")
+    );
 }
 
 /// PROPOSAL §11.2.3, external half: a contracts crate never acquires a
@@ -878,6 +1040,182 @@ fn retired_host_trusted_ingress_token_crate_stays_removed() {
     );
 }
 
+/// The module that received the dissolved `ironclaw_first_party_extension_ports`
+/// crate, resolved through the crate inventory like every other path here.
+const DISSOLVED_PORTS_MODULE: &str = "crates/ironclaw_loop_host/src/skill_activation";
+
+/// The dissolved crate's entire workspace dependency set, frozen as an
+/// **equality** (CHECKLIST WS8, 2026-08-05).
+///
+/// `ironclaw_first_party_extension_ports` declared exactly these five workspace
+/// dependencies plus `ironclaw_loop_host` itself, and a `BoundaryRule` enforced
+/// the complement. The crate is gone — its contents live in
+/// `ironclaw_loop_host` — and a crate-granular rule can no longer say anything
+/// useful about them, because `loop_host` legitimately depends on nine of the
+/// crates that rule forbade (`approvals`, `capabilities`, `host_runtime`,
+/// `llm`, `memory`, `outbound`, `processes`, `resources`, `safety`). Dissolving
+/// the crate without this test would have widened the moved code's legal reach
+/// by those nine in silence: the classic "removing a redundant layer un-masks
+/// behavior" trade, where the layer was backstopping an import restriction.
+///
+/// An **equality**, not a denylist, because the denylist form only catches the
+/// crates someone thought to enumerate. Widening this set is allowed and is
+/// exactly the reviewable moment: it means the skill-activation adapters have
+/// grown a new dependency the dissolved crate never had.
+const DISSOLVED_PORTS_MODULE_REACH: &[&str] = &[
+    "ironclaw_filesystem",
+    "ironclaw_host_api",
+    "ironclaw_loop_contracts",
+    "ironclaw_skills",
+    "ironclaw_turns",
+];
+
+/// Every `ironclaw_*` crate named in code (not comments or string literals)
+/// under `dir`, recursively.
+fn workspace_crates_named_in_code(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    named: &mut std::collections::BTreeMap<String, String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            workspace_crates_named_in_code(&path, root, named);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        // Fatal on unreadable: a scanner that skips a file it cannot read
+        // reports an empty reach and passes while measuring nothing (WS10).
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let code = strip_comments_and_strings(&source);
+        let chars: Vec<char> = code.chars().collect();
+        let mut index = 0usize;
+        while index < chars.len() {
+            if !(chars[index] == 'i' && code_word_starts_at(&chars, index, "ironclaw_")) {
+                index += 1;
+                continue;
+            }
+            let mut end = index + "ironclaw_".len();
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[index..end].iter().collect();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            named
+                .entry(name)
+                .or_insert_with(|| relative.display().to_string());
+            index = end;
+        }
+    }
+}
+
+/// `word` begins at `index` and is not preceded by an identifier character.
+fn code_word_starts_at(chars: &[char], index: usize, word: &str) -> bool {
+    if index > 0 {
+        let previous = chars[index - 1];
+        if previous.is_ascii_alphanumeric() || previous == '_' {
+            return false;
+        }
+    }
+    chars[index..]
+        .iter()
+        .zip(word.chars())
+        .filter(|(a, b)| **a == *b)
+        .count()
+        == word.chars().count()
+}
+
+/// ✎ WS8, 2026-08-05 — the module-granular successor to the deleted
+/// `BoundaryRule { crate_name: "ironclaw_first_party_extension_ports", .. }`.
+#[test]
+fn dissolved_ports_module_keeps_its_crate_boundary() {
+    let root = workspace_root();
+    let dir = crate_path(&root, DISSOLVED_PORTS_MODULE);
+    assert!(
+        dir.is_dir(),
+        "{DISSOLVED_PORTS_MODULE} does not resolve — the skill-activation module moved again \
+         and this gate now measures nothing. Repoint it rather than deleting it."
+    );
+
+    let mut named = std::collections::BTreeMap::new();
+    workspace_crates_named_in_code(&dir, &root, &mut named);
+    // `ironclaw_loop_host` is the crate the module now lives in; it names
+    // itself through `crate::`, so a literal self-reference would be a
+    // leftover from the move.
+    let permitted: std::collections::BTreeSet<&str> =
+        DISSOLVED_PORTS_MODULE_REACH.iter().copied().collect();
+
+    let unexpected: Vec<String> = named
+        .iter()
+        .filter(|(name, _)| !permitted.contains(name.as_str()))
+        .map(|(name, first)| format!("    {name} (first seen in {first})"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the skill-activation module reaches crates the dissolved \
+         `ironclaw_first_party_extension_ports` never depended on. Its old crate boundary is \
+         now enforced here, at module granularity, because `ironclaw_loop_host` legitimately \
+         depends on nine crates that boundary forbade — so folding the module in widened its \
+         *legal* reach and only this equality keeps its *actual* reach honest. If the new \
+         dependency is intended, add it to DISSOLVED_PORTS_MODULE_REACH in the same change \
+         with the reason.\n{}",
+        unexpected.join("\n")
+    );
+
+    let missing: Vec<&&str> = DISSOLVED_PORTS_MODULE_REACH
+        .iter()
+        .filter(|name| !named.contains_key(**name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these crates are in DISSOLVED_PORTS_MODULE_REACH but the skill-activation module no \
+         longer names any of them: {missing:?}. A stale allowance is a hole waiting to be \
+         reused — drop it in the change that removed the dependency."
+    );
+}
+
+/// The scanner must see a rogue import and must not be fooled by prose. Without
+/// this, the equality above could pass on an empty measurement.
+#[test]
+fn dissolved_ports_module_scanner_reads_code_not_comments() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-dissolved-ports-scan-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/example/src/skill_activation");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    std::fs::write(
+        src.join("prose.rs"),
+        "//! Mentions ironclaw_host_runtime in prose only.\n\
+         // and ironclaw_approvals in a line comment\n\
+         fn f() { let _ = \"ironclaw_secrets\"; }\n",
+    )
+    .expect("prose fixture must be written");
+    std::fs::write(
+        src.join("rogue.rs"),
+        "use ironclaw_processes::ProcessId;\nuse my_ironclaw_turns::Nope;\n",
+    )
+    .expect("rogue fixture must be written");
+
+    let mut named = std::collections::BTreeMap::new();
+    workspace_crates_named_in_code(&src, &root, &mut named);
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    let found: Vec<&String> = named.keys().collect();
+    assert_eq!(
+        found,
+        vec!["ironclaw_processes"],
+        "the scanner must report the real import, ignore comment/string mentions, and not \
+         match inside a longer identifier: {named:?}"
+    );
+}
+
 #[test]
 fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     let root = workspace_root();
@@ -905,7 +1243,12 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     ];
     let untrusted_src_roots = [
         "crates/ironclaw_capabilities/src",
-        "crates/ironclaw_first_party_extension_ports/src",
+        // ✎ WS8, 2026-08-05: was `crates/ironclaw_first_party_extension_ports/src`.
+        // That crate dissolved into `ironclaw_loop_host`, so this narrows to the
+        // module that received it rather than dropping the tree out of the guard
+        // (the rest of `loop_host` is not an ingress path and is not covered
+        // here — widening it to the whole crate would be a different claim).
+        "crates/ironclaw_loop_host/src/skill_activation",
         "crates/extensions/ironclaw_extension_support/src",
         "crates/ironclaw_extension_contracts/src",
         // WS2.4: the manager holds the extension-management capability
@@ -3502,45 +3845,17 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_wasm",
             ],
         },
-        BoundaryRule {
-            // First-party extension ports are adapter glue above concrete
-            // userland implementations. They may depend on loop/turn-facing
-            // contracts, but must not reach into host runtime authority or
-            // product composition.
-            crate_name: "ironclaw_first_party_extension_ports",
-            forbidden: vec![
-                "ironclaw_legacy",
-                "ironclaw_approvals",
-                "ironclaw_authorization",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_engine",
-                "ironclaw_event_log",
-                "ironclaw_extension_registry",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_llm",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_assistant",
-                "ironclaw_assistant",
-                "ironclaw_turn_runner",
-                "ironclaw_composition",
-                "ironclaw_config",
-                "ironclaw_event_store",
-                "ironclaw_resources",
-                "ironclaw_approvals",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_sandbox",
-                "ironclaw_secrets",
-                "ironclaw_tui",
-                "ironclaw_wasm",
-            ],
-        },
+        // ✎ WS8, 2026-08-05 — the `ironclaw_first_party_extension_ports` rule
+        // that sat here is gone with the crate. Its replacement is
+        // `dissolved_ports_module_keeps_its_crate_boundary` below, which pins
+        // the same reach at module granularity. Deleting it outright would
+        // have widened the moved code's legal imports by nine crates in
+        // silence; leaving it would have left an inert rule, since a rule
+        // whose crate has no directory is skipped by
+        // `reborn_boundary_rules_active_crates_are_workspace_members`.
+        // `ironclaw_first_party_extension_ports` stays in every *forbidden*
+        // list that named it — those are reintroduction pins now, and the
+        // crate must not come back.
         BoundaryRule {
             crate_name: "ironclaw_config",
             forbidden: vec![
@@ -4571,7 +4886,24 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     ]
 }
 
-const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
+/// The closed layer set — PROPOSAL §8.1 rule 1's seven-layer ladder, and
+/// nothing else.
+///
+/// ✎ **The vestigial `legacy` variant was deleted here 2026-08-05** (PROPOSAL
+/// §11.2.11 and §11.3, CHECKLIST WS10). It described the v1 package tree, which
+/// no longer exists: measured through `cargo metadata` across all 66 workspace
+/// packages, **zero** declared `layer = "legacy"`, so both rules keyed on it
+/// (`layer_allows_dependency`'s permissive `"legacy" => true` arm and the
+/// second dependency pass that rejected a normal dep on a legacy-layer crate)
+/// were unreachable — a `match` arm and a loop that could not fire.
+///
+/// ⚠ **Not to be confused with the ~60 `ironclaw_legacy` entries in
+/// `boundary_rules()`.** Those name a retired v1 *crate* and are live
+/// reintroduction pins, deliberately kept and deliberately matching nothing
+/// (`boundary_rule_names_are_package_names_not_crate_directories` documents
+/// exactly that distinction). Deleting a dead *layer* variant does not touch
+/// them.
+const IRONCLAW_CRATE_LAYERS: [&str; 7] = [
     "contracts",
     "substrates",
     "runtimes",
@@ -4579,7 +4911,6 @@ const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
     "loops",
     "products",
     "app",
-    "legacy",
 ];
 
 struct LayerMatrixException {
@@ -4969,10 +5300,9 @@ fn layer_allows_dependency(crate_layer: &str, dependency_layer: &str) -> bool {
             dependency_layer,
             "contracts" | "substrates" | "runtimes" | "kernel" | "loops" | "products" | "app"
         ),
-        // The v1 package/crates may still depend on Reborn while parity work
-        // is in flight, but Reborn layers are intentionally not allowed to
-        // depend back on legacy.
-        "legacy" => true,
+        // No `legacy` arm: the variant is gone from `IRONCLAW_CRATE_LAYERS`, so
+        // a manifest declaring it now fails the unknown-layer assertion before
+        // this function is ever reached (§11.3, 2026-08-05).
         _ => false,
     }
 }

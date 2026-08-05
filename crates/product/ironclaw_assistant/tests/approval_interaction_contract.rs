@@ -9,7 +9,7 @@ use ironclaw_approvals::{
     CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     test_support::{
         in_memory_backed_capability_permission_override_store,
         in_memory_backed_persistent_approval_policy_store,
@@ -985,7 +985,7 @@ async fn always_allow_clears_existing_ask_each_time_override() {
         .await
         .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
-    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
+    let override_store: Arc<dyn CapabilityPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_tool_permission_override_store(override_store);
@@ -1041,7 +1041,7 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         .await
         .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
-    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
+    let override_store: Arc<dyn CapabilityPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {

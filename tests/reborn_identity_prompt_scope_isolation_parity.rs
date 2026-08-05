@@ -12,7 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_assistant::ProductTriggerReason;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
