@@ -3,7 +3,6 @@ use std::sync::LazyLock;
 use ironclaw_safety::LeakDetector;
 
 use crate::config::{WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER};
-use crate::store::truncate_log_message;
 
 const LEAK_DETECTOR_REDACTION_MARKER: &str = "[REDACTED]";
 
@@ -35,6 +34,18 @@ pub fn sanitize_wasm_diagnostic(message: impl AsRef<str>) -> String {
         redacted
     };
     truncate_log_message(normalized)
+}
+
+fn truncate_log_message(message: String) -> String {
+    if message.len() <= WASM_DIAGNOSTIC_MAX_BYTES {
+        return message;
+    }
+
+    let mut end = WASM_DIAGNOSTIC_MAX_BYTES;
+    while !message.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    message[..end].to_string()
 }
 
 #[cfg(test)]
@@ -77,5 +88,13 @@ mod tests {
             sanitize_wasm_diagnostic(oversize),
             WASM_DIAGNOSTIC_REDACTION_MARKER
         );
+    }
+
+    #[test]
+    fn truncate_log_message_respects_utf8_boundaries() {
+        let message = "é".repeat(WASM_DIAGNOSTIC_MAX_BYTES);
+        let truncated = truncate_log_message(message);
+        assert!(truncated.len() <= WASM_DIAGNOSTIC_MAX_BYTES);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }

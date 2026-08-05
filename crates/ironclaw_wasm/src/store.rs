@@ -4,9 +4,7 @@ use ironclaw_host_api::resource::ResourceUsage;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings;
-use crate::config::{
-    DEFAULT_HTTP_TIMEOUT_MS, WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION,
-};
+use crate::config::{DEFAULT_HTTP_TIMEOUT_MS, WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION};
 use crate::diagnostic::sanitize_wasm_diagnostic;
 use crate::host::{WasmHttpRequest, WitToolHost};
 use crate::types::{WasmLogLevel, WasmLogRecord};
@@ -176,30 +174,5 @@ impl bindings::near::agent::host::Host for StoreData {
             return false;
         }
         exists
-    }
-}
-
-pub(crate) fn truncate_log_message(message: String) -> String {
-    if message.len() <= WASM_DIAGNOSTIC_MAX_BYTES {
-        return message;
-    }
-
-    let mut end = WASM_DIAGNOSTIC_MAX_BYTES;
-    while !message.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    message[..end].to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{WASM_DIAGNOSTIC_MAX_BYTES, truncate_log_message};
-
-    #[test]
-    fn truncate_log_message_respects_utf8_boundaries() {
-        let message = "é".repeat(WASM_DIAGNOSTIC_MAX_BYTES);
-        let truncated = truncate_log_message(message);
-        assert!(truncated.len() <= WASM_DIAGNOSTIC_MAX_BYTES);
-        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
