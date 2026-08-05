@@ -37,7 +37,7 @@ pub(crate) enum Command {
     /// Inspect configured Reborn hooks.
     Hooks(hooks::HooksCommand),
     /// Search and install signed registry packages from IronHub.
-    #[command(name = "ironhub", visible_alias = "iron-hub")]
+    #[command(name = "ironhub", visible_alias = "iron-hub", visible_alias = "hub")]
     IronHub(ironhub::IronHubCommand),
     /// Inspect Reborn logs.
     Logs(logs::LogsCommand),
