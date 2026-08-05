@@ -10,6 +10,14 @@
   model-visible token set stays enumerable in one file), and **`discovery` owns
   the catalog rules while `client` owns the paging loop** (both read the same
   constants, so the two enforcement points cannot drift).
+- **The failure-string rule is armed, and its carve-out is enumerated.**
+  `tests/module_charter.rs` fails on any new `reason: "…"` / `reason: format!(…)`
+  outside `diagnostics.rs`, and on a re-added `impl From<String> for
+  McpClientError` (the implicit bypass — any `?` could mint a model-visible
+  reason). The only grandfathered inline reasons are `runtime.rs`'s two
+  `McpError` descriptor/invocation strings, which echo the manifest's own ids
+  instead of classifying a failure; they are rows in that test, not a wildcard.
+  Classify in your module, name in `diagnostics`.
 - The submodules are private and every public item is re-exported from
   `lib.rs`, so `ironclaw_mcp::X` stays the single import path for consumers and
   a module rename is never a breaking change.

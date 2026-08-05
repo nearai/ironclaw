@@ -43,7 +43,7 @@ use ironclaw_product::{
 };
 use ironclaw_product::{
     DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -412,14 +412,17 @@ struct StaticBindingService {
 }
 
 #[async_trait]
-impl ironclaw_product::ConversationBindingService for StaticBindingService {
+impl ironclaw_product_contracts::binding::ProductBindingResolver for StaticBindingService {
     async fn resolve_binding(
         &self,
         _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ironclaw_product::ProductSurfaceFailure> {
+    ) -> Result<
+        ironclaw_product::ResolvedBinding,
+        ironclaw_product_contracts::error::ProductOperationFailure,
+    > {
         if self.fail {
             return Err(
-                ironclaw_product::ProductSurfaceFailure::BindingResolutionFailed {
+                ironclaw_product_contracts::error::ProductOperationFailure::BindingResolutionFailed {
                     reason: "unbound".to_string(),
                 },
             );
@@ -430,10 +433,13 @@ impl ironclaw_product::ConversationBindingService for StaticBindingService {
     async fn lookup_binding(
         &self,
         _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ironclaw_product::ProductSurfaceFailure> {
+    ) -> Result<
+        ironclaw_product::ResolvedBinding,
+        ironclaw_product_contracts::error::ProductOperationFailure,
+    > {
         if self.fail {
             return Err(
-                ironclaw_product::ProductSurfaceFailure::BindingResolutionFailed {
+                ironclaw_product_contracts::error::ProductOperationFailure::BindingResolutionFailed {
                     reason: "unbound".to_string(),
                 },
             );
@@ -1816,8 +1822,11 @@ fn trigger_context() -> TriggerCommunicationContext {
     }
 }
 
-fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDeliveryRequest {
-    TriggeredRunDeliveryRequest {
+fn triggered_request(
+    run_id: TurnRunId,
+    project_scoped: bool,
+) -> ironclaw_outbound::TriggeredRunDeliveryRequest {
+    ironclaw_outbound::TriggeredRunDeliveryRequest {
         run_id,
         scope: binding_scope(),
         creator_user_id: user(),

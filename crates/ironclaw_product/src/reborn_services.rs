@@ -668,7 +668,10 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
+    ) -> Result<
+        std::collections::HashMap<ironclaw_host_api::ids::ExtensionId, bool>,
+        ProductSurfaceError,
+    > {
         Ok(std::collections::HashMap::new())
     }
 }

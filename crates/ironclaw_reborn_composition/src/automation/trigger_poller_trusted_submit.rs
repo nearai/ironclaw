@@ -50,11 +50,11 @@ impl TriggerFireAuthRequest {
 }
 
 pub(crate) struct AccessCheckerTriggerFireAuthorizer {
-    checker: Arc<dyn crate::runtime_input::TriggerFireAccessChecker>,
+    checker: Arc<dyn ironclaw_triggers::TriggerFireAccessChecker>,
 }
 
 impl AccessCheckerTriggerFireAuthorizer {
-    pub(crate) fn new(checker: Arc<dyn crate::runtime_input::TriggerFireAccessChecker>) -> Self {
+    pub(crate) fn new(checker: Arc<dyn ironclaw_triggers::TriggerFireAccessChecker>) -> Self {
         Self { checker }
     }
 }
@@ -67,7 +67,7 @@ impl TriggerFireAuthorizer for AccessCheckerTriggerFireAuthorizer {
     ) -> Result<(), TriggerFireAuthError> {
         let decision = self
             .checker
-            .check_trigger_fire_access(crate::runtime_input::TriggerFireAccessCheck {
+            .check_trigger_fire_access(ironclaw_triggers::TriggerFireAccessCheck {
                 tenant_id: request.tenant_id.clone(),
                 creator_user_id: request.creator_user_id.clone(),
                 agent_id: request.agent_id.clone(),
@@ -80,8 +80,8 @@ impl TriggerFireAuthorizer for AccessCheckerTriggerFireAuthorizer {
                 reason: error.to_string(),
             })?;
         match decision {
-            crate::runtime_input::TriggerFireAccessDecision::Allowed => Ok(()),
-            crate::runtime_input::TriggerFireAccessDecision::Denied { reason } => {
+            ironclaw_triggers::TriggerFireAccessDecision::Allowed => Ok(()),
+            ironclaw_triggers::TriggerFireAccessDecision::Denied { reason } => {
                 Err(TriggerFireAuthError::Denied { reason })
             }
         }
@@ -475,10 +475,6 @@ mod tests {
     use crate::automation::conversation_turn_submitter::{
         CoordinatorTurnSubmitter, turn_submission_error,
     };
-    use crate::runtime_input::{
-        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-        TriggerFireAccessError,
-    };
     use chrono::Utc;
     use ironclaw_conversations::{
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
@@ -507,6 +503,10 @@ mod tests {
         TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord,
         TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
         TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    };
+    use ironclaw_triggers::{
+        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+        TriggerFireAccessError,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,

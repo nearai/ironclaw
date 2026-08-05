@@ -158,6 +158,7 @@ jobs:
           scripts/ci/test-build-wasm-extensions.sh
           scripts/ci/test-check-wasm-artifact-freshness.sh
           scripts/ci/test-package-feature-flags.sh
+          scripts/ci/test-quality-gate-runner.sh
           python3 scripts/ci/test_changed_workspace_packages.py
           scripts/ci/test-reborn-crate-test-buckets.sh
           scripts/ci/test-main-ci-slack-alerts.sh

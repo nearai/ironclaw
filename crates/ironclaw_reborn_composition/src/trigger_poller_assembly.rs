@@ -13,10 +13,9 @@ use crate::automation::trigger_poller::{
 };
 use crate::factory::filesystem_reborn_identity_store;
 use crate::runtime::RebornRuntimeError;
-use crate::runtime_input::{
-    TriggerFireAccessChecker, TriggerPollerAuthorizerConfig, TriggerPollerSettings,
-};
+use crate::runtime_input::{TriggerPollerAuthorizerConfig, TriggerPollerSettings};
 use ironclaw_processes::ProcessLifecycleLookupSource;
+use ironclaw_triggers::TriggerFireAccessChecker;
 use ironclaw_turns::TurnError;
 
 pub(crate) struct TriggerPollerServices {

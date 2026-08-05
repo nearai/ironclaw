@@ -1219,9 +1219,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_extension_host/src/channel_host.rs"
-lines = [1276]
+lines = [975]
 owner = "@nearai/reborn"
-reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged. Repointed 1276 -> 975 on 2026-08-05: the extension_host products -> loops flip shrank this file from 1405 to 1098 lines, putting the old number past EOF and failing `--validate-manifest-only` loudly. Repointed to the same construct rather than deleted — it is the only `product_adapter_error::ProductAdapterError` in the file, so the exemption still names exactly what it always named."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 

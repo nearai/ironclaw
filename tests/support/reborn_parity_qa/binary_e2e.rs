@@ -44,13 +44,13 @@ use ironclaw_loop_host::{
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
 };
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -910,7 +910,7 @@ impl RebornBinaryE2EHarness {
             gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;
-        let binding_service: Arc<dyn ConversationBindingService> =
+        let binding_service: Arc<dyn ProductBindingResolver> =
             Arc::new(product_harness.binding_service()?);
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
             Arc::clone(&binding_service),

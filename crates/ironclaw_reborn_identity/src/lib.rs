@@ -159,7 +159,8 @@ pub trait RebornIdentityResolver: Send + Sync {
     /// store, preserving BOTH its canonical `user_id` and its
     /// verified-email linkage.
     ///
-    /// Unlike [`bind`](Self::bind) (channel actors, no email), this records
+    /// Unlike the retired `bind` (channel actors, no email — removed from this
+    /// trait in #5618, see the module doc), this records
     /// the identity's `email` / `email_verified` and — for a verified email
     /// — seeds the canonical verified-email index so a *later* login through
     /// a different provider with the same verified email converges on the

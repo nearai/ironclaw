@@ -35,7 +35,7 @@ engine names belongs to that engine rather than to `vocabulary`.
 
 ## Do Not Move In Here
 
-- New V1 route handlers, V1 pending maps, V1 extension manager authority, or V1 `SecretsStore` access. The existing `loopback_oauth` transport is legacy-only and must not gain Reborn consumers.
+- New V1 route handlers, V1 pending maps, V1 extension manager authority, or V1 `SecretsStore` access. `loopback_oauth` is **deleted** (see above): do not re-add a fixed-port loopback callback transport, under that name or any other, and do not reintroduce `urlencoding` to serve one.
 - Raw HTTP clients, host-runtime credential injection adapters, HTTP route
   serving, extension lifecycle mutation, or turn replay/resume. Durable
   product-auth records may live here; encrypted raw token material still stays

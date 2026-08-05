@@ -202,12 +202,6 @@ impl McpClientError {
     }
 }
 
-impl From<String> for McpClientError {
-    fn from(reason: String) -> Self {
-        Self::client(reason)
-    }
-}
-
 /// Full resource-governed MCP execution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpExecutionResult {

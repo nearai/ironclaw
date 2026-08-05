@@ -257,7 +257,13 @@ impl ChannelConnectionTestBundle {
             ))
             .await
             .map_err(|error| format!("{:?}", error.code))?;
-        Ok(connections.get(extension_id).copied().unwrap_or(false))
+        // The port is keyed by `ExtensionId`; a caller-supplied string that is
+        // not valid extension vocabulary could never have an entry, so it reads
+        // as "not connected" for the same reason an absent entry does.
+        let Ok(extension_id) = ironclaw_host_api::ids::ExtensionId::new(extension_id) else {
+            return Ok(false);
+        };
+        Ok(connections.get(&extension_id).copied().unwrap_or(false))
     }
 
     /// Durable-state evidence: whether ANY identity binding for `provider`

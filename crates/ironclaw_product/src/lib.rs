@@ -12,7 +12,7 @@
 //!   [`ProductSurface`].
 //! - [`InboundTurnService`] / [`DefaultInboundTurnService`] — the narrower
 //!   user-message path that coordinates binding + turn submission.
-//! - [`ConversationBindingService`] — resolves external adapter refs to
+//! - [`ProductBindingResolver`] — resolves external adapter refs to
 //!   canonical Reborn identifiers.
 //! - [`ProductConversationBindingService`] — bridges product adapter bindings to
 //!   `ironclaw_conversations` using trusted installation configuration for
@@ -32,9 +32,9 @@ mod auth_continuation;
 mod auth_interaction;
 mod automation_product_service;
 mod automation_thread_metadata;
-mod binding;
 mod binding_ref;
 mod blocked_auth_resume;
+mod channel_workflow;
 mod command_admission;
 mod command_dispatch;
 mod commands;
@@ -113,11 +113,20 @@ pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,
 };
-pub use binding::{
-    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding, route_kind_for_inbound_payload,
-};
 pub use blocked_auth_resume::BlockedAuthResumeFanout;
+pub use channel_workflow::{
+    ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
+    RebornChannelWorkflowServices, channel_conversation_services,
+};
+// The conversation-binding family moved to
+// `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
+// workflow factory hands a live binding service back to a caller that sits
+// below product, so the port had to be declared at the boundary. The value
+// DTOs keep their product import path — they are wire vocabulary this crate
+// already re-exports ~120 of — but `ProductBindingResolver` deliberately
+// does NOT: it is a port, and `reborn_product_contract_location_scan.rs`
+// grants a port exactly one import path. Consumers import the trait from the
+// contracts crate.
 pub use command_admission::DirectConversationCommandAdmission;
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService,
@@ -132,6 +141,10 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+pub use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    route_kind_for_inbound_payload,
+};
 pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 // `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
 // and `ProductConversationSubjectRouteResolver` are deliberately absent: they
@@ -292,9 +305,11 @@ pub use policy::{
 };
 pub use run_delivery::{
     DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    triggered_run_delivery_settings,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, triggered_run_delivery_settings,
 };
+// `TriggeredRunDeliveryRequest` is deliberately absent: it moved to
+// `ironclaw_outbound` with the `TriggeredRunDelivery` port it crosses
+// (§12.11 D-A), so the generic post-submit hook below product can name it.
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product service.

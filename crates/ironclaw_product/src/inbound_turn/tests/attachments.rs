@@ -20,16 +20,17 @@ use ironclaw_threads::{
     AttachmentKind, AttachmentRef, FilesystemSessionThreadService, InMemorySessionThreadService,
 };
 
-use crate::binding::ResolveBindingRequest;
+use ironclaw_product_contracts::binding::ResolveBindingRequest;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 
 struct LandingBindingStub;
 
 #[async_trait]
-impl ConversationBindingService for LandingBindingStub {
+impl ProductBindingResolver for LandingBindingStub {
     async fn resolve_binding(
         &self,
         _request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         Ok(ResolvedBinding {
             tenant_id: tenant_id(),
             actor_user_id: user_id(),
@@ -43,7 +44,7 @@ impl ConversationBindingService for LandingBindingStub {
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.resolve_binding(request).await
     }
 }

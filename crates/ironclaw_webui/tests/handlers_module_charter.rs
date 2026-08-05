@@ -42,10 +42,7 @@ fn top_level_items(source: &str) -> Vec<String> {
         if line.starts_with(' ') || line.starts_with('\t') || line.is_empty() {
             continue;
         }
-        let rest = line
-            .strip_prefix("pub(crate) ")
-            .or_else(|| line.strip_prefix("pub "))
-            .unwrap_or(line);
+        let rest = strip_visibility(line);
         let rest = rest.strip_prefix("unsafe ").unwrap_or(rest);
         let rest = rest.strip_prefix("async ").unwrap_or(rest);
         let Some((keyword, tail)) = rest.split_once(' ') else {
@@ -66,6 +63,35 @@ fn top_level_items(source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Drop a leading visibility modifier, whatever its restriction.
+///
+/// `pub`, `pub(crate)`, `pub(super)`, `pub(self)`, `pub(in path::to::mod)` — a
+/// scanner that knows only the first two reads `pub(super)` as the item's
+/// *keyword*, which matches nothing in the keyword set, so the item is silently
+/// dropped from `charted_surface()`. Silently, because the completeness check
+/// compares charter rows against this same list: an item this function cannot
+/// see never registers as "unassigned" and never needs a row. That is the
+/// fail-open direction for a gate whose whole claim is "every top-level item
+/// appears in exactly one row".
+fn strip_visibility(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix("pub") else {
+        return line;
+    };
+    if let Some(rest) = rest.strip_prefix(' ') {
+        return rest;
+    }
+    if !rest.starts_with('(') {
+        // `public_thing` — `pub` was a name prefix, not a visibility.
+        return line;
+    }
+    // `pub(crate)`, `pub(super)`, `pub(self)`, `pub(in a::b)`: skip to the
+    // matching `)`. Restriction paths contain no nested parentheses.
+    match rest.find(')') {
+        Some(close) => rest[close + 1..].strip_prefix(' ').unwrap_or(line),
+        None => line,
+    }
 }
 
 /// Every chartable item, keyed the way `CLAUDE.md` names it: bare for
@@ -152,6 +178,45 @@ fn parse_charter_table(section: &str) -> BTreeMap<String, Vec<String>> {
          anything"
     );
     assignments
+}
+
+/// `top_level_items` must see an item at **every** visibility level.
+///
+/// The live `handlers.rs` declares nothing at `pub(super)`/`pub(in …)` today,
+/// so without this fixture the scanner could regress to
+/// `strip_prefix("pub(crate) ")`/`strip_prefix("pub ")` and stay green — while
+/// the first `pub(super) fn` anyone adds slips out of `charted_surface()`, and
+/// therefore never registers as "unassigned" and never needs a charter row.
+#[test]
+fn top_level_items_sees_every_visibility_level() {
+    let source = "\
+fn private_fn() {}
+pub fn public_fn() {}
+pub(crate) fn crate_fn() {}
+pub(super) fn super_fn() {}
+pub(self) struct SelfStruct;
+pub(in crate::webui_v2) enum RestrictedEnum {}
+pub(super) async fn super_async_fn() {}
+pub(crate) const CRATE_CONST: usize = 1;
+    pub(super) fn nested_is_not_top_level() {}
+pub_looking_call();
+";
+    let items = top_level_items(source);
+    assert_eq!(
+        items,
+        vec![
+            "private_fn",
+            "public_fn",
+            "crate_fn",
+            "super_fn",
+            "SelfStruct",
+            "RestrictedEnum",
+            "super_async_fn",
+            "CRATE_CONST",
+        ],
+        "every top-level item must be seen regardless of visibility, and indented \
+         items must stay excluded"
+    );
 }
 
 #[test]

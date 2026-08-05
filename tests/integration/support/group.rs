@@ -72,9 +72,10 @@ use ironclaw_loop_host::{
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product::ProductTriggerReason;
 use ironclaw_product::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ResolvedBinding,
+    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
+    ResolvedBinding,
 };
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
@@ -1666,7 +1667,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_milestone_count = shared.milestone_sink.milestones().len();
 
         // --- per-thread workflow over the SHARED coordinator --------------------
-        let binding_service: Arc<dyn ConversationBindingService> =
+        let binding_service: Arc<dyn ProductBindingResolver> =
             Arc::new(shared.product_harness.binding_service()?);
         let mut inbound_service = DefaultInboundTurnService::new(
             Arc::clone(&binding_service),

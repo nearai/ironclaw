@@ -9,14 +9,15 @@ use std::sync::Arc;
 use crate::OutboundPart;
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::ids::{AgentId, UserId};
+use ironclaw_host_api::ids::AgentId;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    TriggerCommunicationContext, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
-    TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
+    TriggerCommunicationContext, TriggeredRunDelivery, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_threads::{AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadScope};
 use ironclaw_turns::{TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus};
@@ -42,27 +43,12 @@ use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 // this crate. Consumers import it from there; this module deliberately keeps
 // no second import path for it (PROPOSAL §11.2.4).
 
-/// One trigger-submitted run to watch and deliver, in generic vocabulary.
-/// The composition's post-submit hook translates its trigger-fire type into
-/// this.
-#[derive(Debug, Clone)]
-pub struct TriggeredRunDeliveryRequest {
-    pub run_id: TurnRunId,
-    pub scope: TurnScope,
-    /// The trigger creator; delivery goes to their personal preference
-    /// target.
-    pub creator_user_id: UserId,
-    /// Fail closed for non-personal triggers: a project-scoped trigger is
-    /// never delivered to a personal channel.
-    pub project_scoped: bool,
-    /// The trigger prompt; its first line becomes the short footer label.
-    pub prompt: String,
-    /// Optional per-trigger target resolved from the creator-scoped outbound
-    /// target registry. When present, ordinary results route here instead of
-    /// consulting the user's mutable global default.
-    pub delivery_target: Option<ironclaw_turns::ReplyTargetBindingRef>,
-    pub trigger_context: TriggerCommunicationContext,
-}
+// `TriggeredRunDeliveryRequest` and the `TriggeredRunDelivery` port it crosses
+// live in `ironclaw_outbound` (PROPOSAL §12.11 D-A): the generic post-submit
+// hook that drives this driver sits *below* product, so the contract had to be
+// declared where its vocabulary already lives. Every field is either outbound's
+// own triggered-delivery vocabulary or `ironclaw_host_api` turn vocabulary, so
+// the move cost no type weakening.
 
 /// Notification content for one actionable triggered-run state.
 struct TriggeredNotification {
@@ -267,6 +253,18 @@ impl TriggeredRunDeliveryDriver {
                 "triggered run delivery completed"
             );
         });
+    }
+}
+
+/// The port the generic post-submit hook drives this driver through.
+///
+/// The inherent method stays: product's own tests and the crate's contract
+/// suite call it directly, and an inherent method wins name resolution over a
+/// trait one, so no call site changes meaning by this impl existing.
+#[async_trait]
+impl TriggeredRunDelivery for TriggeredRunDeliveryDriver {
+    async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest) {
+        TriggeredRunDeliveryDriver::on_trigger_submitted(self, request).await;
     }
 }
 

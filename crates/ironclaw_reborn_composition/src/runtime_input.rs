@@ -34,6 +34,7 @@ use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
     DEFAULT_TURN_RUNNER_WORKER_COUNT,
 };
+use ironclaw_triggers::TriggerFireAccessChecker;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 
 use crate::input::RebornHostBindings;
@@ -72,20 +73,25 @@ impl Default for RebornRuntimeIdentity {
 pub(crate) const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The fire-time access contract lives in `ironclaw_triggers` (CHECKLIST WS6):
-/// the check is a decision about a persisted trigger's own stored scope, so the
-/// request/decision vocabulary and the checkers that carry no backend belong
-/// beside the trigger record and the worker that consults them. What stays in
-/// this file is the *deployment grant* the `serve`/`run` edge resolves — §6.10.1
-/// names config-as-data as composition's charter — and `build_reborn_runtime`
-/// still turns one into the other.
-pub use ironclaw_triggers::{
-    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError,
-};
+// The fire-time access contract lives in `ironclaw_triggers` (CHECKLIST WS6):
+// the check is a decision about a persisted trigger's own stored scope, so the
+// request/decision vocabulary and the checkers that carry no backend belong
+// beside the trigger record and the worker that consults them.
+//
+// It is deliberately NOT re-exported from here. A relocation that leaves a
+// `pub use` behind has moved the definition and kept the old import path, which
+// is the shape §11.2.4 exists to stop — one trait, two names, and the next
+// reader cannot tell which is canonical. Composition's own consumers
+// (`trigger_fire_access.rs`, `automation/trigger_poller_trusted_submit.rs`)
+// import the four contract types from `ironclaw_triggers` directly.
+//
+// What stays in this file is the *deployment grant* the `serve`/`run` edge
+// resolves — §6.10.1 names config-as-data as composition's charter — and
+// `build_reborn_runtime` still turns one into the other.
 
 /// A single fire-time access grant. The granted scope is exact (`None` project
-/// means "no project", never a wildcard), matching [`TriggerFireAccessCheck`].
+/// means "no project", never a wildcard), matching
+/// [`ironclaw_triggers::TriggerFireAccessCheck`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerFireAccessGrant {
     /// A single static owner may fire triggers for the granted scope — the

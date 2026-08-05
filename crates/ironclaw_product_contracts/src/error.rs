@@ -44,9 +44,24 @@ pub enum ProductOperationFailure {
     #[error("binding resolution failed: {reason}")]
     BindingResolutionFailed { reason: String },
 
+    /// The external actor has no trusted binding to a canonical user.
+    ///
+    /// **Distinct from [`Self::BindingResolutionFailed`], and the difference is
+    /// user-visible.** `BindingResolutionFailed` is an internal invariant (500);
+    /// this one is the fail-closed "you are not paired yet" answer the workflow
+    /// turns into a `ProductRejectionKind::BindingRequired` acknowledgement with
+    /// its own onboarding hint. Collapsing the two would change what an unpaired
+    /// external actor is told.
+    #[error("binding required: {reason}")]
+    BindingRequired { reason: String },
+
     /// The actor or route is not allowed to use the resolved thread.
     #[error("binding access denied")]
     BindingAccessDenied,
+
+    /// The adapter installation is not mapped to a tenant.
+    #[error("unknown adapter installation")]
+    UnknownInstallation,
 
     /// The request is invalid and should not be retried unchanged.
     #[error("invalid binding request: {reason}")]
@@ -70,6 +85,18 @@ pub enum ProductOperationFailure {
     /// The requested action kind is not supported by this port implementation.
     #[error("unsupported action kind: {kind}")]
     UnsupportedActionKind { kind: String },
+
+    /// The turn coordinator rejected a submission before typed turn errors
+    /// were available, carrying only the rendered cause.
+    ///
+    /// The untyped half of `ironclaw_product::ProductSurfaceFailure`'s
+    /// submission pair: the typed half (`TurnSubmissionFailed { error:
+    /// TurnError }`) is minted only by product's own turn path and stays
+    /// there, because `TurnError` is a kernel type this crate's ceiling
+    /// forbids. A port implementor reaches this variant when the conversation
+    /// binding store surfaces a submission rejection it can only render.
+    #[error("turn submission rejected: {reason}")]
+    TurnSubmissionRejected { reason: String },
 
     /// A transient store or service failure.
     #[error("transient workflow failure: {reason}")]
@@ -113,7 +140,15 @@ impl From<ProductOperationFailure> for ProductSurfaceError {
             ProductOperationFailure::Transient { .. } => {
                 ProductSurfaceError::service_unavailable(true)
             }
-            ProductOperationFailure::BindingResolutionFailed { .. } => {
+            // No boundary image: the membrane renders these as an internal
+            // invariant and the caller-facing answer is produced upstream —
+            // `BindingRequired` and `UnknownInstallation` become typed
+            // `ProductRejectionKind` acknowledgements on the inbound path, and
+            // a rendered submission rejection is never a client's fault.
+            ProductOperationFailure::BindingResolutionFailed { .. }
+            | ProductOperationFailure::BindingRequired { .. }
+            | ProductOperationFailure::UnknownInstallation
+            | ProductOperationFailure::TurnSubmissionRejected { .. } => {
                 ProductSurfaceError::internal_invariant()
             }
         }
@@ -178,6 +213,28 @@ mod tests {
                 500,
                 false,
             ),
+            (
+                ProductOperationFailure::BindingRequired {
+                    reason: "actor is not paired".into(),
+                },
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
+            (
+                ProductOperationFailure::UnknownInstallation,
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
+            (
+                ProductOperationFailure::TurnSubmissionRejected {
+                    reason: "thread busy".into(),
+                },
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
         ];
 
         for (failure, expected_code, expected_status, expected_retryable) in cases {
@@ -223,7 +280,20 @@ mod tests {
                 },
                 Some("no tenant"),
             ),
+            (
+                ProductOperationFailure::BindingRequired {
+                    reason: "actor is not paired".into(),
+                },
+                Some("actor is not paired"),
+            ),
             (ProductOperationFailure::BindingAccessDenied, None),
+            (ProductOperationFailure::UnknownInstallation, None),
+            (
+                ProductOperationFailure::TurnSubmissionRejected {
+                    reason: "thread busy".into(),
+                },
+                Some("thread busy"),
+            ),
             (
                 ProductOperationFailure::InvalidBindingRequest {
                     reason: "bad ref".into(),

@@ -218,8 +218,39 @@ fn composition_public_pub_use_surface_matches_snapshot() {
 fn composition_public_pub_use_entries_name_their_consumer() {
     let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
         .expect("composition lib.rs readable");
-    let lines: Vec<&str> = lib.lines().collect();
+    let (documented, undocumented) = pub_use_consumer_annotations(&lib);
 
+    assert!(
+        documented > 0,
+        "the annotation scan found no documented entries at all — the scan is broken, \
+         not the wall"
+    );
+    assert!(
+        undocumented.is_empty(),
+        "every public `pub use` in the composition root must name its consumer and the \
+         test that pins it, as a `// consumer: <who> · pinned by: <test>` line above the \
+         entry (above any `#[cfg]`). A re-export whose consumer can reach the symbol at \
+         its owning crate should be deleted, not annotated. Undocumented entries:\n{}",
+        undocumented.join("\n")
+    );
+}
+
+/// Split a crate root's top-level `pub use` entries into
+/// `(annotated_count, unannotated_entries)`.
+///
+/// Extracted from the gate above so the scan itself is testable on synthetic
+/// input — a scanner that silently stops looking is the fail-*open* direction,
+/// and the only way to see that is to feed it a shape the real file does not
+/// have today.
+///
+/// The walk upward is bracket-aware. A `#[cfg(…)]` split across lines puts
+/// interior lines (`feature = "x",`) and a closer (`))]`) between the comment
+/// block and the entry; matching only on a `#[` / `//` / `]` line prefix stops
+/// on those and reports a correctly annotated re-export as undocumented. So
+/// unmatched `]`s are counted while walking, and every line inside an open
+/// attribute is consumed regardless of how it starts.
+fn pub_use_consumer_annotations(source: &str) -> (usize, Vec<String>) {
+    let lines: Vec<&str> = source.lines().collect();
     let mut undocumented = Vec::new();
     let mut documented = 0usize;
     let mut in_pub_use = false;
@@ -241,19 +272,43 @@ fn composition_public_pub_use_entries_name_their_consumer() {
         // entry looking for the annotation.
         let mut cursor = index;
         let mut annotated = false;
+        // Unmatched `]` seen so far while walking upward: > 0 means we are
+        // inside an attribute whose `#[` opener is still above us.
+        let mut open_attribute = 0i32;
         while cursor > 0 {
-            let above = lines[cursor - 1].trim_start();
-            let is_block = above.starts_with("#[")
-                || above.starts_with("//")
-                || above.starts_with("///")
-                || above.starts_with("]");
-            if !is_block {
-                break;
+            let raw = lines[cursor - 1];
+            let above = raw.trim_start();
+            if open_attribute > 0 {
+                open_attribute += bracket_balance(raw);
+                open_attribute = open_attribute.max(0);
+                cursor -= 1;
+                continue;
             }
-            if above.starts_with("// consumer:") && above.contains("pinned by:") {
-                annotated = true;
+            if above.starts_with("//") {
+                // Checked before the bracket arithmetic: a comment may carry
+                // unbalanced brackets (`// consumer: foo[bar]`) and must never
+                // be mistaken for an attribute tail.
+                if above.starts_with("// consumer:") && above.contains("pinned by:") {
+                    annotated = true;
+                }
+                cursor -= 1;
+                continue;
             }
-            cursor -= 1;
+            let balance = bracket_balance(raw);
+            if above.starts_with("#[") {
+                // Single-line attribute, or the opener of a multiline one we
+                // already walked through.
+                open_attribute = (open_attribute + balance).max(0);
+                cursor -= 1;
+                continue;
+            }
+            if balance > 0 {
+                // Tail of a multiline attribute: `))]`, `)]`, `]`, …
+                open_attribute = balance;
+                cursor -= 1;
+                continue;
+            }
+            break;
         }
         if annotated {
             documented += 1;
@@ -261,20 +316,73 @@ fn composition_public_pub_use_entries_name_their_consumer() {
             undocumented.push(format!("lib.rs:{}: {}", index + 1, line));
         }
     }
+    (documented, undocumented)
+}
 
-    assert!(
-        documented > 0,
-        "the annotation scan found no documented entries at all — the scan is broken, \
-         not the wall"
+/// `count(']') - count('[')` for one line: positive when the line closes more
+/// attribute brackets than it opens.
+fn bracket_balance(line: &str) -> i32 {
+    line.matches(']').count() as i32 - line.matches('[').count() as i32
+}
+
+/// The scan must see a `// consumer: … · pinned by: …` line through a
+/// multiline attribute, and must still catch a genuinely unannotated entry.
+///
+/// The checked-in `lib.rs` carries only single-line `#[cfg(…)]` attributes, so
+/// without this fixture the bracket-aware walk could regress to the
+/// prefix-match version and stay green — while quietly rejecting the first
+/// multiline `#[cfg(any(…))]` anyone writes above a re-export.
+#[test]
+fn the_consumer_annotation_scan_reads_through_a_multiline_attribute() {
+    let multiline = "\
+/// Doc.
+// consumer: `ironclaw_reborn_cli` · pinned by: `some_test`
+#[cfg(any(
+    test,
+    feature = \"test-support\"
+))]
+pub use ironclaw_thing::Thing;
+";
+    let (documented, undocumented) = pub_use_consumer_annotations(multiline);
+    assert_eq!(
+        documented, 1,
+        "a multiline `#[cfg(any(…))]` between the annotation and the entry must not \
+         hide the annotation; got undocumented: {undocumented:?}"
     );
-    assert!(
-        undocumented.is_empty(),
-        "every public `pub use` in the composition root must name its consumer and the \
-         test that pins it, as a `// consumer: <who> · pinned by: <test>` line above the \
-         entry (above any `#[cfg]`). A re-export whose consumer can reach the symbol at \
-         its owning crate should be deleted, not annotated. Undocumented entries:\n{}",
-        undocumented.join("\n")
+    assert!(undocumented.is_empty(), "{undocumented:?}");
+
+    let single_line = "\
+// consumer: `ironclaw_reborn_cli` · pinned by: `some_test`
+#[cfg(test)]
+pub use ironclaw_thing::Thing;
+";
+    let (documented, undocumented) = pub_use_consumer_annotations(single_line);
+    assert_eq!(documented, 1, "{undocumented:?}");
+
+    // Sabotage: the same shape with the annotation removed must still fail.
+    let unannotated = "\
+/// Doc.
+#[cfg(any(
+    test,
+    feature = \"test-support\"
+))]
+pub use ironclaw_thing::Thing;
+";
+    let (documented, undocumented) = pub_use_consumer_annotations(unannotated);
+    assert_eq!(documented, 0);
+    assert_eq!(
+        undocumented.len(),
+        1,
+        "an unannotated entry under a multiline attribute must still be reported"
     );
+
+    // A comment carrying brackets is a comment, not an attribute tail.
+    let bracketed_comment = "\
+// consumer: `cli` (see `map[key]`) · pinned by: `some_test`
+pub use ironclaw_thing::Thing;
+";
+    let (documented, undocumented) = pub_use_consumer_annotations(bracketed_comment);
+    assert_eq!(documented, 1, "{undocumented:?}");
 }
 
 #[test]

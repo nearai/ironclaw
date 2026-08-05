@@ -177,8 +177,17 @@ impl From<ProductOperationFailure> for ProductSurfaceFailure {
             ProductOperationFailure::BindingResolutionFailed { reason } => {
                 ProductSurfaceFailure::BindingResolutionFailed { reason }
             }
+            ProductOperationFailure::BindingRequired { reason } => {
+                ProductSurfaceFailure::BindingRequired { reason }
+            }
             ProductOperationFailure::BindingAccessDenied => {
                 ProductSurfaceFailure::BindingAccessDenied
+            }
+            ProductOperationFailure::UnknownInstallation => {
+                ProductSurfaceFailure::UnknownInstallation
+            }
+            ProductOperationFailure::TurnSubmissionRejected { reason } => {
+                ProductSurfaceFailure::TurnSubmissionRejected { reason }
             }
             ProductOperationFailure::InvalidBindingRequest { reason } => {
                 ProductSurfaceFailure::InvalidBindingRequest { reason }

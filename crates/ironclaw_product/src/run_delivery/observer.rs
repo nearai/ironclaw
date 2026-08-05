@@ -406,7 +406,8 @@ impl RunDeliveryObserver {
             .services
             .binding_service
             .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
-            .await?;
+            .await
+            .map_err(ProductSurfaceFailure::from)?;
         let actor = TurnActor::new(binding.actor_user_id.clone());
         let thread_scope = thread_scope_from_binding(&binding)?;
         let scope = turn_scope_from_thread_scope(&binding, &thread_scope)?;
@@ -1236,6 +1237,34 @@ impl RunDeliveryObserver {
                 prompts::BUSY_GENERIC_MESSAGE.to_string()
             }
         }
+    }
+}
+
+/// The port the channel host consumes this observer through (§12.11 D-A).
+///
+/// The three inherent methods stay: they are the crate's own API and the
+/// contract suite calls them directly. An inherent method wins name
+/// resolution over a trait one, so no existing call site changes meaning.
+#[async_trait::async_trait]
+impl ironclaw_product_contracts::channel_workflow::ChannelRunDeliveryObserver
+    for RunDeliveryObserver
+{
+    async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
+        RunDeliveryObserver::observe_ack(self, envelope, ack).await;
+    }
+
+    async fn observe_error(&self, envelope: ProductInboundEnvelope, error: ProductAdapterError) {
+        RunDeliveryObserver::observe_error(self, envelope, error).await;
+    }
+
+    async fn post_connection_status_notice(
+        &self,
+        conversation: &ExternalConversationRef,
+        event_id: &ExternalEventId,
+        text: &str,
+    ) {
+        RunDeliveryObserver::post_connection_status_notice(self, conversation, event_id, text)
+            .await;
     }
 }
 

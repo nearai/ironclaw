@@ -46,10 +46,10 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{
-    ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
-    ResolveBindingRequest, ResolvedBinding,
+    DefaultProductSurface, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
@@ -1059,7 +1059,7 @@ impl RebornIntegrationHarness {
     /// admission-time writes.
     pub(crate) fn binding_service_for_test(
         &self,
-    ) -> HarnessResult<Arc<dyn ConversationBindingService>> {
+    ) -> HarnessResult<Arc<dyn ProductBindingResolver>> {
         Ok(Arc::new(self._shared.product_harness.binding_service()?))
     }
 

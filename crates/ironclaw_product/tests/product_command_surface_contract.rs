@@ -10,16 +10,18 @@ use ironclaw_product::{
     FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
     PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
     PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductInboundAck, ProductRejectionKind, ProductSurfaceFailure,
+    ProductCommandAdmissionService, ProductInboundAck, ProductRejectionKind,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthRequirement, ConversationBindingService, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, InboundCommandPayload, ProductAdapterId,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
-    ResolveBindingRequest, ResolvedBinding, TrustedInboundContext,
+    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundEnvelope,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, ResolveBindingRequest,
+    ResolvedBinding, TrustedInboundContext,
 };
 use ironclaw_product_contracts::admin_users::AdminUserRole;
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceInvokeRequest, ProductSurfaceInvokeResponse,
@@ -219,11 +221,11 @@ impl FirstCommandBindingService {
 }
 
 #[async_trait]
-impl ConversationBindingService for FirstCommandBindingService {
+impl ProductBindingResolver for FirstCommandBindingService {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.resolve_count.fetch_add(1, Ordering::SeqCst);
         self.inner.resolve_binding(request).await
     }
@@ -231,9 +233,9 @@ impl ConversationBindingService for FirstCommandBindingService {
     async fn lookup_binding(
         &self,
         _request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.lookup_count.fetch_add(1, Ordering::SeqCst);
-        Err(ProductSurfaceFailure::BindingRequired {
+        Err(ProductOperationFailure::BindingRequired {
             reason: "no conversation binding exists yet".to_string(),
         })
     }

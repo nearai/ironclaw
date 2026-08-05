@@ -182,8 +182,8 @@ async fn lifecycle_extension_infos(
     installed: Vec<LifecycleInstalledExtensionSummary>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     caller: ProductSurfaceCaller,
-    connections: HashMap<String, bool>,
-    account_states: HashMap<String, ChannelAuthAccountState>,
+    connections: HashMap<ExtensionId, bool>,
+    account_states: HashMap<ExtensionId, ChannelAuthAccountState>,
     activation_errors: HashMap<ExtensionId, String>,
 ) -> Result<Vec<RebornExtensionInfo>, ProductSurfaceError> {
     let resolved = stream::iter(installed)
@@ -256,8 +256,8 @@ async fn credential_readiness_for_extension(
 fn extension_info(
     installed: LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
-    connections: &HashMap<String, bool>,
-    account_states: &HashMap<String, ChannelAuthAccountState>,
+    connections: &HashMap<ExtensionId, bool>,
+    account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
     activation_errors: &HashMap<ExtensionId, String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
@@ -267,21 +267,26 @@ fn extension_info(
     let summary = installed.summary;
     let has_external_channel_surface = has_external_channel_surface(&summary);
     let runtime = summary.runtime_kind.runtime_wire_name().to_string();
+    // All three per-extension maps are keyed by `ExtensionId`; a package id that
+    // is not valid extension vocabulary cannot be a key in any of them, so it
+    // reports no connection, no account state, and no activation error rather
+    // than being looked up as a string that could never have matched.
+    let extension_id = ExtensionId::new(summary.package_ref.id.as_str()).ok();
     let connected = if has_external_channel_surface {
-        connections.get(summary.package_ref.id.as_str()).copied()
+        extension_id
+            .as_ref()
+            .and_then(|id| connections.get(id))
+            .copied()
     } else {
         None
     };
-    let account_state = account_states.get(summary.package_ref.id.as_str());
+    let account_state = extension_id.as_ref().and_then(|id| account_states.get(id));
     // Redacted activation error for this extension (host installation record's
     // typed `last_error`), threaded onto the card slot the frontend already
     // renders. `None` when the service surfaces no failure for this extension.
-    // The map is keyed by `ExtensionId`; a package id that is not valid
-    // extension vocabulary cannot be a key, so it reports no error rather
-    // than being looked up as a string that could never have matched.
-    let activation_error = ExtensionId::new(summary.package_ref.id.as_str())
-        .ok()
-        .and_then(|extension_id| activation_errors.get(&extension_id).cloned());
+    let activation_error = extension_id
+        .as_ref()
+        .and_then(|id| activation_errors.get(id).cloned());
     // A channel extension the calling user has not personally connected — via
     // the vendor's OAuth or a pairing/proof-code binding — is not ready for
     // that caller, whatever the host record says. Absence of a connection
@@ -550,7 +555,7 @@ mod tests {
 
     #[derive(Default)]
     struct TestConnections {
-        connections: std::collections::HashMap<String, bool>,
+        connections: std::collections::HashMap<ExtensionId, bool>,
     }
 
     impl TestConnections {
@@ -558,7 +563,12 @@ mod tests {
             Self {
                 connections: entries
                     .iter()
-                    .map(|(key, value)| ((*key).to_string(), *value))
+                    .map(|(key, value)| {
+                        (
+                            ExtensionId::new(*key).expect("test key is valid extension id"),
+                            *value,
+                        )
+                    })
                     .collect(),
             }
         }
@@ -569,7 +579,7 @@ mod tests {
         async fn caller_channel_connections(
             &self,
             _caller: ProductSurfaceCaller,
-        ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
+        ) -> Result<std::collections::HashMap<ExtensionId, bool>, ProductSurfaceError> {
             Ok(self.connections.clone())
         }
     }
@@ -585,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn static_channel_connection_service_fails_disconnect_closed() {
         let error = StaticChannelConnectionService
-            .disconnect_channel_for_caller(caller(), "slack")
+            .disconnect_channel_for_caller(caller(), &ExtensionId::new("slack").expect("valid id"))
             .await
             .expect_err("unwired disconnect must not report success");
 

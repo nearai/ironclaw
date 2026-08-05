@@ -45,7 +45,8 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
 };
-use crate::{ConversationBindingService, ProductSurfaceFailure, ResolvedBinding};
+use crate::{ProductSurfaceFailure, ResolvedBinding};
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 
 mod gate_routes;
 mod observer;
@@ -53,7 +54,7 @@ pub(crate) mod prompts;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
-pub use triggered::{TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest};
+pub use triggered::TriggeredRunDeliveryDriver;
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -107,7 +108,7 @@ pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
 /// `Arc`s; cloning shares them.
 #[derive(Clone)]
 pub struct RunDeliveryServices {
-    pub binding_service: Arc<dyn ConversationBindingService>,
+    pub binding_service: Arc<dyn ProductBindingResolver>,
     pub thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
