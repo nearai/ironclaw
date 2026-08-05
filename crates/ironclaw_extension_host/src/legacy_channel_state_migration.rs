@@ -47,6 +47,10 @@ const SLACK_GROUP: &str = "extension.slack";
 const TELEGRAM_GROUP: &str = "extension.telegram";
 const MANAGED_SLACK_SUBJECT_PREFIX: &str = "user:slack-channel:";
 const MAX_RC1_CHANNEL_TENANTS: usize = 100_000;
+const MAX_RC1_CHANNEL_USERS_PER_TENANT: usize = 100_000;
+const MAX_RC1_CHANNEL_AGENTS_PER_USER: usize = 100_000;
+const MAX_RC1_CHANNEL_PROJECTS_PER_OWNER: usize = 100_000;
+const MAX_RC1_CHANNEL_SECRET_SCOPE_CANDIDATES: usize = 1_000_000;
 const MAX_RC1_CHANNEL_ROWS_PER_ROOT: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,10 +168,14 @@ pub async fn discover_rc1_channel_migration_scopes(
     filesystem: Arc<dyn RootFilesystem>,
 ) -> Result<Vec<Rc1ChannelMigrationScope>, Rc1ChannelStateMigrationError> {
     let tenants_root = VirtualPath::new("/tenants").map_err(log_malformed)?;
-    let tenant_entries = filesystem
+    let tenant_entries = match filesystem
         .list_dir_bounded(&tenants_root, MAX_RC1_CHANNEL_TENANTS.saturating_add(1))
         .await
-        .map_err(log_unavailable)?;
+    {
+        Ok(entries) => entries,
+        Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(log_unavailable(error)),
+    };
     if tenant_entries.len() > MAX_RC1_CHANNEL_TENANTS {
         return Err(Rc1ChannelStateMigrationError::Unavailable);
     }
@@ -178,14 +186,13 @@ pub async fn discover_rc1_channel_migration_scopes(
         }
         let tenant_segment = tenant_entry.name;
         let shared = format!("/tenants/{tenant_segment}/shared");
-        let mut rows = query_all(&filesystem, &shared).await?;
+        let rows = query_all(&filesystem, &shared).await?;
         if !rows
             .iter()
             .any(|row| is_rc1_channel_state_path(row.path.as_str()))
         {
             continue;
         }
-        rows.extend(query_all(&filesystem, &format!("/tenants/{tenant_segment}/users")).await?);
         let tenant = TenantId::new(&tenant_segment).map_err(log_malformed)?;
         let slack_setup = find_row(&rows, &format!("{shared}/slack-setup/installation.json"))
             .map(parse::<Rc1SlackSetup>)
@@ -237,12 +244,22 @@ pub async fn discover_rc1_channel_migration_scopes(
             thread_id: None,
             invocation_id: InvocationId::new(),
         };
-        let oauth_channel_secret_scope =
-            discover_secret_scope(&rows, &tenant_segment, &tenant, &slack_handles)?
-                .unwrap_or_else(|| admin_scope.clone());
-        let proof_code_channel_secret_scope =
-            discover_secret_scope(&rows, &tenant_segment, &tenant, &telegram_handles)?
-                .unwrap_or_else(|| admin_scope.clone());
+        let oauth_channel_secret_scope = discover_secret_scope(
+            filesystem.as_ref(),
+            &tenant_segment,
+            &tenant,
+            &slack_handles,
+        )
+        .await?
+        .unwrap_or_else(|| admin_scope.clone());
+        let proof_code_channel_secret_scope = discover_secret_scope(
+            filesystem.as_ref(),
+            &tenant_segment,
+            &tenant,
+            &telegram_handles,
+        )
+        .await?
+        .unwrap_or_else(|| admin_scope.clone());
         scopes.push(Rc1ChannelMigrationScope {
             admin_scope,
             oauth_channel_secret_scope,
@@ -274,8 +291,8 @@ fn find_row<'a>(rows: &'a [VersionedEntry], path: &str) -> Option<&'a VersionedE
     rows.iter().find(|row| row.path.as_str() == path)
 }
 
-fn discover_secret_scope(
-    rows: &[VersionedEntry],
+async fn discover_secret_scope(
+    filesystem: &dyn RootFilesystem,
     tenant_segment: &str,
     tenant: &TenantId,
     handles: &[SecretHandle],
@@ -284,24 +301,78 @@ fn discover_secret_scope(
         return Ok(None);
     }
     let mut candidates: BTreeMap<String, (ResourceScope, BTreeSet<String>)> = BTreeMap::new();
-    for row in rows {
-        for handle in handles {
-            let Some(scope) =
-                secret_scope_from_path(row.path.as_str(), tenant_segment, tenant, handle.as_str())?
-            else {
-                continue;
-            };
-            let key = format!(
-                "{}\0{}\0{}",
-                scope.user_id.as_str(),
-                scope.agent_id.as_ref().map_or("", AgentId::as_str),
-                scope.project_id.as_ref().map_or("", ProjectId::as_str),
-            );
-            candidates
-                .entry(key)
-                .or_insert_with(|| (scope, BTreeSet::new()))
-                .1
-                .insert(handle.as_str().to_string());
+    let mut scope_candidates = 0usize;
+    let users_root = format!("/tenants/{tenant_segment}/users");
+    for user in
+        bounded_directory_names(filesystem, &users_root, MAX_RC1_CHANNEL_USERS_PER_TENANT).await?
+    {
+        let secrets_root = format!("{users_root}/{user}/secrets");
+        probe_secret_scope(
+            filesystem,
+            tenant_segment,
+            tenant,
+            handles,
+            &secrets_root,
+            &mut scope_candidates,
+            &mut candidates,
+        )
+        .await?;
+
+        for project in bounded_directory_names(
+            filesystem,
+            &format!("{secrets_root}/projects"),
+            MAX_RC1_CHANNEL_PROJECTS_PER_OWNER,
+        )
+        .await?
+        {
+            probe_secret_scope(
+                filesystem,
+                tenant_segment,
+                tenant,
+                handles,
+                &format!("{secrets_root}/projects/{project}/secrets"),
+                &mut scope_candidates,
+                &mut candidates,
+            )
+            .await?;
+        }
+
+        for agent in bounded_directory_names(
+            filesystem,
+            &format!("{secrets_root}/agents"),
+            MAX_RC1_CHANNEL_AGENTS_PER_USER,
+        )
+        .await?
+        {
+            let agent_root = format!("{secrets_root}/agents/{agent}");
+            probe_secret_scope(
+                filesystem,
+                tenant_segment,
+                tenant,
+                handles,
+                &format!("{agent_root}/secrets"),
+                &mut scope_candidates,
+                &mut candidates,
+            )
+            .await?;
+            for project in bounded_directory_names(
+                filesystem,
+                &format!("{agent_root}/projects"),
+                MAX_RC1_CHANNEL_PROJECTS_PER_OWNER,
+            )
+            .await?
+            {
+                probe_secret_scope(
+                    filesystem,
+                    tenant_segment,
+                    tenant,
+                    handles,
+                    &format!("{agent_root}/projects/{project}/secrets"),
+                    &mut scope_candidates,
+                    &mut candidates,
+                )
+                .await?;
+            }
         }
     }
     let required = handles
@@ -316,6 +387,68 @@ fn discover_secret_scope(
         return Err(Rc1ChannelStateMigrationError::Unavailable);
     }
     Ok(result)
+}
+
+async fn bounded_directory_names(
+    filesystem: &dyn RootFilesystem,
+    root: &str,
+    limit: usize,
+) -> Result<Vec<String>, Rc1ChannelStateMigrationError> {
+    let root = VirtualPath::new(root).map_err(log_malformed)?;
+    let entries = match filesystem
+        .list_dir_bounded(&root, limit.saturating_add(1))
+        .await
+    {
+        Ok(entries) => entries,
+        Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(log_unavailable(error)),
+    };
+    if entries.len() > limit {
+        return Err(Rc1ChannelStateMigrationError::Unavailable);
+    }
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry.file_type == FileType::Directory)
+        .map(|entry| entry.name)
+        .collect())
+}
+
+async fn probe_secret_scope(
+    filesystem: &dyn RootFilesystem,
+    tenant_segment: &str,
+    tenant: &TenantId,
+    handles: &[SecretHandle],
+    secret_root: &str,
+    scope_candidates: &mut usize,
+    candidates: &mut BTreeMap<String, (ResourceScope, BTreeSet<String>)>,
+) -> Result<(), Rc1ChannelStateMigrationError> {
+    *scope_candidates = scope_candidates.saturating_add(1);
+    if *scope_candidates > MAX_RC1_CHANNEL_SECRET_SCOPE_CANDIDATES {
+        return Err(Rc1ChannelStateMigrationError::Unavailable);
+    }
+    for handle in handles {
+        let path = VirtualPath::new(format!("{secret_root}/{}.json", handle.as_str()))
+            .map_err(log_malformed)?;
+        match filesystem.get(&path).await {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(FilesystemError::NotFound { .. }) => continue,
+            Err(error) => return Err(log_unavailable(error)),
+        }
+        let scope = secret_scope_from_path(path.as_str(), tenant_segment, tenant, handle.as_str())?
+            .ok_or(Rc1ChannelStateMigrationError::Malformed)?;
+        let key = format!(
+            "{}\0{}\0{}",
+            scope.user_id.as_str(),
+            scope.agent_id.as_ref().map_or("", AgentId::as_str),
+            scope.project_id.as_ref().map_or("", ProjectId::as_str),
+        );
+        candidates
+            .entry(key)
+            .or_insert_with(|| (scope, BTreeSet::new()))
+            .1
+            .insert(handle.as_str().to_string());
+    }
+    Ok(())
 }
 
 fn secret_scope_from_path(
@@ -1498,7 +1631,10 @@ mod tests {
         ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
         ExtensionManifestRef, InstallationOwner, ManifestHash, ManifestSource, PackageRootBinding,
     };
-    use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, ScopedFilesystem};
+    use ironclaw_filesystem::{
+        CasExpectation, Entry, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend,
+        ScopedFilesystem,
+    };
     use ironclaw_host_api::{
         mount::{MountGrant, MountPermissions, MountView},
         path::MountAlias,
@@ -2229,8 +2365,19 @@ service = "telegram.fixture/v1"
     }
 
     #[tokio::test]
-    async fn scope_discovery_finds_every_tenant_and_exact_secret_owner() {
+    async fn scope_discovery_is_a_noop_on_an_empty_backend() {
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+
+        let scopes = discover_rc1_channel_migration_scopes(filesystem)
+            .await
+            .expect("empty installation has no rc1 channel state");
+
+        assert!(scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scope_discovery_finds_every_tenant_and_exact_secret_owner() {
+        let backend = InMemoryBackend::new();
         for (tenant, user, agent) in [
             ("tenant-a", "operator-a", "agent-a"),
             ("tenant-b", "operator-b", "agent-b"),
@@ -2250,7 +2397,7 @@ service = "telegram.fixture/v1"
                 "revision": 1,
                 "updated_at": "2026-07-01T00:00:00Z"
             });
-            filesystem
+            backend
                 .put(
                     &setup_path,
                     Entry::bytes(serde_json::to_vec(&setup).expect("setup wire")),
@@ -2263,7 +2410,7 @@ service = "telegram.fixture/v1"
                     "/tenants/{tenant}/users/{user}/secrets/agents/{agent}/secrets/{handle}.json"
                 ))
                 .expect("secret path");
-                filesystem
+                backend
                     .put(
                         &secret_path,
                         Entry::bytes(vec![1, 2, 3]),
@@ -2273,6 +2420,14 @@ service = "telegram.fixture/v1"
                     .expect("seed secret authority");
             }
         }
+
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(
+            FaultInjecting::new(backend).with_fault(
+                Fault::on(FilesystemOperation::Query)
+                    .path("/users")
+                    .backend("scope discovery must not query the user-data subtree"),
+            ),
+        );
 
         let scopes = discover_rc1_channel_migration_scopes(filesystem)
             .await
