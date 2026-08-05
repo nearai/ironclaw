@@ -71,33 +71,28 @@ const EXTENSION_MANAGER: &str = "ironclaw_extension_manager";
 /// actually blocks the survivors is their *request/response* vocabulary, which
 /// is what each reason now states. `ProductConversationSubjectRouteResolver`
 /// had no other blocker and was inverted.
-const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[
-    (
-        "AuthChallengeProvider",
-        "signature returns Result<_, ironclaw_auth::AuthProductError> and carries \
-         ironclaw_auth::{AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl}; \
-         moving it needs the auth vocabulary narrowed out of the port first",
-    ),
-    (
-        "ChannelConnectionService",
-        "returns ChannelAuthAccountState, whose fields are \
-         ironclaw_auth::{AuthFlowStatus, CredentialAccountStatus}",
-    ),
-    (
-        "ConversationBindingService",
-        "takes ironclaw_product::ResolveBindingRequest and returns \
-         ironclaw_product::ResolvedBinding; both are declared in product beside \
-         the route-kind grammar that derives them. The error no longer blocks it \
-         (WS2.2) — the DTOs do, and they move with the channel_host row",
-    ),
-    (
-        "ProductActorUserResolver",
-        "resolves to ResolvedProductActorUser, which carries \
-         ironclaw_conversations::ExternalActorBindingEpoch. The error no longer \
-         blocks it (WS2.2); the conversations dep is the whole blocker and needs \
-         that epoch narrowed out of the response first",
-    ),
-];
+///
+/// **WS2.5 then cleared every vocabulary-blocked row, 4 -> 1, and the reasons
+/// above were the map that made it mechanical.** Two of the three did not need
+/// their vocabulary narrowed at all: `AuthChallengeProvider` and
+/// `ChannelConnectionService` were declared where their vocabulary already
+/// lives (`ironclaw_auth`), which is what `.claude/rules/type-placement.md`
+/// §2/§3 and `families/contracts.md:46` ask for and costs zero type
+/// weakening — the residue clears when a trait stops being *product*-declared,
+/// whichever legal home it lands in. The third,
+/// `ProductActorUserResolver`, did move to `ironclaw_product_contracts`,
+/// because the one type that blocked it (`ExternalActorBindingEpoch`) belonged
+/// beside `ExternalActorRef` in `ironclaw_extension_contracts::external` all
+/// along. What survives is not vocabulary: `ConversationBindingService`'s DTOs
+/// move with the §12.11 D-A factory port, which is unstarted.
+const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[(
+    "ConversationBindingService",
+    "takes ironclaw_product::ResolveBindingRequest and returns \
+     ironclaw_product::ResolvedBinding; both are declared in product beside \
+     the route-kind grammar that derives them. The error no longer blocks it \
+     (WS2.2) — the DTOs do, and they move with the channel_host row (the \
+     §12.11 D-A factory-port scope, unstarted)",
+)];
 
 /// The ports this row inverted: defined in `ironclaw_product_contracts` and
 /// implemented **below** product, paired with the crate that implements each.
@@ -127,6 +122,11 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     ("DeliveryReplyContextSource", EXTENSION_HOST),
     // WS2.4: the lifecycle product service is the manager's headline surface.
     ("LifecycleProductService", EXTENSION_MANAGER),
+    // WS2.5: inverted once `ExternalActorBindingEpoch` moved to
+    // `ironclaw_extension_contracts::external`, which made
+    // `ResolvedProductActorUser` contracts-legal. Its request and response
+    // types moved with it and the error became `ProductOperationFailure`.
+    ("ProductActorUserResolver", EXTENSION_HOST),
     // WS2.2: inverted once `ProductOperationFailure` gave it a contracts-legal
     // error. Its request type and route key moved with it.
     ("ProductConversationSubjectRouteResolver", EXTENSION_HOST),
@@ -136,8 +136,12 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
 
 /// Ceiling on the residue. Only ever moves down. (WS2.1 froze it at 6; WS2.2
 /// inverted `ProductConversationSubjectRouteResolver`; WS2.4 moved
-/// `ExtensionCredentialSetupService`'s implementation out of the crate.)
-const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 4;
+/// `ExtensionCredentialSetupService`'s implementation out of the crate; WS2.5
+/// took the three vocabulary-blocked ports 4 -> 1 — `AuthChallengeProvider` and
+/// `ChannelConnectionService` to `ironclaw_auth` beside the vocabulary that
+/// blocked them, `ProductActorUserResolver` to `ironclaw_product_contracts`
+/// once `ExternalActorBindingEpoch` moved to `ironclaw_extension_contracts`.)
+const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 1;
 
 /// The manager twin of the host list above. WS2.4 moved
 /// `ExtensionCredentialSetupService`'s implementation out of the host, which
@@ -150,8 +154,10 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
     "ExtensionCredentialSetupService",
     "implemented in webui_extension_credentials.rs; the port stays declared in \
      ironclaw_product because its vocabulary is ironclaw_auth credential-account \
-     projections — it moves to ironclaw_product_contracts when that vocabulary \
-     is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
+     projections. WS2.5 showed the cheaper answer for that class: declare the \
+     port in ironclaw_auth beside the vocabulary, as AuthChallengeProvider and \
+     ChannelConnectionService now are, rather than narrowing the vocabulary out \
+     to reach ironclaw_product_contracts",
 )];
 
 /// **The full `ironclaw_product` reference ledger** — every production file in
@@ -160,11 +166,14 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 ///
 /// Why this exists when the trait residue above already does: the trait list is
 /// **trait-shaped** — it sees `impl <product trait> for …` headers and nothing
-/// else. A dependency can also be a constant (`adapter_registry::
-/// PRODUCT_ADAPTER_HOST_API_ID`), a free function (`auth_prompt_view_for_
-/// blocked_auth`), or an inline construction of a concrete product type
-/// (`ProductConversationBindingService::new`), and none of those register
-/// there. The manifest biconditional below catches the *sum* loudly, but as a
+/// else. A dependency can also be a free function or an inline construction
+/// of a concrete product type (`ProductConversationBindingService::new`), and
+/// none of those register there — the two examples this paragraph used to
+/// give are both gone: `adapter_registry::PRODUCT_ADAPTER_HOST_API_ID`
+/// retired with the WS5 `adapter_registry` move, and
+/// `auth_prompt_view_for_blocked_auth` moved to
+/// `ironclaw_auth::product_prompt` with the challenge family (WS2.5). The
+/// manifest biconditional below catches the *sum* loudly, but as a
 /// boolean: it cannot say what remains. The `products → loops` re-layer was
 /// sized five times from proxies of this set and was wrong five times
 /// (PROPOSAL §12.11 D-A and its 2026-08-03 amendment; #7092; #7143; #7145) —
@@ -181,26 +190,11 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 /// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
 const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
     (
-        "available_extensions.rs",
-        "adapter-registry: product_adapter_sections manifest projection \
-         (owned by CHECKLIST WS5's product-narrows row; the strategy-alias \
-         half of this row fell to #7143's import repoint)",
-    ),
-    (
-        "channel_connection.rs",
-        "port: implements ChannelConnectionService and returns \
-         ChannelAuthAccountState — the ironclaw_auth vocabulary residue row",
-    ),
-    (
         "channel_host.rs",
-        "port: implements ConversationBindingService and ProductActorUserResolver \
-         (their DTOs are product-declared) + assembly: inline-constructs product's \
-         concrete stack — the §12.11 D-A factory-port scope",
-    ),
-    (
-        "channel_lifecycle.rs",
-        "adapter-registry: PRODUCT_ADAPTER_HOST_API_ID section filter (the \
-         strategy-alias half fell to #7143's import repoint)",
+        "port: implements ConversationBindingService (its DTOs are \
+         product-declared) + assembly: inline-constructs product's concrete \
+         stack — the §12.11 D-A factory-port scope. The ProductActorUserResolver \
+         half of this row fell to WS2.5's inversion",
     ),
     (
         "channel_triggered_delivery.rs",
@@ -208,36 +202,25 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
          triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
          alongside channel_host.rs",
     ),
-    (
-        "host_api_contracts.rs",
-        "adapter-registry: registers product's \
-         register_product_adapter_host_api_contract into the manifest contract \
-         registry (owned by CHECKLIST WS5's product-narrows row)",
-    ),
-    (
-        "product_lifecycle.rs",
-        "port vocabulary (ChannelConnectionService) + \
-         ExtensionAccountSetupRegistry (the strategy alias fell to #7143)",
-    ),
-    (
-        "provider_identity.rs",
-        "port: implements ProductActorUserResolver, whose response carries \
-         ironclaw_conversations::ExternalActorBindingEpoch — the conversations \
-         vocabulary residue row",
-    ),
-    (
-        "run_delivery_ports.rs",
-        "port: implements AuthChallengeProvider (ironclaw_auth vocabulary residue) \
-         + product-fn: calls auth_prompt_view_for_blocked_auth and \
-         projection::approval_prompt_context_view, free functions that move with \
-         the auth-prompt vocabulary",
-    ),
 ];
 
 /// Ceiling on the reference ledger. Only ever moves down — growing the frozen
 /// list past it needs this constant raised in the same PR, which is the
 /// deliberate two-edit speed bump against re-widening the edge.
-const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 9;
+///
+/// **WS2.5 took it 9 -> 5.** Four rows fell together, all by the same move: the
+/// port-facing vocabulary went to the crate that owns it, and product maps at
+/// its boundary. `channel_connection.rs` and `product_lifecycle.rs` speak
+/// `ironclaw_auth::{ChannelConnectionService, ChannelAuthAccountState}` and the
+/// `ExtensionAccountSetupReader` port; `provider_identity.rs` speaks
+/// `ironclaw_product_contracts::actor_identity`; `run_delivery_ports.rs` speaks
+/// `ironclaw_auth::product_prompt` for the challenge family and
+/// `ironclaw_product_contracts::approval_prompt` for the approval projection.
+///
+/// The five survivors are exactly two classes and neither is vocabulary: three
+/// `adapter-registry` rows (CHECKLIST WS5's `product` narrows row) and two
+/// `assembly` rows (§12.11 D-A's factory port, unstarted).
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 2;
 
 /// Workspace package metadata, resolved once per test binary.
 ///
@@ -635,17 +618,10 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
 /// `ironclaw_product_contracts::error::ProductOperationFailure`. A third file
 /// appearing here means the boundary error was bypassed; a stale entry means a
 /// port was inverted without deleting its row.
-const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
-    (
-        "channel_host.rs",
-        "implements ConversationBindingService and ProductActorUserResolver, both \
-         still declared in ironclaw_product",
-    ),
-    (
-        "provider_identity.rs",
-        "implements ProductActorUserResolver, still declared in ironclaw_product",
-    ),
-];
+const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[(
+    "channel_host.rs",
+    "implements ConversationBindingService, still declared in ironclaw_product",
+)];
 
 /// Production files in `crate_name` whose *code* names `type_name`, as paths
 /// relative to the crate's `src/`.

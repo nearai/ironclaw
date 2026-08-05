@@ -139,7 +139,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_runtime_policy(standalone_runtime_policy())
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: None,
     }]);
@@ -359,6 +359,56 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     assert!(
         cfg.regex_activation_enabled,
         "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+    );
+}
+
+/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the
+/// unset one.
+///
+/// The unset branch is the product default and was previously unreachable from a
+/// test: it sits behind `std::env::var`, and unsetting the key in-process would
+/// race the other tests in this binary. `skill_injection_mode_from_env_value`
+/// takes the lookup's `Result` so the decision can be exercised without touching
+/// process state.
+#[test]
+fn skill_injection_mode_resolves_every_env_branch() {
+    use ironclaw_first_party_extension_ports::SkillInjectionMode;
+
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotPresent)),
+            Ok(mode) if mode == super::DEFAULT_SKILL_INJECTION_MODE
+        ),
+        "an unset key must resolve to the product default, not an error"
+    );
+    assert!(matches!(
+        super::skill_injection_mode_from_env_value(Ok("full".to_string())),
+        Ok(SkillInjectionMode::Full)
+    ));
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok("  Listing  ".to_string())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "values are trimmed and case-insensitive"
+    );
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok(String::new())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "an empty value is the same as asking for the listing, not an error"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Ok("bodies".to_string())).is_err(),
+        "an unrecognized mode must fail loudly rather than silently pick one"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("full")
+        )))
+        .is_err(),
+        "an unreadable value must not be mistaken for an unset key"
     );
 }
 
@@ -2047,13 +2097,15 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2196,13 +2248,15 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2699,13 +2753,15 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     // Provider selection lives entirely in config.toml (mirrors an
@@ -3015,15 +3071,15 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
 struct RecordingSandboxTransport;
 
 #[async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
         &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
+        _request: ironclaw_host_api::process::CommandExecutionRequest,
     ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
     > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
             output: String::new(),
             saved_output: None,
             exit_code: 0,

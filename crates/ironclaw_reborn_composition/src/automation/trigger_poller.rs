@@ -21,7 +21,7 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-pub use ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook;
+pub(crate) use ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::{

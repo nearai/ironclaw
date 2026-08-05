@@ -3036,7 +3036,7 @@ async fn dispatch_runtime_capability_auth_decline(
 }
 
 fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
-    capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
+    capability_id.as_str() == ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
 fn provider_schema_is_resolved(schema: &serde_json::Value) -> bool {
@@ -4116,7 +4116,7 @@ mod tests {
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
     };
-    use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
+    use ironclaw_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
@@ -8014,7 +8014,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_capability_invocation_uses_spawn_with_validated_plan() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-spawn");
@@ -8523,7 +8523,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_capability_maps_runtime_invalid_plan_failure_to_model() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-invalid-plan");
@@ -8601,7 +8601,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_capability_maps_runtime_malformed_plan_failure_to_model() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-malformed-plan");
@@ -8679,7 +8679,7 @@ mod tests {
     #[tokio::test]
     async fn process_sandbox_rejection_keeps_scrubbed_fenced_diagnostic_model_visible() {
         let capability_id =
-            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+            CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
                 .expect("valid capability id");
         let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
         let mut context = execution_context("thread-process-sandbox-scrubbed-diagnostic");

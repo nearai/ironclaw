@@ -45,15 +45,16 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
 use ironclaw_product::ProjectFilesystemReader;
 use ironclaw_product::{
-    ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    StaticProductInstallationResolver,
+    ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
+    DefaultInboundTurnService, DefaultProductSurface, DeliveryCoordinator, IdempotencyLedger,
+    ProductInstallationKey, ProductInstallationScope, ProductSurfaceFailure,
+    RebornFilesystemIdempotencyLedger, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, StaticProductInstallationResolver,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::actor_identity::{
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
+};
 use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductInboundEnvelope};
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
@@ -269,7 +270,7 @@ pub struct ChannelHostDeliveryDeps {
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
-    pub auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    pub auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
     pub settings: RunDeliverySettings,
 }
 
@@ -498,7 +499,11 @@ impl GenericChannelHostAssembly {
     /// Register one extension's vendor extras, then re-reconcile the
     /// extension against the current snapshot so the remaining extras apply
     /// to the next build.
-    pub async fn register_extras(&self, extension_id: &str, extras: ChannelExtras) {
+    pub async fn register_extras(
+        &self,
+        extension_id: &ironclaw_host_api::ids::ExtensionId,
+        extras: ChannelExtras,
+    ) {
         let ChannelExtras {
             preference_target_codec,
             subject_route_resolver,
@@ -506,7 +511,7 @@ impl GenericChannelHostAssembly {
         } = extras;
         if let Ok(mut stored) = self.extras.lock() {
             stored.insert(
-                extension_id.to_string(),
+                extension_id.as_str().to_string(),
                 StoredChannelExtras {
                     preference_target_codec,
                     subject_route_resolver,
@@ -515,7 +520,7 @@ impl GenericChannelHostAssembly {
             );
         }
         let mut reconciled = self.reconciled.lock().await;
-        reconciled.remove(extension_id);
+        reconciled.remove(extension_id.as_str());
         drop(reconciled);
         self.reconcile(self.deps.watch.current()).await;
     }
@@ -1187,7 +1192,10 @@ impl ProductActorUserResolver for OperatorActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<
+        Option<ResolvedProductActorUser>,
+        ironclaw_product_contracts::error::ProductOperationFailure,
+    > {
         Ok(Some(ResolvedProductActorUser::new(
             self.operator_user_id.clone(),
         )))

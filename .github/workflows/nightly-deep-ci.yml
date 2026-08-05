@@ -116,10 +116,21 @@ jobs:
         # Targets the dispatch routing logic itself. Keep this pointed at a file
         # with real mutable statements — a pure `pub use` re-export file yields
         # zero mutants and makes this step silently vacuous.
-        run: >-
-          scripts/mutation-audit.sh
-          -p ironclaw_capabilities
-          crates/ironclaw_capabilities/src/dispatch.rs
+        #
+        # The crate directory is resolved through the shared inventory
+        # (scripts/ci/crate-dir.sh) rather than the flat `crates/
+        # ironclaw_capabilities` literal, so this step needs no edit when the
+        # crate moves into a family directory (PROPOSAL §5) — a stale literal
+        # here used to be a SILENT failure: cargo-mutants would match zero
+        # mutants under a path that no longer exists and report a clean run
+        # over code it never read. `set -e` aborts here if resolution itself
+        # fails; scripts/mutation-audit.sh's own file-existence guard is the
+        # second layer, catching dispatch.rs being renamed within a crate that
+        # still resolves.
+        run: |
+          set -euo pipefail
+          capabilities_dir="$(bash scripts/ci/crate-dir.sh ironclaw_capabilities)"
+          scripts/mutation-audit.sh -p ironclaw_capabilities "${capabilities_dir}/src/dispatch.rs"
       - name: Upload mutation triage queue
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

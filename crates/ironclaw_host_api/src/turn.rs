@@ -1101,6 +1101,30 @@ impl ProductTurnContext {
     }
 }
 
+/// The accepted-submission record for a turn.
+///
+/// Turn *vocabulary*, not turn authority: every field is already this module's,
+/// and the value is durable state that non-kernel crates persist and replay —
+/// `ironclaw_conversations` stores it in the inbound idempotency ledger and
+/// replays it on duplicate delivery without ever holding a coordinator. It
+/// descended here from `ironclaw_turns::response` so that ledger contract can
+/// name it without importing the kernel (PROPOSAL §6.4.2, "turn vocabulary via
+/// `host_api`"); `ironclaw_turns` re-exports it through its documented
+/// `host_api::turn` facade, so coordinator callers keep one import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmitTurnResponse {
+    Accepted {
+        turn_id: TurnId,
+        run_id: TurnRunId,
+        status: TurnStatus,
+        resolved_run_profile_id: RunProfileId,
+        resolved_run_profile_version: RunProfileVersion,
+        event_cursor: EventCursor,
+        accepted_message_ref: AcceptedMessageRef,
+        reply_target_binding_ref: ReplyTargetBindingRef,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

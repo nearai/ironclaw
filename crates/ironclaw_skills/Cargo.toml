@@ -10,7 +10,7 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
 [package.metadata.ironclaw]
-layer = "loops"
+layer = "substrates"
 
 [package.metadata.dist]
 dist = false

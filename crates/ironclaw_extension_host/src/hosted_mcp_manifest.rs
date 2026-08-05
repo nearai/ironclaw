@@ -302,7 +302,7 @@ effects = ["network", "use_secret"]
     let parsed = ExtensionManifestRecord::from_toml_with_root_binding(
         raw.clone(),
         ManifestSource::UserRegistered,
-        &ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        &ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
             ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host port catalog rejected hosted MCP registration: {error}"),
             }

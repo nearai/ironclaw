@@ -9,6 +9,8 @@ mod auto_approve;
 mod capability_permission;
 mod cas_record;
 mod policy;
+mod profile_gate;
+mod profile_gate_policy;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -52,6 +54,15 @@ pub use policy::{
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
     PersistentApprovalPolicyStorePort, PersistentApprovalScope,
     permission_mode_allows_persistent_approval, persistent_approval_grant_issuer,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use profile_gate::EmptyApprovalSettingsProvider;
+pub use profile_gate::{
+    ApprovalSettingsProvider, OriginGateRequirement, ProfileApprovalGatePolicy,
+    profile_approval_authorizer,
+};
+pub use profile_gate_policy::{
+    RuntimeProfileApprovalGateEffectSets, RuntimeProfileApprovalGatePolicy,
 };
 
 pub type ToolPermissionOverride = CapabilityPermissionOverride;

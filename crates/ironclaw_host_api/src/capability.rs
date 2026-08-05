@@ -120,6 +120,15 @@ pub struct OriginGateMatrix {
 /// `AskDestructive` effect gate, i.e. their effects are a subset of
 /// `{read_filesystem, dispatch_capability}` or they are exempt from approval).
 /// Additions require security review (S5 ratchet).
+/// Capability id of the sandboxed-process lane.
+///
+/// Lives here rather than beside the lane's plan types because both the kernel
+/// spawn path (`ironclaw_host_runtime`) and the loop tier
+/// (`ironclaw_loop_host`) compare against it, and a `loops`-layer crate must
+/// not take the lane's Docker/CA dependency cone for a string constant
+/// (PROPOSAL §6.6.4, CHECKLIST WS10).
+pub const PROCESS_SANDBOX_CAPABILITY_ID: &str = "system.process_sandbox.run";
+
 pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.echo",
     "builtin.time",
@@ -596,5 +605,25 @@ mod origin_gate_wire_tests {
         assert_eq!(matrix.loop_run, OriginGatePolicy::Forbidden);
         assert_eq!(matrix.product, OriginGatePolicy::ConsentSufficient);
         assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+    }
+}
+
+#[cfg(test)]
+mod process_sandbox_capability_id_tests {
+    use super::PROCESS_SANDBOX_CAPABILITY_ID;
+    use crate::ids::CapabilityId;
+
+    /// The constant is compared as a `&str` on two gating paths — the kernel
+    /// spawn check (`ironclaw_host_runtime::production`) and the process
+    /// executor's routing check — where a malformed literal would not fail
+    /// loudly: `capability_id.as_str() == LITERAL` would simply never match, so
+    /// sandbox plans would silently stop being recognised. `CapabilityId::new`
+    /// is fallible and cannot be evaluated in a `const`, so pin it here instead:
+    /// this is the check that makes the literal a valid capability id.
+    #[test]
+    fn process_sandbox_capability_id_literal_is_a_valid_capability_id() {
+        let parsed = CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID)
+            .expect("PROCESS_SANDBOX_CAPABILITY_ID must be a valid CapabilityId");
+        assert_eq!(parsed.as_str(), PROCESS_SANDBOX_CAPABILITY_ID);
     }
 }

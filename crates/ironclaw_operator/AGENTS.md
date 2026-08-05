@@ -67,10 +67,22 @@
 
 ## Known Debt
 
-- **Direct `ironclaw_secrets` edge.** The key store reaches the secret store
-  directly. CHECKLIST WS3 removes it behind a `product_contracts` port
-  ("port replacements land first", PROPOSAL §12.1b), so the boundary rule
-  deliberately does *not* forbid `ironclaw_secrets` yet.
+- ~~**Direct `ironclaw_secrets` edge.**~~ **Discharged by CHECKLIST WS3.** The
+  key store holds
+  `ironclaw_product_contracts::operator_secrets::OperatorSecretValueStore`;
+  `ironclaw_reborn_composition::RuntimeOperatorSecretValueStore` implements it
+  over the substrate, and the boundary rule now forbids `ironclaw_secrets` here
+  under every normal dependency kind. **What stays in this crate is policy** —
+  the `llm_provider_<id>_api_key` handle derivation and the fail-closed
+  behaviour when a store call errors. What left is every substrate concern: the
+  scope (the port fixes it, so this crate cannot name one), the lease protocol
+  behind `read`, and the substrate's error detail (only a stable classification
+  string crosses). Two tests travelled with the behaviour rather than being
+  faked here — `read_is_repeatable_across_reloads` and the #4673
+  production-store reproduction now live with the port's implementor in
+  `ironclaw_reborn_composition`, because a fake asserting its own repeatability
+  proves nothing. Adding a secret substrate back to this crate is a boundary
+  failure, not a convenience.
 - **`llm_admin/provider_admin.rs` `include_str!`s CLI source** (into
   `crates/ironclaw_reborn_cli/src/commands/config/init.rs`). Inventoried by
   `reborn_cross_crate_include_scan.rs`, which is still report-only; CHECKLIST

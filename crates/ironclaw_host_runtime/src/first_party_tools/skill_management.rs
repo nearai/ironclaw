@@ -1,10 +1,23 @@
+//! Registrar-side adapter for the first-party skill-management tools.
+//!
+//! WS3 moved the executable half — URL/GitHub source fetching, bundle
+//! extraction, and install-input normalization — into
+//! `ironclaw_extension_support::skills`. What stays here is the host's own
+//! concern: the capability manifests the builtin package declares, the
+//! registry wiring, and the translation between the host's dispatch types and
+//! the executor's neutral request/error pair — the same executor/adapter seam
+//! every binary-registered first-party tool already uses.
+
 use std::{sync::Arc, time::Instant};
 
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extension_support::skills::{
     SkillManagementCapabilityError, SkillManagementCapabilityKind,
-    SkillManagementCapabilityRequest, dispatch,
+    SkillManagementCapabilityRequest, SkillUrlFetchContext, dispatch, resolve_install_input,
 };
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
@@ -14,17 +27,8 @@ use ironclaw_host_api::{
     ids::CapabilityId,
     resource::ResourceUsage,
 };
-use ironclaw_skills::InstalledSkillMetadataSource;
-use serde_json::{Map, Value, json};
 
-use crate::{
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
-};
-
-use super::{
-    first_party_capability_manifest, resource_profile, skill_url_install::fetch_skill_url_payload,
-};
+use super::{first_party_capability_manifest, resource_profile};
 
 pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
@@ -128,9 +132,20 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         };
         let mut usage = ResourceUsage::default();
         let input = if kind == SkillManagementCapabilityKind::Install {
-            skill_install_input(&request, &mut usage)
-                .await
-                .map_err(|error| error.with_usage(usage_with_elapsed(&usage, started)))?
+            resolve_install_input(
+                &request.input,
+                &skill_url_fetch_context(&request),
+                &mut usage,
+            )
+            .await
+            // Deliberately NOT `skill_management_error`: the install-input path
+            // never logged before this executor moved out of the crate, and a
+            // move-only change must not add a log line. The `dispatch` arm below
+            // keeps the debug record it already had.
+            .map_err(|error| {
+                FirstPartyCapabilityError::new(error.kind())
+                    .with_usage(usage_with_elapsed(&usage, started))
+            })?
         } else {
             request.input.clone()
         };
@@ -151,77 +166,14 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
     }
 }
 
-async fn skill_install_input(
-    request: &FirstPartyCapabilityRequest,
-    usage: &mut ResourceUsage,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let Some(object) = request.input.as_object() else {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::InputEncode,
-        ));
-    };
-    let has_content = object.contains_key("content");
-    let url = object
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    match (has_content, url) {
-        // Direct install: `content` (the SKILL.md) plus, optionally, an author-supplied
-        // `files` array for the rest of the bundle.
-        //
-        // `files` used to be excluded here, so `content` + `files` matched NO arm and fell
-        // through to `_ => Err(InputEncode)` -- an agent attaching a script had its whole
-        // install rejected. `files` was reachable only on the URL-fetch path below, which
-        // builds the array itself. Measured on the 31-task SkillsBench subset
-        // (nearai/benchmarks#287): once the schema advertised `files`, the model sent 18
-        // correctly-shaped `{path, text}` entries (`scripts/verify_bib.py`,
-        // `references/fake_patterns.json`) across 9 calls, and every one was refused --
-        // which is why 0 of 27 agent-authored skills shipped a resource file while 18 of
-        // 31 human-curated ones do.
-        //
-        // `source`/`source_url` stay excluded: those are set by the URL path to record
-        // provenance, and an agent must not be able to forge them on a direct install.
-        (true, None) if !object.contains_key("source") && !object.contains_key("source_url") => {
-            Ok(request.input.clone())
-        }
-        (false, Some(url)) => {
-            let payload = fetch_skill_url_payload(request, url, usage).await?;
-            let mut rewritten = Map::new();
-            if let Some(name) = object.get("name").cloned() {
-                rewritten.insert("name".to_string(), name);
-            }
-            rewritten.insert("content".to_string(), Value::String(payload.content));
-            rewritten.insert(
-                "source".to_string(),
-                Value::String(
-                    InstalledSkillMetadataSource::InstalledUrl
-                        .as_str()
-                        .to_string(),
-                ),
-            );
-            rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
-            if !payload.files.is_empty() {
-                rewritten.insert(
-                    "files".to_string(),
-                    Value::Array(
-                        payload
-                            .files
-                            .into_iter()
-                            .map(|file| {
-                                json!({
-                                    "path": file.path.display().to_string(),
-                                    "bytes_base64": BASE64_STANDARD.encode(file.contents),
-                                })
-                            })
-                            .collect(),
-                    ),
-                );
-            }
-            Ok(Value::Object(rewritten))
-        }
-        _ => Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::InputEncode,
-        )),
+/// The host-runtime-free slice of an already-authorized dispatch input the
+/// skill-URL fetch path needs. Everything else the host holds (mounts,
+/// filesystem, secret staging, process ports) stays on this side of the seam.
+fn skill_url_fetch_context(request: &FirstPartyCapabilityRequest) -> SkillUrlFetchContext {
+    SkillUrlFetchContext {
+        capability_id: request.capability_id.clone(),
+        scope: request.scope.clone(),
+        runtime_http_egress: request.services.runtime_http_egress.clone(),
     }
 }
 
@@ -237,70 +189,4 @@ fn skill_management_error(error: SkillManagementCapabilityError) -> FirstPartyCa
         "skill management error mapped to first-party capability error"
     );
     FirstPartyCapabilityError::new(error.kind())
-}
-
-#[cfg(test)]
-mod skill_install_input_tests {
-    use serde_json::json;
-
-    /// Regression: `content` + `files` used to match no arm and fall through to
-    /// `Err(InputEncode)`, so an agent attaching `scripts/*.py` had its ENTIRE install
-    /// rejected. Measured consequence: 0 of 27 agent-authored skills shipped a resource
-    /// file (18 of 31 human-curated ones do), while the model was in fact sending 18
-    /// correctly-shaped `{path, text}` entries that were all refused.
-    #[tokio::test]
-    async fn content_with_author_supplied_files_is_accepted() {
-        let input = json!({
-            "name": "verify-bib",
-            "content": "# Verify BibTeX\n\nRun scripts/verify_bib.py\n",
-            "files": [
-                { "path": "scripts/verify_bib.py", "text": "#!/usr/bin/env python3\n" },
-                { "path": "references/patterns.json", "text": "{}\n" }
-            ]
-        });
-        let out = passthrough(&input).expect("content + files must be accepted");
-        assert_eq!(out, input, "input is forwarded unchanged to the capability");
-    }
-
-    /// Prose-only installs keep working.
-    #[tokio::test]
-    async fn content_only_still_accepted() {
-        let input = json!({ "name": "x", "content": "# x" });
-        assert_eq!(passthrough(&input).expect("accepted"), input);
-    }
-
-    /// An agent must not be able to forge install provenance on a direct install; those
-    /// keys are set by the URL-fetch path only.
-    #[tokio::test]
-    async fn content_with_forged_provenance_is_rejected() {
-        assert!(passthrough(&json!({ "content": "# x", "source": "installed_url" })).is_none());
-        assert!(
-            passthrough(&json!({ "content": "# x", "source_url": "https://e.example" })).is_none()
-        );
-    }
-
-    /// Neither content nor url is still invalid.
-    #[tokio::test]
-    async fn empty_input_rejected() {
-        assert!(passthrough(&json!({ "name": "x" })).is_none());
-    }
-
-    /// Exercises only the non-fetching arms of `skill_install_input`, which is all these
-    /// cases reach: the URL path needs a live request context.
-    fn passthrough(input: &serde_json::Value) -> Option<serde_json::Value> {
-        let object = input.as_object()?;
-        let has_content = object.contains_key("content");
-        let url = object
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.trim().is_empty());
-        match (has_content, url) {
-            (true, None)
-                if !object.contains_key("source") && !object.contains_key("source_url") =>
-            {
-                Some(input.clone())
-            }
-            _ => None,
-        }
-    }
 }

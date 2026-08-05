@@ -1,21 +1,46 @@
 use super::*;
 
-/// The ONE construction seam for host HTTP egress: policy enforcement over
-/// the reqwest transport, honoring the env-gated test-only host rewrite map
-/// ([`ironclaw_network::TEST_HTTP_REWRITE_MAP_ENV`]). Every composition path
-/// builds its vendor egress here so test runs redirect ALL vendor calls
-/// identically. Fail-closed: a set-but-invalid map refuses composition.
-pub(super) fn default_host_http_egress() -> Result<
-    ironclaw_network::PolicyNetworkHttpEgress<
-        ironclaw_network::RewriteNetworkTransport<ironclaw_network::ReqwestNetworkTransport>,
-    >,
-    RebornBuildError,
-> {
+/// The ONE construction seam for host HTTP egress.
+///
+/// Two arms, chosen at COMPILE time, so a shipped binary does not merely
+/// refuse the test seam at runtime — it does not contain it.
+///
+/// * **Production** (release/dist: no `debug_assertions`, no `test-support`):
+///   policy enforcement directly over the reqwest transport. The env-gated
+///   host-rewrite wrapper is not compiled into the binary at all, so
+///   `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` has nowhere to take effect.
+/// * **Debug / `test-support`**: the same policy egress wrapped in the
+///   rewrite transport, so E2E harnesses keep redirecting vendor calls to
+///   local fakes. E2E builds are debug builds, so they get this implicitly.
+///
+/// This replaces a *runtime* profile-proxy check (`cfg!(debug_assertions)`
+/// inside `from_env_value`, which still fails closed and stays as
+/// defence-in-depth) with compile-time exclusion. Fail-closed either way: a
+/// set-but-invalid map refuses composition.
+#[cfg(any(debug_assertions, feature = "test-support"))]
+pub(super) type HostHttpEgress = ironclaw_network::PolicyNetworkHttpEgress<
+    ironclaw_network::RewriteNetworkTransport<ironclaw_network::ReqwestNetworkTransport>,
+>;
+
+/// Production shape: no rewrite wrapper in the type at all.
+#[cfg(not(any(debug_assertions, feature = "test-support")))]
+pub(super) type HostHttpEgress =
+    ironclaw_network::PolicyNetworkHttpEgress<ironclaw_network::ReqwestNetworkTransport>;
+
+#[cfg(any(debug_assertions, feature = "test-support"))]
+pub(super) fn default_host_http_egress() -> Result<HostHttpEgress, RebornBuildError> {
     ironclaw_network::default_policy_http_egress().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         }
     })
+}
+
+#[cfg(not(any(debug_assertions, feature = "test-support")))]
+pub(super) fn default_host_http_egress() -> Result<HostHttpEgress, RebornBuildError> {
+    Ok(ironclaw_network::PolicyNetworkHttpEgress::new(
+        ironclaw_network::ReqwestNetworkTransport::default(),
+    ))
 }
 
 pub(super) fn apply_post_edit_check_from_env<F, G>(

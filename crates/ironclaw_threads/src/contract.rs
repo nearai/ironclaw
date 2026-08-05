@@ -495,7 +495,7 @@ pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
 /// opt-in override, so the observation envelope and every default stay exactly where they
 /// were. A deployment that raises the cap accepts larger single reads; it does not change
 /// anything for a deployment that does not.
-pub const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
+pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
 
 /// Effective per-request cap: 24 KiB — unchanged from the historical default.
 ///
@@ -512,16 +512,16 @@ pub const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
 /// `[4, TOOL_RESULT_RECORD_READ_MAX_BYTES]` — an override can never exceed the
 /// compile-time ceiling, so the observation envelope is always large enough for
 /// whatever a read returns.
-pub const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
+pub(crate) const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
 
 /// Env var controlling [`effective_tool_result_read_max_bytes`].
-pub const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
+pub(crate) const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
 
 /// Resolve the effective per-request `result_read` cap.
 ///
 /// Unparseable or out-of-range values fall back to the default rather than
 /// failing the run — a malformed tuning knob must not take down an agent.
-pub fn effective_tool_result_read_max_bytes() -> usize {
+pub(crate) fn effective_tool_result_read_max_bytes() -> usize {
     match std::env::var(TOOL_RESULT_READ_MAX_BYTES_ENV) {
         Ok(raw) => match raw.trim().parse::<usize>() {
             // floor mirrors `tool_result_records::TOOL_RESULT_RECORD_READ_MIN_BYTES`
@@ -1028,7 +1028,7 @@ mod tool_result_read_cap_tests {
         // never isolated from the other switches it shipped with, so it is available
         // only via the env override, not as a default.
         assert_eq!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES, 24 * 1024);
-        assert!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES <= TOOL_RESULT_RECORD_READ_MAX_BYTES);
+        const { assert!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES <= TOOL_RESULT_RECORD_READ_MAX_BYTES) };
     }
 
     /// The ceiling bounds only what the ENV OVERRIDE may reach; it is not the default.
@@ -1044,7 +1044,7 @@ mod tool_result_read_cap_tests {
         assert_eq!(TOOL_RESULT_RECORD_READ_MAX_BYTES, 24 * 1024);
         // The override may go higher; nothing is derived from this bound.
         assert_eq!(TOOL_RESULT_READ_ENV_CEILING_BYTES, 64 * 1024);
-        assert!(TOOL_RESULT_READ_ENV_CEILING_BYTES >= TOOL_RESULT_RECORD_READ_MAX_BYTES);
+        const { assert!(TOOL_RESULT_READ_ENV_CEILING_BYTES >= TOOL_RESULT_RECORD_READ_MAX_BYTES) };
     }
 
     /// A malformed knob must degrade to the default, never fail the run.

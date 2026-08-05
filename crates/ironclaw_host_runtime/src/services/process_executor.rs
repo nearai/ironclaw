@@ -181,7 +181,8 @@ impl ProcessExecutor for HostProcessExecutor {
 
 fn is_process_sandbox_request(request: &ProcessExecutionRequest) -> bool {
     request.runtime == RuntimeKind::System
-        && request.capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
+        && request.capability_id.as_str()
+            == ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
 #[derive(Clone)]

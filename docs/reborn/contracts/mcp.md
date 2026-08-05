@@ -16,11 +16,17 @@ MCP is an integration lane, not an authority bypass:
 ```text
 ExtensionPackage(runtime = mcp)
   -> McpRuntime validates manifest/capability metadata
-  -> ResourceGovernor reserve(...)
+  -> RuntimeResourceBudget reserve(...)
   -> host-selected McpClient adapter call
   -> output limit enforcement
-  -> ResourceGovernor reconcile(...) / release(...)
+  -> RuntimeResourceBudget reconcile(...) / release(...)
 ```
+
+The lane holds no budget authority of its own. It is handed
+`ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile /
+release, and nothing else — which the kernel implements over its
+`ResourceGovernor` (`ironclaw_resources::GovernorRuntimeBudget`). The lane
+cannot set limits, read account state, or name an account (#7067).
 
 The crate does not discover extensions, grant secrets, open host paths, perform approval decisions, or expose unmediated network/process authority to models or MCP servers.
 

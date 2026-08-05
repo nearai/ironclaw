@@ -12,7 +12,7 @@ fn capabilities_crate_does_not_depend_on_concrete_runtime_or_dispatcher_crates()
     for forbidden in [
         "ironclaw_host_runtime",
         "ironclaw_mcp",
-        "ironclaw_scripts",
+        "ironclaw_sandbox",
         "ironclaw_wasm",
         "ironclaw_secrets",
         "ironclaw_network",

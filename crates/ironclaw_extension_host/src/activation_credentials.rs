@@ -159,7 +159,7 @@ required = true
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
             &contracts,
         )
         .expect("fixture manifest");

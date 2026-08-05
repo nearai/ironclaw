@@ -40,6 +40,7 @@ use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_resources::ResourceGovernor;
@@ -63,7 +64,7 @@ pub struct GenericExtensionHost {
 pub struct GenericExtensionHostParams {
     pub binder: ExtensionLaneToolBinder,
     pub native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
-    pub channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
+    pub channel_adapters: Vec<(ExtensionId, Arc<dyn ChannelAdapter>)>,
     pub installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub boot_installations: Vec<InstallationRecord>,
     pub governor: Arc<dyn ResourceGovernor>,
@@ -293,7 +294,7 @@ struct CompositionExtensionLoader {
     /// extensions whose TOOLS load via the runtime lanes (P4 ingress cutover).
     /// An extension without an entry binds the transitional bridge until its
     /// adapter lands.
-    channel_adapters: HashMap<String, Arc<dyn ChannelAdapter>>,
+    channel_adapters: HashMap<ExtensionId, Arc<dyn ChannelAdapter>>,
     governor: Arc<dyn ResourceGovernor>,
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
@@ -381,7 +382,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
             // rule satisfied until the adapter lands.
             channel: declares_channel.then(|| {
                 self.channel_adapters
-                    .get(&ctx.extension_id)
+                    .get(&extension_id)
                     .cloned()
                     .unwrap_or_else(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>)
             }),
@@ -817,9 +818,9 @@ input_schema_ref = "schemas/echo.input.json"
         let record = ExtensionManifestRecord::from_toml(
             fixture_manifest_toml(id),
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest resolves");
@@ -884,9 +885,9 @@ input_schema_ref = "schemas/echo.input.json"
         let record = ExtensionManifestRecord::from_toml(
             toml.to_string(),
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest resolves");
@@ -1045,7 +1046,7 @@ input_schema_ref = "schemas/echo.input.json"
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
             HostPortCatalog::empty(),
-            ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
         )
         .await
         .expect("filesystem extension installation store")
@@ -1220,7 +1221,7 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
         let record = ExtensionManifestRecord::from_toml_with_root_binding(
             toml,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
             &crate::product_extension_host_api_contract_registry().expect("test contracts"),
             ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),

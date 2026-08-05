@@ -1,55 +1,21 @@
-use std::sync::Arc;
+//! Host-runtime extension discovery over the default manifest contracts.
+//!
+//! The two *default sets* this module used to define now live with the
+//! vocabulary they enumerate — `ironclaw_host_api::host_port::
+//! default_host_port_catalog` and `ironclaw_extensions::
+//! default_host_api_contract_registry` (WS3 row 3, PROPOSAL §6.5.9). What stays
+//! here is the discovery that binds them to a `RootFilesystem`, which is
+//! host-runtime's own job.
 
 use ironclaw_extensions::{
-    CapabilityProviderHostApiContract, ExtensionDiscovery, ExtensionError, ExtensionRegistry,
-    HostApiContractRegistry, ManifestV2Error, TolerantBoundedDiscovery,
+    ExtensionDiscovery, ExtensionError, ExtensionRegistry, HostApiContractRegistry,
+    TolerantBoundedDiscovery, default_host_api_contract_registry,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    error::HostApiError,
-    host_port::{
-        HOST_EVENTS_AUDIT_PORT_ID, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-        HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostPortCatalog, HostPortCatalogEntry,
-        HostPortId,
-    },
+    host_port::{HostPortCatalog, default_host_port_catalog},
     path::VirtualPath,
 };
-
-/// Build the host-runtime default set of Extension Manifest v2 host API contracts.
-///
-/// These contracts validate host-owned manifest declarations but do not execute
-/// runtime code, resolve schema files, or publish hot surfaces. Product-specific
-/// contracts are added by the composition layer that owns those products.
-pub fn default_host_api_contract_registry() -> Result<HostApiContractRegistry, ManifestV2Error> {
-    let mut registry = HostApiContractRegistry::new();
-    registry.register(Arc::new(CapabilityProviderHostApiContract::new()?))?;
-    Ok(registry)
-}
-
-/// Build the host-runtime default host-port validation catalog.
-///
-/// The catalog is validation vocabulary only. It does not grant authority or
-/// construct the concrete runtime HTTP egress / storage / audit adapters; those
-/// live in host/runtime service crates and are scoped into a `HostPortView`
-/// after authorization. Registering a port here only allows a manifest to
-/// *declare* it without failing closed on an unknown-port error.
-///
-/// The memory ports (`host.storage.sql_transaction.first_party`,
-/// `host.events.audit`) are future storage/audit vocabulary for the deferred
-/// SQL-backed memory milestone (issue #3537, ADR 0002), not a live backing
-/// today: the bundled `ironclaw.memory` extension is filesystem-backed
-/// and declares no host ports (see `native_memory_declares_no_host_ports`).
-/// Cataloguing them here only lets a manifest *declare* them without failing
-/// closed on an unknown-port error.
-pub fn default_host_port_catalog() -> Result<HostPortCatalog, HostApiError> {
-    HostPortCatalog::new(vec![
-        HostPortCatalogEntry::new(HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID)?),
-        HostPortCatalogEntry::new(HostPortId::new(
-            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
-        )?),
-        HostPortCatalogEntry::new(HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID)?),
-    ])
-}
 
 /// Discover installed extensions through host-runtime's default host API
 /// contracts and default host-port validation catalog.
@@ -130,22 +96,4 @@ where
         max_extensions,
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_catalog_registers_egress_storage_and_audit_ports() {
-        let catalog = default_host_port_catalog().expect("default host port catalog must build");
-        for id in [
-            HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
-            HOST_EVENTS_AUDIT_PORT_ID,
-        ] {
-            let port = HostPortId::new(id).expect("port id must validate");
-            assert!(catalog.contains(&port), "default catalog must contain {id}");
-        }
-    }
 }

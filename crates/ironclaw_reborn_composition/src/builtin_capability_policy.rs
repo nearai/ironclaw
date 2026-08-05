@@ -14,7 +14,7 @@ use ironclaw_host_api::{
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::runtime_profile_approval_policy::RuntimeProfileApprovalGateEffectSets;
+use ironclaw_approvals::RuntimeProfileApprovalGateEffectSets;
 
 const BUILTIN_CAPABILITY_POLICY_TOML: &str = include_str!("builtin_capability_policy.toml");
 

@@ -85,7 +85,7 @@ use ironclaw_host_api::{
     ids::CapabilityId,
 };
 
-use ratchet_support::workspace_root;
+use ratchet_support::{crate_dir, workspace_root};
 
 /// The reviewed S5 seed of builtins the model may invoke UNGATED (§5.2.1/§10).
 /// Any drift from this list is a reviewed diff — see the module header. Adding an
@@ -115,8 +115,28 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "builtin.extension_search",
 ];
 
+/// The shipped package assets, anchored on the crate that owns them rather
+/// than on the literal `crates/extensions/packages`. A package directory is
+/// owned by no crate (PROPOSAL section 5) so it cannot be resolved by name, but
+/// its owning support crate can be and `packages/` is that crate's sibling.
+/// `collect_manifest_tomls` returns quietly on an unreadable directory, so a
+/// wrong root here would leave this ratchet asserting over an empty matrix
+/// (CHECKLIST WS10).
 fn first_party_assets_dir() -> PathBuf {
-    workspace_root().join("crates/extensions/packages")
+    let root = workspace_root();
+    let support = crate_dir(&root, "ironclaw_extension_support");
+    let packages = support
+        .parent()
+        .expect("the package-support crate must have a parent directory")
+        .join("packages");
+    assert!(
+        packages.is_dir(),
+        "first-party package assets root {} does not exist; the origin-gate matrix would \
+         ratchet over nothing. `packages/` is resolved as a sibling of the \
+         ironclaw_extension_support crate - repoint the hop if the packages moved.",
+        packages.display()
+    );
+    packages
 }
 
 fn collect_manifest_tomls(dir: &Path, out: &mut Vec<PathBuf>) {

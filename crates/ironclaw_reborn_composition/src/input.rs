@@ -236,7 +236,12 @@ pub struct RebornHostBindings {
 #[derive(Clone)]
 pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
-    pub extension_id: String,
+    ///
+    /// Typed: this is the product identity newtype
+    /// (`ironclaw_host_api::ids::ExtensionId`), not the transparent
+    /// `ironclaw_hooks::identity::ExtensionId` — the two coexist by design and
+    /// resolve by crate, never by name (see `ironclaw_hooks/src/identity.rs`).
+    pub extension_id: ironclaw_host_api::ids::ExtensionId,
     /// The channel adapter implementation linked into the deployment.
     pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
     /// The vendor half of the preference-target codec, consumed by the
@@ -1096,7 +1101,7 @@ fn resolve_production_runtime_policy(
             reason: format!("invalid [policy].default_profile `{default_profile}`: {error}"),
         }
     })?;
-    crate::resolve_runtime_policy(crate::RuntimePolicyResolveRequest::new(
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         deployment,
         requested_profile,
     ))

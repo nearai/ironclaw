@@ -10,6 +10,7 @@ use ironclaw_extension_host::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, LoadContext,
     NativeExtensionFactory,
 };
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_reborn_composition::ChannelExtensionBinding;
 use ironclaw_telegram_extension::{TelegramChannelAdapter, TelegramPreferenceTargetCodec};
 
@@ -26,14 +27,14 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
 pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBinding> {
     vec![
         ChannelExtensionBinding {
-            extension_id: "slack".to_string(),
+            extension_id: ExtensionId::from_trusted("slack".to_string()),
             adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
             preference_target_codec: Some(Arc::new(
                 ironclaw_slack_extension::SlackPreferenceTargetCodec,
             )),
         },
         ChannelExtensionBinding {
-            extension_id: "telegram".to_string(),
+            extension_id: ExtensionId::from_trusted("telegram".to_string()),
             adapter: Arc::new(TelegramChannelAdapter::default()),
             preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
         },
@@ -122,12 +123,12 @@ mod tests {
         let bindings = bundled_channel_extension_bindings();
         let slack = bindings
             .iter()
-            .find(|binding| binding.extension_id == "slack")
+            .find(|binding| binding.extension_id.as_str() == "slack")
             .expect("the binary supplies the slack channel binding");
         assert!(slack.preference_target_codec.is_some());
         let telegram = bindings
             .iter()
-            .find(|binding| binding.extension_id == "telegram")
+            .find(|binding| binding.extension_id.as_str() == "telegram")
             .expect("the binary supplies the telegram deployment channel binding");
         assert!(
             telegram.preference_target_codec.is_some(),
@@ -140,7 +141,7 @@ mod tests {
         let bindings = bundled_channel_extension_bindings();
         let telegram = bindings
             .iter()
-            .find(|binding| binding.extension_id == "telegram")
+            .find(|binding| binding.extension_id.as_str() == "telegram")
             .expect("the binary supplies the Telegram deployment channel binding");
         let config = vec![(
             TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
@@ -185,7 +186,7 @@ mod tests {
             let outcome = telegram
                 .adapter
                 .inbound(VerifiedInbound {
-                    extension_id: &telegram.extension_id,
+                    extension_id: telegram.extension_id.as_str(),
                     installation_id: "install_test",
                     config: &config,
                     body: &body,
@@ -199,7 +200,7 @@ mod tests {
             let message = messages.remove(0);
             assert!(
                 sink.admit(InboundAdmission {
-                    extension_id: telegram.extension_id.clone(),
+                    extension_id: telegram.extension_id.as_str().to_string(),
                     installation_id: "install_test".to_string(),
                     message,
                     channel_adapter: Arc::clone(&telegram.adapter),

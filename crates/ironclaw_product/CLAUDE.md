@@ -127,8 +127,19 @@ idempotency replay, and the inbound-attachment and policy failures. Two rules:
 ## Boundary rules
 
 Must NOT depend on: `ironclaw_extensions`,
-`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_scripts`,
+`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_sandbox`,
 `ironclaw_network`.
+
+All six are now *enforced* — the `ironclaw_product` `BoundaryRule` in
+`crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` is the
+arbiter, and this list is a copy of it. Until WS5, `ironclaw_extensions` was on
+this list and **not** on the enforced one, and the crate held the dependency:
+`adapter_registry` was its only consumer. Moving that module to its chartered
+owners (schema → `ironclaw_extension_contracts::product_adapter_section`,
+manifest contract + resolved projection →
+`ironclaw_extensions::host_api::product_adapter`) dropped the manifest entry and
+closed the contradiction PROPOSAL §6.9.1 recorded. A product-tier crate that
+needs manifest vocabulary imports the contracts crate, never the registry.
 
 Agent-loop note: product-facing turns enter through workflow services and
 canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,

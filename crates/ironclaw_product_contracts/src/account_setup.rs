@@ -7,11 +7,12 @@
 //! [`AccountConnectionStatusSource`]. The declaration registry itself is
 //! product-owned mutable state and stays in `ironclaw_product`; what lives
 //! here is the descriptor it stores, the sanitized error classes it reports,
-//! and the probe port `ironclaw_extension_host` implements over its pairing
-//! service.
+//! the probe port `ironclaw_extension_host` implements over its pairing
+//! service, and — since WS2.5 — [`ExtensionAccountSetupReader`], the registry's
+//! two-method *read* surface the extension host consumes.
 //!
 //! Never here: the registry, activation preflight policy, or any
-//! implementation of the port.
+//! implementation of either port.
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -104,6 +105,37 @@ pub enum ExtensionAccountSetupError {
         #[source]
         source: AccountConnectionStatusError,
     },
+}
+
+/// The read half of the product-owned account-setup registry, as the extension
+/// host consumes it.
+///
+/// The registry itself — single-assignment declarations plus connected status
+/// sources, under a lock — is product-owned mutable state and stays in
+/// `ironclaw_product`, exactly as this module's header says. What the extension
+/// host needs is these two reads, and both speak only `host_api` +
+/// this module's vocabulary, so the port is declarable here and the state is
+/// not. Dependency inversion: declared below, implemented above
+/// (`.claude/rules/type-placement.md`, traits §2).
+///
+/// A caller with **no** reader wired behaves exactly as an empty registry
+/// does: no descriptor, no missing requirement. That equivalence is why the
+/// extension host holds an `Option<Arc<dyn ExtensionAccountSetupReader>>`
+/// rather than needing a null implementation in this crate.
+#[async_trait]
+pub trait ExtensionAccountSetupReader: Send + Sync {
+    /// The declared setup descriptor for an extension, if one was declared.
+    fn descriptor(&self, extension_id: &ExtensionId) -> Option<ExtensionAccountSetupDescriptor>;
+
+    /// The outstanding credential requirement for a user, and only when the
+    /// declared account is disconnected. Undeclared extensions have no account
+    /// gate; a declared extension whose host or status backend is unavailable
+    /// fails closed with an error.
+    async fn missing_requirement(
+        &self,
+        extension_id: &ExtensionId,
+        user_id: &UserId,
+    ) -> Result<Option<RuntimeCredentialAuthRequirement>, ExtensionAccountSetupError>;
 }
 
 #[cfg(test)]

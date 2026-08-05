@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use ironclaw_auth::product_prompt::{
+    AuthChallengeProvider, AuthChallengeView, auth_prompt_view_for_blocked_auth,
+};
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
@@ -9,10 +12,7 @@ use ironclaw_host_api::{
     ids::{ExtensionId, TenantId, ThreadId, UserId, VendorId},
 };
 use ironclaw_product::AuthPromptChallengeKind;
-use ironclaw_product::{
-    AuthChallengeProvider, AuthChallengeView, approval_prompt_lookup,
-    auth_prompt_view_for_blocked_auth,
-};
+use ironclaw_product::approval_prompt_lookup;
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 #[derive(Debug)]

@@ -21,10 +21,10 @@ use ironclaw_host_api::{
     ids::UserId,
     user_identity::{RebornUserIdentityLookup, installation_scoped_provider_user_id},
 };
-use ironclaw_product::{
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductSurfaceFailure,
-    ResolvedProductActorUser,
+use ironclaw_product_contracts::actor_identity::{
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
+use ironclaw_product_contracts::error::ProductOperationFailure;
 
 // Positive resolutions only: a revoked binding may keep resolving for up to
 // this window, but an unbound actor is never cached, so connecting takes
@@ -85,9 +85,12 @@ impl ProviderIdentityActorResolver {
         }
     }
 
-    fn cached_user(&self, provider_user_id: &str) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    fn cached_user(
+        &self,
+        provider_user_id: &str,
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         let mut cache = self.resolved_user_cache.lock().map_err(|_| {
-            ProductSurfaceFailure::BindingResolutionFailed {
+            ProductOperationFailure::BindingResolutionFailed {
                 reason: "provider identity cache lock poisoned".into(),
             }
         })?;
@@ -105,10 +108,10 @@ impl ProviderIdentityActorResolver {
         &self,
         provider_user_id: String,
         user_id: UserId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.resolved_user_cache
             .lock()
-            .map_err(|_| ProductSurfaceFailure::BindingResolutionFailed {
+            .map_err(|_| ProductOperationFailure::BindingResolutionFailed {
                 reason: "provider identity cache lock poisoned".into(),
             })?
             .insert(
@@ -142,11 +145,11 @@ impl ProviderIdentityActorResolver {
     async fn lookup_user(
         &self,
         provider_user_id: &str,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         self.lookup
             .resolve_user_identity(&self.provider, provider_user_id)
             .await
-            .map_err(|error| ProductSurfaceFailure::BindingResolutionFailed {
+            .map_err(|error| ProductOperationFailure::BindingResolutionFailed {
                 reason: error.to_string(),
             })
     }
@@ -174,7 +177,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         let Some(provider_user_id) = self.provider_user_id_for_request(&request) else {
             return Ok(None);
         };
@@ -192,7 +195,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         &self,
         request: &ProductActorUserResolutionRequest,
         expected: &ResolvedProductActorUser,
-    ) -> Result<bool, ProductSurfaceFailure> {
+    ) -> Result<bool, ProductOperationFailure> {
         let Some(provider_user_id) = self.provider_user_id_for_request(request) else {
             return Ok(false);
         };
@@ -310,7 +313,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductSurfaceFailure::BindingResolutionFailed { .. }
+            ProductOperationFailure::BindingResolutionFailed { .. }
         ));
     }
 

@@ -92,8 +92,8 @@ crates/
 │   └── host_runtime           mediated services & the lane executor
 │
 ├── lanes/                     execution for already-authorized work
-│   ├── wit/                   component-model interface definitions
-│   ├── wasm                   WASM component sandbox
+│   ├── wasm                   WASM component sandbox (owns wit/ — the
+│   │                          component-model interface definitions)
 │   ├── wasm_limiter           shared wasmtime resource limiter
 │   ├── mcp                    MCP over host-mediated HTTP
 │   └── sandbox                container process lane                  NEW

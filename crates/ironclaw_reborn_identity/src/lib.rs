@@ -1,16 +1,24 @@
-//! Canonical Reborn identity layer.
+//! Canonical Reborn **principal** identity layer.
 //!
-//! One boundary that maps every external identity — WebUI OAuth logins
-//! (`google`, `github`, …) and external channel/product actors
-//! (`telegram`, `slack`, triggers, …) — to a stable Reborn [`UserId`]
+//! The boundary that maps an external identity to a stable Reborn [`UserId`]
 //! *before* any runtime state (conversation binding, thread ownership) is
-//! touched.
+//! touched, and the only path in the stack that **mints** a user.
 //!
 //! - Identity provisioning lives HERE, not in WebUI ingress and not in
 //!   `ironclaw_conversations` (which stays lookup/binding-oriented and
 //!   consumes an already-resolved `UserId`).
-//! - WebUI OAuth and product/channel adapters feed normalized
-//!   [`ResolveExternalIdentity`] values into [`RebornIdentityResolver`].
+//! - WebUI OAuth feeds normalized [`ResolveExternalIdentity`] values into
+//!   [`RebornIdentityResolver`].
+//! - **Channel actors are not bound here.** `SurfaceKind::ChannelActor` is
+//!   rejected on `resolve_or_create` ([`RebornIdentityError::ChannelActorNotMintable`])
+//!   and this crate offers no binding path of its own: post-OAuth channel
+//!   binding belongs to `ironclaw_extension_host`'s channel identity store,
+//!   behind the `ironclaw_host_api::user_identity` ports. The two stores and
+//!   the line between them are specified in `CONTRACT.md`, "Two
+//!   external-identity stores". `ExternalIdentityKey` and
+//!   `RebornIdentityResolver::{lookup, bind}` were retired in #5618 — they
+//!   had no production caller and the key was not even constructible
+//!   downstream.
 //!
 //! The external identity is keyed by `(tenant_id, surface_kind,
 //! provider_kind, provider_instance_id, external_subject_id)` so two
@@ -92,18 +100,6 @@ pub struct ResolveExternalIdentity {
     pub display_name: Option<String>,
 }
 
-/// The identity-only key part of an external identity (no email /
-/// profile). Used by the link-only [`lookup`](RebornIdentityResolver::lookup)
-/// and [`bind`](RebornIdentityResolver::bind) paths that channel actors
-/// (e.g. Slack) use, where there is no email and no minting.
-pub struct ExternalIdentityKey {
-    pub tenant_id: TenantId,
-    pub surface_kind: SurfaceKind,
-    pub provider_kind: ProviderKind,
-    pub provider_instance_id: Option<ProviderInstanceId>,
-    pub external_subject_id: ExternalSubjectId,
-}
-
 /// Failure modes of the canonical identity layer.
 #[derive(Debug, thiserror::Error)]
 pub enum RebornIdentityError {
@@ -125,11 +121,15 @@ pub enum RebornIdentityError {
     #[error("user account is suspended: {0}")]
     UserSuspended(String),
     /// `resolve_or_create` was called for a `ChannelActor` identity. Channel
-    /// actors are never mint-capable — the resolver contract routes them
-    /// through [`lookup`](RebornIdentityResolver::lookup) /
-    /// [`bind`](RebornIdentityResolver::bind) so an unbound actor fails closed
-    /// instead of auto-provisioning a Reborn account.
-    #[error("channel-actor identities must resolve through lookup/bind, not resolve_or_create")]
+    /// actors are never mint-capable, and this crate does not bind them at
+    /// all: post-OAuth channel binding is owned by
+    /// `ironclaw_extension_host::channel_identity_store` behind the
+    /// `ironclaw_host_api::user_identity` ports (see `CONTRACT.md`, "Two
+    /// external-identity stores"). The guard keeps a channel actor from
+    /// auto-provisioning a Reborn account through this path.
+    #[error(
+        "channel-actor identities are bound by the channel identity store, not resolve_or_create"
+    )]
     ChannelActorNotMintable,
 }
 
@@ -147,29 +147,13 @@ pub trait RebornIdentityResolver: Send + Sync {
     /// email-domain allowlist). A [`ChannelActor`](SurfaceKind::ChannelActor)
     /// identity is rejected with
     /// [`ChannelActorNotMintable`](RebornIdentityError::ChannelActorNotMintable):
-    /// channel actors are never mint-capable and must resolve through
-    /// [`lookup`](Self::lookup) / [`bind`](Self::bind).
+    /// channel actors are never mint-capable, and their binding is owned by
+    /// the channel identity store, not by this trait (`CONTRACT.md`, "Two
+    /// external-identity stores").
     async fn resolve_or_create(
         &self,
         identity: ResolveExternalIdentity,
     ) -> Result<UserId, RebornIdentityError>;
-
-    /// Link-only lookup: return the user already bound to this external
-    /// identity, or `None`. NEVER creates a user. Channel actors (e.g.
-    /// Slack) resolve through this so an unbound actor fails closed
-    /// instead of auto-provisioning a Reborn account.
-    async fn lookup(&self, key: ExternalIdentityKey)
-    -> Result<Option<UserId>, RebornIdentityError>;
-
-    /// Link an external identity to an ALREADY-EXISTING user (no user
-    /// creation). Re-binding the same key re-points it at `user_id`. The
-    /// caller must have authenticated `user_id` first (e.g. Slack personal
-    /// binding proves the actor is a known Reborn user before binding).
-    async fn bind(
-        &self,
-        key: ExternalIdentityKey,
-        user_id: &UserId,
-    ) -> Result<(), RebornIdentityError>;
 
     /// Adopt a pre-existing external identity carried over from a legacy
     /// store, preserving BOTH its canonical `user_id` and its
