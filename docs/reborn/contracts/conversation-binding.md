@@ -103,6 +103,7 @@ This is not the final durable transcript store. The conversation contract stores
 22. Host-trusted trigger fires are submitted only through the conversation-owned submitter trait object returned by `trusted_trigger_fire_submitter(...)` and wired by host-owned composition services from durable host state. Channel adapters cannot build this submitter or submit trusted trigger requests under workspace architecture rules. Trusted trigger ingress details live in [`triggers.md`](triggers.md); this contract owns only the replay-first trusted-scope adapter. No delivery target data belongs in `ExternalConversationRef`, `TurnActor`, `adapter_kind`, or any trusted ingress identity.
 23. Resolver-backed external actor pairings may carry a provider-neutral opaque binding epoch scoped to the full actor key. Conditional teardown compares both the canonical user and that epoch under the conversation-state mutation lock; a missing pairing is idempotent, and a changed user or epoch is preserved. Ordinary epoch-less pairing remains compatible and explicitly clears an older epoch for the same actor key.
 24. Lookup-only product binding resolution revalidates resolver-backed direct and shared routes immediately before returning them. The current resolver result must match both the stored canonical actor and the requesting actor key's stored epoch. A revoked actor or newer generation fails closed without returning the stale route; shared-route subject ownership remains a separate subject-scoped decision and is not overwritten by a participant's epoch.
+25. Unrouted shared conversations require a configured subject route by default. A configured installation default subject is not shared-route authority and must not silently place distinct channel actors in that subject's user or memory scope.
 
 ---
 
@@ -112,12 +113,14 @@ Current semantic coverage lives in:
 
 ```text
 crates/ironclaw_conversations/tests/inbound_contract.rs
+crates/ironclaw_product/tests/product_surface_contract.rs
 ```
 
 Run:
 
 ```bash
 cargo test -p ironclaw_conversations --test inbound_contract
+cargo test -p ironclaw_product --test product_surface_contract
 ```
 
 The planned trusted ingress implementation must add a caller-level regression

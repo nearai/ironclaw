@@ -4767,7 +4767,7 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
 }
 
 #[tokio::test]
-async fn shared_route_without_configured_subject_requires_binding() {
+async fn unrouted_shared_route_does_not_fallback_to_default_subject() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -4784,16 +4784,18 @@ async fn shared_route_without_configured_subject_requires_binding() {
         .await;
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations;
+    let installation_scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_default_subject_user_id(UserId::new("user:operator").expect("operator subject"));
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
             AdapterInstallationId::new("install_alpha").expect("installation"),
         ),
-        ProductInstallationScope::with_default_scope(
-            tenant_id,
-            AgentId::new("agent:alpha").expect("agent"),
-            Some(ProjectId::new("project:alpha").expect("project")),
-        ),
+        installation_scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_payload(
@@ -4809,11 +4811,13 @@ async fn shared_route_without_configured_subject_requires_binding() {
         .await
         .expect_err("shared binding must require an explicit subject user");
 
-    assert!(matches!(
-        error,
-        ProductSurfaceFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
-    ));
+    let ProductSurfaceFailure::BindingRequired { reason } = error else {
+        panic!("unrouted shared binding returned an unexpected error: {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "shared product route requires a configured subject user"
+    );
 }
 
 #[tokio::test]
@@ -6444,6 +6448,11 @@ fn product_binding_service(
                     project.map(|value| ProjectId::new(value).expect("project")),
                 )
                 .with_default_subject_user_id(
+                    UserId::new("user:team-agent").expect("team subject"),
+                )
+                .with_conversation_subject_route(
+                    ProductConversationRouteKey::new(None, "conv1".to_string())
+                        .expect("shared conversation route"),
                     UserId::new("user:team-agent").expect("team subject"),
                 ),
             )

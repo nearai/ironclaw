@@ -137,7 +137,7 @@ impl ProductInstallationScope {
             default_project_id: None,
             default_subject_user_id: None,
             unrouted_shared_conversation_subject_policy:
-                UnroutedSharedConversationSubjectPolicy::UseDefaultSubject,
+                UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute,
             conversation_subject_routes: HashMap::new(),
             conversation_subject_route_resolver: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
@@ -155,7 +155,7 @@ impl ProductInstallationScope {
             default_project_id,
             default_subject_user_id: None,
             unrouted_shared_conversation_subject_policy:
-                UnroutedSharedConversationSubjectPolicy::UseDefaultSubject,
+                UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute,
             conversation_subject_routes: HashMap::new(),
             conversation_subject_route_resolver: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
