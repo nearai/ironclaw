@@ -378,7 +378,13 @@ impl DeliveryCoordinator {
                 Ok(true) => recovered += 1,
                 Ok(false) => {}
                 Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
+                Err(error) => {
+                    debug!(
+                        delivery_id = %attempt.delivery_id,
+                        error = %error,
+                        "delivery coordinator: additional recovery attempt failed after first error was captured"
+                    );
+                }
             }
         }
         if recovered > 0 {
