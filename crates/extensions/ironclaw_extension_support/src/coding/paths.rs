@@ -183,7 +183,14 @@ pub(super) fn is_filesystem_root_request(path: &str) -> bool {
 }
 
 fn scoped_path_input(path: &str) -> String {
-    if path == "." || path.is_empty() {
+    // `/` means the workspace, like `.` and `""`.
+    //
+    // It used to pass through, and `ScopedPath::new("/")` rejects the bare root -- so the tool failed
+    // with `path  is not under an available scoped root`, the offending path rendering BLANK because
+    // the safe-summary encoder maps `/` to a space. Agents hit this constantly: a leading-wildcard
+    // glob, or an attempt to look at the root to see what exists, produced an error that named
+    // nothing. `list_dir` special-cased it; every other coding tool did not.
+    if path == "." || path.is_empty() || path.trim() == "/" {
         DEFAULT_SCOPED_ROOT.to_string()
     } else if path.starts_with('/') {
         path.to_string()
@@ -528,5 +535,38 @@ mod root_listing_tests {
             vec!["/skills/".to_string(), "/workspace/".to_string()],
             "sorted, one entry per grant, so an agent can see where it may work"
         );
+    }
+}
+
+#[cfg(test)]
+mod root_path_normalization_tests {
+    use super::*;
+
+    /// `/`, `.` and `""` all mean the workspace, for every coding tool.
+    ///
+    /// `/` used to pass through to `ScopedPath::new`, which rejects the bare root, and the resulting
+    /// summary rendered the path BLANK because the safe-summary encoder maps `/` to a space. Agents hit
+    /// it constantly -- a leading-wildcard glob, or looking at the root to see what exists -- and got
+    /// `path  is not under an available scoped root`, naming nothing. `list_dir` special-cased it;
+    /// `glob`, `grep`, `read_file`, `write_file` and `apply_patch` did not.
+    #[test]
+    fn the_filesystem_root_normalizes_to_the_workspace() {
+        for input in ["/", " / ", ".", ""] {
+            assert_eq!(
+                scoped_path_input(input),
+                DEFAULT_SCOPED_ROOT,
+                "{input:?} must resolve to the workspace rather than the unaddressable bare root"
+            );
+        }
+    }
+
+    /// An absolute path under a real root is untouched.
+    #[test]
+    fn absolute_paths_are_passed_through() {
+        assert_eq!(
+            scoped_path_input("/skills/x/SKILL.md"),
+            "/skills/x/SKILL.md"
+        );
+        assert_eq!(scoped_path_input("scripts/x.py"), "/workspace/scripts/x.py");
     }
 }
