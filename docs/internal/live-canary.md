@@ -5,16 +5,20 @@ IronClaw now has two complementary regression systems:
 - deterministic CI, which replays committed tests and traces without depending
   on real third-party providers for the main blocking path;
 - live canaries, which use real providers, real browser consent flows, or
-  selected real LLM lanes to catch provider drift, refresh failures, release
-  upgrade problems, and auth regressions that mocks will miss.
+  selected real LLM lanes to catch provider drift, refresh failures, and auth
+  regressions that mocks will miss.
 
 The implementation lives in:
 
 - `.github/workflows/reborn-tests.yml` / `.github/workflows/reborn-e2e.yml` for the normal blocking test lanes (the v1 `test.yml` was removed under Tier B);
 - `.github/workflows/live-canary.yml` for scheduled and manual live lanes;
 - `scripts/live-canary/run.sh` for lane dispatch;
-- `scripts/live-canary/scrub-artifacts.sh` for artifact scanning;
-- `scripts/live-canary/upgrade-canary.sh` for previous-release upgrade checks.
+- `scripts/live-canary/scrub-artifacts.sh` for artifact scanning.
+
+Release-pair compatibility is deterministic and artifact-based, not a live
+provider lane. The tag publisher runs `scripts/ci/release-upgrade-canary.py`
+against the published previous release and the exact cargo-dist candidate
+before the `host` job may create a GitHub Release.
 
 The auth-specific executors used by the unified live-canary wrapper are:
 
@@ -41,7 +45,6 @@ account guide rather than introducing another bespoke runner layout.
 | `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |
 | `provider-matrix` | Same live behavior against multiple provider adapters | GitHub-hosted | Weekly and manual | Opens issue on scheduled failure |
 | `release-public-full` | Full public live suite for release candidates | GitHub-hosted | Manual | Release checklist gate |
-| `upgrade-canary` | Previous release DB opened by current checkout | GitHub-hosted | Manual | Release checklist gate |
 | `auth-smoke` | Fresh-machine mock-backed auth smoke: hosted OAuth, MCP OAuth, and multi-user MCP isolation | GitHub-hosted | Hourly and manual | No |
 | `auth-full` | Larger mock-backed auth matrix including failure and refresh cases | GitHub-hosted | Manual | No |
 | `auth-channels` | WASM channel auth diagnostic lane | GitHub-hosted | Manual | No |

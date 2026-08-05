@@ -68,6 +68,9 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/ironclaw-release.yml": (
         "Smoke exact binaries before packaging upload",
         "scripts/ci/smoke-release-binary.py",
+        "release-upgrade-canary:",
+        "scripts/ci/release-upgrade-canary.py",
+        "needs.release-upgrade-canary.result == 'success'",
     ),
 }
 
@@ -251,7 +254,14 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             ("ironclaw_reborn_config", "src/lib.rs"),
             ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
         ),
-        in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
+        in_scope=(
+            "Cargo.toml",
+            "Cargo.lock",
+            "scripts/ci/smoke-release-binary.py",
+            "scripts/ci/release-upgrade-canary.py",
+            "tests/test_smoke_release_binary.py",
+            "tests/test_release_upgrade_canary.py",
+        ),
         out_of_scope=(
             # The filter must stay a filter: the dist-build lane is expensive
             # and is deliberately NOT triggered by every crate.

@@ -63,6 +63,26 @@ identifiers, message contents, credentials, or secret handles.
   configured 1.1 tenant/default owner is its intended recipient. A conflicting
   destination or unsupported special file fails startup without overwrite.
 
+## Release artifact gate
+
+The tag publisher must pass `scripts/ci/release-upgrade-canary.py` before its
+privileged `host` job may upload artifacts or create the GitHub Release. The
+gate downloads and checksum-verifies the published
+`ironclaw-v1.0.0-rc.1` Linux x86_64 archive, then exercises that binary and the
+exact cargo-dist candidate archive against one retained libSQL home and
+workspace snapshot. It creates two threads and four messages through the
+shipping WebChat API using a local deterministic OpenAI-compatible server,
+then proves first upgrade, candidate restart, rc1 rollback, and candidate
+re-upgrade preserve exact thread/message identities, roles, order, and
+content. Every candidate boot also reads the migrated workspace sentinel
+through the authenticated filesystem surface.
+
+This gate deliberately does not call a live model or third-party provider.
+The owning crate contracts remain responsible for malformed inputs, backend
+parity, every migrated domain, and completion-record internals; the release
+gate proves those contracts are present in, and correctly composed by, the
+artifacts that will actually ship.
+
 ## Railway workspace handoff
 
 The image entrypoint defaults `IRONCLAW_REBORN_WORKSPACE_ROOT` to

@@ -98,7 +98,7 @@ jobs:
           # `ironclaw_runner`, so without it a PR touching only the new home
           # would no longer light this lane — the move would have narrowed CI
           # scope as a side effect.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_reborn_cli/|crates/([^/]+/)*ironclaw_reborn_config/|crates/([^/]+/)*ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_reborn_cli/|crates/([^/]+/)*ironclaw_reborn_config/|crates/([^/]+/)*ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/(smoke-release-binary|release-upgrade-canary)\.py$|tests/test_(smoke_release_binary|release_upgrade_canary)\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -192,8 +192,11 @@ jobs:
           python3 scripts/ci/reborn_changed_coverage.py
           --manifest tests/integration/changed-coverage-exemptions.toml
           --validate-manifest-only
-      - name: Self-test exact release-binary smoke gate
-        run: python3 -m unittest tests/test_smoke_release_binary.py
+      - name: Self-test exact release artifact gates
+        run: >-
+          python3 -m unittest
+          tests/test_smoke_release_binary.py
+          tests/test_release_upgrade_canary.py
 
   webui-v2-js-lint:
     name: WebUI v2 JS lint (no-undef)

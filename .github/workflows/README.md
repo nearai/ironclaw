@@ -203,6 +203,15 @@ hand-maintained CI list. The musl entries also use `readelf` to reject a program
 interpreter or dynamic-library dependency, which prevents an installed musl
 loader on the build runner from hiding a non-portable artifact.
 
+For the `1.0.0-rc.1` to `1.1.0-rc.1` compatibility window, the tag publisher
+also runs a blocking `Release upgrade canary` after all cargo-dist artifacts
+exist and before `host` receives permission to publish them. It downloads and
+checksum-verifies the exact previous Linux x86_64 release archive, compares it
+with the exact candidate archive, creates state through the shipping WebChat
+API, and verifies upgrade, restart, rollback, and re-upgrade plus the explicit
+workspace-snapshot handoff. The local model endpoint is deterministic; this is
+a release-artifact/runtime gate rather than live-provider evidence.
+
 The scheduled Postgres capacity lane complements that portable gate by building
 the same canonical binary with `--profile dist`, starting `serve`, applying the
 Postgres-backed runtime migrations, and driving its authenticated API against a

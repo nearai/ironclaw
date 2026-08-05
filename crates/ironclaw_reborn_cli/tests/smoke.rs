@@ -480,11 +480,30 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "the cargo-dist publisher must extract and smoke every exact native archive before it can enter the artifact upload set"
     );
     assert!(
-        code_style_workflow.contains("scripts/ci/smoke-release-binary\\.py$")
-            && code_style_workflow.contains("tests/test_smoke_release_binary\\.py$")
+        code_style_workflow
+            .contains("scripts/ci/(smoke-release-binary|release-upgrade-canary)\\.py$")
             && code_style_workflow
-                .contains("python3 -m unittest tests/test_smoke_release_binary.py"),
-        "release-smoke script changes must select and run their sabotage self-tests on pull requests"
+                .contains("tests/test_(smoke_release_binary|release_upgrade_canary)\\.py$")
+            && code_style_workflow.contains(
+                "tests/test_smoke_release_binary.py\n          tests/test_release_upgrade_canary.py"
+            ),
+        "release artifact-gate changes must select and run their sabotage self-tests on pull requests"
+    );
+    let release_upgrade_position = release_workflow
+        .find("  release-upgrade-canary:\n")
+        .expect("release upgrade canary job");
+    let release_host_position = release_workflow
+        .find("  host:\n")
+        .expect("release host job");
+    assert!(
+        release_upgrade_position < release_host_position
+            && release_workflow.contains("PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1")
+            && release_workflow.contains("CANARY_TARGET: x86_64-unknown-linux-gnu")
+            && release_workflow.contains("scripts/ci/release-upgrade-canary.py")
+            && release_workflow.contains("--previous-checksum")
+            && release_workflow.contains("--candidate-checksum")
+            && release_workflow.contains("needs.release-upgrade-canary.result == 'success'"),
+        "the exact release-pair upgrade canary must gate the privileged publishing job"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
@@ -7104,9 +7123,24 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
         "global packaging must not receive elevated repository permissions or a GitHub token"
     );
 
+    let release_upgrade_job = release_job("release-upgrade-canary");
+    assert!(
+        release_upgrade_job.contains("permissions:\n      contents: read")
+            && release_upgrade_job.contains("- build-local-artifacts")
+            && release_upgrade_job.contains("- build-global-artifacts")
+            && release_upgrade_job.contains("PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1")
+            && release_upgrade_job.contains("CANARY_TARGET: x86_64-unknown-linux-gnu")
+            && release_upgrade_job.contains("scripts/ci/release-upgrade-canary.py")
+            && release_upgrade_job.contains("release-upgrade-canary-evidence")
+            && release_upgrade_job.contains("scripts/live-canary/scrub-artifacts.sh"),
+        "release publishing must run the checksummed artifact upgrade and retain scrubbed evidence"
+    );
+
     let host_job = release_job("host");
     assert!(
         host_job.contains("needs.plan.outputs.publishing == 'true'")
+            && host_job.contains("- release-upgrade-canary")
+            && host_job.contains("needs.release-upgrade-canary.result == 'success'")
             && host_job.contains("permissions:\n      \"contents\": \"write\"")
             && host_job.contains("GH_TOKEN:")
             && host_job.contains("--steps=upload --steps=release")

@@ -55,7 +55,7 @@ owner, and deployment approver can synchronize on a predictable window.
 | Pull request | Compile, lint, unit tests, and targeted integration tests selected for the change. |
 | Merge queue | Short deterministic integration and critical-path smoke checks on the merged result. |
 | Push to `main` | Full deterministic E2E and compatibility checks; failures make `main` red and block release cuts. |
-| Release candidate | Release artifact smoke, QA regression and exploratory testing, `release-public-full`, and the upgrade canary when applicable. |
+| Release candidate | Release artifact smoke, the blocking artifact-based upgrade canary, QA regression and exploratory testing, and `release-public-full`. |
 | Production | Independent deployment approval, canary smoke tests, health monitoring, and rollback readiness. |
 
 The authoritative test tiers remain in

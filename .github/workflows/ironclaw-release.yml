@@ -251,6 +251,75 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  release-upgrade-canary:
+    name: Release upgrade canary
+    permissions:
+      contents: read
+    needs:
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-local-artifacts.result == 'success' && needs.build-global-artifacts.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1
+      CANARY_TARGET: x86_64-unknown-linux-gnu
+      CANARY_ARTIFACT_DIR: ${{ runner.temp }}/release-upgrade-canary
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install Python for release upgrade canary
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Prepare upgrade evidence directory
+        run: mkdir -p "$CANARY_ARTIFACT_DIR"
+      - name: Fetch exact candidate artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Fetch checksummed previous release artifact
+        shell: bash
+        run: |
+          mkdir -p target/previous-release
+          archive="ironclaw-${CANARY_TARGET}.tar.gz"
+          gh release download "$PREVIOUS_RELEASE_TAG" \
+            --repo nearai/ironclaw \
+            --pattern "$archive" \
+            --pattern "$archive.sha256" \
+            --dir target/previous-release
+      - name: Gate publishing on exact release-pair upgrade
+        shell: bash
+        run: |
+          archive="ironclaw-${CANARY_TARGET}.tar.gz"
+          candidate_version="${GITHUB_REF_NAME#ironclaw-v}"
+          previous_version="${PREVIOUS_RELEASE_TAG#ironclaw-v}"
+          python scripts/ci/release-upgrade-canary.py \
+            --previous-archive "target/previous-release/$archive" \
+            --previous-checksum "target/previous-release/$archive.sha256" \
+            --previous-version "$previous_version" \
+            --candidate-archive "target/distrib/$archive" \
+            --candidate-checksum "target/distrib/$archive.sha256" \
+            --candidate-version "$candidate_version" \
+            --artifact-dir "$CANARY_ARTIFACT_DIR"
+      - name: Scrub upgrade evidence
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh "$CANARY_ARTIFACT_DIR"
+      - name: Upload upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-upgrade-canary-evidence
+          path: ${{ env.CANARY_ARTIFACT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+
   # Determines if we should publish/announce
   host:
     permissions:
@@ -259,8 +328,9 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+      - release-upgrade-canary
+    # Publishing is fail-closed on the artifact builders and release upgrade canary.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && needs.release-upgrade-canary.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

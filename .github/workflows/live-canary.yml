@@ -25,7 +25,6 @@ on:
           - private-oauth
           - provider-matrix
           - release-public-full
-          - upgrade-canary
           - auth-smoke
           - auth-full
           - auth-channels
@@ -43,11 +42,6 @@ on:
         required: false
         default: ""
         type: string
-      previous_ref:
-        description: "Previous release/tag for upgrade-canary"
-        type: string
-        required: false
-        default: ""
       target_ref:
         description: "Optional ref/SHA for the Reborn WebUI v2 live QA checkout. Used by /canary PR comments."
         type: string
@@ -1481,54 +1475,6 @@ jobs:
           path: artifacts/live-canary/
           retention-days: 30
 
-  upgrade-canary:
-    name: Upgrade Canary
-    if: >
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: live-canary-upgrade
-      - name: Setup OVH sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Run upgrade canary lane
-        env:
-          LANE: upgrade-canary
-          PROVIDER: upgrade
-          PREVIOUS_REF: ${{ inputs.previous_ref }}
-          CURRENT_REF: ${{ github.sha }}
-          COMMAND_TIMEOUT: 150m
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: live-canary-upgrade
-          path: artifacts/live-canary/
-          retention-days: 30
-
   canary-report:
     name: Canary Report
     needs:
@@ -1546,7 +1492,6 @@ jobs:
       - private-oauth
       - provider-matrix
       - release-public-full
-      - upgrade-canary
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

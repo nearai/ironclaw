@@ -4,7 +4,6 @@ This directory contains the unified entrypoints for the live regression lanes:
 
 - `run.sh` dispatches named lanes and writes artifacts
 - `scrub-artifacts.sh` scans artifacts before upload
-- `upgrade-canary.sh` checks previous-release DB compatibility
 
 The auth-focused Python runners remain the executors behind the auth lanes:
 
@@ -39,7 +38,6 @@ Run commands from the repository root.
 - `private-oauth`
 - `provider-matrix`
 - `release-public-full`
-- `upgrade-canary`
 
 ### Auth lanes added on this branch
 
@@ -144,15 +142,6 @@ Reuse an existing build and Python environment:
 
 ```bash
 LANE=auth-smoke SKIP_BUILD=1 SKIP_PYTHON_BOOTSTRAP=1 scripts/live-canary/run.sh
-```
-
-Run an upgrade canary:
-
-```bash
-LANE=upgrade-canary \
-PREVIOUS_REF=v0.1.2 \
-CURRENT_REF=HEAD \
-scripts/live-canary/run.sh
 ```
 
 Artifacts are written under:

@@ -284,9 +284,6 @@ main() {
       run_cargo_test e2e_live_mission ""
       run_cargo_test e2e_live_personas ""
       ;;
-    upgrade-canary)
-      run_with_timeout scripts/live-canary/upgrade-canary.sh
-      ;;
     auth-smoke)
       run_python_lane scripts/auth_canary/run_canary.py --profile smoke --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
@@ -336,7 +333,7 @@ main() {
       ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, reborn-webui-v2-live-qa" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, reborn-webui-v2-live-qa" >&2
       return 2
       ;;
   esac
