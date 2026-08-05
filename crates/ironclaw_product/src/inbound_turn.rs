@@ -36,11 +36,6 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::binding::{
-    ConversationBindingService, ProductConversationBindingCreationPolicy,
-    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
-    binding_profile_for_trigger,
-};
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
     bounded_source_binding_ref,
@@ -51,6 +46,10 @@ use crate::policy::{
     NoopBeforeInboundPolicy,
 };
 use ironclaw_attachments::InboundAttachmentLander;
+use ironclaw_product_contracts::binding::{
+    ProductBindingResolver, ProductConversationBindingCreationPolicy, ProductConversationRouteKind,
+    ResolveBindingRequest, ResolvedBinding, binding_profile_for_trigger,
+};
 
 #[cfg(not(any(test, feature = "test-support")))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -238,7 +237,7 @@ pub trait InboundTurnService: Send + Sync {
     }
 }
 
-/// Default implementation that composes a [`ConversationBindingService`] with a
+/// Default implementation that composes a [`ProductBindingResolver`] with a
 /// [`SessionThreadService`] and [`TurnCoordinator`].
 pub struct DefaultInboundTurnService<B, T, C> {
     binding_service: B,
@@ -250,7 +249,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
 where
-    B: ConversationBindingService,
+    B: ProductBindingResolver,
     T: SessionThreadService,
     C: TurnCoordinator,
 {
@@ -365,7 +364,7 @@ where
 #[async_trait]
 impl<B, T, C> InboundTurnService for DefaultInboundTurnService<B, T, C>
 where
-    B: ConversationBindingService,
+    B: ProductBindingResolver,
     T: SessionThreadService,
     C: TurnCoordinator,
 {
@@ -446,7 +445,7 @@ where
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
 where
-    B: ConversationBindingService,
+    B: ProductBindingResolver,
     T: SessionThreadService,
     C: TurnCoordinator,
 {

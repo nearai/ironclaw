@@ -36,7 +36,13 @@
 //!
 //! - **No module builds a failure string of its own.** Reasons are constructed
 //!   only from `diagnostics`' cause enums, so every token the model can see is
-//!   bounded and enumerable in one file.
+//!   bounded and enumerable in one file. Armed by
+//!   `tests/module_charter.rs`, which also carries the rule's one enumerated
+//!   carve-out: `runtime.rs`'s two `McpError` descriptor/invocation reasons,
+//!   which echo the manifest's own ids rather than classifying a failure. The
+//!   `egress` seam was the other exception until its two reasons became
+//!   `McpEgressCause`, and `impl From<String> for McpClientError` — the
+//!   implicit bypass — is gone.
 //! - **`discovery` owns the rules, `client` owns the loop.** The per-page caps
 //!   and the running-total check read the *same* constants from `discovery`, so
 //!   the two enforcement points cannot drift apart.

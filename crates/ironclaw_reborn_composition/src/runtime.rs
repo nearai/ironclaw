@@ -190,8 +190,7 @@ use crate::automation::trigger_poller::{
 };
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessChecker,
-    TriggerFireAccessGrant,
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessGrant,
 };
 use crate::trigger_fire_access::IdentityMembershipTriggerFireChecker;
 use crate::trigger_poller_assembly::{
@@ -199,7 +198,9 @@ use crate::trigger_poller_assembly::{
     validate_trigger_poller_authorization,
 };
 use crate::{RebornBuildError, RebornReadiness};
-use ironclaw_triggers::{CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker};
+use ironclaw_triggers::{
+    CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker, TriggerFireAccessChecker,
+};
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,
@@ -625,6 +626,12 @@ pub struct RebornRuntime {
     /// reconcile loop lives exactly as long as the runtime.
     _channel_host_assembly:
         Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>>,
+    /// The product-side workflow factory that assembly builds every graph
+    /// through (§12.11 D-A), held beside it for the same reason: it owns the
+    /// per-extension durable state builder and every triggered driver's
+    /// services, so the composed runtime keeps a handle on it rather than
+    /// reaching it only through the graphs it produced.
+    channel_workflow_factory: Option<Arc<ironclaw_product::RebornChannelWorkflowFactory>>,
     pub(crate) process_lifecycle_lookup_source:
         Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
     pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
@@ -1047,6 +1054,15 @@ impl RebornRuntime {
         Some(Arc::clone(&self.triggered_run_delivery))
     }
 
+    /// The product-side workflow factory the production channel host builds
+    /// every per-extension graph through (§12.11 D-A) — `None` when the
+    /// composed profile has no channel host at all.
+    pub fn channel_workflow_factory(
+        &self,
+    ) -> Option<Arc<ironclaw_product::RebornChannelWorkflowFactory>> {
+        self.channel_workflow_factory.clone()
+    }
+
     /// Test-only readiness projection for the production generic channel-host
     /// assembly. Activation publishes snapshots asynchronously; whole-runtime
     /// delivery tests wait until the owning preference codec is routable before
@@ -1102,6 +1118,7 @@ impl RebornRuntime {
             outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
+            triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
             identity_lookup: Arc::clone(&self.channel_identity_store)
                 as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
             deployment_channels: Arc::clone(&self.deployment_channels),
@@ -1114,22 +1131,25 @@ impl RebornRuntime {
                 self.reborn_admin_secret_provisioner(),
                 Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
             ));
-        Some(crate::extension_host_assembly::start_channel_host(
-            &source,
-            crate::extension_host_assembly::ChannelHostAssemblyWiring {
-                thread_service,
-                turn_coordinator,
-                input_enqueue: self.webui_input_enqueue(),
-                approval_interaction: None,
-                auth_interaction: None,
-                identity,
-                approval_context: None,
-                blocked_auth_prompts: None,
-                auth_flow_cancel: None,
-                run_delivery_settings,
-                admin_users,
-            },
-        ))
+        Some(
+            crate::extension_host_assembly::start_channel_host(
+                &source,
+                crate::extension_host_assembly::ChannelHostAssemblyWiring {
+                    thread_service,
+                    turn_coordinator,
+                    input_enqueue: self.webui_input_enqueue(),
+                    approval_interaction: None,
+                    auth_interaction: None,
+                    identity,
+                    approval_context: None,
+                    blocked_auth_prompts: None,
+                    auth_flow_cancel: None,
+                    run_delivery_settings,
+                    admin_users,
+                },
+            )
+            .assembly,
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3851,7 +3871,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         projection_services
     };
 
-    let channel_host_assembly = crate::extension_host_assembly::build_runtime_channel_host(
+    let started_channel_host = crate::extension_host_assembly::build_runtime_channel_host(
         &services,
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
@@ -3867,6 +3887,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         },
     )
     .await;
+    let channel_workflow_factory = started_channel_host
+        .as_ref()
+        .map(|started| Arc::clone(&started.workflow_factory));
+    let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
@@ -3998,13 +4022,29 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // Generic triggered-run delivery (extension-runtime P6): one hook routes
     // each settled trigger fire to the owning channel extension's driver via
     // the assembly's vendor codecs.
-    if let (Some(slot), Some(assembly), Some(local_runtime)) = (
+    if let (Some(slot), Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
         runtime_post_submit_hook_slot.as_ref(),
         channel_host_assembly.as_ref(),
+        channel_workflow_factory.as_ref(),
         local_runtime,
     ) {
         let triggered_run_delivery = &local_runtime.triggered_run_delivery;
         let outbound_preferences = &local_runtime.outbound_preferences;
+        // One driver per codec-bearing channel binding, built by the SAME
+        // product-side workflow factory the channel host graphs are built by
+        // (§12.11 D-A) and from the SAME binding list `register_extras` feeds
+        // the assembly, so the hook's routing set and its driver set cannot
+        // disagree. Construction is product's; routing stays in the hook.
+        let drivers: Vec<(String, Arc<dyn ironclaw_outbound::TriggeredRunDelivery>)> = services
+            .channel_extension_bindings
+            .iter()
+            .filter_map(|binding| {
+                let codec = binding.preference_target_codec.clone()?;
+                workflow_factory
+                    .triggered_run_delivery(binding.extension_id.as_str(), codec)
+                    .map(|driver| (binding.extension_id.as_str().to_owned(), driver))
+            })
+            .collect();
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
@@ -4013,6 +4053,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(triggered_run_delivery),
                 Arc::clone(outbound_preferences),
                 Arc::clone(&local_runtime.outbound_delivery_targets),
+                drivers,
             ),
         );
         if slot.set(generic_trigger_hook).is_err() {
@@ -4209,6 +4250,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,
         _channel_host_assembly: channel_host_assembly,
+        channel_workflow_factory: channel_workflow_factory.clone(),
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,

@@ -317,6 +317,64 @@ mod tests {
         assert_eq!(decision, TriggerFireAccessDecision::Allowed);
     }
 
+    /// A checker whose backend is down. Stands in for the identity-directory
+    /// checker composition wires, which maps a `RebornUserDirectory` fault to
+    /// `TriggerFireAccessError::Unavailable`.
+    struct UnavailableChecker;
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for UnavailableChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            _request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            Err(TriggerFireAccessError::Unavailable {
+                reason: "identity store down".to_string(),
+            })
+        }
+    }
+
+    /// The unavailable-precedence rule: a recorded backend fault outranks a
+    /// stable denial, but never outranks a grant.
+    ///
+    /// This is the fail-closed decision the composite exists to make. A
+    /// transient identity-store fault must reach the caller as retryable
+    /// (`Err(Unavailable)`) rather than as a permanent `Denied` that a poller
+    /// would treat as a settled answer — while a fault alongside a real grant
+    /// is not a reason to withhold access the user actually has. Both
+    /// directions are pinned because collapsing either one is silent: the
+    /// all-static tests below cannot see the fault path at all.
+    #[tokio::test]
+    async fn composite_prefers_unavailable_over_denial_but_never_over_a_grant() {
+        // Fault recorded, final checker denies -> retryable error, not a denial.
+        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
+            vec![Arc::new(UnavailableChecker), Arc::new(static_checker())];
+        let error = CompositeTriggerFireChecker::new(checkers)
+            .check_trigger_fire_access(check("stranger", Some("agent"), Some("project")))
+            .await
+            .expect_err("a recorded backend fault must surface as retryable");
+        assert!(matches!(error, TriggerFireAccessError::Unavailable { .. }));
+
+        // Fault recorded, but a later grant allows -> still Allowed.
+        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
+            vec![Arc::new(UnavailableChecker), Arc::new(static_checker())];
+        let decision = CompositeTriggerFireChecker::new(checkers)
+            .check_trigger_fire_access(check("owner", Some("agent"), Some("project")))
+            .await
+            .expect("a backend fault must not withhold a grant that allows");
+        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
+
+        // The fault in the *last* position propagates directly — the `Err`
+        // arm of the final match, which the two cases above never reach.
+        let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =
+            vec![Arc::new(static_checker()), Arc::new(UnavailableChecker)];
+        let error = CompositeTriggerFireChecker::new(checkers)
+            .check_trigger_fire_access(check("stranger", Some("agent"), Some("project")))
+            .await
+            .expect_err("a fault from the final checker must surface as retryable");
+        assert!(matches!(error, TriggerFireAccessError::Unavailable { .. }));
+    }
+
     #[tokio::test]
     async fn composite_denies_if_no_grant_allows() {
         let checkers: Vec<Arc<dyn TriggerFireAccessChecker>> =

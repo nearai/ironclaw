@@ -221,12 +221,39 @@ pub fn spawn_trace_queue_flush_worker(
             // re-adds it via `record_observed_scope`. Scopes that still hold
             // pending work (e.g. a flush that hit the per-tick limit, or an
             // endpoint that's down) are retained so the next tick retries them.
+            //
+            // `trace_scope_has_pending_queue` is a synchronous `read_dir` per
+            // scope, so it runs on the blocking pool against a *snapshot* of the
+            // set rather than under the guard: `record_observed_scope` takes the
+            // same lock from the capture path, and a slow or stalled filesystem
+            // would otherwise block capture-time scope recording and this
+            // runtime worker thread. The set is re-acquired only to apply the
+            // result, and scopes recorded during the probe are left alone — they
+            // were not in the snapshot, so a concurrent first capture is never
+            // pruned by a decision made before it happened.
+            let probe_scopes = scopes;
+            let drained = match tokio::task::spawn_blocking(move || {
+                probe_scopes
+                    .into_iter()
+                    .filter(|scope| !trace::trace_scope_has_pending_queue(scope.as_str()))
+                    .collect::<Vec<String>>()
+            })
+            .await
             {
+                Ok(drained) => drained,
+                Err(error) => {
+                    tracing::debug!(%error, "Reborn trace queue prune probe failed");
+                    continue;
+                }
+            };
+            if !drained.is_empty() {
                 let mut observed = match observed_scopes.lock() {
                     Ok(observed) => observed,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                observed.retain(|scope| trace::trace_scope_has_pending_queue(scope.as_str()));
+                for scope in drained {
+                    observed.remove(&scope);
+                }
             }
         }
     });

@@ -204,10 +204,7 @@ pub(crate) async fn build_backend_channel_pairing(
     input: BackendChannelPairingAssemblyInput,
 ) -> Result<Arc<ironclaw_extension_host::channel_pairing::ChannelPairingRegistry>, RebornBuildError>
 {
-    use ironclaw_extension_host::channel_host::{
-        ChannelWorkflowStateFactory, FilesystemChannelWorkflowStateFactory,
-        default_channel_workflow_storage_roots,
-    };
+    use ironclaw_extension_host::channel_host::default_channel_workflow_storage_roots;
     use ironclaw_extension_host::channel_pairing::{
         ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceParts,
         FilesystemChannelPairingStore,
@@ -264,17 +261,20 @@ pub(crate) async fn build_backend_channel_pairing(
                 descriptor.pairing_deep_link_template.as_deref(),
             ),
         );
-        let workflow_state_service =
-            FilesystemChannelWorkflowStateFactory::new(Arc::clone(&filesystem));
         let workflow_roots =
             default_channel_workflow_storage_roots(&scope.tenant_id, extension_id.as_str())
                 .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
-        let workflow_state = workflow_state_service
-            .build(&workflow_roots, scope.clone())
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?;
+        // Same roots, same mount aliases, same construction the channel
+        // workflow factory uses (§12.11 D-A) — the pairing lane must bind
+        // actors into the SAME durable conversation store the workflow
+        // resolves through, so both go through product's one builder.
+        let pairing_conversations = ironclaw_product::channel_conversation_services(
+            &filesystem,
+            &workflow_roots,
+            scope.clone(),
+        )
+        .await
+        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
         let agent_id = match scope.agent_id.clone() {
             Some(agent_id) => agent_id,
             None => ironclaw_host_api::ids::AgentId::new("reborn").map_err(|error| {
@@ -302,7 +302,7 @@ pub(crate) async fn build_backend_channel_pairing(
             identity_delete: Arc::clone(&identity_store)
                 as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             continuation: Arc::clone(&continuation),
-            conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
+            conversation_actor_pairings: Arc::clone(&pairing_conversations)
                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
             dm_targets: Arc::clone(&dm_targets),
         }));
@@ -377,6 +377,9 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     pub(crate) outbound_preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+    /// Durable outcome record for proactive (trigger-fired) deliveries; the
+    /// workflow factory wires it into every per-extension triggered driver.
+    pub(crate) triggered_delivery_store: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
@@ -413,6 +416,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         outbound_state: Arc::clone(&services.outbound_state),
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
         outbound_preferences: Arc::clone(&services.outbound_preferences),
+        triggered_delivery_store: Arc::clone(&services.triggered_run_delivery),
         identity_lookup: Arc::clone(&services.channel_identity_store)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
         deployment_channels: Arc::clone(&services.deployment_channels),
@@ -440,13 +444,22 @@ pub(crate) fn channel_admin_users(
     ))
 }
 
+/// The started channel host plus the product-side workflow factory it was
+/// built over. The factory is returned rather than dropped because the generic
+/// triggered-delivery hook needs the SAME one to build its per-extension
+/// drivers (§12.11 D-A) — two factories would mean two ledgers and two
+/// conversation stores at the same roots.
+pub(crate) struct StartedChannelHost {
+    pub(crate) assembly: Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>,
+    pub(crate) workflow_factory: Arc<ironclaw_product::RebornChannelWorkflowFactory>,
+}
+
 pub(crate) fn start_channel_host(
     source: &ChannelHostAssemblySource,
     wiring: ChannelHostAssemblyWiring,
-) -> Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly> {
+) -> StartedChannelHost {
     use ironclaw_extension_host::channel_host::{
-        ChannelHostDeliveryDeps, FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly,
-        GenericChannelHostDeps,
+        GenericChannelHostAssembly, GenericChannelHostDeps,
     };
 
     let ChannelHostAssemblyWiring {
@@ -472,17 +485,14 @@ pub(crate) fn start_channel_host(
         outbound_state,
         delivered_gate_routes,
         outbound_preferences,
+        triggered_delivery_store,
         identity_lookup,
         deployment_channels,
         channel_config,
         channel_pairing,
     } = source;
-    let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
-        workflow_filesystem,
-    )));
-    let delivery = delivery_coordinator
-        .clone()
-        .map(|coordinator| ChannelHostDeliveryDeps {
+    let delivery = delivery_coordinator.clone().map(|coordinator| {
+        ironclaw_product::ChannelWorkflowDeliveryServices {
             coordinator,
             outbound_store: Arc::clone(outbound_state),
             route_store: Arc::clone(delivered_gate_routes),
@@ -492,33 +502,51 @@ pub(crate) fn start_channel_host(
             blocked_auth_prompts,
             auth_flow_cancel,
             settings: run_delivery_settings,
-        });
+            triggered_delivery_store: Arc::clone(triggered_delivery_store),
+        }
+    });
+    let workflow_factory = Arc::new(ironclaw_product::RebornChannelWorkflowFactory::new(
+        ironclaw_product::RebornChannelWorkflowServices {
+            filesystem: Arc::clone(workflow_filesystem),
+            thread_service,
+            turn_coordinator,
+            inbound_attachments: Arc::clone(inbound_attachments),
+            input_enqueue,
+            approval_interaction,
+            auth_interaction,
+            identity: ironclaw_product::ChannelWorkflowIdentity {
+                tenant_id: identity.tenant_id.clone(),
+                agent_id: identity.agent_id.clone(),
+                project_id: identity.project_id.clone(),
+                operator_user_id: identity.operator_user_id.clone(),
+            },
+            delivery,
+        },
+    ));
     let identity_lookup = Some(Arc::clone(identity_lookup));
 
-    GenericChannelHostAssembly::start(GenericChannelHostDeps {
+    let assembly = GenericChannelHostAssembly::start(GenericChannelHostDeps {
         watch: generic_host.snapshot_watch(),
         deployment_channels: Arc::clone(deployment_channels),
         registry: Arc::clone(registry),
         channel_config: Arc::clone(channel_config),
-        workflow_state,
-        thread_service,
-        turn_coordinator,
-        inbound_attachments: Arc::clone(inbound_attachments),
-        input_enqueue,
-        approval_interaction,
-        auth_interaction,
+        channel_workflow: Arc::clone(&workflow_factory)
+            as Arc<dyn ironclaw_product_contracts::channel_workflow::ChannelWorkflowFactory>,
         identity,
         identity_lookup,
-        delivery,
         channel_pairing: channel_pairing.clone(),
         admin_users,
-    })
+    });
+    StartedChannelHost {
+        assembly,
+        workflow_factory,
+    }
 }
 
 pub(crate) async fn build_runtime_channel_host(
     services: &RebornRuntimeStores,
     wiring: RuntimeExtensionHostAssemblyWiring<'_>,
-) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
+) -> Option<StartedChannelHost> {
     let RuntimeExtensionHostAssemblyWiring {
         thread_service,
         turn_coordinator,
@@ -551,7 +579,7 @@ pub(crate) async fn build_runtime_channel_host(
         operator_user_id: actor_user_id,
     };
     let admin_users = channel_admin_users(services, &identity);
-    let assembly = start_channel_host(
+    let started = start_channel_host(
         &source,
         ChannelHostAssemblyWiring {
             thread_service,
@@ -567,6 +595,7 @@ pub(crate) async fn build_runtime_channel_host(
             admin_users,
         },
     );
+    let assembly = Arc::clone(&started.assembly);
 
     for binding in &services.channel_extension_bindings {
         assembly
@@ -598,7 +627,7 @@ pub(crate) async fn build_runtime_channel_host(
             );
     }
 
-    Some(assembly)
+    Some(started)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -607,5 +636,5 @@ pub(crate) fn start_channel_host_from_stores(
     wiring: ChannelHostAssemblyWiring,
 ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
     let source = channel_host_source(services)?;
-    Some(start_channel_host(&source, wiring))
+    Some(start_channel_host(&source, wiring).assembly)
 }

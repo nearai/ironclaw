@@ -1759,7 +1759,7 @@ impl ExtensionLifecycleManager {
                             removal_scope.agent_id.clone(),
                             removal_scope.project_id.clone(),
                         ),
-                        extension_id.as_str(),
+                        &extension_id,
                     )
                     .await
                     .map_err(|error| ProductOperationFailure::Transient {

@@ -1,20 +1,31 @@
-//! Conversation binding resolution service contract.
+//! Conversation binding resolution — the port and the DTOs that cross it.
 //!
 //! Maps external adapter references (external actor, external conversation) to
 //! canonical Reborn identifiers (tenant, user, thread, agent/project scope).
-//! This replaces the ad-hoc session/thread resolution scattered across v1
-//! `Agent::handle_message` and the engine-v2 bridge.
+//!
+//! **Why this is a contract and not product's own** (§12.11 D-A): the channel
+//! host's per-extension workflow factory returns a live binding service to its
+//! caller, and the caller sits *below* product. The port therefore has to be
+//! declared at the boundary, which is only possible now that its request and
+//! response DTOs name nothing but `ironclaw_host_api` and
+//! `ironclaw_extension_contracts` vocabulary. The error is the boundary error
+//! ([`ProductOperationFailure`]) for the same reason; `ironclaw_product`
+//! absorbs it into its workflow error with a total, discriminant-preserving
+//! `From`, so a product call site keeps every distinction it had.
 
-use crate::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    VerifiedAuthClaim,
-};
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterId, VerifiedAuthClaim,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::error::ProductSurfaceFailure;
+use crate::error::ProductOperationFailure;
+use crate::inbound::{ProductInboundEnvelope, ProductInboundPayload};
 
 /// Resolved canonical binding for a product inbound action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,30 +52,6 @@ pub struct ResolvedBinding {
     /// user-scoped must be completed before entering `InboundTurnService`.
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolved_binding_accepts_legacy_user_id_actor_field() {
-        let binding: ResolvedBinding = serde_json::from_value(serde_json::json!({
-            "tenant_id": "tenant:legacy",
-            "user_id": "user:legacy-actor",
-            "subject_user_id": "user:legacy-subject",
-            "thread_id": "thread:legacy",
-            "agent_id": "agent:legacy",
-            "project_id": "project:legacy"
-        }))
-        .expect("legacy binding should deserialize");
-
-        assert_eq!(binding.actor_user_id.as_str(), "user:legacy-actor");
-        assert_eq!(
-            binding.subject_user_id.as_ref().map(UserId::as_str),
-            Some("user:legacy-subject")
-        );
-    }
 }
 
 /// Request to resolve external adapter refs into canonical Reborn bindings.
@@ -161,46 +148,68 @@ pub fn route_kind_for_inbound_payload(
     }
 }
 
-pub(crate) fn route_kind_for_trigger(
-    trigger: ProductTriggerReason,
-) -> ProductConversationRouteKind {
+pub fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationRouteKind {
     binding_profile_for_trigger(trigger).0
 }
 
 /// Conversation binding resolution contract. Host implementations wire this to
 /// the tenant registry, user directory, and thread management services.
 #[async_trait]
-pub trait ConversationBindingService: Send + Sync {
+pub trait ProductBindingResolver: Send + Sync {
     /// Resolve external adapter references to canonical Reborn identifiers.
     /// Implementations must create or look up the thread as needed.
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure>;
+    ) -> Result<ResolvedBinding, ProductOperationFailure>;
 
     /// Look up an existing binding without creating conversation/thread state.
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure>;
+    ) -> Result<ResolvedBinding, ProductOperationFailure>;
 }
 
 #[async_trait]
-impl<T> ConversationBindingService for std::sync::Arc<T>
+impl<T> ProductBindingResolver for std::sync::Arc<T>
 where
-    T: ConversationBindingService + ?Sized,
+    T: ProductBindingResolver + ?Sized,
 {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.as_ref().resolve_binding(request).await
     }
 
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.as_ref().lookup_binding(request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_binding_accepts_legacy_user_id_actor_field() {
+        let binding: ResolvedBinding = serde_json::from_value(serde_json::json!({
+            "tenant_id": "tenant:legacy",
+            "user_id": "user:legacy-actor",
+            "subject_user_id": "user:legacy-subject",
+            "thread_id": "thread:legacy",
+            "agent_id": "agent:legacy",
+            "project_id": "project:legacy"
+        }))
+        .expect("legacy binding should deserialize");
+
+        assert_eq!(binding.actor_user_id.as_str(), "user:legacy-actor");
+        assert_eq!(
+            binding.subject_user_id.as_ref().map(UserId::as_str),
+            Some("user:legacy-subject")
+        );
     }
 }

@@ -16,14 +16,14 @@ use ironclaw_product_contracts::surface::{
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
 use crate::action::ProductInboundAction;
-use crate::binding::{
-    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
-};
 use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
+use ironclaw_product_contracts::binding::{
+    ProductBindingResolver, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
 #[allow(dead_code)]
 pub fn rejecting_product_surface_error() -> ProductSurfaceError {
     ProductSurfaceError {
@@ -50,7 +50,7 @@ pub struct FakeConversationBindingService {
 #[derive(Default)]
 struct FakeBindingState {
     programmed: HashMap<String, ResolvedBinding>,
-    fail_with: Option<ProductSurfaceFailure>,
+    fail_with: Option<ProductOperationFailure>,
     resolve_count: usize,
     route_kinds: Vec<ProductConversationRouteKind>,
 }
@@ -69,7 +69,7 @@ impl FakeConversationBindingService {
     }
 
     /// Force all resolutions to fail.
-    pub fn force_failure(&self, error: ProductSurfaceFailure) {
+    pub fn force_failure(&self, error: ProductOperationFailure) {
         let mut state = self.state.lock().expect("fake binding state lock poisoned"); // safety: test-support fake
         state.fail_with = Some(error);
     }
@@ -94,18 +94,18 @@ impl Default for FakeConversationBindingService {
 }
 
 #[async_trait]
-impl ConversationBindingService for FakeConversationBindingService {
+impl ProductBindingResolver for FakeConversationBindingService {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.resolve_programmed_or_default(request)
     }
 
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.resolve_programmed_or_default(request)
     }
 }
@@ -114,7 +114,7 @@ impl FakeConversationBindingService {
     fn resolve_programmed_or_default(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         let mut state = self.state.lock().expect("fake binding state lock poisoned"); // safety: test-support fake
         state.resolve_count += 1;
         state.route_kinds.push(request.route_kind);
@@ -128,16 +128,16 @@ impl FakeConversationBindingService {
         // Default: deterministic binding from external refs.
         Ok(ResolvedBinding {
             tenant_id: TenantId::new(format!("tenant:{}", request.installation_id.as_str()))
-                .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
+                .map_err(|e| ProductOperationFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
             actor_user_id: UserId::new(format!("user:{}", request.external_actor_ref.id()))
-                .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
+                .map_err(|e| ProductOperationFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
             subject_user_id: Some(
                 UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(|e| {
-                    ProductSurfaceFailure::BindingResolutionFailed {
+                    ProductOperationFailure::BindingResolutionFailed {
                         reason: e.to_string(),
                     }
                 })?,
@@ -147,11 +147,11 @@ impl FakeConversationBindingService {
                 request.installation_id.as_str(),
                 request.external_conversation_ref.conversation_fingerprint()
             ))
-            .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
+            .map_err(|e| ProductOperationFailure::BindingResolutionFailed {
                 reason: e.to_string(),
             })?,
             agent_id: Some(AgentId::new("agent:fake").map_err(|e| {
-                ProductSurfaceFailure::BindingResolutionFailed {
+                ProductOperationFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?),

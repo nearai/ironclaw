@@ -56,6 +56,7 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
     resource::ResourceScope,
 };
+use ironclaw_outbound::TriggeredRunDeliveryRequest;
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
@@ -65,18 +66,19 @@ use ironclaw_outbound::{
 use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    DeliveryCoordinator, DeliveryRetryPolicy, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest,
 };
 use ironclaw_product_contracts::admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
+use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::inbound::{
     AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
@@ -102,8 +104,7 @@ use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransp
 use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 use super::{
-    ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,
-    FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
+    ChannelExtras, ChannelHostIdentity, GenericChannelHostAssembly, GenericChannelHostDeps,
 };
 use crate::extension_ingress::{
     ExtensionIngressParts, PostAdmissionObserver, build_extension_ingress,
@@ -243,6 +244,12 @@ struct Harness {
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
     assembly: Arc<GenericChannelHostAssembly>,
+    /// The product-side factory the assembly builds every graph through — the
+    /// triggered-delivery scenarios build their per-extension driver from the
+    /// SAME one, as composition does.
+    workflow_factory: Arc<ironclaw_product::RebornChannelWorkflowFactory>,
+    /// The store that factory wired into every triggered driver it builds.
+    triggered_delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -556,47 +563,63 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     )]));
 
     let channel_config = configured_channel_config().await;
+    let identity = ChannelHostIdentity {
+        tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        agent_id: AgentId::new(AGENT).expect("agent"),     // safety: static test agent id is valid.
+        project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+        operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
+    };
+    let triggered_delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
+        Arc::new(in_memory_backed_outbound_state_store());
+    // The production shape: composition builds ONE product-side workflow
+    // factory and the assembly names no product type at all (§12.11 D-A).
+    let workflow_factory = Arc::new(ironclaw_product::RebornChannelWorkflowFactory::new(
+        ironclaw_product::RebornChannelWorkflowServices {
+            filesystem: Arc::new(InMemoryBackend::new()),
+            thread_service: Arc::new(threads.clone()),
+            turn_coordinator: Arc::new(coordinator.clone()),
+            inbound_attachments: Arc::new(InertAttachmentLander),
+            input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
+            approval_interaction: Some(approval_interaction),
+            auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
+            identity: ironclaw_product::ChannelWorkflowIdentity {
+                tenant_id: identity.tenant_id.clone(),
+                agent_id: identity.agent_id.clone(),
+                project_id: identity.project_id.clone(),
+                operator_user_id: identity.operator_user_id.clone(),
+            },
+            delivery: Some(ironclaw_product::ChannelWorkflowDeliveryServices {
+                project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+                coordinator: delivery_coordinator,
+                outbound_store,
+                route_store: Arc::clone(&route_store),
+                communication_preferences: preferences,
+                approval_context: None,
+                blocked_auth_prompts: options.auth_challenges.map(|provider| {
+                    Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
+                        as Arc<dyn BlockedAuthPromptSource>
+                }),
+                auth_flow_cancel: None,
+                settings: RunDeliverySettings {
+                    poll_interval: Duration::from_millis(1),
+                    max_wait: options.max_wait,
+                    max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
+                    max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+                },
+                triggered_delivery_store: Arc::clone(&triggered_delivery_store),
+            }),
+        },
+    ));
     let deps = GenericChannelHostDeps {
-        inbound_attachments: Arc::new(InertAttachmentLander),
-        input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
         channel_config: Arc::clone(&channel_config),
-        workflow_state: Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::new(
-            InMemoryBackend::new(),
-        ))),
-        thread_service: Arc::new(threads.clone()),
-        turn_coordinator: Arc::new(coordinator.clone()),
-        approval_interaction: Some(approval_interaction),
-        auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
-        identity: ChannelHostIdentity {
-            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
-            project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
-            operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
-        },
+        channel_workflow: Arc::clone(&workflow_factory)
+            as Arc<dyn ironclaw_product_contracts::channel_workflow::ChannelWorkflowFactory>,
+        identity,
         identity_lookup: Some(Arc::clone(&identity_lookup)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>),
-        delivery: Some(ChannelHostDeliveryDeps {
-            project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
-            coordinator: delivery_coordinator,
-            outbound_store,
-            route_store: Arc::clone(&route_store),
-            communication_preferences: preferences,
-            approval_context: None,
-            blocked_auth_prompts: options.auth_challenges.map(|provider| {
-                Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
-                    as Arc<dyn BlockedAuthPromptSource>
-            }),
-            auth_flow_cancel: None,
-            settings: RunDeliverySettings {
-                poll_interval: Duration::from_millis(1),
-                max_wait: options.max_wait,
-                max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
-                max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
-            },
-        }),
         channel_pairing: None,
         admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
     };
@@ -635,6 +658,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         outbound,
         _host: host,
         assembly,
+        workflow_factory,
+        triggered_delivery_store,
     }
 }
 
@@ -1006,7 +1031,7 @@ async fn bare_approve_in_dm_resolves_gate_recorded_by_observer() {
     );
 }
 
-/// No-op [`ConversationBindingService`] mirroring the one the production
+/// No-op [`ProductBindingResolver`] mirroring the one the production
 /// triggered-delivery factory (`build_triggered_run_delivery_hook_from_parts`)
 /// hardcodes: the triggered path receives the `TurnScope` directly from the
 /// poller and never resolves a binding. Using it here keeps the composite on the
@@ -1014,12 +1039,12 @@ async fn bare_approve_in_dm_resolves_gate_recorded_by_observer() {
 struct NoopTriggeredBindingService;
 
 #[async_trait]
-impl ConversationBindingService for NoopTriggeredBindingService {
+impl ProductBindingResolver for NoopTriggeredBindingService {
     async fn resolve_binding(
         &self,
         _request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
-        Err(ProductSurfaceFailure::BindingResolutionFailed {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
             reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
         })
     }
@@ -1027,8 +1052,8 @@ impl ConversationBindingService for NoopTriggeredBindingService {
     async fn lookup_binding(
         &self,
         _request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
-        Err(ProductSurfaceFailure::BindingResolutionFailed {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
             reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
         })
     }
@@ -4387,6 +4412,19 @@ use crate::channel_outbound_targets::{
     GenericChannelOutboundTargetProvider, register_generic_channel_outbound_targets,
 };
 use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
+
+/// The per-extension triggered-delivery drivers composition supplies the hook:
+/// built by the SAME product-side workflow factory the assembly's graphs are
+/// built by, from the same codec the harness registered as an extra.
+fn harness_triggered_drivers(
+    harness: &Harness,
+) -> Vec<(String, Arc<dyn ironclaw_outbound::TriggeredRunDelivery>)> {
+    harness
+        .workflow_factory
+        .triggered_run_delivery("slack", Arc::new(SlackPreferenceTargetCodec))
+        .map(|driver| vec![("slack".to_string(), driver)])
+        .unwrap_or_default()
+}
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec as _;
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
@@ -4761,12 +4799,13 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         .await
         .expect("seed personal preference"); // safety: in-memory store should not fail.
 
-    let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
+    let delivery_store = Arc::clone(&harness.triggered_delivery_store);
     let hook = GenericTriggeredRunDeliveryHook::new(
         Arc::clone(&harness.assembly),
-        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
+        Arc::clone(&delivery_store),
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
         Arc::new(ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default()),
+        harness_triggered_drivers(&harness),
     );
 
     let fire = TriggerFire {
@@ -4908,12 +4947,13 @@ async fn generic_triggered_hook_honors_per_trigger_target_without_global_default
         .await
         .expect("seed completed trigger run");
 
-    let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
+    let delivery_store = Arc::clone(&harness.triggered_delivery_store);
     let hook = GenericTriggeredRunDeliveryHook::new(
         Arc::clone(&harness.assembly),
-        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
+        Arc::clone(&delivery_store),
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
         registry,
+        harness_triggered_drivers(&harness),
     );
     let fire = TriggerFire {
         identity: TriggerFireIdentity::new(

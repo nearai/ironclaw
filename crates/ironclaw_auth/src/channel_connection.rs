@@ -11,7 +11,10 @@
 //! stays a pure function of the two enums and is called by `ironclaw_product`'s
 //! extensions wire, so nothing authoritative moves with the vocabulary.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
 use crate::credential::CredentialAccountStatus;
@@ -41,15 +44,23 @@ pub struct ChannelAuthAccountState {
 
 /// Per-user channel connection state. Returns, for the calling user, which
 /// channel extensions they have personally connected — a per-user vendor OAuth
-/// grant, typically. Keyed by channel package id -> `true` when connected.
+/// grant, typically. Keyed by channel [`ExtensionId`] -> `true` when connected.
 /// Only channels that have a per-user connection concept appear in the map;
 /// absence means "no per-user connection concept for this channel".
+///
+/// The keys and the disconnect argument are [`ExtensionId`], not `String`: this
+/// is a port, and a raw string permits a malformed or non-canonical package id
+/// to become a map key that no lookup can ever match — a channel that silently
+/// reads as "not connected" rather than failing. The sibling map on the same
+/// product call (`installed_activation_errors`) is already keyed this way, so
+/// the untyped half was the odd one out. Serialization to the product wire
+/// happens at the surface, not here.
 #[async_trait]
 pub trait ChannelConnectionService: Send + Sync {
     async fn caller_channel_connections(
         &self,
         caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError>;
+    ) -> Result<HashMap<ExtensionId, bool>, ProductSurfaceError>;
 
     /// The caller's durable auth-account signal per channel extension, keyed by
     /// channel package id — richer than the connected/disconnected bool
@@ -64,15 +75,14 @@ pub trait ChannelConnectionService: Send + Sync {
     async fn caller_channel_account_states(
         &self,
         _caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, ProductSurfaceError>
-    {
-        Ok(std::collections::HashMap::new())
+    ) -> Result<HashMap<ExtensionId, ChannelAuthAccountState>, ProductSurfaceError> {
+        Ok(HashMap::new())
     }
 
     async fn disconnect_channel_for_caller(
         &self,
         _caller: ProductSurfaceCaller,
-        _channel: &str,
+        _channel: &ExtensionId,
     ) -> Result<(), ProductSurfaceError> {
         Err(ProductSurfaceError::service_unavailable(false))
     }

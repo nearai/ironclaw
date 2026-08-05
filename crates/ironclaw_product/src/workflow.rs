@@ -47,10 +47,6 @@ use crate::auth_interaction::{
     RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     is_auth_gate_ref,
 };
-use crate::binding::{
-    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
-};
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
@@ -67,6 +63,9 @@ use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
+use ironclaw_product_contracts::binding::{
+    ProductBindingResolver, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 
 use crate::reborn_services::{
@@ -81,7 +80,7 @@ pub struct DefaultProductSurface {
     inbound_turn_service: Arc<dyn InboundTurnService>,
     idempotency_ledger: Arc<dyn IdempotencyLedger>,
     before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
-    binding_service: Arc<dyn ConversationBindingService>,
+    binding_service: Arc<dyn ProductBindingResolver>,
     command_admission_service: Arc<dyn ProductCommandAdmissionService>,
     command_surface: Option<Arc<dyn ProductSurface>>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
@@ -93,7 +92,7 @@ impl DefaultProductSurface {
     pub fn new(
         inbound_turn_service: Arc<dyn InboundTurnService>,
         idempotency_ledger: Arc<dyn IdempotencyLedger>,
-        binding_service: Arc<dyn ConversationBindingService>,
+        binding_service: Arc<dyn ProductBindingResolver>,
     ) -> Self {
         Self {
             inbound_turn_service,
@@ -505,7 +504,7 @@ struct DispatchedAction {
 struct DispatchPorts<'a> {
     inbound_turn_service: &'a dyn InboundTurnService,
     before_inbound_policy: &'a dyn BeforeInboundPolicy,
-    binding_service: &'a dyn ConversationBindingService,
+    binding_service: &'a dyn ProductBindingResolver,
     command_admission_service: &'a dyn ProductCommandAdmissionService,
     command_surface: Option<&'a dyn ProductSurface>,
     approval_interaction_service: &'a dyn ApprovalInteractionService,
@@ -518,7 +517,7 @@ fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingR
 }
 
 async fn resolve_projection_subject(
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     subject: &ProductProjectionSubject,
     thread_id_hint: Option<&str>,
 ) -> Result<(TurnActor, TurnScope), ProductAdapterError> {
@@ -542,7 +541,7 @@ async fn resolve_projection_subject(
                     auth_claim: auth_claim.clone(),
                 })
                 .await
-                .map_err(ProductAdapterError::from)?;
+                .map_err(|error| ProductAdapterError::from(ProductSurfaceFailure::from(error)))?;
             let thread_id = projection_thread_id_from_binding(&binding, thread_id_hint)?;
             Ok((
                 TurnActor::new(binding.actor_user_id.clone()),
@@ -558,10 +557,14 @@ async fn resolve_projection_subject(
 
 async fn lookup_interaction_binding(
     envelope: &ProductInboundEnvelope,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
 ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
     let request = resolve_binding_request(envelope);
-    match binding_service.lookup_binding(request.clone()).await {
+    match binding_service
+        .lookup_binding(request.clone())
+        .await
+        .map_err(ProductSurfaceFailure::from)
+    {
         Ok(binding) => Ok(binding),
         Err(ProductSurfaceFailure::BindingRequired { .. })
             if can_fallback_to_direct_base_binding(&request) =>
@@ -569,6 +572,7 @@ async fn lookup_interaction_binding(
             binding_service
                 .lookup_binding(direct_base_binding_request(request)?)
                 .await
+                .map_err(ProductSurfaceFailure::from)
         }
         Err(error) => Err(error),
     }
@@ -596,7 +600,7 @@ fn direct_base_binding_request(
 
 async fn delivered_route_base_binding(
     envelope: &ProductInboundEnvelope,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
 ) -> Option<ResolvedBinding> {
     // AUTHZ INVARIANT: the returned binding's `actor_user_id` is the
     // authenticated external actor resolved by the pairing/binding service
@@ -808,7 +812,7 @@ struct SelectedDeliveredRoute {
 #[allow(clippy::too_many_arguments)]
 async fn select_delivered_gate_routes(
     envelope: &ProductInboundEnvelope,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
     gate_kind_filter: fn(&str) -> bool,
@@ -862,7 +866,7 @@ async fn select_delivered_gate_routes(
 #[allow(clippy::too_many_arguments)]
 async fn resolve_via_delivered_approval_route(
     envelope: &ProductInboundEnvelope,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     approval_interaction_service: &dyn ApprovalInteractionService,
     decision: ApprovalInteractionDecision,
@@ -987,7 +991,7 @@ fn is_stale_approval_error(error: &ProductSurfaceFailure) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn resolve_via_delivered_auth_route(
     envelope: &ProductInboundEnvelope,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     auth_interaction_service: &dyn AuthInteractionService,
     decision: AuthInteractionDecision,
@@ -1275,7 +1279,7 @@ async fn dispatch_approval_resolution(
     envelope: &ProductInboundEnvelope,
     payload: &crate::ApprovalResolutionPayload,
     action_fingerprint: ActionFingerprintKey,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     approval_interaction_service: &dyn ApprovalInteractionService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
@@ -1333,7 +1337,7 @@ async fn dispatch_scoped_approval_resolution(
     envelope: &ProductInboundEnvelope,
     payload: &crate::ScopedApprovalResolutionPayload,
     action_fingerprint: ActionFingerprintKey,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     approval_interaction_service: &dyn ApprovalInteractionService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
@@ -1430,7 +1434,7 @@ async fn dispatch_auth_resolution(
     envelope: &ProductInboundEnvelope,
     payload: &crate::AuthResolutionPayload,
     action_fingerprint: ActionFingerprintKey,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     auth_interaction_service: &dyn AuthInteractionService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
@@ -1706,7 +1710,7 @@ fn product_surface_failure(error: ProductSurfaceError) -> ProductSurfaceFailure 
 async fn dispatch_product_command(
     envelope: &ProductInboundEnvelope,
     action_id: ProductActionId,
-    binding_service: &dyn ConversationBindingService,
+    binding_service: &dyn ProductBindingResolver,
     command_surface: Option<&dyn ProductSurface>,
     command: ProductCommand,
 ) -> Result<ProductInboundAck, ProductSurfaceFailure> {

@@ -14,7 +14,10 @@ use serde_json::Value;
 // crate inventory, so the family move (PROPOSAL §5) repoints them without a
 // lockstep edit of the ~100 literals below. On today's tree resolution is the
 // identity — pinned by `reborn_crate_inventory.rs`.
-use ratchet_support::{crate_path, resolve_crate_relative, try_crate_directory, workspace_root};
+use ratchet_support::{
+    crate_path, production_rust_files, resolve_crate_relative, strip_comments_and_strings,
+    try_crate_directory, workspace_root,
+};
 
 #[test]
 fn reborn_boundary_rules_active_crates_are_workspace_members() {
@@ -1112,7 +1115,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     // lives in a `lib.rs`. Scanning the whole crate source tree keeps the rule
     // non-vacuous across that move (and the family `git mv` still to come) —
     // reading one hardcoded file would have gone silently green.
-    let scripts = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_sandbox/src"));
+    let scripts = production_crate_source_tokens(&crate_path(&root, "crates/ironclaw_sandbox/src"));
     assert!(
         scripts.contains("pub struct ScriptRuntime"),
         "sandbox lane scan is vacuous: it found no script-lane source under \
@@ -1124,8 +1127,11 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     // WS6 module charters: the MCP lane is no longer one file. Scanning the
     // whole crate source tree keeps the rule non-vacuous across the §6.6.3
     // split (and the family `git mv` still to come) — reading `lib.rs` alone
-    // would now see only the re-export list and go silently green.
-    let mcp = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_mcp/src"));
+    // would now see only the re-export list and go silently green. The scan is
+    // over *production tokens* (see `production_crate_source_tokens`): a
+    // comment, a string literal, or a `#[cfg(test)]` fixture naming the runtime
+    // must not keep this probe green after the production runtime is gone.
+    let mcp = production_crate_source_tokens(&crate_path(&root, "crates/ironclaw_mcp/src"));
     assert!(
         mcp.contains("pub struct McpRuntime<C>"),
         "MCP lane scan is vacuous: it found no MCP runtime source under \
@@ -5270,36 +5276,101 @@ fn collect_forbidden_uses_detects_violation() {
 ///
 /// Every read is fatal: a scanner that silently skips an unreadable file
 /// reports success while measuring nothing (WS10's guardrail rule).
-fn concatenated_crate_sources(src_root: &std::path::Path) -> String {
-    fn walk(dir: &std::path::Path, out: &mut String) {
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
-        let mut paths: Vec<_> = entries
-            .map(|entry| {
-                entry
-                    .unwrap_or_else(|error| panic!("read entry under {}: {error}", dir.display()))
-                    .path()
-            })
-            .collect();
-        paths.sort();
-        for path in paths {
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push_str(
-                    &std::fs::read_to_string(&path)
-                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
-                );
-                out.push('\n');
-            }
-        }
-    }
-    let mut out = String::new();
-    walk(src_root, &mut out);
+/// Every **production** Rust source under `src_root`, concatenated with
+/// comments and string literals blanked.
+///
+/// The vacuity probes above use this as *proof a lane still exists* — a
+/// `contains("pub struct McpRuntime<C>")` that goes green off a comment, a
+/// doc-example, or a `#[cfg(test)]` fixture is exactly the dark verdict the
+/// probe is there to prevent: the gate would keep passing after the production
+/// runtime it guards was deleted. So the concatenation is narrowed twice:
+///
+/// - [`production_rust_files`] drops `tests.rs`/`*_tests.rs`, files reachable
+///   only through a `#[cfg(test)]` `mod` declaration, and the
+///   `target`/`node_modules`/`tests` directory names, so no test fixture and no
+///   build output can satisfy a probe;
+/// - [`strip_comments_and_strings`] blanks comment and string bodies (newlines
+///   preserved), so prose and literals cannot either.
+///
+/// What survives is source tokens, which is what "the lane is still here"
+/// means.
+fn production_crate_source_tokens(src_root: &std::path::Path) -> String {
+    let files = production_rust_files(src_root);
     assert!(
-        !out.is_empty(),
-        "no Rust sources found under {}",
+        !files.is_empty(),
+        "no production Rust sources found under {}",
         src_root.display()
     );
+    let mut out = String::new();
+    for path in files {
+        out.push_str(&strip_comments_and_strings(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        ));
+        out.push('\n');
+    }
     out
+}
+
+/// A marker that appears only in non-production text must not satisfy a
+/// vacuity probe.
+///
+/// This is the regression for the fail-open shape
+/// [`production_crate_source_tokens`] closes: a raw concatenation answers
+/// "yes, the runtime is here" to a comment, a doc example, a string literal, or
+/// a `#[cfg(test)]` fixture. Each of those is checked separately so a partial
+/// regression (say, dropping the string stripper but keeping the comment one)
+/// cannot pass.
+#[test]
+fn a_marker_in_non_production_text_does_not_prove_a_lane_exists() {
+    const MARKER: &str = "pub struct McpRuntime<C>";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("tests")).expect("create src/tests");
+
+    std::fs::write(
+        src.join("lib.rs"),
+        format!(
+            "// {MARKER}\n\
+             /// Doc example:\n\
+             /// ```\n\
+             /// {MARKER} {{}}\n\
+             /// ```\n\
+             /* block: {MARKER} */\n\
+             pub const NAME: &str = \"{MARKER}\";\n\
+             #[cfg(test)]\n\
+             mod fixture;\n\
+             pub struct SomethingElse;\n"
+        ),
+    )
+    .expect("write lib.rs");
+    // Reachable only through the `#[cfg(test)]` decl above — production-looking
+    // name, test-only file.
+    std::fs::write(src.join("fixture.rs"), format!("{MARKER} {{}}\n")).expect("write fixture.rs");
+    // Conventional test-file names, and a `tests/` directory.
+    std::fs::write(src.join("tests.rs"), format!("{MARKER} {{}}\n")).expect("write tests.rs");
+    std::fs::write(
+        src.join("tests").join("more.rs"),
+        format!("{MARKER} {{}}\n"),
+    )
+    .expect("write tests/more.rs");
+
+    let scanned = production_crate_source_tokens(&src);
+    assert!(
+        !scanned.contains(MARKER),
+        "a marker present only in comments, doc examples, string literals, and \
+         test-only files must not satisfy a lane-existence probe; scanned:\n{scanned}"
+    );
+    assert!(
+        scanned.contains("pub struct SomethingElse"),
+        "the scan must still see real production tokens; scanned:\n{scanned}"
+    );
+
+    // And the positive direction: a real production declaration is found.
+    std::fs::write(src.join("runtime.rs"), format!("{MARKER} {{}}\n")).expect("write runtime.rs");
+    assert!(
+        production_crate_source_tokens(&src).contains(MARKER),
+        "a production declaration must satisfy the probe"
+    );
 }

@@ -91,10 +91,10 @@ use ironclaw_product::{
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product::{
-    ConversationBindingService, ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings,
+    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
@@ -391,7 +391,7 @@ fn delivery_run_services(
 /// binding service the registered sink uses) — so the scripted model
 /// gateway can be registered for the run's scope up front.
 async fn preresolve_vendor_turn_scope(
-    binding_service: &Arc<dyn ConversationBindingService>,
+    binding_service: &Arc<dyn ProductBindingResolver>,
     adapter: &dyn ChannelAdapter,
     adapter_id: &str,
     installation_id: &str,
@@ -722,7 +722,7 @@ async fn wait_for_production_registration(
     assembly: &Arc<GenericChannelHostAssembly>,
     services: &RebornRuntime,
     extension_id: &str,
-) -> Arc<dyn ConversationBindingService> {
+) -> Arc<dyn ProductBindingResolver> {
     let registry = services
         .extension_ingress_parts()
         .expect("composition built the generic ingress")

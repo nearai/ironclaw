@@ -32,10 +32,10 @@ use ironclaw_product::{
     ActionDispatchKind, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionScope,
     AuthInteractionService, AuthInteractionStatus, BeforeInboundPolicy, BeforeInboundPolicyOutcome,
-    BeforeInboundPolicyRequest, ConversationBindingService, DefaultInboundTurnService,
-    DefaultProductSurface, FakeBeforeInboundPolicy, FakeConversationBindingService,
-    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
-    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    BeforeInboundPolicyRequest, DefaultInboundTurnService, DefaultProductSurface,
+    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
+    FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
+    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
@@ -62,6 +62,7 @@ use ironclaw_product_contracts::action::{
 use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::subject_route::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
@@ -742,21 +743,21 @@ impl BindingRequiredThenSucceedingService {
 }
 
 #[async_trait]
-impl ConversationBindingService for BindingRequiredThenSucceedingService {
+impl ProductBindingResolver for BindingRequiredThenSucceedingService {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.lookup_binding(request).await
     }
 
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_count {
-            return Err(ProductSurfaceFailure::BindingRequired {
+            return Err(ProductOperationFailure::BindingRequired {
                 reason: format!("injected failure #{n}"),
             });
         }
@@ -4312,7 +4313,10 @@ async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
         actor_resolver.calls().is_empty(),
         "lookup cannot revalidate until a durable pairing and route exist"
     );
-    assert!(matches!(err, ProductSurfaceFailure::BindingRequired { .. }));
+    assert!(matches!(
+        err,
+        ProductOperationFailure::BindingRequired { .. }
+    ));
 }
 
 #[tokio::test]
@@ -4330,7 +4334,10 @@ async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures_befor
         .await
         .expect_err("missing durable pairing fails before resolver revalidation");
 
-    assert!(matches!(err, ProductSurfaceFailure::BindingRequired { .. }));
+    assert!(matches!(
+        err,
+        ProductOperationFailure::BindingRequired { .. }
+    ));
 }
 
 #[tokio::test]
@@ -4374,7 +4381,10 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
         .expect_err("lookup must reject a durable pairing that no longer matches the resolver");
 
     assert_eq!(actor_resolver.calls().len(), 1);
-    assert!(matches!(error, ProductSurfaceFailure::BindingAccessDenied));
+    assert!(matches!(
+        error,
+        ProductOperationFailure::BindingAccessDenied
+    ));
 }
 
 #[tokio::test]
@@ -4403,7 +4413,8 @@ async fn lookup_binding_rechecks_direct_actor_revocation_after_the_route_was_cre
 
     assert!(matches!(
         error,
-        ProductSurfaceFailure::BindingRequired { .. } | ProductSurfaceFailure::BindingAccessDenied
+        ProductOperationFailure::BindingRequired { .. }
+            | ProductOperationFailure::BindingAccessDenied
     ));
 }
 
@@ -4437,7 +4448,8 @@ async fn lookup_binding_rechecks_direct_actor_revocation_when_the_epoch_changes(
 
     assert!(matches!(
         error,
-        ProductSurfaceFailure::BindingRequired { .. } | ProductSurfaceFailure::BindingAccessDenied
+        ProductOperationFailure::BindingRequired { .. }
+            | ProductOperationFailure::BindingAccessDenied
     ));
 }
 
@@ -4811,7 +4823,7 @@ async fn shared_route_without_configured_subject_requires_binding() {
 
     assert!(matches!(
         error,
-        ProductSurfaceFailure::BindingRequired { reason }
+        ProductOperationFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 }
@@ -4993,7 +5005,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         .expect_err("shared binding must require a configured subject");
     assert!(matches!(
         error,
-        ProductSurfaceFailure::BindingRequired { reason }
+        ProductOperationFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 
@@ -5093,7 +5105,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         .expect_err("existing shared binding must record the external event route");
     assert!(matches!(
         route_mismatch,
-        ProductSurfaceFailure::BindingAccessDenied
+        ProductOperationFailure::BindingAccessDenied
     ));
     assert_eq!(failing_subject_resolver.call_count(), 0);
     let calls = subject_resolver.calls();
@@ -5266,7 +5278,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("unrouted shared binding must not fall back to default subject");
     assert!(matches!(
         error,
-        ProductSurfaceFailure::BindingRequired { reason }
+        ProductOperationFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
     assert!(
@@ -5345,7 +5357,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("existing shared binding must not switch subjects without rebinding");
     assert!(matches!(
         reassigned_error,
-        ProductSurfaceFailure::BindingAccessDenied
+        ProductOperationFailure::BindingAccessDenied
     ));
 
     subject_resolver.clear_subject();
@@ -5371,7 +5383,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("existing shared binding must stop resolving after route removal");
     assert!(matches!(
         error,
-        ProductSurfaceFailure::BindingRequired { reason }
+        ProductOperationFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 
@@ -5400,7 +5412,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("existing shared binding lookup must stop after route removal");
     assert!(matches!(
         lookup_error,
-        ProductSurfaceFailure::BindingRequired { reason }
+        ProductOperationFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 }
@@ -5490,7 +5502,10 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
         .await
         .expect_err("lookup should reject mismatched resolved actor");
 
-    assert!(matches!(error, ProductSurfaceFailure::BindingAccessDenied));
+    assert!(matches!(
+        error,
+        ProductOperationFailure::BindingAccessDenied
+    ));
 }
 
 #[tokio::test]
@@ -5579,7 +5594,10 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
         .await
         .expect_err("lookup must not backfill legacy ownerless shared routes");
 
-    assert!(matches!(error, ProductSurfaceFailure::BindingAccessDenied));
+    assert!(matches!(
+        error,
+        ProductOperationFailure::BindingAccessDenied
+    ));
     assert!(
         subject_resolver.calls().is_empty(),
         "existing-only lookup must stay read-only and must not invoke route subject resolution"
@@ -5679,7 +5697,7 @@ async fn shared_route_propagates_dynamic_subject_route_resolver_error() {
 
     assert!(matches!(
         error,
-        ProductSurfaceFailure::Transient { reason }
+        ProductOperationFailure::Transient { reason }
             if reason == "subject resolver backend down"
     ));
 }

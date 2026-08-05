@@ -26,7 +26,7 @@ over from WS1.3 to sixteen; WS1.5's `verified_inbound` made seventeen; WS5's
 | `channel_identity` | The channel-identity hooks a host runs around binding: `ChannelConnectionScopeSource`, `ChannelIdentityPostBind(Factory)`, `ChannelIdentityOverride`. |
 | `egress` | Channel egress transport vocabulary: `ProtocolHttpEgress`, the `Egress*` request/response types, `DeliveryStatus`/`OutboundDeliverySink`, `DeclaredEgressHost`/`Target` — arrived with WS1.4. |
 | `extension` | `Extension`, `ExtensionContract`, `ExtensionRuntimeIdentity`, `ExtensionInstanceId`, `ExtensionHostAssemblyConfig`. |
-| `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4. |
+| `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalActorBindingEpoch`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4; `ExternalActorBindingEpoch` joined with WS2.5's binding-epoch move. |
 | `hosted_mcp` | Untrusted registration input for user-registered hosted MCP servers: `RegisterHostedMcpRequest`, `HostedMcpEndpoint`, `HostedMcpAuthSelection`, `McpAuthChallenge`, and the auth-metadata extraction helper. |
 | `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |

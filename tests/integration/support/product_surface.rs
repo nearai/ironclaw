@@ -15,11 +15,12 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    ActionPhase, ConversationBindingService, IdempotencyDecision, IdempotencyLedger,
-    ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
-    ResolveBindingRequest, ResolvedBinding,
+    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductConversationRouteKind,
+    ProductInboundAction, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product_contracts::action::ActionFingerprintKey;
+use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -144,7 +145,7 @@ impl RebornProductSurfaceHarness {
         &self,
         request: &ResolveBindingRequest,
         bytes: Vec<u8>,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let path = binding_path(&self.scope, request)?;
         self.filesystem
             .write_bytes(&self.scope, &path, bytes)
@@ -181,14 +182,14 @@ where
 }
 
 #[async_trait]
-impl<F> ConversationBindingService for FilesystemConversationBindingService<F>
+impl<F> ProductBindingResolver for FilesystemConversationBindingService<F>
 where
     F: RootFilesystem + 'static,
 {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         let path = binding_path(&self.scope, &request)?;
         if let Some(stored) =
             read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path).await?
@@ -204,7 +205,7 @@ where
         let binding_key = binding_key(&self.scope, &request)?;
         let reply_target_binding_ref =
             ironclaw_turns::ReplyTargetBindingRef::new(format!("reply:harness-{binding_key}"))
-                .map_err(|error| ProductSurfaceFailure::BindingResolutionFailed {
+                .map_err(|error| ProductOperationFailure::BindingResolutionFailed {
                     reason: error.to_string(),
                 })?;
         let binding = ResolvedBinding {
@@ -242,12 +243,12 @@ where
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
         let path = binding_path(&self.scope, &request)?;
         read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path)
             .await?
             .map(|stored| stored.binding)
-            .ok_or_else(|| ProductSurfaceFailure::BindingRequired {
+            .ok_or_else(|| ProductOperationFailure::BindingRequired {
                 reason: "product conversation binding not found".to_string(),
             })
     }
@@ -348,6 +349,7 @@ where
             &StoredIdempotencyAction::settled(action),
         )
         .await
+        .map_err(ProductSurfaceFailure::from)
     }
 
     async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
@@ -366,7 +368,10 @@ where
         match self.filesystem.delete(&self.scope, &path).await {
             Ok(()) => Ok(()),
             Err(FilesystemError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(fs_error("release idempotency reservation", error)),
+            Err(error) => Err(ProductSurfaceFailure::from(fs_error(
+                "release idempotency reservation",
+                error,
+            ))),
         }
     }
 }
@@ -429,9 +434,9 @@ impl StoredIdempotencyAction {
     fn reserved(
         action: ProductInboundAction,
         lease_ttl: Duration,
-    ) -> Result<Self, ProductSurfaceFailure> {
+    ) -> Result<Self, ProductOperationFailure> {
         let ttl = chrono::Duration::from_std(lease_ttl).map_err(|error| {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: format!("invalid idempotency lease ttl: {error}"),
             }
         })?;
@@ -458,7 +463,7 @@ async fn read_json<F, T>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,
-) -> Result<Option<T>, ProductSurfaceFailure>
+) -> Result<Option<T>, ProductOperationFailure>
 where
     F: RootFilesystem,
     T: DeserializeOwned,
@@ -471,7 +476,7 @@ where
         return Ok(None);
     };
     let value = serde_json::from_slice(&versioned.entry.body).map_err(|error| {
-        ProductSurfaceFailure::Transient {
+        ProductOperationFailure::Transient {
             reason: format!("failed to parse product surface record: {error}"),
         }
     })?;
@@ -483,13 +488,13 @@ async fn write_json<F, T>(
     scope: &ResourceScope,
     path: &ScopedPath,
     value: &T,
-) -> Result<(), ProductSurfaceFailure>
+) -> Result<(), ProductOperationFailure>
 where
     F: RootFilesystem,
     T: Serialize,
 {
     let body =
-        serde_json::to_vec_pretty(value).map_err(|error| ProductSurfaceFailure::Transient {
+        serde_json::to_vec_pretty(value).map_err(|error| ProductOperationFailure::Transient {
             reason: format!("failed to serialize product surface record: {error}"),
         })?;
     filesystem
@@ -501,14 +506,12 @@ where
 fn binding_path(
     scope: &ResourceScope,
     request: &ResolveBindingRequest,
-) -> Result<ScopedPath, ProductSurfaceFailure> {
-    let agent_id =
-        scope
-            .agent_id
-            .as_ref()
-            .ok_or_else(|| ProductSurfaceFailure::BindingResolutionFailed {
-                reason: "missing agent id in binding scope".to_string(),
-            })?;
+) -> Result<ScopedPath, ProductOperationFailure> {
+    let agent_id = scope.agent_id.as_ref().ok_or_else(|| {
+        ProductOperationFailure::BindingResolutionFailed {
+            reason: "missing agent id in binding scope".to_string(),
+        }
+    })?;
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(
         "/workflow/bindings",
@@ -527,14 +530,12 @@ fn binding_path(
 fn binding_key(
     scope: &ResourceScope,
     request: &ResolveBindingRequest,
-) -> Result<String, ProductSurfaceFailure> {
-    let agent_id =
-        scope
-            .agent_id
-            .as_ref()
-            .ok_or_else(|| ProductSurfaceFailure::BindingResolutionFailed {
-                reason: "missing agent id in binding scope".to_string(),
-            })?;
+) -> Result<String, ProductOperationFailure> {
+    let agent_id = scope.agent_id.as_ref().ok_or_else(|| {
+        ProductOperationFailure::BindingResolutionFailed {
+            reason: "missing agent id in binding scope".to_string(),
+        }
+    })?;
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     Ok(hash_parts(&[
         agent_id.as_str(),
@@ -550,7 +551,7 @@ fn binding_key(
 fn reply_target_path(
     scope: &ResourceScope,
     reply_target: &ironclaw_turns::ReplyTargetBindingRef,
-) -> Result<ScopedPath, ProductSurfaceFailure> {
+) -> Result<ScopedPath, ProductOperationFailure> {
     let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(
@@ -562,7 +563,7 @@ fn reply_target_path(
 fn ledger_path(
     scope: &ResourceScope,
     fingerprint: &ActionFingerprintKey,
-) -> Result<ScopedPath, ProductSurfaceFailure> {
+) -> Result<ScopedPath, ProductOperationFailure> {
     let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(
@@ -580,7 +581,7 @@ fn ledger_path(
     )
 }
 
-fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, ProductSurfaceFailure> {
+fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, ProductOperationFailure> {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());
@@ -588,7 +589,7 @@ fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, Produc
     }
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!("{prefix}/{digest}.json")).map_err(|error| {
-        ProductSurfaceFailure::BindingResolutionFailed {
+        ProductOperationFailure::BindingResolutionFailed {
             reason: format!("invalid product workflow scoped path: {error}"),
         }
     })
@@ -606,7 +607,7 @@ fn hash_parts(parts: &[&str]) -> String {
 fn user_id_for_binding(
     tenant_id: &TenantId,
     request: &ResolveBindingRequest,
-) -> Result<UserId, ProductSurfaceFailure> {
+) -> Result<UserId, ProductOperationFailure> {
     scoped_id(
         "user",
         &[
@@ -622,7 +623,7 @@ fn user_id_for_binding(
 fn thread_id_for_binding(
     scope: &ResourceScope,
     request: &ResolveBindingRequest,
-) -> Result<ThreadId, ProductSurfaceFailure> {
+) -> Result<ThreadId, ProductOperationFailure> {
     let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     scoped_id(
@@ -642,7 +643,7 @@ fn scoped_id<T>(
     prefix: &str,
     parts: &[&str],
     construct: impl FnOnce(String) -> Result<T, HostApiError>,
-) -> Result<T, ProductSurfaceFailure> {
+) -> Result<T, ProductOperationFailure> {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());
@@ -650,7 +651,7 @@ fn scoped_id<T>(
     }
     let digest = hex::encode(hasher.finalize());
     construct(format!("{prefix}-{}", &digest[..32])).map_err(|error| {
-        ProductSurfaceFailure::BindingResolutionFailed {
+        ProductOperationFailure::BindingResolutionFailed {
             reason: format!("invalid derived {prefix} id: {error}"),
         }
     })
@@ -679,8 +680,8 @@ fn product_surface_mount_target(scope: &ResourceScope) -> String {
     )
 }
 
-fn fs_error(operation: &str, error: FilesystemError) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::Transient {
+fn fs_error(operation: &str, error: FilesystemError) -> ProductOperationFailure {
+    ProductOperationFailure::Transient {
         reason: format!("{operation} failed: {error}"),
     }
 }

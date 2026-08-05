@@ -635,12 +635,14 @@ use rust_decimal_macros::dec;
 use crate::RebornRuntimeProcessBinding;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
-    TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
-    TriggerPollerSettings,
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
 };
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
+use ironclaw_triggers::{
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError,
+};
 
 use super::{RebornSkillActivationSource, build_reborn_runtime};
 
@@ -5277,12 +5279,15 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let assembly = runtime
-        ._channel_host_assembly
+    assert!(
+        runtime._channel_host_assembly.is_some(),
+        "local-dev runtime composes the production channel host"
+    );
+    let lander = runtime
+        .channel_workflow_factory()
         .as_ref()
-        .expect("local-dev runtime composes the production channel host");
-    let lander =
-        ironclaw_extension_host::channel_host::test_support::inbound_attachment_lander(assembly);
+        .expect("the production channel host is built over a workflow factory")
+        .inbound_attachment_lander();
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-channel-attachment-tenant").unwrap(),
         agent_id: AgentId::new("runtime-channel-attachment-agent").unwrap(),

@@ -2001,9 +2001,11 @@ async fn overflowing_turn_ref_inputs_hash_deterministically() {
 #[tokio::test]
 async fn binding_failure_surfaces_workflow_error() {
     let binding_service = FakeConversationBindingService::new();
-    binding_service.force_failure(ProductSurfaceFailure::BindingResolutionFailed {
-        reason: "no tenant found".into(),
-    });
+    binding_service.force_failure(
+        ironclaw_product_contracts::error::ProductOperationFailure::BindingResolutionFailed {
+            reason: "no tenant found".into(),
+        },
+    );
 
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());

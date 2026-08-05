@@ -25,6 +25,7 @@ use ironclaw_host_api::{
 use thiserror::Error;
 
 use crate::contract::McpClientError;
+use crate::diagnostics::{McpEgressCause, egress_failure};
 
 pub type McpHostHttpResponse = RuntimeHttpEgressResponse;
 
@@ -58,7 +59,7 @@ where
         .catch_unwind()
         .await
         .map_err(|_| McpHostHttpError::Egress {
-            reason: "runtime_http_egress_panicked".to_string(),
+            reason: egress_failure(McpEgressCause::RuntimeEgressPanicked),
         })?
         .map_err(mcp_http_error)
     }
@@ -66,7 +67,9 @@ where
 
 fn mcp_http_error(error: RuntimeHttpEgressError) -> McpHostHttpError {
     McpHostHttpError::Egress {
-        reason: error.stable_runtime_reason().to_string(),
+        reason: egress_failure(McpEgressCause::RuntimeEgressFailed(
+            error.stable_runtime_reason(),
+        )),
     }
 }
 

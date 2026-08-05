@@ -6586,7 +6586,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     // correctly `setup_needed` (that is the unpaired-channel contract), so the
     // connected signal is what this test's `active` assertion depends on.
     .with_channel_connection_service(Arc::new(ConnectedChannelConnectionService {
-        connections: std::collections::HashMap::from([("slack".to_string(), true)]),
+        connections: std::collections::HashMap::from([(extension_id("slack"), true)]),
     }));
 
     let response = query_extensions(&services, caller())
@@ -6623,11 +6623,17 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     assert_eq!(info.installation_state, LifecyclePublicState::Active);
 }
 
+/// The `ChannelConnectionService` maps are keyed by `ExtensionId`, so these
+/// doubles build the same typed key production does.
+fn extension_id(value: &str) -> ExtensionId {
+    ExtensionId::new(value).expect("fixture extension id is valid extension vocabulary")
+}
+
 /// A caller-scoped channel-connection service that reports a fixed set of
 /// connected channels (mirrors the production port shape the composition crate
 /// wires; the default `StaticChannelConnectionService` reports none).
 struct ConnectedChannelConnectionService {
-    connections: std::collections::HashMap<String, bool>,
+    connections: std::collections::HashMap<ExtensionId, bool>,
 }
 
 #[async_trait]
@@ -6635,7 +6641,7 @@ impl ChannelConnectionService for ConnectedChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, bool>, ProductSurfaceError> {
         Ok(self.connections.clone())
     }
 }
@@ -6691,7 +6697,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         },
     }))
     .with_channel_connection_service(Arc::new(ConnectedChannelConnectionService {
-        connections: std::collections::HashMap::from([("acme".to_string(), true)]),
+        connections: std::collections::HashMap::from([(extension_id("acme"), true)]),
     }));
 
     let response = query_extensions(&services, caller())
@@ -6814,8 +6820,8 @@ impl LifecycleProductService for FailedStateLifecycleService {
 /// states (expired / refresh-failed) instead of the connected/disconnected
 /// collapse the connection bool alone permits.
 struct AccountStatusConnectionService {
-    connections: std::collections::HashMap<String, bool>,
-    account_states: std::collections::HashMap<String, ChannelAuthAccountState>,
+    connections: std::collections::HashMap<ExtensionId, bool>,
+    account_states: std::collections::HashMap<ExtensionId, ChannelAuthAccountState>,
 }
 
 #[async_trait]
@@ -6823,14 +6829,14 @@ impl ChannelConnectionService for AccountStatusConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, bool>, ProductSurfaceError> {
         Ok(self.connections.clone())
     }
 
     async fn caller_channel_account_states(
         &self,
         _caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, ProductSurfaceError>
+    ) -> Result<std::collections::HashMap<ExtensionId, ChannelAuthAccountState>, ProductSurfaceError>
     {
         Ok(self.account_states.clone())
     }
@@ -6902,9 +6908,9 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         // The caller still holds a binding (connected), yet the durable
         // credential-account status says the grant's refresh failed. The real
         // status must win over the connected backfill.
-        connections: std::collections::HashMap::from([("acme".to_string(), true)]),
+        connections: std::collections::HashMap::from([(extension_id("acme"), true)]),
         account_states: std::collections::HashMap::from([(
-            "acme".to_string(),
+            extension_id("acme"),
             ChannelAuthAccountState {
                 account_status: Some(CredentialAccountStatus::RefreshFailed),
                 active_flow_status: None,

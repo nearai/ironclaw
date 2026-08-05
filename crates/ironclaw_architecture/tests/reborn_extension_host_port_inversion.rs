@@ -83,16 +83,25 @@ const EXTENSION_MANAGER: &str = "ironclaw_extension_manager";
 /// `ProductActorUserResolver`, did move to `ironclaw_product_contracts`,
 /// because the one type that blocked it (`ExternalActorBindingEpoch`) belonged
 /// beside `ExternalActorRef` in `ironclaw_extension_contracts::external` all
-/// along. What survives is not vocabulary: `ConversationBindingService`'s DTOs
-/// move with the §12.11 D-A factory port, which is unstarted.
-const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[(
-    "ConversationBindingService",
-    "takes ironclaw_product::ResolveBindingRequest and returns \
-     ironclaw_product::ResolvedBinding; both are declared in product beside \
-     the route-kind grammar that derives them. The error no longer blocks it \
-     (WS2.2) — the DTOs do, and they move with the channel_host row (the \
-     §12.11 D-A factory-port scope, unstarted)",
-)];
+/// along.
+///
+/// **The D-A factory port (§12.11) took the last one, 1 -> 0.**
+/// `ProductBindingResolver` moved to `ironclaw_product_contracts::binding`
+/// with `ResolveBindingRequest`, `ResolvedBinding`, and the route-kind grammar
+/// that derives them — every one of those names nothing but `host_api` and
+/// `extension_contracts` vocabulary, so the DTOs were never the real blocker,
+/// only the fact that nobody had moved them. The error became
+/// `ProductOperationFailure`, which grew the three discriminants the binding
+/// path actually constructs (`BindingRequired`, `UnknownInstallation`,
+/// `TurnSubmissionRejected`) rather than collapsing them — `BindingRequired`
+/// in particular is what an unpaired external actor is told, and folding it
+/// into `BindingResolutionFailed` would have changed that message.
+///
+/// **An empty list is the end state for this half, not a disabled gate.** The
+/// exact two-way diff below still fails on a new inverted edge, and the
+/// manifest biconditional now keys on this list *and* the reference ledger, so
+/// emptying this one does not release the manifest edge on its own.
+const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[];
 
 /// The ports this row inverted: defined in `ironclaw_product_contracts` and
 /// implemented **below** product, paired with the crate that implements each.
@@ -140,8 +149,9 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
 /// took the three vocabulary-blocked ports 4 -> 1 — `AuthChallengeProvider` and
 /// `ChannelConnectionService` to `ironclaw_auth` beside the vocabulary that
 /// blocked them, `ProductActorUserResolver` to `ironclaw_product_contracts`
-/// once `ExternalActorBindingEpoch` moved to `ironclaw_extension_contracts`.)
-const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 1;
+/// once `ExternalActorBindingEpoch` moved to `ironclaw_extension_contracts`;
+/// the §12.11 D-A factory port took `ProductBindingResolver` 1 -> 0.)
+const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 0;
 
 /// The manager twin of the host list above. WS2.4 moved
 /// `ExtensionCredentialSetupService`'s implementation out of the host, which
@@ -166,13 +176,12 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 ///
 /// Why this exists when the trait residue above already does: the trait list is
 /// **trait-shaped** — it sees `impl <product trait> for …` headers and nothing
-/// else. A dependency can also be a free function or an inline construction
-/// of a concrete product type (`ProductConversationBindingService::new`), and
-/// none of those register there — the two examples this paragraph used to
-/// give are both gone: `adapter_registry::PRODUCT_ADAPTER_HOST_API_ID`
-/// retired with the WS5 `adapter_registry` move, and
-/// `auth_prompt_view_for_blocked_auth` moved to
-/// `ironclaw_auth::product_prompt` with the challenge family (WS2.5). The
+/// else. A dependency can also be a constant (`adapter_registry::
+/// PRODUCT_ADAPTER_HOST_API_ID`), a free function (`auth_prompt_view_for_
+/// blocked_auth`), or an inline construction of a concrete product type
+/// (`ProductConversationBindingService::new`), and none of those register
+/// there (`auth_prompt_view_for_blocked_auth` was one, until WS2.5 moved it to
+/// `ironclaw_auth::product_prompt` with the rest of the challenge family). The
 /// manifest biconditional below catches the *sum* loudly, but as a
 /// boolean: it cannot say what remains. The `products → loops` re-layer was
 /// sized five times from proxies of this set and was wrong five times
@@ -188,27 +197,15 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 /// trait residue above), `adapter-registry` (manifest projection, owned by
 /// CHECKLIST WS5's `product` narrows row), `product-fn` (a free function that
 /// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
-const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
-    (
-        "channel_host.rs",
-        "port: implements ConversationBindingService (its DTOs are \
-         product-declared) + assembly: inline-constructs product's concrete \
-         stack — the §12.11 D-A factory-port scope. The ProductActorUserResolver \
-         half of this row fell to WS2.5's inversion",
-    ),
-    (
-        "channel_triggered_delivery.rs",
-        "assembly: drives product's TriggeredRunDeliveryDriver/Request and \
-         triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
-         alongside channel_host.rs",
-    ),
-];
+const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[];
 
 /// Ceiling on the reference ledger. Only ever moves down — growing the frozen
 /// list past it needs this constant raised in the same PR, which is the
 /// deliberate two-edit speed bump against re-widening the edge.
 ///
-/// **WS2.5 took it 9 -> 5.** Four rows fell together, all by the same move: the
+/// **This batch took it 9 -> 2, in two moves.**
+///
+/// *WS2.5 took 9 -> 5.* Four rows fell together, all by the same move: the
 /// port-facing vocabulary went to the crate that owns it, and product maps at
 /// its boundary. `channel_connection.rs` and `product_lifecycle.rs` speak
 /// `ironclaw_auth::{ChannelConnectionService, ChannelAuthAccountState}` and the
@@ -217,10 +214,28 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// `ironclaw_auth::product_prompt` for the challenge family and
 /// `ironclaw_product_contracts::approval_prompt` for the approval projection.
 ///
-/// The five survivors are exactly two classes and neither is vocabulary: three
-/// `adapter-registry` rows (CHECKLIST WS5's `product` narrows row) and two
-/// `assembly` rows (§12.11 D-A's factory port, unstarted).
-const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 2;
+/// *WS5 then took 5 -> 2.* The whole `adapter-registry` class went with the
+/// `[product_adapter.*]` manifest surface: `product_adapter_section` moved out
+/// of `ironclaw_product::adapter_registry` into
+/// `ironclaw_extension_contracts`, so `available_extensions.rs`,
+/// `channel_lifecycle.rs`, and `host_api_contracts.rs` now name the contracts
+/// crate rather than product.
+///
+/// **The §12.11 D-A factory port took the last two, 2 -> 0 (2026-08-05).** Both
+/// `assembly` rows fell together and by the same move: the per-extension
+/// product cone is now built by `ChannelWorkflowFactory` (declared in
+/// `ironclaw_product_contracts`, implemented by
+/// `ironclaw_product::RebornChannelWorkflowFactory`, injected through
+/// `GenericChannelHostDeps`), and the proactive half by
+/// `ironclaw_outbound::TriggeredRunDelivery` — declared beside the
+/// triggered-delivery vocabulary it already carries, the same placement rule
+/// WS2.5 applied to the auth ports. `channel_host.rs` states the shape and
+/// consumes the result; `channel_triggered_delivery.rs` routes a fire to a
+/// driver composition built. Neither constructs a product type. (The two
+/// halves landed on different branches — the D-A port on the #7202 line, the
+/// adapter-registry move via #7181 — and their union emptied the ledger, which
+/// is what released the manifest edge and the layer flip.)
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 0;
 
 /// Workspace package metadata, resolved once per test binary.
 ///
@@ -611,17 +626,16 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
 /// The only `ironclaw_extension_host` production files still allowed to name
 /// product's workflow error, each with the residue port that forces it.
 ///
-/// **Shrink-only, exact-match.** These two are exactly the files implementing a
-/// port whose *signature* still names `ProductSurfaceFailure` because the port
-/// itself has not been inverted (see the trait residue above). Every other
-/// production file — 17 of the 19 the WS2.1 finding counted — now speaks
-/// `ironclaw_product_contracts::error::ProductOperationFailure`. A third file
-/// appearing here means the boundary error was bypassed; a stale entry means a
-/// port was inverted without deleting its row.
-const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[(
-    "channel_host.rs",
-    "implements ConversationBindingService, still declared in ironclaw_product",
-)];
+/// **Shrink-only, exact-match, and now empty.** Each entry was a file
+/// implementing a port whose *signature* still named `ProductSurfaceFailure`
+/// because the port itself had not been inverted (see the trait residue above).
+/// All 19 production files the WS2.1 finding counted now speak
+/// `ironclaw_product_contracts::error::ProductOperationFailure`: the last one,
+/// `channel_host.rs`, lost its binding-port implementation to the §12.11 D-A
+/// factory port, and the port itself took the boundary error with it when it
+/// moved to `ironclaw_product_contracts::binding`. A file appearing here means
+/// the boundary error was bypassed.
+const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[];
 
 /// Production files in `crate_name` whose *code* names `type_name`, as paths
 /// relative to the crate's `src/`.
@@ -807,7 +821,7 @@ fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger(
         violations.join("\n")
     );
     assert!(
-        found.len() <= EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
+        found.len() == EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
         "the product-reference ledger is shrink-only: {} files > baseline {}",
         found.len(),
         EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE
@@ -855,9 +869,23 @@ fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger(
 ///   Resolved through cargo, an unregistered crate panics in [`package`] and a
 ///   relocated one is simply followed.
 ///
-/// The dependency is asserted to exist **exactly while** the residue is
-/// non-empty, so the last residue row and the manifest edge have to go in the
-/// same change — in either direction.
+/// The dependency is asserted to exist **exactly while** a residue needs it, so
+/// the last residue row and the manifest edge have to go in the same change —
+/// in either direction.
+///
+/// ✎ **"a residue" is the trait residue OR the reference ledger (2026-08-04,
+/// §12.11 D-A).** This assertion used to key on the trait list alone, which was
+/// a faithful proxy only while a trait was the last thing holding the edge. It
+/// stopped being one the moment #7145 itemized the *full* reference ledger:
+/// `adapter-registry` rows are constants and free functions, invisible to any
+/// trait-shaped rule, and they hold the manifest edge just as hard. Keying on
+/// the trait list alone would now demand the edge be **deleted** while three
+/// files still name the crate — i.e. it would fail a correct tree and pass an
+/// impossible one. Both directions stay enforced against the union: the edge
+/// must exist while either list is occupied, and must be gone when both are.
+/// (`extension_host_production_files_naming_product_are_exactly_the_frozen_ledger`
+/// carries the ledger half of the same biconditional, so the two agree by
+/// construction.)
 #[test]
 fn the_extension_host_manifest_names_product_only_while_a_residue_needs_it() {
     let host = package(EXTENSION_HOST);
@@ -891,13 +919,16 @@ fn the_extension_host_manifest_names_product_only_while_a_residue_needs_it() {
     let has_normal_dep = product_deps
         .iter()
         .any(|dependency| dependency["kind"].as_str().unwrap_or("normal") == "normal");
-    let residue_is_open = !PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS.is_empty();
+    let trait_residue_is_open = !PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS.is_empty();
+    let ledger_is_open = !EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT.is_empty();
+    let residue_is_open = trait_residue_is_open || ledger_is_open;
     assert_eq!(
         has_normal_dep, residue_is_open,
-        "{EXTENSION_HOST}'s normal dependency on {PRODUCT} must exist exactly while its \
-         port residue is non-empty. Residue open: {residue_is_open}; manifest edge present: \
-         {has_normal_dep}. When the last residue row goes, delete the manifest edge in the \
-         same change (and vice versa) — that pairing IS the move-order proof"
+        "{EXTENSION_HOST}'s normal dependency on {PRODUCT} must exist exactly while a residue \
+         still needs it. Trait residue open: {trait_residue_is_open}; reference ledger open: \
+         {ledger_is_open}; manifest edge present: {has_normal_dep}. When the last row of BOTH \
+         goes, delete the manifest edge in the same change (and vice versa) — that pairing IS \
+         the move-order proof"
     );
 }
 

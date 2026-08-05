@@ -188,12 +188,13 @@ pub use runtime::{
 };
 // consumer: `ironclaw_reborn_cli` runtime input construction · pinned by: `composition/tests/admin_api_e2e.rs`
 // Also `harness/latency/runner`, `ironclaw_product` test support, root integration + QA suites.
-// `TriggerFireAccess*` is `TriggerFireAccessPolicy`'s vocabulary; `runtime_input` is private.
+// `TriggerFireAccessGrant` is `TriggerFireAccessPolicy`'s own vocabulary (both are
+// composition-declared config-as-data); `runtime_input` is private. The relocated
+// check contract (`TriggerFireAccessCheck`/`Checker`/`Decision`/`Error`) is NOT
+// forwarded — `ironclaw_triggers` is its one import path (§11.2.4).
 pub use runtime_input::{
     KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
-    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
-    TurnRunnerSettings,
+    TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings, TurnRunnerSettings,
 };
 
 /// Re-exported IronHub command vocabulary for the `ironclaw` binary's
