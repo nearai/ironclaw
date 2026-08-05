@@ -7264,7 +7264,7 @@ async fn write_file_overwrites_a_readable_text_log_with_a_stray_nul() {
     original.push(0u8);
     original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
     let log_path = temp.path().join("syslog.log");
-    std::fs::write(&log_path, original).unwrap();
+    tokio::fs::write(&log_path, original).await.unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
@@ -7288,7 +7288,7 @@ async fn write_file_overwrites_a_readable_text_log_with_a_stray_nul() {
     .await
     .expect("a text log accepted by read_file must remain writable");
 
-    assert_eq!(std::fs::read(log_path).unwrap(), b"redacted log\n");
+    assert_eq!(tokio::fs::read(log_path).await.unwrap(), b"redacted log\n");
 }
 
 #[tokio::test]

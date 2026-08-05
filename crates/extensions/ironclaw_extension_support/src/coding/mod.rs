@@ -822,7 +822,9 @@ mod tests {
         let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
         original.push(0u8);
         original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
-        std::fs::write(&file, original).expect("seed text log");
+        tokio::fs::write(&file, original)
+            .await
+            .expect("seed text log");
 
         fixture
             .dispatch(
@@ -841,7 +843,9 @@ mod tests {
             .expect("a text log accepted by read_file must remain writable");
 
         assert_eq!(
-            std::fs::read(file).expect("text log after overwrite"),
+            tokio::fs::read(file)
+                .await
+                .expect("text log after overwrite"),
             b"redacted log\n"
         );
     }
