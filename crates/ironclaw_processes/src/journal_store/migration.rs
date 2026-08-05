@@ -407,14 +407,16 @@ fn legacy_loop_checkpoint(
     checkpoint_states: &HashMap<String, Value>,
 ) -> Result<Option<ProcessCheckpointRecord>, ProcessJournalStoreError> {
     let state_ref = required_string(value, "state_ref")?;
+    let run_id: TurnRunId = required(value, "run_id")?;
     let payload = match value.get("payload").filter(|payload| !payload.is_null()) {
         Some(payload) => serde_json::from_value(payload.clone()).map_err(deserialization)?,
         None => {
-            let stored = checkpoint_states.get(&state_ref).ok_or_else(|| {
-                invalid_legacy(format!(
-                    "legacy loop checkpoint {state_ref} has no checkpoint-state payload"
-                ))
-            })?;
+            let stored = checkpoint_state_record(checkpoint_states, &state_ref, run_id)
+                .ok_or_else(|| {
+                    invalid_legacy(format!(
+                        "legacy loop checkpoint {state_ref} has no checkpoint-state payload"
+                    ))
+                })?;
             validate_checkpoint_state_metadata(value, stored)?;
             let payload_hex = required_string(stored, "payload_hex")?;
             hex::decode(payload_hex).map_err(|error| {
@@ -424,7 +426,6 @@ fn legacy_loop_checkpoint(
             })?
         }
     };
-    let run_id: TurnRunId = required(value, "run_id")?;
     let turn_scope: TurnScope = required(value, "scope")?;
     let mut scope = turn_scope.to_resource_scope();
     scope.invocation_id = InvocationId::from_uuid(run_id.as_uuid());
@@ -446,12 +447,39 @@ fn legacy_loop_checkpoint(
     }))
 }
 
+/// Resolve the checkpoint-state record holding a loop checkpoint's payload.
+///
+/// The two sides of this join do not agree on how a checkpoint state is named:
+///
+/// ```text
+///   loop_checkpoints row   state_ref = "checkpoint:{run_id}:{token}"  (LoopCheckpointStateRef::for_run)
+///   checkpoint-state file  state_ref = "checkpoint:{token}"           (the stored state identity)
+/// ```
+///
+/// Older deployments wrote one opaque ref on both sides, so try the ref
+/// verbatim first and fall back to the stored identity the run-scoped form
+/// wraps. Matching on the whole string alone made every run-scoped row look
+/// like it had lost its payload, which failed the startup migration.
+fn checkpoint_state_record<'a>(
+    checkpoint_states: &'a HashMap<String, Value>,
+    state_ref: &str,
+    run_id: TurnRunId,
+) -> Option<&'a Value> {
+    if let Some(stored) = checkpoint_states.get(state_ref) {
+        return Some(stored);
+    }
+    let token = state_ref.strip_prefix(&format!("checkpoint:{run_id}:"))?;
+    checkpoint_states.get(&format!("checkpoint:{token}"))
+}
+
 fn validate_checkpoint_state_metadata(
     checkpoint: &Value,
     stored: &Value,
 ) -> Result<(), ProcessJournalStoreError> {
+    // `state_ref` is deliberately absent: it is the join key, and the two
+    // sides carry different representations of it (see
+    // `checkpoint_state_record`).
     for field in [
-        "state_ref",
         "scope",
         "turn_id",
         "run_id",

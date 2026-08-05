@@ -994,6 +994,14 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
     let turn_id = TurnId::new();
     let checkpoint_id = TurnCheckpointId::new();
     let external_checkpoint_id = TurnCheckpointId::new();
+    let run_scoped_checkpoint_id = TurnCheckpointId::new();
+    // Deployed loop checkpoints carry the run-scoped
+    // `checkpoint:{run_id}:{token}` ref minted by
+    // `LoopCheckpointStateRef::for_run`, while the checkpoint-state authority
+    // record persists the bare `checkpoint:{token}` identity it was stored
+    // under. The migration has to join those two shapes on the token.
+    let run_scoped_state_token = TurnCheckpointId::new().as_uuid().to_string();
+    let run_scoped_state_ref = format!("checkpoint:{}:{run_scoped_state_token}", run_id.as_uuid());
     let root_run_id = TurnRunId::new();
     let capability_invocation_id = InvocationId::new();
     let per_user_capability_invocation_id = InvocationId::new();
@@ -1068,6 +1076,18 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
                 "kind": "Gate",
                 "gate_ref": "gate:migration-approval",
                 "created_at": "2026-01-01T00:00:02Z"
+            },
+            {
+                "checkpoint_id": run_scoped_checkpoint_id,
+                "scope": turn_scope,
+                "turn_id": turn_id,
+                "run_id": run_id,
+                "state_ref": run_scoped_state_ref,
+                "schema_id": "interactive_checkpoint_v1",
+                "schema_version": 1,
+                "kind": "Gate",
+                "gate_ref": "gate:migration-approval",
+                "created_at": "2026-01-01T00:00:03Z"
             }
         ],
         "idempotency_records": [
@@ -1127,6 +1147,31 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         )
         .await
         .expect("seed deployed per-user checkpoint-state");
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new(format!(
+                "/legacy-tenants/tenant-process-test/users/user-process-test/checkpoint-state/agents/agent-process-test/threads/thread-process-test/states/checkpoint/{run_scoped_state_token}.json"
+            ))
+            .expect("run-scoped legacy checkpoint-state path"),
+            Entry::bytes(
+                serde_json::to_vec(&json!({
+                    "state_ref": format!("checkpoint:{run_scoped_state_token}"),
+                    "scope": turn_scope,
+                    "turn_id": turn_id,
+                    "run_id": run_id,
+                    "schema_id": "interactive_checkpoint_v1",
+                    "schema_version": 1,
+                    "kind": "Gate",
+                    "payload_hex": "72756e2d73636f706564",
+                    "created_at": "2026-01-01T00:00:03Z"
+                }))
+                .expect("serialize run-scoped checkpoint-state record"),
+            ),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed deployed run-scoped checkpoint-state");
     let capability_scope = scope();
     filesystem
         .put(
@@ -1238,6 +1283,23 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         .expect("read externally stored checkpoint")
         .expect("external checkpoint exists");
     assert_eq!(external_checkpoint.payload.as_bytes(), b"external");
+    let run_scoped_checkpoint = store
+        .get_process_checkpoint(GetProcessCheckpointRequest {
+            checkpoint_id: ProcessCheckpointId::from_trusted(
+                run_scoped_checkpoint_id.as_uuid().to_string(),
+            ),
+            process_id: turn_process_id,
+            scope: imported_scope.clone(),
+        })
+        .await
+        .expect("read run-scoped externally stored checkpoint")
+        .expect("run-scoped checkpoint exists");
+    assert_eq!(run_scoped_checkpoint.payload.as_bytes(), b"run-scoped");
+    assert_eq!(
+        run_scoped_checkpoint.state_ref.as_str(),
+        run_scoped_state_ref,
+        "the imported record keeps the deployed run-scoped ref"
+    );
 
     let replay = store
         .submit_process(SubmitProcessRequest {
