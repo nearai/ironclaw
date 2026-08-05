@@ -97,14 +97,29 @@ control-plane `ScopedFilesystem` mount as `identity_store`.
 - **No silent failures.** Backend errors carry their cause
   (`ProjectError::backend("op", e)`); do not `map_err(|_| …)` away the source
   (see `.claude/rules/error-handling.md`).
-- The module persists data; it does **not** authorize callers, expose HTTP, or
-  know about the service. Authorization gating that combines `resolve_access`
-  with a required role lives in the product workflow
-  (`ironclaw_assistant::RebornProjectService`), **not here** — and that is a
-  layer fact, not a preference: `trait ProjectService` is declared at
-  `products` and this crate is `substrates`, so the gating half can only follow
-  the records once the port moves to `ironclaw_product_contracts` (PROPOSAL
-  §6.4.11's 2026-08-04 correction; the WS5 `product` row owns that hoist).
+- **The record half does not authorize.** `projects.rs` / `projects/store.rs`
+  persist data; they do not authorize callers, expose HTTP, or know about the
+  service. Authorization gating that combines `resolve_access` with a required
+  role is `projects::service::RebornProjectService` — a *separate module* that
+  implements `ironclaw_product_contracts::project_service::ProjectService` over
+  the repository. Keep the split: a role check must never move down into
+  `store.rs`, and the store must never gain a "current caller".
+- **The gating half arrived 2026-08-05** (PROPOSAL §12.13 D-P + D-Q). It used to
+  live in `ironclaw_assistant` and could not follow the records because
+  `trait ProjectService` was a `products`-layer declaration while this crate is
+  `substrates`. D-P hoisted the port into `ironclaw_product_contracts`
+  (`contracts`) and D-Q widened this crate's armed dependency allowlist by
+  exactly that one entry.
+- **The allowlist is `{ironclaw_host_api, ironclaw_filesystem,
+  ironclaw_product_contracts}` and widening it again is a decision, not a
+  chore.** All three are contracts- or substrates-layer, so the crate's
+  guarantee — *it can never reach upstream into `ironclaw_composition` or
+  `ironclaw_assistant`* — is unchanged in kind. `reborn_dependency_boundaries.rs`
+  enforces it as an allowlist (every other workspace crate forbidden), so a
+  fourth entry has to come through that file and be argued in PROPOSAL §12.
+  Concretely refused today: the project-create capability (names
+  `ironclaw_loop_host`) and the multi-mount browse reader (names
+  `ironclaw_assistant` helpers and composition-owned mount aliases).
 
 **Storage layout** (opaque key parts base64url-encoded per segment, the same
 encoding `identity_store` uses):

@@ -21,10 +21,20 @@ base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+# `projects::service` implements the product-tier `ProjectService` port over
+# this crate's `ProjectRepository`. The port is a contracts-layer declaration
+# (`substrates -> contracts` is downward and matrix-legal), and this is the ONE
+# entry PROPOSAL §12.13 D-Q adds to the armed allowlist in
+# `reborn_dependency_boundaries.rs` — the crate still may not reach any
+# `products`, `loops`, `kernel` or `app` crate.
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+# `projects::service` logs backend causes behind sanitized product errors so a
+# 5xx is never undiagnosable (`.claude/rules/error-handling.md`).
+tracing = "0.1"
 # `projects` mints ProjectIds; identity mints UserIds with uuid.
 ulid = { version = "3", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }

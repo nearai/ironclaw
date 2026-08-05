@@ -1,33 +1,40 @@
-//! Product-workflow adapter implementing the [`ProjectService`] port over the
-//! durable [`ProjectRepository`].
+//! Access-control gating for projects: the adapter implementing the
+//! [`ProjectService`] port over this module's durable [`ProjectRepository`].
 //!
-//! This is where access-control gating lives: every read/mutation resolves the
-//! caller's effective role through `resolve_access` and enforces a minimum role
-//! before touching the repository. The product boundary's coarse enums are
-//! mapped to/from the `ironclaw_identity::projects` domain types here so
-//! neither side depends on the other's vocabulary.
+//! Every read/mutation resolves the caller's effective role through
+//! `resolve_access` and enforces a minimum role before touching the repository.
+//! The product boundary's coarse enums are mapped to/from this module's domain
+//! types here so neither side depends on the other's vocabulary.
 //!
-//! It lives here rather than beside the records it gates because
-//! `trait ProjectService` is a `products`-layer declaration and
-//! `ironclaw_identity` is `substrates`: the gating half can only follow the
-//! records once that port moves to `ironclaw_product_contracts` (PROPOSAL
-//! §6.4.11's 2026-08-04 correction; the WS5 `product` row owns the hoist).
+//! It lives beside the records it gates as of 2026-08-05 (PROPOSAL §6.4.11's
+//! second hop, unblocked by §12.13 D-P and D-Q). The blocker until then was
+//! layering, not design: `trait ProjectService` was declared in
+//! `ironclaw_assistant` (`products`) and this crate is `substrates`, so the
+//! adapter could not name its own port. D-P hoisted the port into
+//! `ironclaw_product_contracts` (`contracts`) and D-Q widened this crate's
+//! armed dependency allowlist by exactly that entry.
+//!
+//! What still does **not** live here, and why: nothing in this file may name a
+//! `products`, `loops`, `kernel` or `app` crate. That is what keeps
+//! `project_create_capability` (which names `ironclaw_loop_host`) and the
+//! composition-resident browse reader out — see §6.10.1.
 
 use std::sync::Arc;
 
-use crate::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+use super::{
+    ProjectError, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord, ProjectRepository,
+    ProjectRole, ProjectState,
 };
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{ProjectId, TenantId, UserId};
-use ironclaw_identity::projects::{
-    ProjectError, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord, ProjectRepository,
-    ProjectRole, ProjectState,
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
+use ironclaw_product_contracts::workspace_views::{
+    ProjectCaller, RebornAddMemberRequest, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest,
 };
 
 /// Default cap on `list_projects` when the request omits a limit.
@@ -485,7 +492,7 @@ fn map_repo_error(error: ProjectError) -> ProjectServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_identity::projects::ProjectList;
+    use crate::projects::ProjectList;
 
     /// Repository fake with canned responses, so tests drive the real
     /// access-control path (`require_role` → `resolve_access`) of the service.

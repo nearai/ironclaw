@@ -235,7 +235,7 @@ struct RuntimeStoreParts {
     /// Process lifecycle source for trigger active-run lookup. Every substrate
     /// now provides the same typed process-journal projection.
     admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
-    project_service: Arc<dyn ironclaw_assistant::ProjectService>,
+    project_service: Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     trigger_conversation_services: Option<RebornFilesystemConversationServices>,
 }
 
@@ -550,7 +550,8 @@ pub struct RebornRuntime {
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
-    pub(crate) project_service: Arc<dyn ironclaw_assistant::ProjectService>,
+    pub(crate) project_service:
+        Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -1012,7 +1013,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn standalone_project_service_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_assistant::ProjectService>> {
+    ) -> Option<Arc<dyn ironclaw_product_contracts::project_service::ProjectService>> {
         Some(Arc::clone(&self.project_service))
     }
 
@@ -1615,7 +1616,9 @@ impl RebornRuntime {
 
     /// First-class projects + membership (ACL) facade over the host-owned scoped
     /// substrate, backing the WebUI project surface.
-    pub(crate) fn reborn_project_service(&self) -> Arc<dyn ironclaw_assistant::ProjectService> {
+    pub(crate) fn reborn_project_service(
+        &self,
+    ) -> Arc<dyn ironclaw_product_contracts::project_service::ProjectService> {
         Arc::clone(&self.project_service)
     }
 

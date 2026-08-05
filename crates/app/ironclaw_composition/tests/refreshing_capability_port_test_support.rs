@@ -21,12 +21,11 @@ use ironclaw_approvals::test_support::{
     in_memory_backed_persistent_approval_policy_store,
 };
 use ironclaw_assistant::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo, RebornProjectResponse,
-    RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    ProjectCaller, RebornAddMemberRequest, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use ironclaw_authorization::in_memory_backed_capability_lease_store;
 use ironclaw_composition::test_support::{
@@ -61,6 +60,7 @@ use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 /// Echoes a runtime-visible capability for every grant in the request's

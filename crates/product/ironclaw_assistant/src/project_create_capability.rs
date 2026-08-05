@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::{ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest};
+use crate::{ProjectCaller, RebornCreateProjectRequest};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::{InvocationId, UserId},
@@ -17,6 +17,7 @@ use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 
 pub const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
 const PROJECT_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__project_create";

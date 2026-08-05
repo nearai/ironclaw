@@ -27,11 +27,20 @@
 //! substrate as [`RebornIdentityStore`](crate::RebornIdentityStore) — nothing
 //! distinguished it as its own compilation or trust unit.
 //!
-//! What did **not** move: the authorization-gating service half
-//! (`ironclaw_assistant::project_service`). `trait ProjectService` is declared
-//! at the `products` layer, and this crate is `substrates`, so that half needs
-//! its port hoisted into `ironclaw_product_contracts` first — see §6.4.11's
-//! 2026-08-04 correction. This module is the record/repository half only.
+//! The authorization-gating half followed on 2026-08-05:
+//! [`RebornProjectService`] in [`service`] implements
+//! `ironclaw_product_contracts::project_service::ProjectService` over the
+//! repository below it. It could not travel with the records because the port
+//! was a `products`-layer declaration; §12.13 D-P hoisted the port into
+//! `ironclaw_product_contracts` and D-Q widened this crate's armed allowlist to
+//! `{ironclaw_host_api, ironclaw_filesystem, ironclaw_product_contracts}` so
+//! the adapter could name it.
+//!
+//! Still **not** here, and neither is blocked on this crate: the project-create
+//! capability (`ironclaw_assistant::project_create_capability`, which names
+//! `ironclaw_loop_host` — a `loops` crate no `substrates` crate may hold) and
+//! the multi-mount browse reader (`ironclaw_composition`, which names product
+//! helpers and composition-owned mount aliases). See §6.10.1.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -44,8 +53,10 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 use ulid::Ulid;
 
+pub mod service;
 mod store;
 
+pub use service::RebornProjectService;
 pub use store::FilesystemProjectRepository;
 
 /// Maximum byte length of a project name.

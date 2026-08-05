@@ -58,7 +58,6 @@ mod policy;
 mod process_gate_turn_view;
 mod product_surface_inbound;
 mod project_create_capability;
-mod project_service;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
@@ -67,7 +66,6 @@ mod steering;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
-pub use project_service::RebornProjectService;
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use admin_user_directory::{
@@ -290,15 +288,15 @@ pub use reborn_services::{
     ProductAgentBoundCaller, ProductCapabilityDescriptor, ProductCapabilityInvoker,
     ProductSurfaceCommandDescriptor, ProductView, ProjectCaller, ProjectFilesystemReader,
     ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    ProjectService, ProjectServiceError, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND,
-    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountBindingSource,
-    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
-    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
-    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
-    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
-    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
+    RebornAccountBindingSource, RebornAccountLoginLinkResponse, RebornAccountTrace,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminConfigurationField,
+    RebornAdminConfigurationGroup, RebornAdminConfigurationListResponse,
+    RebornAdminConfigurationUse, RebornAdminCreateUserRequest,
+    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,

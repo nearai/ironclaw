@@ -61,7 +61,7 @@ use ironclaw_assistant::{
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductCapabilityInvoker, ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller,
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    ProjectFsStat, RUN_ARTIFACT_VIEW,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
@@ -183,6 +183,7 @@ use ironclaw_product_contracts::product_wire::{
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::projection::{
     ProjectionStreamSubscription, ProjectionSubscriptionRequest,

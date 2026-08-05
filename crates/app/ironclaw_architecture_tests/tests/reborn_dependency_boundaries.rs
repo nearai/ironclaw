@@ -427,15 +427,21 @@ fn reborn_crate_dependency_boundaries_hold() {
 
     // Canonical Reborn identity layer: it maps external identities to a stable
     // `UserId` at the bottom of the stack, so among internal ironclaw crates it
-    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
-    // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
-    // as an allowlist so it can never reach UPSTREAM (into
-    // `ironclaw_composition` / `ironclaw_assistant`) or onto the v1
-    // legacy enclave — the "never reach upstream" property the crate guarantees.
+    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes),
+    // `ironclaw_filesystem` (the durable substrate it persists behind) and
+    // `ironclaw_product_contracts` (the `ProjectService` port its `projects`
+    // module implements — added 2026-08-05 by PROPOSAL §12.13 D-Q, and by
+    // exactly that one entry). Enforced as an allowlist so it can never reach
+    // UPSTREAM (into `ironclaw_composition` / `ironclaw_assistant`) or onto the
+    // v1 legacy enclave — the "never reach upstream" property the crate
+    // guarantees. All three additions are contracts- or substrates-layer, so
+    // the guarantee is unchanged in kind: D-Q widens what this crate may *name*,
+    // never the direction it may point.
     let reborn_identity_allowed = [
         "ironclaw_identity",
         "ironclaw_host_api",
         "ironclaw_filesystem",
+        "ironclaw_product_contracts",
     ];
     assert_no_normal_workspace_deps(
         &dependencies,

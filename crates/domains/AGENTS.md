@@ -29,10 +29,13 @@ absorbed by identity's own), and the `CRATE_LAYER_ORIGINS` row deleted under the
 gate's stated removal path. The family is 12 crates and the workspace is 65
 packages; the §5 delta and its `check-target-tree.py` exceptions row are both
 closed. Project **records** live at `ironclaw_identity/src/projects/`; project
-**authorization gating** is still `ironclaw_assistant::RebornProjectService`,
-because its port is a `products`-layer declaration (PROPOSAL §6.4.11's
-2026-08-04 correction — the hoist to `product_contracts` is the WS5 `product`
-row's).
+**authorization gating** joined them on 2026-08-05 as
+`ironclaw_identity::projects::service::RebornProjectService`, once PROPOSAL
+§12.13 D-P hoisted `trait ProjectService` into `ironclaw_product_contracts` and
+D-Q widened identity's armed allowlist by that one entry. Identity's workspace
+deps are now `{ironclaw_host_api, ironclaw_filesystem,
+ironclaw_product_contracts}` — still contracts/substrates only, so the crate's
+"never reach upstream" guarantee is intact.
 
 ## Rules that outrank this file
 

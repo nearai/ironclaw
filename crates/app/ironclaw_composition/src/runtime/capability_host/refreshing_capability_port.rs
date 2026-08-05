@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use ironclaw_assistant::{OutboundPreferencesProductService, ProjectService};
+use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, UserId},
     mount::MountView,
@@ -20,6 +20,7 @@ use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
     wrap_external_tools, wrap_surface_disclosure,
 };
+use ironclaw_product_contracts::project_service::ProjectService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
