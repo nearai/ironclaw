@@ -196,7 +196,7 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
-use ironclaw_host_api::ids::RunId;
+use ironclaw_host_api::ids::{CapabilityId, RunId};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
@@ -1189,6 +1189,7 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
+    prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -1219,6 +1220,7 @@ where
             identity_context_source: None,
             attachment_read_port: None,
             stream_sink: None,
+            prompt_diagnostic_sink: None,
         }
     }
 
@@ -1246,6 +1248,7 @@ where
             identity_context_source: None,
             attachment_read_port: None,
             stream_sink: None,
+            prompt_diagnostic_sink: None,
         }
     }
 
@@ -1300,6 +1303,14 @@ where
 
     pub fn with_stream_sink(mut self, sink: Arc<dyn HostManagedModelStreamSink>) -> Self {
         self.stream_sink = Some(sink);
+        self
+    }
+
+    pub fn with_prompt_diagnostic_sink(
+        mut self,
+        sink: Arc<dyn HostManagedPromptDiagnosticSink>,
+    ) -> Self {
+        self.prompt_diagnostic_sink = Some(sink);
         self
     }
 
@@ -1401,6 +1412,43 @@ where
         // exclusively in the outer port (see #3841 follow-up "delete dead
         // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
+
+        if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
+            let effective_model = self
+                .gateway
+                .diagnostic_effective_model(
+                    &model_profile_id,
+                    self.run_context.resolved_model_route.as_ref(),
+                )
+                .unwrap_or_else(|| model_profile_id.as_str().to_string());
+            let capability_ids = request
+                .capability_view
+                .as_ref()
+                .map(|view| view.visible_capability_ids.clone())
+                .unwrap_or_default();
+            sink.record_prompt(HostManagedPromptDiagnosticCapture {
+                context: self.run_context.clone(),
+                messages: resolved_messages
+                    .iter()
+                    .map(|message| HostManagedPromptDiagnosticMessage {
+                        role: message.role,
+                        content_ref: message.content_ref.clone(),
+                        content: message.content.clone(),
+                    })
+                    .collect(),
+                identity_message_count: prompt_grant.diagnostic_metadata.identity_message_count,
+                instruction_snippet_count: prompt_grant
+                    .diagnostic_metadata
+                    .instruction_snippet_count,
+                active_skills: prompt_grant.diagnostic_metadata.active_skills,
+                capability_ids,
+                requested_model: requested_model_profile_id
+                    .as_ref()
+                    .map(|model| model.as_str().to_string()),
+                effective_model,
+                context_limit: self.prompt_context_budget.context_limit_tokens,
+            });
+        }
 
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
@@ -1818,6 +1866,17 @@ where
 /// profile policy, retry/circuit behavior, and sanitization.
 #[async_trait]
 pub trait HostManagedModelGateway: Send + Sync {
+    /// Best-effort provider model identity for operator diagnostics. Gateways
+    /// that own provider selection should override this so callers do not
+    /// mistake a logical model profile for the concrete provider model.
+    fn diagnostic_effective_model(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<String> {
+        resolved_model_route.map(|route| route.model_id().to_string())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -1863,6 +1922,33 @@ pub trait HostManagedModelGateway: Send + Sync {
 #[async_trait::async_trait]
 pub trait HostManagedModelStreamSink: Send + Sync {
     async fn safe_text_update(&self, safe_text: String);
+}
+
+/// Best-effort, process-local observation of the exact text prompt resolved at
+/// the host boundary. Implementations must keep this data out of ordinary
+/// product events and apply their own authorization, redaction, and bounds.
+pub trait HostManagedPromptDiagnosticSink: Send + Sync {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture);
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedPromptDiagnosticCapture {
+    pub context: LoopRunContext,
+    pub messages: Vec<HostManagedPromptDiagnosticMessage>,
+    pub identity_message_count: u32,
+    pub instruction_snippet_count: u32,
+    pub active_skills: Vec<String>,
+    pub capability_ids: Vec<CapabilityId>,
+    pub requested_model: Option<String>,
+    pub effective_model: String,
+    pub context_limit: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedPromptDiagnosticMessage {
+    pub role: HostManagedModelMessageRole,
+    pub content_ref: LoopMessageRef,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

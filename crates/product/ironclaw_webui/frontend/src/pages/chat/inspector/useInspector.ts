@@ -179,6 +179,10 @@ export function useInspector({
           if (!shouldAcceptInspectorCursor(lastCursorRef.current, cursor)) return;
           lastCursorRef.current = cursor;
           setUpdates((current) => [...current, payload as DiagnosticUpdate].slice(-MAX_RETAINED_UPDATES));
+          const update = payload.update as { type?: unknown } | undefined;
+          if (update?.type === "prompt_updated") {
+            setSnapshotGeneration((generation) => generation + 1);
+          }
           setHealth(INSPECTOR_HEALTH.CONNECTED);
         },
       });

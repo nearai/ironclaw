@@ -12,13 +12,14 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway, HostSkillContextSource,
-    HostUserProfileSource, LoopAttachmentReadPort, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ModelRouteResolver,
-    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
-    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnLimits, ToolDisclosureCapabilityDecorator, ToolDisclosureMode,
+    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway,
+    HostManagedPromptDiagnosticSink, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ModelRouteResolver, PerSurfaceCapabilityDenyDecorator,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
+    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
+    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
+    SubagentSpawnLimits, ToolDisclosureCapabilityDecorator, ToolDisclosureMode,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
@@ -241,6 +242,8 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Process-local operator diagnostics captured at the resolved prompt boundary.
+    pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     /// Shared run-scoped intent store used by the explicit attachment
     /// capability and transcript finalizer. Production must pass the exact
     /// same handle to both sides so sealing cannot split from registration.
@@ -750,6 +753,9 @@ where
     host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
+    }
+    if let Some(sink) = parts.prompt_diagnostic_sink {
+        host_factory = host_factory.with_prompt_diagnostic_sink(sink);
     }
     if let Some(port) = parts.reply_attachment_intent_port {
         host_factory = host_factory.with_reply_attachment_intent_port(port);

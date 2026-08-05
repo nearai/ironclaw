@@ -552,6 +552,7 @@ pub struct RebornRuntime {
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
+    pub(crate) diagnostic_store: Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -3628,6 +3629,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
+    let diagnostic_store =
+        Arc::new(ironclaw_product::inspector_store::InMemoryDiagnosticStore::default());
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),
@@ -3641,6 +3644,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
+        prompt_diagnostic_sink: Some(Arc::clone(&diagnostic_store)
+            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone
@@ -4208,6 +4213,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         scoped_filesystem,
         admin_secret_provisioner,
         project_service,
+        diagnostic_store,
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),

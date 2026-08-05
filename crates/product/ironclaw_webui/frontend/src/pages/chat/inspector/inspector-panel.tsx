@@ -48,8 +48,64 @@ function EmptyTab({ title, description }: { title: string; description: string }
   );
 }
 
-function PromptShell({ snapshot }: { snapshot: Record<string, unknown> | null }) {
-  if (!snapshot?.prompt) {
+interface BoundedDiagnosticText {
+  content: string;
+  original_bytes: number;
+  truncated: boolean;
+}
+
+interface PromptComponent {
+  kind: string;
+  label: BoundedDiagnosticText;
+  content: BoundedDiagnosticText;
+  estimated_tokens: number | null;
+}
+
+interface PromptDiagnostic {
+  components: PromptComponent[];
+  components_truncated: boolean;
+  reconstructed_prompt: BoundedDiagnosticText;
+  total_estimated_tokens: number | null;
+  message_count: number;
+  identity_message_count: number;
+  instruction_snippet_count: number;
+  active_skills: BoundedDiagnosticText[];
+  active_skills_truncated: boolean;
+  capability_count: number;
+  requested_model: BoundedDiagnosticText | null;
+  effective_model: BoundedDiagnosticText | null;
+  context_limit: number | null;
+}
+
+function formatNumber(value: number | null | undefined): string {
+  return typeof value === "number" ? value.toLocaleString() : "Unavailable";
+}
+
+function PromptShell({
+  snapshot,
+  health,
+}: {
+  snapshot: Record<string, unknown> | null;
+  health: string;
+}) {
+  const prompt = snapshot?.prompt as PromptDiagnostic | null | undefined;
+  if (!prompt) {
+    if (health === INSPECTOR_HEALTH.LOADING || health === INSPECTOR_HEALTH.CONNECTING) {
+      return (
+        <EmptyTab
+          title="Loading prompt diagnostics"
+          description="The inspector is loading the latest bounded prompt snapshot."
+        />
+      );
+    }
+    if (health === INSPECTOR_HEALTH.FORBIDDEN || health === INSPECTOR_HEALTH.UNAVAILABLE) {
+      return (
+        <EmptyTab
+          title="Prompt diagnostics unavailable"
+          description="This session cannot access prompt diagnostics. Chat remains available."
+        />
+      );
+    }
     return (
       <EmptyTab
         title="No prompt captured"
@@ -57,11 +113,96 @@ function PromptShell({ snapshot }: { snapshot: Record<string, unknown> | null })
       />
     );
   }
+  const contextPercent = prompt.context_limit && prompt.total_estimated_tokens != null
+    ? Math.min(100, (prompt.total_estimated_tokens / prompt.context_limit) * 100)
+    : null;
+  const anyTruncated = prompt.components_truncated
+    || prompt.reconstructed_prompt.truncated
+    || prompt.active_skills_truncated
+    || prompt.components.some((component) => component.content.truncated);
   return (
-    <EmptyTab
-      title="Prompt diagnostics ready"
-      description="Prompt component rendering is available in the next inspector workflow."
-    />
+    <div className="space-y-4 p-4" data-testid="inspector-prompt-content">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
+          <p className="text-xs text-[var(--v2-text-muted)]">Estimated prompt tokens</p>
+          <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">
+            {formatNumber(prompt.total_estimated_tokens)}
+          </p>
+        </div>
+        <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
+          <p className="text-xs text-[var(--v2-text-muted)]">Context limit</p>
+          <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">
+            {formatNumber(prompt.context_limit)}
+          </p>
+        </div>
+      </div>
+      {contextPercent != null && (
+        <div>
+          <div className="mb-1 flex justify-between text-[11px] text-[var(--v2-text-muted)]">
+            <span>Estimated context usage</span>
+            <span>{contextPercent.toFixed(1)}%</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-[var(--v2-surface-soft)]">
+            <div
+              className="h-full rounded-full bg-[var(--v2-accent)]"
+              style={{ width: `${contextPercent}%` }}
+            />
+          </div>
+        </div>
+      )}
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+        <div><dt className="text-[var(--v2-text-faint)]">Effective model</dt><dd>{prompt.effective_model?.content || "Unavailable"}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">Requested model</dt><dd>{prompt.requested_model?.content || "Default"}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">Messages</dt><dd>{prompt.message_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">Identity messages</dt><dd>{prompt.identity_message_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">Instruction snippets</dt><dd>{prompt.instruction_snippet_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">Capabilities</dt><dd>{prompt.capability_count}</dd></div>
+      </dl>
+      {prompt.active_skills.length > 0 && (
+        <div>
+          <p className="text-xs text-[var(--v2-text-faint)]">Active skills</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {prompt.active_skills.map((skill, index) => (
+              <span key={`${skill.content}-${index}`} className="rounded-full bg-[var(--v2-surface-soft)] px-2 py-1 text-[11px]">
+                {skill.content}{skill.truncated ? "…" : ""}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {anyTruncated && (
+        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
+          Some prompt content was safely truncated before display.
+        </p>
+      )}
+      <div className="space-y-2">
+        {prompt.components.map((component, index) => (
+          <details key={`${component.label.content}-${index}`} className="rounded-xl border border-[var(--v2-panel-border)]">
+            <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-[var(--v2-text-strong)]">
+              <span>{component.label.content}</span>
+              <span className="ml-2 font-normal text-[var(--v2-text-faint)]">
+                {component.kind} · {formatNumber(component.estimated_tokens)} tokens
+                {component.content.truncated ? " · truncated" : ""}
+              </span>
+            </summary>
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-[var(--v2-panel-border)] p-3 text-[11px] leading-5 text-[var(--v2-text-muted)]">
+              {component.content.content}
+            </pre>
+          </details>
+        ))}
+      </div>
+      <details className="rounded-xl border border-[var(--v2-panel-border)]">
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium">Full reconstructed prompt</summary>
+        <div className="border-t border-[var(--v2-panel-border)] p-3">
+          <p className="mb-3 text-[11px] leading-5 text-[var(--v2-text-faint)]">
+            Reconstructed content reflects the latest host prompt boundary and may differ from a specific historical model call.
+          </p>
+          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--v2-text-muted)]">
+            {prompt.reconstructed_prompt.content}
+          </pre>
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -241,7 +382,9 @@ function InspectorPanelCore({
 
       <StatusNotice health={inspector.health} error={inspector.error} />
       <section role="tabpanel" className="min-h-0 flex-1 overflow-y-auto">
-        {preferences.activeTab === "prompt" && <PromptShell snapshot={snapshot} />}
+        {preferences.activeTab === "prompt" && (
+          <PromptShell snapshot={snapshot} health={inspector.health} />
+        )}
         {preferences.activeTab === "activity" && (
           <ActivityShell snapshot={snapshot} updateCount={inspector.updates.length} />
         )}

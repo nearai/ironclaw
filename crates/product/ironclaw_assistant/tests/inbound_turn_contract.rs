@@ -776,6 +776,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
@@ -949,6 +950,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
@@ -1138,6 +1140,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,

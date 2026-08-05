@@ -8,8 +8,8 @@ use ironclaw_loop_contracts::LoopRuntimeContext;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
     LoopContextPort, LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority,
-    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
-    VisibleCapabilitySurface,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    LoopRunContext, PromptMode, VisibleCapabilitySurface,
 };
 use ironclaw_loop_contracts::{
     InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
@@ -391,7 +391,20 @@ where
             instruction_snippet_count,
         };
         let started_at = ironclaw_observability::live_latency_started_at();
-        self.prompt_authority.issue_bundle(&self.context, &bundle)?;
+        self.prompt_authority
+            .issue_bundle_with_diagnostic_metadata(
+                &self.context,
+                &bundle,
+                Some(LoopPromptDiagnosticMetadata {
+                    identity_message_count,
+                    instruction_snippet_count,
+                    active_skills: instruction_bundle
+                        .skill_context
+                        .iter()
+                        .map(|skill| skill.source_name.clone())
+                        .collect(),
+                }),
+            )?;
         trace_prompt_latency_ok(
             "issue_bundle",
             &self.context,

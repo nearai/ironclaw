@@ -403,6 +403,21 @@ impl<P> HostManagedModelGateway for LlmProviderModelGateway<P>
 where
     P: LlmProvider + ?Sized + Send + Sync,
 {
+    fn diagnostic_effective_model(
+        &self,
+        model_profile_id: &ModelProfileId,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<String> {
+        let route = self.policy.route_for(model_profile_id)?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        Some(self.provider.effective_model_name(Some(&model_override)))
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,

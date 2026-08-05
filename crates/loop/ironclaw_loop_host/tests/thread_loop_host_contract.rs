@@ -28,9 +28,9 @@ use ironclaw_loop_contracts::{
     LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView,
     LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
     LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation,
-    ObservationTrust, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-    PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort, ModelProfileId,
+    ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PersonalContextPolicy,
+    PromptMode, PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillTrustLevel,
     SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
     VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
@@ -39,14 +39,14 @@ use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    IdentityApplicability, IdentityBudget, IdentityFileName, LoopAttachmentReadError,
-    LoopAttachmentReadPort, PromptContextTokenBudget, SkillBundleContextSource,
-    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
-    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, build_skill_run_snapshot,
-    identity_message_ref,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedPromptDiagnosticCapture,
+    HostManagedPromptDiagnosticSink, HostManagedToolResultContent, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
+    IdentityFileName, LoopAttachmentReadError, LoopAttachmentReadPort, PromptContextTokenBudget,
+    SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_outbound::{
     OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
@@ -222,6 +222,66 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].messages.len(), 1);
     assert_eq!(calls[0].messages[0].content, "latest short");
+}
+
+#[tokio::test]
+async fn model_port_records_resolved_prompt_at_the_host_boundary() {
+    let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+    let messages = user_model_messages(&fixture);
+    let bundle = LoopPromptBundle {
+        bundle_ref: LoopPromptBundleRef::for_run(&fixture.run_context, "diagnostic-bundle")
+            .expect("bundle"),
+        messages: messages.clone(),
+        surface_version: None,
+        compaction_message_index: Vec::new(),
+        instruction_fingerprint: None,
+        identity_message_count: 0,
+        instruction_snippet_count: 2,
+    };
+    LoopPromptBundleAuthority::shared()
+        .issue_bundle_with_diagnostic_metadata(
+            &fixture.run_context,
+            &bundle,
+            Some(ironclaw_loop_contracts::LoopPromptDiagnosticMetadata {
+                identity_message_count: 0,
+                instruction_snippet_count: 2,
+                active_skills: vec!["workspace-search".to_string()],
+            }),
+        )
+        .expect("prompt grant");
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(64_000, 4_000, 0))
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        capability_view: Some(LoopModelCapabilityView {
+            visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
+        }),
+    })
+    .await
+    .expect("model response");
+
+    let captures = sink.captures.lock().expect("captures");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].messages[0].content, "diagnostic prompt body");
+    assert_eq!(captures[0].instruction_snippet_count, 2);
+    assert_eq!(captures[0].active_skills, ["workspace-search"]);
+    assert_eq!(captures[0].capability_ids[0].as_str(), "filesystem.read");
+    assert_eq!(captures[0].effective_model, "provider-model");
+    assert_eq!(captures[0].context_limit, 64_000);
 }
 
 #[tokio::test]
@@ -5839,6 +5899,17 @@ struct RecordingGateway {
     response: Result<HostManagedModelResponse, HostManagedModelError>,
 }
 
+#[derive(Default)]
+struct RecordingPromptDiagnosticSink {
+    captures: Mutex<Vec<HostManagedPromptDiagnosticCapture>>,
+}
+
+impl HostManagedPromptDiagnosticSink for RecordingPromptDiagnosticSink {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
+        self.captures.lock().expect("captures").push(capture);
+    }
+}
+
 impl RecordingGateway {
     fn reply(content: &str) -> Self {
         Self {
@@ -5927,6 +5998,14 @@ impl RecordingGateway {
 
 #[async_trait]
 impl HostManagedModelGateway for RecordingGateway {
+    fn diagnostic_effective_model(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        _resolved_model_route: Option<&ironclaw_loop_host::HostManagedModelRouteSnapshot>,
+    ) -> Option<String> {
+        Some("provider-model".to_string())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
