@@ -281,6 +281,7 @@ mod tests {
                 memory_mounts: &empty_mounts,
                 system_extensions_lifecycle_mounts: &empty_mounts,
                 policy: &policy,
+                surface_policy: &CapabilitySurfacePolicy::allow_all(),
                 extension_surface: &ExtensionCapabilitySurface::default(),
             },
         )

@@ -501,6 +501,40 @@ async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
         .expect("the rejected call must not produce a successful capability result");
 }
 
+/// Regression for the host-policy propagation seam: capability metadata
+/// lookup must resolve against the same already-narrowed host-visible surface
+/// that disclosure and the outer gate use. A denied target is therefore
+/// indistinguishable from an unknown target and returns a normal tool failure;
+/// it must not escape registration as terminal invalid model output.
+#[tokio::test]
+async fn capability_info_for_disabled_spawn_is_opaque_and_model_recoverable() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "capability_info",
+                json!({"name": "builtin__spawn_subagent", "detail": "schema"}),
+            ),
+            RebornScriptedReply::text("continued without the disabled capability"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("inspect the disabled spawn capability")
+        .await
+        .expect("run recovers from opaque capability_info failure");
+    h.assert_tool_error_summary_contains("capability_info target is not on the visible surface")
+        .await
+        .expect("denied target is reported through the model-visible tool-result path");
+    h.assert_reply_contains("continued without the disabled capability")
+        .await
+        .expect("the model can continue after the tool failure");
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("metadata lookup never dispatches the denied target");
+}
+
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
 /// once serialized, so both durable-projection tests below exercise
 /// truncation, while staying under `PROVIDER_ARGUMENTS_MAX_BYTES` (64 KiB) --

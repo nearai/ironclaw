@@ -156,6 +156,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             &run_context,
             &Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
+            ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         )
         .await?;
     assert_capability_denied(

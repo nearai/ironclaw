@@ -399,6 +399,7 @@ fn test_parts(
     RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
+        surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         fallback_user_id: UserId::new("user-stub").expect("user id"),
         workspace_mounts: ironclaw_host_api::mount::MountView::default(),
         skill_mounts: ironclaw_host_api::mount::MountView::default(),

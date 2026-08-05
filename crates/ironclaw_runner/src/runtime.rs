@@ -861,7 +861,10 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         }
         policy = policy.deny_capability_ids(denied);
         let policy = Arc::new(policy);
-        let mut capabilities = self.inner.create_capability_port(run_context).await?;
+        let mut capabilities = self
+            .inner
+            .create_capability_port_with_surface_policy(run_context, Arc::clone(&policy))
+            .await?;
         capabilities = self.spawn_decorator.decorate(run_context, capabilities);
         capabilities = apply_capability_surface_policy(capabilities, Arc::clone(&policy));
         if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
@@ -1204,6 +1207,33 @@ mod tests {
         }
     }
 
+    struct RecordingSurfacePolicyFactory {
+        port: Arc<dyn LoopCapabilityPort>,
+        policies: Arc<Mutex<Vec<CapabilitySurfacePolicy>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for RecordingSurfacePolicyFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Ok(Arc::clone(&self.port))
+        }
+
+        async fn create_capability_port_with_surface_policy(
+            &self,
+            _run_context: &LoopRunContext,
+            surface_policy: Arc<CapabilitySurfacePolicy>,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            self.policies
+                .lock()
+                .unwrap()
+                .push(surface_policy.as_ref().clone());
+            Ok(Arc::clone(&self.port))
+        }
+    }
+
     struct NoopDecorator {
         decorate_calls: Arc<AtomicUsize>,
     }
@@ -1253,12 +1283,17 @@ mod tests {
     async fn profiled_factory_resolves_policy_once_with_tool_disclosure() {
         let calls = Arc::new(AtomicUsize::new(0));
         let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let policies = Arc::new(Mutex::new(Vec::new()));
+        let denied_id = CapabilityId::new("demo.denied").expect("valid capability id");
         let inner = Arc::new(InnerPort {
             label: "inner",
             log: Arc::new(Mutex::new(Vec::new())),
         });
         let factory = RuntimeProfiledCapabilityPortFactory {
-            inner: Arc::new(StaticFactory { port: inner }),
+            inner: Arc::new(RecordingSurfacePolicyFactory {
+                port: inner,
+                policies: Arc::clone(&policies),
+            }),
             surface_resolver: Arc::new(CountingSurfaceResolver {
                 calls: Arc::clone(&calls),
             }),
@@ -1268,7 +1303,7 @@ mod tests {
             tool_disclosure_decorator: Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
                 Arc::new(UnusedResultWriter),
             ))),
-            global_denied: Vec::new(),
+            global_denied: vec![denied_id.clone()],
             scheduled_trigger_denied: Vec::new(),
         };
 
@@ -1281,6 +1316,16 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "one resolved policy must be shared by disclosure and enforcement"
+        );
+        let policies = policies.lock().unwrap();
+        assert_eq!(
+            policies.len(),
+            1,
+            "the resolved policy is passed inward once"
+        );
+        assert!(
+            !policies[0].permits_capability_id(&denied_id),
+            "the host-visible request must receive the final deny-subtracted policy"
         );
     }
 

@@ -1697,6 +1697,7 @@ impl HostRuntimeCapabilityHarness {
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
+        surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
         // the harness opts in, else the fixed harness user — see
@@ -1904,6 +1905,7 @@ impl HostRuntimeCapabilityHarness {
         let parts = ironclaw_reborn_composition::test_support::RefreshingCapabilityPortTestParts {
             runtime: self.runtime.lock().unwrap().clone(),
             run_context: run_context.clone(),
+            surface_policy,
             fallback_user_id: dispatch_user,
             // All four mount views = this harness's single `mounts` view.
             // Production splits skill/memory/system-extensions mounts off
