@@ -54,8 +54,9 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_outbound::{
-    CommunicationPreferenceRecord, DeliveryDefaultScope, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryStore,
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, DeliveryDefaultScope,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -81,6 +82,10 @@ const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
 const SLACK_PER_TRIGGER_CHANNEL: &str = "C-TRIGGER-OVERRIDE";
 const QA_9B_TARGET_ID: &str = "slack:personal-dm:T-TRIGGER-E2E:trigger-e2e-owner";
 const QA_9D_TARGET_ID: &str = "slack:shared-channel:T-TRIGGER-E2E:C-TRIGGER-OVERRIDE";
+// Both Slack delivery journeys assemble a full channel runtime and use short
+// provider deadlines. Keep them sequential so running the test binary with
+// the default parallel harness does not make one journey starve the other.
+static SLACK_DELIVERY_TEST_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 const TEST_SECRET_MASTER_KEY: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// Name of the trigger the fired run's capability call attempts to create.
@@ -149,11 +154,37 @@ impl HostManagedModelGateway for RecordingGateway {
 }
 
 #[derive(Debug, Default)]
+struct DeliveryModelGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl DeliveryModelGate {
+    async fn wait_until_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(15), self.entered.notified())
+            .await
+            .expect("scheduled run never reached the model gateway");
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[derive(Debug, Default)]
 struct DeliveryJourneyGateway {
     requests: TokioMutex<Vec<HostManagedModelRequest>>,
+    gate: Option<Arc<DeliveryModelGate>>,
 }
 
 impl DeliveryJourneyGateway {
+    fn gated(gate: Arc<DeliveryModelGate>) -> Self {
+        Self {
+            requests: TokioMutex::new(Vec::new()),
+            gate: Some(gate),
+        }
+    }
+
     async fn request_count_containing(&self, needle: &str) -> usize {
         self.requests
             .lock()
@@ -191,6 +222,10 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
             "unexpected scheduled-trigger prompt"
         };
         self.requests.lock().await.push(request);
+        if let Some(gate) = &self.gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
     }
 }
@@ -815,6 +850,21 @@ async fn wait_for_delivered_run(
     delivery_store: &Arc<dyn TriggeredRunDeliveryStore>,
     trigger_id: TriggerId,
 ) -> TurnRunId {
+    let (run_id, outcome) =
+        wait_for_triggered_run_delivery(repository, delivery_store, trigger_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "triggered run must reach the provider successfully"
+    );
+    run_id
+}
+
+async fn wait_for_triggered_run_delivery(
+    repository: &Arc<dyn TriggerRepository>,
+    delivery_store: &Arc<dyn TriggeredRunDeliveryStore>,
+    trigger_id: TriggerId,
+) -> (TurnRunId, TriggeredRunDeliveryOutcomeKind) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let history = repository
@@ -831,12 +881,7 @@ async fn wait_for_delivered_run(
                 .await
                 .expect("read triggered delivery outcome")
         {
-            assert_eq!(
-                record.outcome,
-                TriggeredRunDeliveryOutcomeKind::Delivered,
-                "triggered run must reach the provider successfully"
-            );
-            return run_id;
+            return (run_id, record.outcome);
         }
         assert!(
             Instant::now() < deadline,
@@ -844,6 +889,38 @@ async fn wait_for_delivered_run(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+async fn remove_creator_default_delivery_route(runtime: &RebornRuntime) {
+    let preferences = runtime
+        .standalone_outbound_preferences_for_test()
+        .expect("local runtime exposes outbound preferences");
+    let tenant_id = TenantId::new(TENANT).expect("valid tenant id");
+    let user_id = UserId::new(USER).expect("valid user id");
+    let current = preferences
+        .load_communication_preference(CommunicationPreferenceKey::personal(
+            tenant_id.clone(),
+            user_id.clone(),
+        ))
+        .await
+        .expect("load creator delivery preference")
+        .expect("creator default Slack route exists before removal");
+    preferences
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant_id, user_id.clone()),
+                final_reply_target: None,
+                progress_target: current.record.progress_target,
+                approval_prompt_target: current.record.approval_prompt_target,
+                auth_prompt_target: current.record.auth_prompt_target,
+                default_modality: current.record.default_modality,
+                updated_at: Utc::now(),
+                updated_by: user_id,
+            },
+            expected_version: Some(current.version),
+        })
+        .await
+        .expect("remove creator default Slack delivery route");
 }
 
 /// Same as [`build_runtime_with`], but with an explicit
@@ -1155,6 +1232,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
 /// must not repeat either provider mutation.
 #[tokio::test]
 async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart() {
+    let _slack_delivery_guard = SLACK_DELIVERY_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("tempdir");
     let model_gateway = Arc::new(DeliveryJourneyGateway::default());
     let slack_provider = Arc::new(FakeSlackProvider::default());
@@ -1251,6 +1329,62 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         1,
         "restart must not rerun QA-9D"
     );
+}
+
+/// A scheduled delivery must fail closed when the creator removes its Slack
+/// route while the triggered run is still producing its reply. The resolver
+/// must not invent a fallback destination, and the Slack adapter must never
+/// reach the provider boundary.
+#[tokio::test]
+async fn removed_slack_default_route_blocks_scheduled_delivery_without_fallback() {
+    let _slack_delivery_guard = SLACK_DELIVERY_TEST_LOCK.lock().await;
+    let root = tempfile::tempdir().expect("tempdir");
+    let model_gate = Arc::new(DeliveryModelGate::default());
+    let model_gateway = Arc::new(DeliveryJourneyGateway::gated(Arc::clone(&model_gate)));
+    let slack_provider = Arc::new(FakeSlackProvider::default());
+    let runtime = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+
+    configure_and_activate_slack_for_delivery(&runtime).await;
+    configure_delivery_targets(&runtime).await;
+    pair_trigger_creator(&runtime).await;
+
+    let repository = runtime.trigger_repository();
+    let trigger_id = seed_due_delivery_trigger(&repository, QA_9D_PROMPT, None).await;
+    model_gate.wait_until_entered().await;
+    remove_creator_default_delivery_route(&runtime).await;
+    model_gate.release();
+
+    let delivery_store = runtime
+        .triggered_run_delivery_store_for_test()
+        .expect("local runtime exposes the production triggered-delivery store");
+    let (_, outcome) =
+        wait_for_triggered_run_delivery(&repository, &delivery_store, trigger_id).await;
+
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured,
+        "removed Slack route must record that no default remains"
+    );
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9D_PROMPT).await,
+        1,
+        "the scheduled work still executes exactly once"
+    );
+    assert!(
+        slack_provider.wire_messages().is_empty(),
+        "removed Slack route must prevent every provider wire mutation"
+    );
+    assert!(
+        slack_provider.provider_messages().is_empty(),
+        "removed Slack route must not deliver to the explicit target or creator default"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 fn assert_slack_dm_delivery_evidence(messages: &[Value]) {

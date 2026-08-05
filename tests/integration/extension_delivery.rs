@@ -57,6 +57,7 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_assistant::RebornServices;
 use ironclaw_assistant::{
     AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
@@ -81,7 +82,10 @@ use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
-    ids::{CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProductKind},
+    ids::{
+        CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProductKind,
+        UserId,
+    },
     invocation::InvocationOrigin,
     mount::MountView,
     resource::{ResourceEstimate, ResourceScope},
@@ -96,6 +100,7 @@ use ironclaw_loop_host::{
 use ironclaw_outbound::OutboundDeliveryStatus;
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::product_wire::RebornAttachmentRequest;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
@@ -103,6 +108,7 @@ use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, 
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
+use reborn_support::webui_mount::{get_raw, mount_webui_v2_router};
 use rstest::rstest;
 use serde_json::json;
 use sha2::Sha256;
@@ -2057,13 +2063,137 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         1,
         "the retry and the duplicate must not reland the attachment"
     );
-    let storage_key = attachment_messages[0].attachments[0]
+    let attachment_message = attachment_messages[0];
+    let attachment_ref = &attachment_message.attachments[0];
+    let storage_key = attachment_ref
         .storage_key
         .as_deref()
         .expect("landed attachment carries a canonical workspace ref");
     assert!(
         storage_key.starts_with("/workspace/attachments/"),
         "unexpected storage key {storage_key}"
+    );
+
+    // Cross-surface read: the paired account can open the Telegram-landed
+    // attachment through the authenticated WebUI endpoint. Build the product
+    // facade over the exact thread service and attachment filesystem used by
+    // the channel host; this is a surface transition, not a direct filesystem
+    // assertion.
+    let webui_caller = ProductSurfaceCaller::new(
+        inbound.binding.tenant_id.clone(),
+        paired_user.clone(),
+        inbound.binding.agent_id.clone(),
+        inbound.binding.project_id.clone(),
+    );
+    let attachment_path = format!(
+        "/api/webchat/v2/threads/{}/messages/{}/attachments/{}",
+        attachment_scope.thread_id.as_str(),
+        attachment_message.message_id.as_uuid(),
+        attachment_ref.id
+    );
+    let initial_attachment_reader = services
+        .standalone_inbound_attachment_reader_for_test()
+        .expect("composed runtime exposes the production attachment reader");
+    let webui_services = Arc::new(
+        RebornServices::new(
+            inbound
+                .thread_service_for_test()
+                .expect("group thread service"),
+            inbound.turn_coordinator_for_test(),
+        )
+        .with_inbound_attachment_reader(initial_attachment_reader.clone()),
+    );
+    let (status, headers, bytes) = get_raw(
+        mount_webui_v2_router(webui_services.clone(), webui_caller.clone()),
+        &attachment_path,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "paired WebUI caller can read bytes");
+    assert_eq!(
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/pdf")
+    );
+    assert_eq!(bytes, b"DATA", "WebUI serves the Telegram-landed bytes");
+
+    // Direct caller-path isolation: a different authenticated user in the
+    // same tenant/project cannot resolve the paired user's channel thread, so
+    // the product surface denies before consulting the workspace reader.
+    let other_user = ProductSurfaceCaller::new(
+        inbound.binding.tenant_id.clone(),
+        UserId::new("attachment-cross-user").expect("other user id"),
+        inbound.binding.agent_id.clone(),
+        inbound.binding.project_id.clone(),
+    );
+    // The denied read is exercised through the authenticated WebUI route too,
+    // so the HTTP error mapping and handler boundary are covered, not only the
+    // product-surface service call.
+    let (denied_status, _, denied_bytes) = get_raw(
+        mount_webui_v2_router(webui_services.clone(), other_user.clone()),
+        &attachment_path,
+    )
+    .await;
+    assert_eq!(denied_status, StatusCode::NOT_FOUND);
+    assert!(
+        !denied_bytes
+            .windows(b"DATA".len())
+            .any(|window| window == b"DATA"),
+        "a denied WebUI request must not disclose attachment bytes"
+    );
+
+    let denied = webui_services
+        .read_attachment(
+            other_user,
+            RebornAttachmentRequest {
+                thread_id: attachment_scope.thread_id.as_str().to_string(),
+                message_id: attachment_message.message_id.to_string(),
+                attachment_id: attachment_ref.id.clone(),
+            },
+        )
+        .await
+        .expect_err("another user must not read the paired user's attachment");
+    assert_eq!(
+        denied.code,
+        ironclaw_product_contracts::surface::ProductSurfaceErrorCode::NotFound
+    );
+    assert_eq!(denied.status_code, StatusCode::NOT_FOUND.as_u16());
+
+    // Reconstruct both the product facade and the production attachment
+    // reader, then read again. Each accessor call builds a fresh reader and
+    // scoped-filesystem handle over the same composed backing store; this is
+    // handler/service reconstruction, not a full process or database reopen.
+    let reconstructed_attachment_reader = services
+        .standalone_inbound_attachment_reader_for_test()
+        .expect("fresh production attachment reader reconstructs");
+    assert!(
+        !Arc::ptr_eq(&initial_attachment_reader, &reconstructed_attachment_reader),
+        "reconstruction must not retain the original attachment-reader object"
+    );
+    drop(webui_services);
+    drop(initial_attachment_reader);
+    let reconstructed_services = Arc::new(
+        RebornServices::new(
+            inbound
+                .thread_service_for_test()
+                .expect("group thread service remains available after facade reconstruction"),
+            inbound.turn_coordinator_for_test(),
+        )
+        .with_inbound_attachment_reader(reconstructed_attachment_reader),
+    );
+    let (status, _, bytes) = get_raw(
+        mount_webui_v2_router(reconstructed_services, webui_caller),
+        &attachment_path,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "attachment survives service reconstruction"
+    );
+    assert_eq!(
+        bytes, b"DATA",
+        "reconstructed reader returns the same bytes"
     );
 
     // Duplicate replay after durable success: acknowledged without any
