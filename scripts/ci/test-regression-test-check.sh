@@ -408,6 +408,50 @@ EOF
 expect_fail "tautological TypeScript assertion" \
   "no meaningful changed regression assertion" run_check "$typescript_tautology"
 
+typescript_node_assert="$TMP_ROOT/typescript-node-assert"
+init_repo "$typescript_node_assert"
+mkdir -p "$typescript_node_assert/crates/ironclaw_webui/frontend/src"
+while IFS='|' read -r method assertion; do
+  cat > "$typescript_node_assert/crates/ironclaw_webui/frontend/src/regression.test.ts" <<EOF
+import assert from "node:assert/strict";
+
+test("recognizes node:assert methods", () => {
+  $assertion
+});
+EOF
+  expect_pass "meaningful node:assert $method assertion" \
+    run_check "$typescript_node_assert"
+done <<'EOF'
+equal|assert.equal(actualStatus(), "fixed");
+deepEqual|assert.deepEqual(actualResult(), { status: "fixed" });
+ok|assert.ok(wasFixed());
+match|assert.match(actualMessage(), /fixed/);
+notEqual|assert.notEqual(actualStatus(), "broken");
+strictEqual|assert.strictEqual(actualCount(), 1);
+deepStrictEqual|assert.deepStrictEqual(actualItems(), ["fixed"]);
+EOF
+
+typescript_node_assert_tautology="$TMP_ROOT/typescript-node-assert-tautology"
+init_repo "$typescript_node_assert_tautology"
+mkdir -p "$typescript_node_assert_tautology/crates/ironclaw_webui/frontend/src"
+cat > "$typescript_node_assert_tautology/crates/ironclaw_webui/frontend/src/regression.test.ts" <<'EOF'
+import assert from "node:assert/strict";
+
+test("does not accept tautological node:assert methods", () => {
+  const result = runRegression();
+  assert.equal(result, result);
+  assert.deepEqual(result, result);
+  assert.ok(true);
+  assert.ok(1);
+  assert.fail();
+  assert(true);
+  // assert.equal(result.status, "fixed");
+});
+EOF
+expect_fail "tautological node:assert TypeScript assertions" \
+  "no meaningful changed regression assertion" \
+  run_check "$typescript_node_assert_tautology"
+
 shell_test="$TMP_ROOT/shell"
 init_repo "$shell_test"
 mkdir -p "$shell_test/scripts/ci"

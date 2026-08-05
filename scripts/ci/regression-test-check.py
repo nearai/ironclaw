@@ -73,6 +73,26 @@ PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ASSERT_METHOD = re.compile(
+    r"\bassert\s*\.\s*"
+    r"(strictEqual|deepStrictEqual|notStrictEqual|notDeepStrictEqual"
+    r"|equal|deepEqual|notEqual|notDeepEqual"
+    r"|ok|match|doesNotMatch|throws|rejects|doesNotThrow|doesNotReject|fail)"
+    r"\s*\((.*?)\)",
+    re.DOTALL,
+)
+
+_ASSERT_COMPARISON_METHODS = {
+    "strictEqual",
+    "deepStrictEqual",
+    "notStrictEqual",
+    "notDeepStrictEqual",
+    "equal",
+    "deepEqual",
+    "notEqual",
+    "notDeepEqual",
+}
+
 
 def git(repo: Path, *args: str) -> str:
     result = subprocess.run(
@@ -327,6 +347,17 @@ def has_meaningful_typescript_assertion(text: str) -> bool:
         return True
     for match in re.finditer(r"\bassert\s*\((.*?)\)", text, re.DOTALL):
         if normalized(match.group(1)) in {"true", "false", "1", "0", ""}:
+            continue
+        return True
+    for match in _ASSERT_METHOD.finditer(text):
+        method, expression = match.groups()
+        operands = expression.split(",", 2)
+        if method in _ASSERT_COMPARISON_METHODS:
+            if len(operands) >= 2 and normalized(operands[0]) == normalized(
+                operands[1]
+            ):
+                continue
+        elif normalized(operands[0]) in {"true", "false", "1", "0", ""}:
             continue
         return True
     for match in re.finditer(
