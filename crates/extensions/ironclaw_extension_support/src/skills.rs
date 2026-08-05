@@ -571,7 +571,7 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
+        ids::{CapabilityId, InvocationId, UserId},
         mount::MountView,
         resource::ResourceScope,
     };
@@ -597,6 +597,27 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    /// A fetch context with no egress, which must never be used.
+    ///
+    /// Both cases below are decided from the input shape alone, so reaching the
+    /// network at all would itself be the bug — and with `runtime_http_egress:
+    /// None` a fetch could not succeed anyway, so a regression that started
+    /// taking the url arm fails loudly here instead of going quiet.
+    ///
+    /// Deliberately kept with no caller: it is the negative control a future
+    /// url-arm test reaches for. `dead_code` is allowed rather than the fixture
+    /// deleted, because deleting it is what would let such a test quietly wire
+    /// a real egress instead.
+    #[allow(dead_code)]
+    fn unused_fetch_context() -> SkillUrlFetchContext {
+        SkillUrlFetchContext {
+            capability_id: CapabilityId::new("ironclaw.skill.install").unwrap(),
+            scope: ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            runtime_http_egress: None,
+        }
     }
 }
 

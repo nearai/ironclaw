@@ -91,10 +91,12 @@ tests/fixtures/llm_traces/live/*.log
 .anvil/
 .codegraph/
 
-# codebase-memory knowledge graph — build artifact, not source.
-# Rebuilt from code via the codebase-memory MCP; per-environment, never committed.
+# codebase-memory knowledge graph. Share only the compressed bootstrap snapshot;
+# local metadata and runtime state remain per-environment.
 # See CLAUDE.md -> "Code Discovery".
-.codebase-memory/
+.codebase-memory/*
+!.codebase-memory/.gitattributes
+!.codebase-memory/graph.db.zst
 
 # test-tools fixture-bundle build artifacts — regenerate with
 # scripts/build-test-tools.sh; only sources/manifests/schemas/prompts are tracked.
@@ -118,5 +120,7 @@ crates/*/frontend/dist/
 mutants.out/
 mutants.out.old/
 
-# for a local typescript app, but don't want to push with main repo
+# Local TypeScript app directory — anchored to repo root so it does not
+# silently exclude nested `app/` directories (e.g. crates/*/frontend/src/app/).
+# Prefer .git/info/exclude for personal working directories.
 /app/

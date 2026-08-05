@@ -10,20 +10,20 @@ publish = false
 async-trait = "0.1"
 axum = "0.8"
 deadpool-postgres = "0.14"
-ironclaw_filesystem = { path = "../../../crates/ironclaw_filesystem" }
-ironclaw_approvals = { path = "../../../crates/ironclaw_approvals" }
-ironclaw_host_runtime = { path = "../../../crates/ironclaw_host_runtime" }
-ironclaw_host_api = { path = "../../../crates/ironclaw_host_api" }
-ironclaw_processes = { path = "../../../crates/ironclaw_processes" }
-ironclaw_libsql_runtime = { path = "../../../crates/ironclaw_libsql_runtime" }
-ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition" }
-ironclaw_reborn_event_store = { path = "../../../crates/ironclaw_reborn_event_store" }
-ironclaw_resources = { path = "../../../crates/ironclaw_resources" }
-ironclaw_secrets = { path = "../../../crates/ironclaw_secrets" }
-ironclaw_triggers = { path = "../../../crates/ironclaw_triggers" }
-ironclaw_trust = { path = "../../../crates/ironclaw_trust" }
-ironclaw_turns = { path = "../../../crates/ironclaw_turns" }
-ironclaw_webui = { path = "../../../crates/ironclaw_webui" }
+ironclaw_filesystem = { path = "../../../crates/substrates/ironclaw_filesystem" }
+ironclaw_approvals = { path = "../../../crates/kernel/ironclaw_approvals" }
+ironclaw_host_runtime = { path = "../../../crates/kernel/ironclaw_host_runtime" }
+ironclaw_host_api = { path = "../../../crates/contracts/ironclaw_host_api" }
+ironclaw_processes = { path = "../../../crates/kernel/ironclaw_processes" }
+ironclaw_libsql_runtime = { path = "../../../crates/substrates/ironclaw_libsql_runtime" }
+ironclaw_composition = { path = "../../../crates/app/ironclaw_composition" }
+ironclaw_event_store = { path = "../../../crates/events/ironclaw_event_store" }
+ironclaw_resources = { path = "../../../crates/kernel/ironclaw_resources" }
+ironclaw_secrets = { path = "../../../crates/substrates/ironclaw_secrets" }
+ironclaw_triggers = { path = "../../../crates/domains/ironclaw_triggers" }
+ironclaw_trust = { path = "../../../crates/kernel/ironclaw_trust" }
+ironclaw_turns = { path = "../../../crates/kernel/ironclaw_turns" }
+ironclaw_webui = { path = "../../../crates/product/ironclaw_webui" }
 chrono = "0.4"
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = "0.10"

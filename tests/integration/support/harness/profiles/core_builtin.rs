@@ -203,7 +203,7 @@ pub(crate) async fn core_builtin_tools(
                 // The `Disabled` binding shape: builtin package only — the
                 // registry (and therefore the model tool surface) carries no
                 // memory package at all.
-                let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+                let mut registry = ironclaw_extension_registry::ExtensionRegistry::new();
                 registry.insert(ironclaw_host_runtime::builtin_first_party_package()?)?;
                 super::super::assembly::standalone_host_runtime_with_registry_and_runtime_http_egress(
                     storage_root.clone(),

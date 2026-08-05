@@ -1,10 +1,10 @@
-# Composition mass budget — ratchet gate for the ironclaw_reborn_composition crate.
+# Composition mass budget — ratchet gate for the ironclaw_composition crate.
 #
 # Enforced by scripts/ci/check-composition-budget.sh (CI: .github/workflows/code_style.yml;
 # local: scripts/pre-commit-safety.sh when composition files are staged).
 #
 # WHY THIS EXISTS
-#   ironclaw_reborn_composition's charter is service-graph *assembly*
+#   ironclaw_composition's charter is service-graph *assembly*
 #   (build_*/with_* wiring) — see .claude/skills/ironclaw-reborn-architecture-review.
 #   In practice it has accreted behavior (slack delivery, product_auth, extension
 #   lifecycle, projections) and is now ~27% of ALL production crate code. The
@@ -12,7 +12,7 @@
 #   mass piling up *inside* one crate. This gate is that missing guard.
 #
 # THE METRIC
-#   observed_bp = 10000 * (LOC of crates/ironclaw_reborn_composition/src/**.rs)
+#   observed_bp = 10000 * (LOC of crates/ironclaw_composition/src/**.rs)
 #                       / (LOC of all crates/*/src/**.rs)
 #   Production src only, in basis points (1 bp = 0.01 percentage point).
 #   Test-only FILES are excluded from both numerator and denominator (basenames
@@ -90,8 +90,8 @@ observed_date = "2026-07-16"
 # (the ceiling seeded pre-batch red the batch by 115 LOC).
 #
 # Re-ratcheted 45127 -> 42938 on 2026-08-04 by the WS6 service-cluster eviction
-# (admin-user directory + blocked-auth resume fan-out -> ironclaw_product; turn-end
-# trace capture -> ironclaw_reborn_traces::capture + ironclaw_runner::trace_capture).
+# (admin-user directory + blocked-auth resume fan-out -> ironclaw_assistant; turn-end
+# trace capture -> ironclaw_trace_commons::capture + ironclaw_turn_runner::trace_capture).
 # -2189 LOC, measured on this branch with
 # `bash scripts/ci/check-composition-budget.sh --print`. Set to current, not
 # padded. Sibling WS6 slices lower it further; numeric conflicts belong to the
@@ -115,7 +115,29 @@ observed_date = "2026-07-16"
 # Union re-seed on the waves-0-4 batch, 2026-08-04: the WS6 service-cluster
 # eviction (-2,189) and the WS6 policy eviction (-2,439) are disjoint; on the
 # merged tree the deltas add exactly: 45,127 - 2,189 - 2,439 = 40,499.
-loc_ceiling = 40499
+#
+# RAISED 40,499 -> 41,414 on 2026-08-05 by the skills stack (#6745 -> #6938 ->
+# #7171). This is a raise, not a re-ratchet, so it is the reviewed decision the
+# rule below requires and not routine wiring -- flagged in #7171's body for the
+# owner to push back on. Measured on the merged tree with
+# `bash scripts/ci/check-composition-budget.sh --print`; set to current, not
+# padded.
+#
+# WHY IT IS COMPOSITION'S TO CARRY. The counted growth is +447 production LOC
+# and every line of it is service-graph assembly, which is this crate's charter
+# rather than behavior that belongs elsewhere:
+#   runtime.rs +160          skill-bundle staging + process-execution wiring
+#   standalone_bootstrap +131 one-shot host-disk -> database skill import
+#   capability_host.rs +47   read-only skill paths merged into the tools view
+#   filesystem_assembly +46  database file read/write seams
+#   runtime_mounts.rs +30    the single db_backed_skill_grants decision, which
+#                            REPLACED three divergent views (net of -41 deleted)
+#   the remaining ~33        per-gate approval mount derivation, production seeding
+# The behavior these wire up lives in ironclaw_skills, ironclaw_loop_host and
+# ironclaw_first_party_extension_ports. Note main sat only 54 LOC under the
+# effective ceiling, so this gate currently reds ANY PR adding more than that to
+# composition; the next wave close should re-ratchet rather than inherit this.
+loc_ceiling = 41414
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -126,8 +148,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40499
-loc_observed_date = "2026-08-04"
+loc_observed = 41414
+loc_observed_date = "2026-08-05"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

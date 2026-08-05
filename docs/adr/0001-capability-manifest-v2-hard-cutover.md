@@ -22,7 +22,7 @@ permission. That shape is too small to model the properties #3537 needs:
 
 Reborn uses **Extension Manifest v2** (`schema_version =
 "reborn.extension_manifest.v2"`) as the single manifest model in
-`ironclaw_extensions`. There is **no long-lived v1/v2 dual parser**: v1 manifests
+`ironclaw_extension_registry`. There is **no long-lived v1/v2 dual parser**: v1 manifests
 and tests migrate to v2. The crate, the `/system/extensions/<id>/manifest.toml`
 root, and the CLI/registry terminology stay as "extension".
 
