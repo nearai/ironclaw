@@ -255,6 +255,9 @@ async fn build_local_storage_production_shaped(
         workspace_root,
         host_home_root,
         runtime_policy_for_local_process,
+        // The shell must scope `/workspace` exactly as the file tools do, or one alias names two
+        // directories and a file written by one is invisible to the other.
+        context.workspace_scoped_per_caller,
     )?;
     let root = &host_access.storage_root;
     let workspace_root = &host_access.workspace_root;

@@ -181,6 +181,14 @@ pub(crate) enum HostProcessEnvMode {
 pub struct HostProcessPort {
     env_mode: HostProcessEnvMode,
     workdir_aliases: Vec<HostWorkdirAlias>,
+    /// Whether `/workspace` is scoped to the caller, as the file tools scope it.
+    ///
+    /// The alias list is built once at composition and knows nothing about callers, while
+    /// `scoped_workspace_mount_view` resolves `/workspace` to `<root>/tenants/<t>/users/<u>`. With this
+    /// false under a per-caller policy, one alias means two different directories in one process: an
+    /// agent wrote `scripts/egfr.py` through `write_file`, ran `python3 scripts/egfr.py` in the shell,
+    /// and landed three directories above its own file with no error from either side.
+    workspace_scoped_per_caller: bool,
 }
 
 impl HostProcessPort {
@@ -188,6 +196,7 @@ impl HostProcessPort {
         Self {
             env_mode: HostProcessEnvMode::Scrubbed,
             workdir_aliases: Vec::new(),
+            workspace_scoped_per_caller: false,
         }
     }
 
@@ -195,7 +204,36 @@ impl HostProcessPort {
         Self {
             env_mode: HostProcessEnvMode::Inherited,
             workdir_aliases: Vec::new(),
+            workspace_scoped_per_caller: false,
         }
+    }
+
+    /// Apply the same per-caller workspace scoping the file tools use.
+    ///
+    /// Composition knows the policy (`workspace_scoped_per_caller`); the alias list cannot, because it
+    /// is built before any caller exists. Setting this makes the port derive the caller's subtree from
+    /// the scope carried on every request, so `/workspace` resolves to one directory for both worlds.
+    pub fn with_workspace_scoped_per_caller(mut self, scoped: bool) -> Self {
+        self.workspace_scoped_per_caller = scoped;
+        self
+    }
+
+    /// The alias list as it applies to ONE request, with per-caller scoping resolved.
+    fn aliases_for(
+        &self,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+    ) -> Vec<HostWorkdirAlias> {
+        if !self.workspace_scoped_per_caller {
+            return self.workdir_aliases.clone();
+        }
+        self.workdir_aliases
+            .iter()
+            .map(|alias| {
+                alias
+                    .scoped_to_caller(scope)
+                    .unwrap_or_else(|| alias.clone())
+            })
+            .collect()
     }
 
     pub fn with_workdir_alias(
@@ -220,8 +258,9 @@ impl RuntimeProcessPort for HostProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let cwd = resolve_local_host_workdir(request.workdir.as_deref(), &self.workdir_aliases)
-            .map_err(|e| {
+        let aliases = self.aliases_for(&request.scope);
+        let cwd =
+            resolve_local_host_workdir(request.workdir.as_deref(), &aliases).map_err(|e| {
                 RuntimeProcessError::ExecutionFailed(format!(
                     "cannot determine working directory: {e}"
                 ))
@@ -236,7 +275,7 @@ impl RuntimeProcessPort for HostProcessPort {
                 "running local host command with inherited environment"
             );
         }
-        let command = rewrite_local_host_command_aliases(&request.command, &self.workdir_aliases);
+        let command = rewrite_local_host_command_aliases(&request.command, &aliases);
         let start = std::time::Instant::now();
         let (output, exit_code) = execute_local_command(
             &request.scope,
