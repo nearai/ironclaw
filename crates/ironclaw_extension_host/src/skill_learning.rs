@@ -1304,6 +1304,9 @@ mod learning {
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 requires_skills: Vec::new(),
                 auto_activate: true,
+                // These fixtures exercise keyword/tag similarity only; whether a bundle
+                // carries scripts/ is irrelevant to every assertion below.
+                has_scripts: false,
             }
         }
 

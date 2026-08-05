@@ -276,8 +276,8 @@ mod tests {
         // NAME_WORD_SCORE must stay below the selector's exact-keyword award so
         // adding the fallback can never reorder two skills that both declare
         // keywords.
-        assert!(NAME_WORD_SCORE < 10, "curated keywords must win");
-        assert!(DESCRIPTION_WORD_SCORE < NAME_WORD_SCORE);
+        const { assert!(NAME_WORD_SCORE < 10, "curated keywords must win") };
+        const { assert!(DESCRIPTION_WORD_SCORE < NAME_WORD_SCORE) };
     }
 
     #[test]

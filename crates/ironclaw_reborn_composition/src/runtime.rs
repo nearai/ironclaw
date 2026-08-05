@@ -4458,7 +4458,21 @@ fn skill_activation_selector_config(
 /// (one-line skill listing; bodies load on `builtin.skill_activate`);
 /// `full` restores the legacy inject-bodies-by-score behavior.
 fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> {
-    match std::env::var(SKILL_INJECTION_MODE_ENV_KEY) {
+    skill_injection_mode_from_env_value(std::env::var(SKILL_INJECTION_MODE_ENV_KEY))
+}
+
+/// The decision itself, separated from the lookup so every branch is reachable
+/// from a test without mutating process environment.
+///
+/// `set_var`/`remove_var` would be the alternative and it is not one: this crate's
+/// tests run in-process and in parallel, so a test that unsets the key to reach the
+/// `NotPresent` branch races every other test resolving the same key. Taking the
+/// `Result` as a parameter is the whole seam — there is no test-only field on a
+/// production type and the caller above is the only lookup site.
+fn skill_injection_mode_from_env_value(
+    value: Result<String, std::env::VarError>,
+) -> Result<SkillInjectionMode, RebornRuntimeError> {
+    match value {
         Ok(value) => skill_injection_mode_from(&value),
         Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_INJECTION_MODE),
         Err(error) => Err(RebornRuntimeError::InvalidArgument {

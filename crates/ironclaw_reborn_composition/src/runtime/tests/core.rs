@@ -352,6 +352,56 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     );
 }
 
+/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the
+/// unset one.
+///
+/// The unset branch is the product default and was previously unreachable from a
+/// test: it sits behind `std::env::var`, and unsetting the key in-process would
+/// race the other tests in this binary. `skill_injection_mode_from_env_value`
+/// takes the lookup's `Result` so the decision can be exercised without touching
+/// process state.
+#[test]
+fn skill_injection_mode_resolves_every_env_branch() {
+    use ironclaw_first_party_extension_ports::SkillInjectionMode;
+
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotPresent)),
+            Ok(mode) if mode == super::DEFAULT_SKILL_INJECTION_MODE
+        ),
+        "an unset key must resolve to the product default, not an error"
+    );
+    assert!(matches!(
+        super::skill_injection_mode_from_env_value(Ok("full".to_string())),
+        Ok(SkillInjectionMode::Full)
+    ));
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok("  Listing  ".to_string())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "values are trimmed and case-insensitive"
+    );
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok(String::new())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "an empty value is the same as asking for the listing, not an error"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Ok("bodies".to_string())).is_err(),
+        "an unrecognized mode must fail loudly rather than silently pick one"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("full")
+        )))
+        .is_err(),
+        "an unreadable value must not be mistaken for an unset key"
+    );
+}
+
 #[test]
 fn standalone_selector_config_uses_large_skill_context_budget() {
     let cfg = super::skill_activation_selector_config(
