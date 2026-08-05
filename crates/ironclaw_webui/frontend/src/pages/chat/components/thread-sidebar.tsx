@@ -79,6 +79,7 @@ export function ThreadSidebar({
           </p>
         </div>
         <button
+          data-testid="thread-new"
           onClick={onCreate}
           disabled={createDisabled}
           className="v2-button inline-flex h-8 items-center gap-1.5 rounded-md border border-signal/25 bg-signal/10 px-2 text-xs font-medium text-signal hover:bg-signal/15 disabled:opacity-50"
@@ -104,6 +105,8 @@ export function ThreadSidebar({
           return (
             <button
               key={thread.id}
+              data-testid="thread-item"
+              data-thread-id={thread.id}
               onClick={() => onSelect(thread.id)}
               className={[
                 "v2-button mb-1 flex w-full justify-start items-start flex-col gap-1 rounded-md border px-3 py-3 text-left",
