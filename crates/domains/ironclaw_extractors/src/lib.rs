@@ -961,10 +961,17 @@ mod tests {
         );
     }
 
-    /// #7144: `try_extract_by_extension` discarded the extraction error, so a
+    /// #7104: `try_extract_by_extension` discarded the extraction error, so a
     /// corrupt `.docx` arriving under a generic MIME type fell through to the
     /// "unsupported document type" arm — which by contract means *no extractor
     /// was attempted*. The real parse error never reached the caller or the log.
+    ///
+    /// Asserted on the **variant**, not on `Display`. #7139 made `Display`
+    /// deliberately content-free (`every_extraction_failure_display_is_content_free`),
+    /// so the classification is the whole observable difference — and it is a
+    /// stronger assertion than the substring match this test originally used.
+    /// The parser diagnostic is checked on `detail`, which is the logs-only
+    /// field the type exists to keep out of `Display`.
     #[test]
     fn corrupt_document_under_generic_mime_reports_the_real_failure() {
         let corrupt_docx = b"PK\x03\x04 not actually a zip";
@@ -977,15 +984,15 @@ mod tests {
         let DocumentExtraction::Failed(error) = outcome else {
             panic!("a corrupt .docx must classify as Failed");
         };
-        let ExtractionError::NotExtractable { detail } = error else {
+        let ExtractionError::NotExtractable { detail } = &error else {
             panic!(
-                "an extractor ran and failed; classifying as {error:?} claims none \
-                 was attempted"
+                "an extractor ran and failed; `UnsupportedType` claims none was \
+                 attempted: {error:?}"
             );
         };
         assert!(
             detail.contains("archive"),
-            "the (log-only) detail must name the real failure: {detail}"
+            "the logged detail must name the real failure: {detail}"
         );
     }
 
@@ -1054,13 +1061,25 @@ mod tests {
                 .expect_err("a corrupt XLSX archive must fail"),
             extract_document_text_by_filename(corrupt_zip, Some("doc.docx"))
                 .expect_err("a corrupt DOCX archive must fail"),
-            // `extract_binary_strings` and `extract_rtf` no longer appear here:
-            // since #7104 their "ran fine, found nothing" outcome is `Ok` (it
-            // classifies as `Empty`, pinned by
-            // `text_free_but_valid_documents_classify_as_empty_not_failed`),
-            // and neither has any remaining failure path — so they no longer
-            // speak a diagnostic that could leak.
         ];
+
+        // These two used to be samples in the list above. #7104 reclassified
+        // "the extractor ran fine and found nothing" from `Err` to an empty
+        // `Ok`, because a well-formed image-only file is *empty*, not broken —
+        // so `extract_binary_strings` and `extract_rtf` are now infallible and
+        // have no diagnostic string left to leak. Kept here as the positive
+        // assertion rather than deleted, so the two extractors stay covered and
+        // a regression that re-introduces the failure is still caught.
+        assert_eq!(
+            extract_document_text_by_filename(&[0x00, 0x01], Some("old.doc")),
+            Ok(Some(String::new())),
+            "a binary with no readable runs ran fine and found nothing"
+        );
+        assert_eq!(
+            extract_document_text_by_filename(b"{}", Some("note.rtf")),
+            Ok(Some(String::new())),
+            "an RTF with no text ran fine and found nothing"
+        );
 
         for failure in &failures {
             let rendered = failure.to_string();
