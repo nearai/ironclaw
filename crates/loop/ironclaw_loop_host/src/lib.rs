@@ -196,6 +196,7 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, RunId};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -1413,7 +1414,11 @@ where
         // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
 
-        if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
+        let diagnostic_model = self.prompt_diagnostic_sink.as_ref().map(|_| {
+            let requested_model = requested_model_profile_id
+                .as_ref()
+                .map(|model| model.as_str().to_string())
+                .unwrap_or_else(|| model_profile_id.as_str().to_string());
             let effective_model = self
                 .gateway
                 .diagnostic_effective_model(
@@ -1421,6 +1426,12 @@ where
                     self.run_context.resolved_model_route.as_ref(),
                 )
                 .unwrap_or_else(|| model_profile_id.as_str().to_string());
+            (requested_model, effective_model)
+        });
+        if let (Some(sink), Some((_, effective_model))) = (
+            self.prompt_diagnostic_sink.as_ref(),
+            diagnostic_model.as_ref(),
+        ) {
             let capability_ids = request
                 .capability_view
                 .as_ref()
@@ -1445,12 +1456,14 @@ where
                 requested_model: requested_model_profile_id
                     .as_ref()
                     .map(|model| model.as_str().to_string()),
-                effective_model,
+                effective_model: effective_model.clone(),
                 context_limit: self.prompt_context_budget.context_limit_tokens,
             });
         }
 
         self.emit_model_started(requested_model_profile_id).await;
+        let diagnostic_started_at = Utc::now();
+        let diagnostic_timer = Instant::now();
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
             fallback_index: request.fallback_index,
@@ -1501,10 +1514,14 @@ where
                     effective_fallback_index,
                 } = response;
                 if effective_fallback_index != Some(request.fallback_index) {
-                    Err(AgentLoopHostError::new(
+                    let error = AgentLoopHostError::new(
                         AgentLoopHostErrorKind::Internal,
                         "model gateway returned mismatched fallback route evidence",
-                    ))
+                    );
+                    Err(match usage {
+                        Some(usage) => error.with_usage(usage),
+                        None => error,
+                    })
                 } else {
                     let chunks = safe_text_deltas
                         .into_iter()
@@ -1524,6 +1541,44 @@ where
             }
             Err(error) => Err(model_gateway_error(error)),
         };
+
+        if let (Some(sink), Some((requested_model, _))) = (
+            self.prompt_diagnostic_sink.as_ref(),
+            diagnostic_model.as_ref(),
+        ) {
+            let (status, usage, failure_summary) = match &host_response_result {
+                Ok(response) => (
+                    HostManagedModelCallDiagnosticStatus::Succeeded,
+                    diagnostic_usage(response.usage),
+                    None,
+                ),
+                Err(error) => (
+                    HostManagedModelCallDiagnosticStatus::Failed,
+                    diagnostic_usage(error.usage),
+                    Some(error.safe_summary.as_str().to_string()),
+                ),
+            };
+            let effective_model = self
+                .gateway
+                .diagnostic_effective_model(
+                    &model_profile_id,
+                    self.run_context.resolved_model_route.as_ref(),
+                )
+                .unwrap_or_else(|| model_profile_id.as_str().to_string());
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture {
+                context: self.run_context.clone(),
+                iteration: request.iteration,
+                requested_model: requested_model.clone(),
+                effective_model,
+                started_at: diagnostic_started_at,
+                completed_at: Utc::now(),
+                duration_ms: u64::try_from(diagnostic_timer.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                status,
+                usage,
+                failure_summary,
+            });
+        }
 
         match host_response_result {
             Ok(response) => {
@@ -1929,6 +1984,8 @@ pub trait HostManagedModelStreamSink: Send + Sync {
 /// product events and apply their own authorization, redaction, and bounds.
 pub trait HostManagedPromptDiagnosticSink: Send + Sync {
     fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture);
+
+    fn record_model_call(&self, _capture: HostManagedModelCallDiagnosticCapture) {}
 }
 
 #[derive(Debug, Clone)]
@@ -1949,6 +2006,35 @@ pub struct HostManagedPromptDiagnosticMessage {
     pub role: HostManagedModelMessageRole,
     pub content_ref: LoopMessageRef,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostManagedModelCallDiagnosticStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedModelCallDiagnosticCapture {
+    pub context: LoopRunContext,
+    pub iteration: u32,
+    pub requested_model: String,
+    pub effective_model: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub status: HostManagedModelCallDiagnosticStatus,
+    pub usage: Option<LoopModelUsage>,
+    pub failure_summary: Option<String>,
+}
+
+fn diagnostic_usage(usage: Option<LoopModelUsage>) -> Option<LoopModelUsage> {
+    usage.filter(|usage| {
+        usage.input_tokens > 0
+            || usage.output_tokens > 0
+            || usage.cache_read_input_tokens > 0
+            || usage.cache_creation_input_tokens > 0
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

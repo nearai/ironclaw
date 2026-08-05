@@ -3010,6 +3010,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3060,6 +3061,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4043,6 +4045,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
         surface_version: None,
         model_preference,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     }
 }

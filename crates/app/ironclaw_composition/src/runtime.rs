@@ -3630,7 +3630,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
     let diagnostic_store =
-        Arc::new(ironclaw_product::inspector_store::InMemoryDiagnosticStore::default());
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),

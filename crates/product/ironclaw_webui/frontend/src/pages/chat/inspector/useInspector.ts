@@ -180,7 +180,12 @@ export function useInspector({
           lastCursorRef.current = cursor;
           setUpdates((current) => [...current, payload as DiagnosticUpdate].slice(-MAX_RETAINED_UPDATES));
           const update = payload.update as { type?: unknown } | undefined;
-          if (update?.type === "prompt_updated") {
+          if (
+            update?.type === "prompt_updated"
+            || update?.type === "model_call"
+            || update?.type === "tool_execution_updated"
+            || update?.type === "stats"
+          ) {
             setSnapshotGeneration((generation) => generation + 1);
           }
           setHealth(INSPECTOR_HEALTH.CONNECTED);

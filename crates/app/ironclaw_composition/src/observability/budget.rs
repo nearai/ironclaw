@@ -122,6 +122,7 @@ mod tests {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         };
         let _ = governor
