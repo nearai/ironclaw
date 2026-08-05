@@ -733,6 +733,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 )
                 self.assertTrue(plan["run_qa_replay"])
 
+    def test_wit_and_extension_package_asset_delegate_to_platform_and_compat(
+        self,
+    ) -> None:
+        """A WIT change and a real embedded-asset change compose correctly.
+
+        The WIT carve-out and `EMBEDDED_ASSET_OWNERS` are two independent
+        arms of the same `if package is None:` branch: one PR touching both
+        must not let either clobber the other's reason. Driven through
+        `plan_real_owners` (rather than the toy `alpha`/`beta`/`gamma`
+        workspace `self.plan` uses) because the asset now resolves to
+        `ironclaw_extension_support`, a real crate name the toy canonical set
+        does not contain.
+        """
+        asset = "crates/extensions/packages/github/manifest.toml"
+        wit = f"{planner._wasm_wit_prefix()}tool.wit"
+        plan = self.plan_real_owners([wit, asset])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_support"])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertEqual(
+            plan["reasons"],
+            [
+                "asset compiled into ironclaw_extension_support changed: "
+                f"{asset}",
+                f"Platform & Compat owns WIT compatibility: {wit}",
+            ],
+        )
+
     # An unmapped extension-package manifest or `wasm-src/**` path used to be
     # carved out here for silent "Platform & Compat, no lane" delegation.
     # Upstream's `EMBEDDED_ASSET_OWNERS` table (CHECKLIST WS10) supersedes
