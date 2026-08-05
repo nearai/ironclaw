@@ -1,4 +1,5 @@
 use ironclaw_host_api::{
+    action::{NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityDescriptor, EffectKind, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
     ids::CapabilityId,
@@ -134,6 +135,12 @@ fn valid_hosted_mcp_url(url: &str) -> bool {
 fn hosted_mcp_capability_template(
     package: &ExtensionPackage,
 ) -> Result<HostedMcpCapabilityTemplate, ExtensionError> {
+    let network_target = hosted_mcp_network_target(package).ok_or_else(|| {
+        invalid_hosted_mcp_manifest(format!(
+            "hosted MCP provider {} has no valid network target",
+            package.id
+        ))
+    })?;
     let first = package.manifest.capabilities.first().ok_or_else(|| {
         invalid_hosted_mcp_manifest(format!(
             "hosted MCP provider {} has no capability template",
@@ -159,6 +166,7 @@ fn hosted_mcp_capability_template(
             .any(|capability| capability.effects.contains(&EffectKind::ExternalWrite)),
         required_host_ports: first.required_host_ports.clone(),
         runtime_credentials: first.runtime_credentials.clone(),
+        network_target,
         resource_profile: first.resource_profile.clone(),
         origin_gate_matrix: first.origin_gate_matrix.clone(),
     })
@@ -168,6 +176,7 @@ struct HostedMcpCapabilityTemplate {
     provider_declares_external_write: bool,
     required_host_ports: Vec<ironclaw_host_api::host_port::HostPortId>,
     runtime_credentials: Vec<ironclaw_host_api::capability::RuntimeCredentialRequirement>,
+    network_target: NetworkTargetPattern,
     resource_profile: Option<ironclaw_host_api::resource::ResourceProfile>,
     origin_gate_matrix: Option<ironclaw_host_api::capability::OriginGateMatrix>,
 }
@@ -222,14 +231,24 @@ fn discovered_capability_manifest(
         prompt_doc_ref: None,
         required_host_ports: template.required_host_ports.clone(),
         runtime_credentials: template.runtime_credentials.clone(),
-        // MCP discovered tools derive egress from their credential audiences,
-        // not a manifest-declared allowlist.
-        network_targets: Vec::new(),
+        // Credential-free providers have no credential audience from which to
+        // derive egress, so every discovered tool retains the registered MCP
+        // endpoint as its explicit allowlist target.
+        network_targets: vec![template.network_target.clone()],
         // MCP discovered tools take no manifest egress cap; their egress is
         // bounded by credential audiences and the runtime resource profile.
         max_egress_bytes: None,
         resource_profile: template.resource_profile.clone(),
         origin_gate_matrix: template.origin_gate_matrix.clone(),
+    })
+}
+
+fn hosted_mcp_network_target(package: &ExtensionPackage) -> Option<NetworkTargetPattern> {
+    let endpoint = url::Url::parse(hosted_http_mcp_url(package)?).ok()?;
+    Some(NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: endpoint.host_str()?.to_ascii_lowercase(),
+        port: endpoint.port(),
     })
 }
 
@@ -356,6 +375,41 @@ runtime_credentials = [
             .expect("discovered create-pages capability");
         assert!(create_pages.effects.contains(&EffectKind::ExternalWrite));
         assert_eq!(discovered.manifest.capabilities.len(), 2);
+    }
+
+    /// Regression: credential-free hosted MCP tools still need the registered
+    /// server in their egress allowlist. Without it, authorization emits an
+    /// empty network-policy obligation and dispatch fails before any request.
+    #[test]
+    fn discovered_public_mcp_tool_keeps_endpoint_as_network_target() {
+        let mut package = notion_package();
+        package.manifest.capabilities[0].runtime_credentials.clear();
+        package.capabilities[0].runtime_credentials.clear();
+        let tools = vec![HostedMcpDiscoveredTool {
+            name: "read_wiki".to_string(),
+            description: "Read a repository wiki".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: HostedMcpDiscoveredToolAnnotations {
+                read_only_hint: true,
+                ..Default::default()
+            },
+        }];
+
+        let discovered = package_with_discovered_hosted_mcp_tools(&package, &tools)
+            .expect("build discovered public MCP package");
+        let capability = discovered
+            .capabilities
+            .first()
+            .expect("discovered capability");
+
+        assert_eq!(
+            capability.network_targets,
+            vec![ironclaw_host_api::action::NetworkTargetPattern {
+                scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
+                host_pattern: "mcp.notion.com".to_string(),
+                port: None,
+            }]
+        );
     }
 
     #[test]
