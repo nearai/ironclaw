@@ -61,6 +61,16 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "github.event.schedule == '30 5 * * 1'",
         "provider-matrix:",
     ),
+    ".github/workflows/code_style.yml": (
+        # The docs publication-boundary gate: the job, its self-test step, its
+        # check step, and the roll-up guard that fails closed BEFORE the
+        # has_code early exit (docs-only PRs have has_code=false, so a guard
+        # placed after it could never block).
+        "docs-publication-boundary:",
+        "python3 scripts/ci/test_docs_publication_boundary.py",
+        "python3 scripts/ci/docs_publication_boundary.py",
+        '"${{ needs.docs-publication-boundary.result }}" != "success"',
+    ),
     ".github/workflows/reborn-playwright.yml": (
         "python3 scripts/ci/ws12_suite_shards.py --github-output",
         'test "${{ matrix.retry }}" = "never"',
@@ -394,6 +404,33 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
             "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
+        ),
+    ),
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_docs",
+        # Not crate-keyed: docs/ is deliberately outside the has_code scope,
+        # so this trigger is the ONLY thing that runs the publication-boundary
+        # gate on a docs-only PR. A narrowed grep here skips the gate with
+        # nothing red anywhere — the same silent-skip class as the crate
+        # filters, pinned the same way.
+        anchor="docs_publication_boundary",
+        kind="regex",
+        in_scope=(
+            "docs/index.mdx",
+            "docs/.mintignore",
+            "docs/internal/plans/whatever.md",
+            # The gate's own files (review-discipline.md "Guardrails are
+            # code": checks must run when their own files change).
+            "scripts/ci/docs_publication_boundary.py",
+            "scripts/ci/test_docs_publication_boundary.py",
+            ".github/workflows/code_style.yml",
+        ),
+        out_of_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            "README.md",
+            "openwiki/index.md",
         ),
     ),
     CrateScopeFilter(

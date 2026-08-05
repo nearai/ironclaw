@@ -367,6 +367,35 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
     def test_checked_in_scope_filters_pass(self) -> None:
         self.assertEqual(validate_crate_scope_filters(self.workflows, ROOT), [])
 
+    def test_has_docs_trigger_is_pinned(self) -> None:
+        """The docs publication gate rides its own trigger: docs-only PRs have
+        has_code=false, so nothing else would run the boundary job. An
+        unpinned grep here is the same silent-skip class as the crate
+        filters."""
+        self.assertIn("has_docs", {scope.name for scope in CRATE_SCOPE_FILTERS})
+
+    def test_narrowing_the_has_docs_trigger_fails_loudly(self) -> None:
+        sabotaged = self.sabotage(CODE_STYLE_WORKFLOW, "'^(docs/|", "'^(")
+        errors = validate_crate_scope_filters(sabotaged, ROOT)
+        self.assertTrue(
+            any("has_docs" in error for error in errors),
+            errors,
+        )
+
+    def test_code_style_docs_gate_markers_are_pinned(self) -> None:
+        """The roll-up must fail closed on the boundary job BEFORE the
+        has_code early exit; losing that guard, the job, or either of its two
+        script steps silently unhooks the gate for docs-only PRs."""
+        markers = REQUIRED_MARKERS.get(CODE_STYLE_WORKFLOW, ())
+        for marker in (
+            "docs-publication-boundary:",
+            "python3 scripts/ci/test_docs_publication_boundary.py",
+            "python3 scripts/ci/docs_publication_boundary.py",
+            '"${{ needs.docs-publication-boundary.result }}" != "success"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, markers)
+
     def test_every_filter_declares_probes(self) -> None:
         """A pin with no probes asserts nothing — the defect being fixed."""
         for scope in CRATE_SCOPE_FILTERS:

@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import docs_publication_boundary as boundary
 
@@ -198,6 +201,53 @@ class DocsPublicationBoundaryTest(unittest.TestCase):
         )
         _, missing, _ = boundary.find_violations(docs)
         self.assertEqual(missing, [])
+
+    def test_mintignore_nested_path_glob_pattern_fences(self) -> None:
+        docs = make_docs_tree(
+            self.root,
+            ["index"],
+            "design/*.md\n",
+            {"index.mdx": "# Home", "design/notes.md": "# Internal"},
+        )
+        unfenced, _, _ = boundary.find_violations(docs)
+        self.assertEqual(unfenced, [])
+
+    def test_main_returns_0_on_clean_tree(self) -> None:
+        docs = make_docs_tree(
+            self.root, ["index"], "internal/\n", {"index.mdx": "# Home"}
+        )
+        with mock.patch.object(boundary, "DOCS_ROOT", docs):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = boundary.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("published or fenced", out.getvalue())
+
+    def test_main_returns_1_and_prints_every_violation_class(self) -> None:
+        docs = make_docs_tree(
+            self.root,
+            ["index", "ghost/page"],
+            "internal/\nrogue/\n",
+            {"index.mdx": "# Home", "design/notes.md": "# Internal"},
+        )
+        with mock.patch.object(boundary, "DOCS_ROOT", docs):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = boundary.main()
+        self.assertEqual(rc, 1)
+        stderr = err.getvalue()
+        self.assertIn("docs/design/notes.md", stderr)
+        self.assertIn("ghost/page", stderr)
+        self.assertIn("rogue/", stderr)
+        self.assertIn("docs/internal/", stderr)
+
+    def test_main_reports_mintignore_syntax_error(self) -> None:
+        docs = make_docs_tree(
+            self.root, ["index"], "internal/\n!internal/x.md\n", {"index.mdx": "# Home"}
+        )
+        with mock.patch.object(boundary, "DOCS_ROOT", docs):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = boundary.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("negation pattern", err.getvalue())
 
     def test_real_repo_docs_pass(self) -> None:
         unfenced, missing, unexpected = boundary.find_violations(boundary.DOCS_ROOT)
