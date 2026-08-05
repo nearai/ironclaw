@@ -139,7 +139,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_runtime_policy(standalone_runtime_policy())
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: None,
     }]);

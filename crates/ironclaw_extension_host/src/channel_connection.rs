@@ -21,14 +21,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountStatus, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, ChannelAuthAccountState,
+    ChannelConnectionService, CredentialAccountStatus, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, TenantId},
     resource::ResourceScope,
 };
-use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
 use ironclaw_extension_contracts::channel_identity::{

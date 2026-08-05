@@ -49,6 +49,7 @@ pub mod hosted_mcp;
 pub mod lifecycle_id;
 pub mod memory;
 pub mod preference_target;
+pub mod product_adapter_section;
 pub mod recipe;
 pub mod runtime;
 pub mod state;

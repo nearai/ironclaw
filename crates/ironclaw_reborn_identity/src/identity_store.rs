@@ -47,10 +47,7 @@ use ironclaw_host_api::{
 use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-use crate::{
-    ExternalIdentityKey, RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity,
-    SurfaceKind,
-};
+use crate::{RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind};
 use paths::{identity_path, user_path, user_tombstone_path, verified_email_path};
 use record::{
     StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
@@ -208,22 +205,6 @@ where
             .is_some())
     }
 
-    /// Read the user already bound to an external identity, or `None`.
-    async fn identity_user(
-        &self,
-        tenant: &str,
-        surface: SurfaceKind,
-        provider: &str,
-        instance: &str,
-        subject: &str,
-    ) -> Result<Option<UserId>, RebornIdentityError> {
-        let path = identity_path(tenant, surface, provider, instance, subject)?;
-        match self.read_record::<StoredExternalIdentity>(&path).await? {
-            Some(record) => Ok(Some(to_user_id(record.user_id)?)),
-            None => Ok(None),
-        }
-    }
-
     /// Write the identity record with `CasExpectation::Absent`; if a racing
     /// creator already wrote it, reconcile by returning the persisted user.
     async fn put_identity_reconciling(
@@ -266,10 +247,12 @@ where
         &self,
         identity: ResolveExternalIdentity,
     ) -> Result<UserId, RebornIdentityError> {
-        // Channel actors are never mint-capable: the resolver contract routes
-        // them through lookup/bind so an unbound actor fails closed instead of
-        // auto-provisioning. Only OAuth-surface identities (admission gated up
-        // front by the email-domain allowlist) may mint here.
+        // Channel actors are never mint-capable, so an unbound actor fails
+        // closed here instead of auto-provisioning an account. Their binding is
+        // owned by `ironclaw_extension_host`'s channel identity store, not by
+        // this crate (CONTRACT.md, "Two external-identity stores"). Only
+        // OAuth-surface identities — admission gated up front by the
+        // email-domain allowlist — may mint here.
         if identity.surface_kind == SurfaceKind::ChannelActor {
             return Err(RebornIdentityError::ChannelActorNotMintable);
         }
@@ -442,74 +425,6 @@ where
         // cross-process winner). Reconcile if a same-key racer beat us to it.
         self.put_identity_reconciling(&id_path, &owner_user_id, &identity, &now)
             .await
-    }
-
-    async fn lookup(
-        &self,
-        key: ExternalIdentityKey,
-    ) -> Result<Option<UserId>, RebornIdentityError> {
-        let instance = key
-            .provider_instance_id
-            .as_ref()
-            .map(|value| value.as_str())
-            .unwrap_or("");
-        self.identity_user(
-            key.tenant_id.as_str(),
-            key.surface_kind,
-            key.provider_kind.as_str(),
-            instance,
-            key.external_subject_id.as_str(),
-        )
-        .await
-    }
-
-    async fn bind(
-        &self,
-        key: ExternalIdentityKey,
-        user_id: &UserId,
-    ) -> Result<(), RebornIdentityError> {
-        let instance = key
-            .provider_instance_id
-            .as_ref()
-            .map(|value| value.as_str())
-            .unwrap_or("");
-        let path = identity_path(
-            key.tenant_id.as_str(),
-            key.surface_kind,
-            key.provider_kind.as_str(),
-            instance,
-            key.external_subject_id.as_str(),
-        )?;
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        let lock = self.lock_for(format!("identity:{}", path.as_str()));
-        let _guard = lock.lock().await;
-        // Re-binding the same key re-points it at `user_id` (upsert). Channel
-        // actors carry no email, so the record stores none.
-        let record = StoredExternalIdentity {
-            user_id: user_id.as_str().to_string(),
-            email: None,
-            email_verified: false,
-            created_at: now,
-        };
-        let cas = match self
-            .filesystem
-            .get(&self.scope, &path)
-            .await
-            .map_err(backend)?
-        {
-            Some(versioned) => CasExpectation::Version(versioned.version),
-            None => CasExpectation::Absent,
-        };
-        match self.write_record(&path, &record, cas).await {
-            Ok(()) => Ok(()),
-            Err(FilesystemError::VersionMismatch { .. }) => {
-                // Lost a concurrent write; overwrite to honor re-point semantics.
-                self.write_record(&path, &record, CasExpectation::Any)
-                    .await
-                    .map_err(backend)
-            }
-            Err(error) => Err(backend(error)),
-        }
     }
 
     async fn adopt_migrated_identity(

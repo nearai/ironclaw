@@ -1,5 +1,18 @@
 # ironclaw_mcp guardrails
 
+- **Where new code goes is a charter question, answered in `src/lib.rs`.** The
+  crate is seven private modules — `contract`, `runtime`, `client`, `jsonrpc`,
+  `discovery`, `egress`, `diagnostics` — and the module-charter table in the
+  `lib.rs` doc comment says what each owns and what must never drift into it
+  (PROPOSAL §6.6.3). Read it before adding a file or a function. Two rules it
+  carries are load-bearing here: **no module builds a failure string of its
+  own** (every reason comes from `diagnostics`' cause enums, so the
+  model-visible token set stays enumerable in one file), and **`discovery` owns
+  the catalog rules while `client` owns the paging loop** (both read the same
+  constants, so the two enforcement points cannot drift).
+- The submodules are private and every public item is re-exported from
+  `lib.rs`, so `ironclaw_mcp::X` stays the single import path for consumers and
+  a module rename is never a breaking change.
 - Own the Reborn MCP runtime lane: MCP execution request/result types, client abstraction, host-mediated HTTP adapter, JSON-RPC exchange logic, and MCP-specific resource accounting.
 - HTTP/SSE transports must go through host-mediated runtime egress. Do not add direct outbound networking, ad-hoc HTTP clients, DNS checks, credential injection, or network policy evaluation here.
 - Treat plugin/runtime input as untrusted. Inputs may shape JSON-RPC arguments only; network policy, credentials, timeouts, and body limits must come from host-owned planning/handoff data.

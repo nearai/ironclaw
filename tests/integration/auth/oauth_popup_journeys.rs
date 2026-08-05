@@ -67,14 +67,14 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
-    };
-    use ironclaw_reborn_composition::{
-        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-        test_support::{
-            build_oauth_product_auth_with_identity_for_test,
-            handle_oauth_callback_with_channel_identity_binding_for_test,
+        user_identity::{
+            RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+            RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         },
+    };
+    use ironclaw_reborn_composition::test_support::{
+        build_oauth_product_auth_with_identity_for_test,
+        handle_oauth_callback_with_channel_identity_binding_for_test,
     };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use secrecy::SecretString;

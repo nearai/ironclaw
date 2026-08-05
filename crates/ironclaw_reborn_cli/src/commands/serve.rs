@@ -70,7 +70,7 @@ struct SignedSessionTokenMinter {
 }
 
 #[async_trait::async_trait]
-impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
+impl ironclaw_product_contracts::admin_users::AdminApiTokenMinter for SignedSessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         // `false`: this session is for the admin-created `user_id`, not the
         // operator. Stamping `true` would let any admin-created user (even

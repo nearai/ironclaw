@@ -1121,8 +1121,16 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let scripts_manifest =
         std::fs::read_to_string(crate_path(&root, "crates/ironclaw_sandbox/Cargo.toml"))
             .expect("sandbox lane Cargo.toml must be readable");
-    let mcp = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/src/lib.rs"))
-        .expect("MCP runtime lib.rs must be readable");
+    // WS6 module charters: the MCP lane is no longer one file. Scanning the
+    // whole crate source tree keeps the rule non-vacuous across the §6.6.3
+    // split (and the family `git mv` still to come) — reading `lib.rs` alone
+    // would now see only the re-export list and go silently green.
+    let mcp = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_mcp/src"));
+    assert!(
+        mcp.contains("pub struct McpRuntime<C>"),
+        "MCP lane scan is vacuous: it found no MCP runtime source under \
+         crates/ironclaw_mcp/src (did the lane move again?)"
+    );
     let mcp_manifest = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/Cargo.toml"))
         .expect("MCP runtime Cargo.toml must be readable");
 
@@ -1391,7 +1399,10 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
         "crates/ironclaw_loop_host/src/synthetic_capability.rs",
-        "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
+        // Trace capture rebuilds a provider-shaped tool-call transcript from
+        // stored replay metadata for the Trace Commons envelope; it moved out
+        // of composition into the turn-runner observer seam (WS6, §6.10.1).
+        "crates/ironclaw_runner/src/trace_capture.rs",
     ]
     .into_iter()
     .map(|entry| resolve_crate_relative(&root, entry))
@@ -3137,8 +3148,16 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
+            // `ironclaw_extensions` was on this crate's *guidance* forbidden
+            // list (`CLAUDE.md`) but never on the enforced one, and the crate
+            // held the dependency the whole time — the guidance-vs-code
+            // contradiction PROPOSAL §6.9.1 names. Resolved by CHECKLIST WS5's
+            // `product` narrows row: `adapter_registry` (product's only
+            // consumer of the registry) moved to its chartered owners, the
+            // manifest entry is gone, and the rule is enforced from here on.
             crate_name: "ironclaw_product",
             forbidden: vec![
+                "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",
@@ -3217,9 +3236,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // OpenAiCompatRefStore lives behind the
-                // `storage`/`libsql`/`postgres` features and persists opaque refs
-                // through the universal RootFilesystem port.
+                // OpenAiCompatRefStore persists opaque refs through the universal
+                // RootFilesystem port. It is unconditional — this crate declares no
+                // cargo features, and WS5 collapsed the LibSql/Postgres ref-store
+                // newtypes onto that one backend-neutral form.
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -3407,6 +3427,49 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // response/error DTO primitives used by product-auth HTTP routes;
             // secret storage and durable auth ownership stay behind
             // `ironclaw_auth`, not `ironclaw_secrets`.
+            //
+            // ✎ **Re-derived 2026-08-04 (WS5 `webui` row) against PROPOSAL
+            // §6.9.4.** The row asked for the derivation nobody had done. Result:
+            // **zero removals, nine additions**, all no-op ratchets (webui's ten
+            // normal workspace deps are `host_api`, `product_contracts`,
+            // `extension_contracts`, `extension_host`, `host_ingress`, `auth`,
+            // `attachments`, `common`, `product`, `reborn_openai_compat` — none of
+            // the nine appears in any dependency kind).
+            //
+            // What the derivation is *from*, since §6.9.4 carries no forbidden
+            // list of its own: §8.2's `product/` row ("**app ✗**", "product still
+            // ✗ host_runtime/dispatch/lanes"), §8.2's retained named rules
+            // ("concrete extension crates link only from the binary"), and
+            // `families/product.md`'s "never touches a lane crate / the extension
+            // registry or hosting crates". Additions, in that order:
+            // `ironclaw_reborn_composition` (§8.2 app ✗ — and the direction is
+            // backwards: this crate *receives* handles from composition; it is on
+            // 15 other rules and on every other products-layer rule but
+            // `ironclaw_product`'s), `ironclaw_wasm_limiter` (§8.2 ✗ lanes — the
+            // **only one of the nine no other gate covers**; zero rules named it
+            // workspace-wide, and the existing wasm_limiter gate checks its
+            // outbound deps, not its inbound edges), `ironclaw_slack_extension` +
+            // `ironclaw_telegram_extension` (concrete extension crates),
+            // `ironclaw_event_projections` + `ironclaw_event_streams` +
+            // `ironclaw_extension_support` + `ironclaw_first_party_extension_ports`
+            // + `ironclaw_storage` (parity with `ironclaw_reborn_openai_compat`,
+            // the sibling transport, whose list these five closed the gap to).
+            //
+            // Explicitly NOT added, because the charter sanctions them:
+            // `ironclaw_product` (§12.11 D-B, permanent edge — not a pending
+            // flip), `ironclaw_extension_host` (§6.9.4's 2026-08-02 pairing
+            // amendment; the pairing *service* core stays in the host by §6.8.2),
+            // `ironclaw_reborn_openai_compat`, `ironclaw_attachments`,
+            // `ironclaw_host_api`, `ironclaw_host_ingress`,
+            // `ironclaw_product_contracts`, `ironclaw_extension_contracts`,
+            // `ironclaw_auth`, `ironclaw_common`. Memory providers are covered by
+            // `only_the_sanctioned_residue_names_a_memory_provider`, deliberately.
+            //
+            // **Keep this rule normal-deps-only.** Four entries on the list below
+            // (`ironclaw_secrets`, `ironclaw_loop_host`, `ironclaw_threads`,
+            // `ironclaw_turns`) are live *dev*-dependencies of `ironclaw_webui`;
+            // tightening this rule to all dependency kinds would go red on four
+            // counts on the day it landed.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -3414,9 +3477,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
                 "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
                 "ironclaw_events",
+                "ironclaw_extension_support",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -3428,6 +3495,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_runner",
                 "ironclaw",
+                "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -3437,11 +3505,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
+                "ironclaw_slack_extension",
+                "ironclaw_storage",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
+                "ironclaw_wasm_limiter",
             ],
         },
         BoundaryRule {
@@ -4408,15 +4480,75 @@ struct LayerMatrixException {
 /// port inversion (#7159) the `conversations → turns` row — and this batch
 /// merge is where the union lands: recomputed as `len()` of the merged list
 /// per the CHECKLIST §11.2.2 union rule. One entry survives.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 1;
+///
+/// **1 → 0 (WS3 closeout, 2026-08-04 — `ironclaw_extension_support` re-layered
+/// `loops` → `runtimes`). The list is empty: PROPOSAL §11.2.2's end state and
+/// CHECKLIST WS12's gate condition, reached.** The last entry was
+/// `host_runtime → extension_support`, and it did not fall to the shed its
+/// `removes_in` named. Two measurements, both on this tree, decided that:
+///
+/// 1. **The blocker the CHECKLIST row recorded was wrong.** The row said the
+///    edge "clears only when the last executor family lands". It is held by
+///    exactly **two** `use` sites — `first_party_tools/mod.rs`
+///    (`extension_support::coding`) and `first_party_tools/skill_management.rs`
+///    (`extension_support::skills`) — and both belong to the families whose
+///    executors have **already** moved — `coding` before this row was written,
+///    `skills` with the row's family 1. The five families still awaiting a move
+///    keep their executors in `host_runtime` and hold no edge at all, so moving
+///    them could never have cleared this. (`latency.rs`'s third grep hit is a
+///    doc comment.)
+/// 2. **The seam makes the edge structural, not transitional.** WS3's own
+///    executor/adapter seam — PROPOSAL §8.2's 2026-08-03 note and
+///    `families/extensions.md` — says a tool arrives in `extension_support` as
+///    an *executor* and leaves its `FirstPartyCapabilityHandler`,
+///    `CapabilityManifest` and registry wiring on the host side, because that
+///    crate's `BoundaryRule` forbids naming `ironclaw_host_runtime`. That makes
+///    the kernel a **designed** consumer. Shedding the two adapters upward
+///    anyway costs ~8 kernel private→`pub` widenings (`mod post_edit_check` is
+///    private in `lib.rs`; `first_party_capability_manifest`,
+///    `resource_profile`, `first_party_origin_gate_matrix` are module-private;
+///    `bounded_input_size`, `bounded_output_bytes`,
+///    `FIRST_PARTY_MAX_OUTPUT_BYTES` are `pub(super)`) and relocates the
+///    registration of **builtin** capabilities that 145 references across 31
+///    files reach through `builtin_first_party_*` — a semantic change,
+///    not a move. It is the same refutation §6.5.9's binder half already
+///    carries: paying a kernel API widening to relocate an adapter whose
+///    encapsulation already holds.
+///
+/// A crate the kernel is designed to call cannot be declared two rungs above
+/// it, so the layer is what was wrong. `runtimes` is the **least** demotion
+/// that legalizes a kernel consumer, and it is where this crate's own §8.2 row
+/// already places it in posture — "mediated services arrive by injection",
+/// kernel ✗, invoked only through capability dispatch, which is the wasm / mcp
+/// / sandbox cell verbatim. Checked both directions before flipping it: all
+/// seven normal dependencies (`auth`, `extractors`, `filesystem`,
+/// `observability`, `safety`, `skills` — `substrates`; `host_api` —
+/// `contracts`) and every domain the crate's charter reserves (`memory`,
+/// `traces`, `triggers` — all `substrates`) fit the narrower row, and all five
+/// consumers (`host_runtime` kernel; `extension_host`, `extension_manager`
+/// products; `reborn_composition`, `reborn_cli` app) are `kernel` or above, so
+/// the move forbids no existing edge. **Zero same-layer edges are created** —
+/// no `runtimes` crate is a dependency or a consumer — where `substrates`
+/// would have hidden six of this crate's seven dependencies from the matrix.
+/// The widening it *does* buy is frozen by the `DowngradePin` in
+/// `reborn_same_layer_edge_inventory.rs`, which is the pin #7149 exists for.
+///
+/// Mechanism, not novelty: this is the fourth time the register has moved by a
+/// re-layer and the third `loops → *` demotion in this family — WS2's
+/// `ironclaw_extensions` (4 entries), WS3's `processes` (1), WS4's `skills`
+/// (0). PLAN's Wave 2 note states the rule ("a re-layer *downward* is the
+/// cheap kind … expect the exception register to move"). What is **not**
+/// closed by it: CHECKLIST WS3's `first_party_tools` row, which is executor
+/// consolidation and stays open at five of six families. Only the exception is
+/// discharged.
+///
+/// **The ratchet is now an equality in effect.** With the list empty, any new
+/// entry trips `reborn_layer_matrix_exceptions_ratchet_down_only` immediately;
+/// re-arming it requires an owner-approved baseline raise in the same PR, per
+/// that test's own failure message.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 0;
 
-const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[LayerMatrixException {
-    crate_name: "ironclaw_host_runtime",
-    dependency_name: "ironclaw_extension_support",
-    introduced: "2026-07-09",
-    removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
-    reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-}];
+const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[];
 
 /// The tracking metadata every exception must carry to be removable: the edge
 /// it names, when it was taken on, the milestone that deletes it, and why it
@@ -4457,8 +4589,21 @@ fn exception_tracking_defect(exception: &LayerMatrixException) -> Option<&'stati
 /// the two together mean the list can only move toward empty.
 #[test]
 fn reborn_layer_matrix_exceptions_ratchet_down_only() {
-    assert!(
-        LAYER_MATRIX_EXCEPTIONS.len() <= WS0_LAYER_MATRIX_EXCEPTION_BASELINE,
+    // Expressed as "how far above the baseline are we", not as
+    // `len() <= BASELINE`. The two are the same assertion for every baseline,
+    // but the comparison form becomes `usize <= 0` once the baseline reaches
+    // its target of zero, which is a tautology to `-D warnings`
+    // (`clippy::absurd_extreme_comparisons`) and would have had to be silenced
+    // with an `allow` on the one gate whose whole job is to be loud. The
+    // ceiling semantics are unchanged and deliberately kept: a list *below* the
+    // baseline is fine (the baseline is then lowered in the same PR, per the
+    // constant's own doc); only growth past it is red.
+    let above_baseline = LAYER_MATRIX_EXCEPTIONS
+        .len()
+        .saturating_sub(WS0_LAYER_MATRIX_EXCEPTION_BASELINE);
+    assert_eq!(
+        above_baseline,
+        0,
         "layer-matrix exceptions grew to {} (WS0 baseline {}): the restructure's exception \
          list is shrink-only on its way to empty (PROPOSAL §11.2.2). Remove the edge instead \
          of allowlisting it — or, if the owner has approved a genuinely new exception, raise \

@@ -32,10 +32,18 @@ use serde_json::Value;
 /// production build graphs.
 const DRIVER_LINKED_CRATES: &[&str] = &[
     // Substrates that execute SQL directly.
+    //
+    // Two of these are the §11.2.6 "ADR-or-converge" exceptions, decided
+    // 2026-08-04 as KEEP with a written ADR each — `ironclaw_hooks` and
+    // `ironclaw_triggers`, tagged below. The ADRs state why convergence onto
+    // the `RootFilesystem` fabric is not available and what would reopen the
+    // decision; read the one that argues for an entry before removing it.
     "ironclaw_auth",
     "ironclaw_filesystem",
+    // ADR 0004 (`docs/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
     "ironclaw_hooks",
     "ironclaw_host_runtime",
+    // ADR 0003 (`docs/adr/0003-triggers-keeps-hand-written-sql.md`).
     "ironclaw_triggers",
     // Owns the TLS/driver cone for durable event/audit logs (§6.3.2).
     "ironclaw_reborn_event_store",

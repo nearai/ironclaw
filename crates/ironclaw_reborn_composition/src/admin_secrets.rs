@@ -1,4 +1,5 @@
-//! Admin-scoped per-user secret provisioning.
+//! Admin-scoped per-user secret provisioning — the *deployment* half of
+//! `ironclaw_product::AdminSecretProvisioner`.
 //!
 //! The `ironclaw_secrets` store isolates tenant/user by the caller's
 //! `MountView`, not the `ResourceScope` argument (`secret_owner_alias` only
@@ -22,36 +23,10 @@ use ironclaw_host_api::{
     ids::{InvocationId, SecretHandle, TenantId, UserId},
     resource::ResourceScope,
 };
+use ironclaw_product::AdminSecretProvisioner;
 use ironclaw_secrets::{
     SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretStorePort, SecretsCrypto,
 };
-
-/// Admin provisioning of per-user secrets for an arbitrary target `(tenant,
-/// user)`. Implemented over the filesystem secret substrate; a `dyn` port so
-/// the runtime can retain it without carrying the backend generic.
-#[async_trait]
-pub(crate) trait AdminSecretProvisioner: Send + Sync {
-    async fn list(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError>;
-
-    async fn put(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-        handle: SecretHandle,
-        material: SecretMaterial,
-    ) -> Result<SecretMetadata, SecretStoreError>;
-
-    async fn delete(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError>;
-}
 
 /// Filesystem-backed admin secret provisioner: holds the shared raw root + the
 /// shared crypto and mints a per-target-user store per call.

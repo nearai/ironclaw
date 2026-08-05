@@ -61,6 +61,18 @@
 //! promotions (`hooks` `substrates` → `loops`, `runner` `kernel` → `loops`)
 //! which need no pin because moving up narrows reach.
 //!
+//! ✎ **That census is a snapshot of when this gate was authored and is no
+//! longer the live count — read [`DOWNGRADE_PINS`], not this paragraph.** Three
+//! more demotions have landed since: `ironclaw_host_ingress` `products` →
+//! `substrates` (#7143, the move that motivated the rule), `ironclaw_skills`
+//! `loops` → `substrates` (#7141 / WS4), and `ironclaw_extension_support`
+//! `loops` → `runtimes` (WS3 closeout). The last of those is worth naming here
+//! because it is the first demotion taken *for* the exception register rather
+//! than alongside it: it deleted `LAYER_MATRIX_EXCEPTIONS`' final entry, so the
+//! consumer-side pin is now the only structural check standing over that edge.
+//! Kept as four rows rather than folded into a count, since a pin's whole value
+//! is naming who may reach the demoted crate.
+//!
 //! ⚠ **Every test function here must keep its `reborn_` prefix.** The file name
 //! is not what selects it: `code_style.yml` runs
 //! `cargo test -p ironclaw_architecture reborn`, and that argument is a **test
@@ -177,6 +189,20 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         layer: "kernel",
         owner: "kernel/",
         decided_in: "WS3",
+    },
+    SameLayerEdge {
+        crate_name: "ironclaw_approvals",
+        dependency_name: "ironclaw_runtime_policy",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS6 (the profile approval gate evicted from the composition root consumes `MinimalApprovalBypass`, the classification `runtime_policy` owns per §4.4)",
+    },
+    SameLayerEdge {
+        crate_name: "ironclaw_approvals",
+        dependency_name: "ironclaw_trust",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS6 (same eviction: the gate implements `authorization`'s `TrustAwareCapabilityDispatchAuthorizer`, whose signature names `ironclaw_trust::TrustDecision`)",
     },
     SameLayerEdge {
         crate_name: "ironclaw_capabilities",
@@ -656,10 +682,26 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// so the improvement is banked as a floor rather than left as headroom.
 /// Recounted on the merged tree, not derived by subtracting three.
 ///
+/// ✎ **72 → 74 (WS6, the composition policy eviction).** Two edges are *added*
+/// — the only growth this number has taken — and both are the same kernel crate
+/// paying for a module that left the app layer: `approvals → trust` and
+/// `approvals → runtime_policy`, both arriving with the profile approval gate
+/// (`profile_gate.rs` / `profile_gate_policy.rs`) evicted from
+/// `ironclaw_reborn_composition`. Neither is avoidable at the destination: the
+/// gate *implements* `ironclaw_authorization`'s
+/// `TrustAwareCapabilityDispatchAuthorizer`, whose method signature names
+/// `ironclaw_trust::TrustDecision`, and it consumes `MinimalApprovalBypass`,
+/// which §4.4 pins to `ironclaw_runtime_policy` as "the one place that
+/// classification lives". The trade is deliberate and stated rather than
+/// hidden: 2,178 lines of authorization semantics stop living in the assembly
+/// root, at the cost of two edges inside a kernel family that already carries
+/// twelve (`capabilities` and `host_runtime` hold six each). Growth here is a
+/// reviewed decision, not drift — see PROPOSAL §6.5.2/§6.10.1.
+///
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 72;
+const SAME_LAYER_EDGE_BASELINE: usize = 74;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67
@@ -785,16 +827,49 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
         ],
     },
     DowngradePin {
+        crate_name: "ironclaw_extension_support",
+        from_layer: "loops",
+        to_layer: "runtimes",
+        demoted_in: "WS3 closeout (the move that emptied LAYER_MATRIX_EXCEPTIONS)",
+        // The demotion that deleted the register's last entry,
+        // `host_runtime -> extension_support`. WS3's executor/adapter seam makes
+        // the kernel a *designed* consumer of this crate — a tool moves here as
+        // an executor and leaves its handler, manifest and registry wiring in
+        // `ironclaw_host_runtime` — so a `loops` declaration contradicted the
+        // design rather than describing it. `runtimes` is the least demotion
+        // that legalizes a kernel consumer and creates no same-layer edge
+        // (`substrates` would have hidden six of the crate's seven
+        // dependencies from the matrix). Frozen at the five consumers that
+        // existed at the move; a sixth is a reviewed decision, and that review
+        // is the whole point of the pin, because the widening here reaches down
+        // two rungs rather than one.
+        // (`ironclaw` is the binary crate at `crates/ironclaw_reborn_cli/` —
+        // the pin is keyed on package names, which is what `cargo metadata`
+        // reports and what makes a row able to fire at all.)
+        permitted_consumers: &[
+            "ironclaw",
+            "ironclaw_extension_host",
+            "ironclaw_extension_manager",
+            "ironclaw_host_runtime",
+            "ironclaw_reborn_composition",
+        ],
+    },
+    DowngradePin {
         crate_name: "ironclaw_extensions",
         from_layer: "loops",
         to_layer: "substrates",
         demoted_in: "#7094 (WS2 — Extensions family)",
+        // `ironclaw_product` dropped off with CHECKLIST WS5's `product` narrows
+        // row: `adapter_registry` was its only consumer of the registry, and it
+        // moved to `ironclaw_extensions::host_api::product_adapter` (projection)
+        // and `ironclaw_extension_contracts::product_adapter_section` (schema).
+        // The edge is now forbidden outright by the crate's `BoundaryRule` in
+        // `reborn_dependency_boundaries.rs`, so it cannot come back here.
         permitted_consumers: &[
             "ironclaw_capabilities",
             "ironclaw_extension_host",
             "ironclaw_extension_manager",
             "ironclaw_host_runtime",
-            "ironclaw_product",
             "ironclaw_reborn_composition",
         ],
     },

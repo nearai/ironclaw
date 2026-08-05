@@ -54,11 +54,11 @@ pub mod display_preview;
 pub mod live_progress;
 pub mod runtime_replay;
 pub mod turn_events;
-use crate::AuthChallengeProvider;
 use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
 };
+use ironclaw_auth::product_prompt::AuthChallengeProvider;
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };

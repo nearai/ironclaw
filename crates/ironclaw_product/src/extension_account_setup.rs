@@ -8,12 +8,14 @@
 use std::collections::{BTreeMap, btree_map::Entry as MapEntry};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use async_trait::async_trait;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, UserId},
 };
 use ironclaw_product_contracts::account_setup::{
     AccountConnectionStatusSource, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupReader,
 };
 
 #[derive(Debug)]
@@ -66,20 +68,17 @@ impl ExtensionAccountSetupRegistry {
             .get(extension_id)
             .is_some_and(|entry| entry.status_source.set(source).is_ok())
     }
+}
 
-    pub fn descriptor(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Option<ExtensionAccountSetupDescriptor> {
+#[async_trait]
+impl ExtensionAccountSetupReader for ExtensionAccountSetupRegistry {
+    fn descriptor(&self, extension_id: &ExtensionId) -> Option<ExtensionAccountSetupDescriptor> {
         read_entries(&self.entries)
             .get(extension_id)
             .map(|entry| entry.descriptor.clone())
     }
 
-    /// Returns the requirement only when the declared account is disconnected.
-    /// Undeclared extensions have no account gate; declared extensions whose
-    /// host or status backend is unavailable fail closed.
-    pub async fn missing_requirement(
+    async fn missing_requirement(
         &self,
         extension_id: &ExtensionId,
         user_id: &UserId,

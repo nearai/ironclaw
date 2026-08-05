@@ -19,12 +19,12 @@ pub fn trace_capture_turn_event_sink_for_test(
     actor_user_id: &str,
 ) -> (std::sync::Arc<dyn ironclaw_turns::TurnEventSink>, String) {
     let scope = ironclaw_reborn_traces::contribution::trace_scope_key(tenant_id, actor_user_id);
-    let observed_scopes: crate::observability::trace_capture::ObservedTraceScopes =
+    let observed_scopes: ironclaw_reborn_traces::capture::ObservedTraceScopes =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
             scope.clone(),
         ])));
     let sink = std::sync::Arc::new(
-        crate::observability::trace_capture::TraceCaptureTurnEventSink::new(
+        ironclaw_runner::trace_capture::TraceCaptureTurnEventSink::new(
             thread_service,
             observed_scopes,
         ),

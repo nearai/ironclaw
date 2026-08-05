@@ -9,15 +9,16 @@ use ironclaw_conversations::{
     AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
     ConversationBindingService, ConversationInboundClassification, ConversationRouteKind,
     ConversationTurnSubmission, ConversationTurnSubmitter, ExpectedExternalActorOwner,
-    ExternalActorBindingEpoch, ExternalConversationIdentity, ExternalEventId,
-    InMemoryConversationServices, InboundConversationService, InboundMessageContentRef,
-    InboundTurnError, InboundTurnRequest, InboundTurnService, LinkConversationRequest,
-    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
-    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, ThreadAccessDecision,
-    TurnSubmissionError, TurnSubmissionErrorCategory, TurnSubmissionRetry,
-    ValidateReplyTargetRequest,
+    ExternalConversationIdentity, ExternalEventId, InMemoryConversationServices,
+    InboundConversationService, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
+    InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetAccess, ThreadAccessDecision, TurnSubmissionError,
+    TurnSubmissionErrorCategory, TurnSubmissionRetry, ValidateReplyTargetRequest,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,

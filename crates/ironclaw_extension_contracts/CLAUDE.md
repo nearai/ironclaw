@@ -13,9 +13,10 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is seventeen modules (WS1.4 corrected the stale "thirteen" carried
-over from WS1.3 to sixteen; WS1.5's `verified_inbound` makes seventeen — the
-number is checked against `src/lib.rs`, not incremented by hand):
+Today that is eighteen modules (WS1.4 corrected the stale "thirteen" carried
+over from WS1.3 to sixteen; WS1.5's `verified_inbound` made seventeen; WS5's
+`product_adapter_section` makes eighteen — the number is checked against
+`src/lib.rs`, not incremented by hand):
 
 | Module | Owns |
 | --- | --- |
@@ -30,6 +31,7 @@ number is checked against `src/lib.rs`, not incremented by hand):
 | `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
+| `product_adapter_section` | The `[product_adapter.*]` manifest surface: `PRODUCT_ADAPTER_HOST_API_ID`/`PRODUCT_ADAPTER_SECTION_PREFIX`, `ProductAdapterSectionDeclaration` (the `Deserialize` wire shape), `ProductAdapterSection` (resolved + validated), `HostIngressRoute`, `ProductAdapterSectionError`. Arrived with WS5 from `ironclaw_product::adapter_registry`. Same split as `channel`: the schema and its cross-field invariants are here; the *manifest parsing* — the `HostApiManifestContract`, the raw-TOML inline-secret guard, and pairing a resolved section with its `ManifestSectionPath` — is `ironclaw_extensions::host_api::product_adapter` (§6.8.1), because this crate parses no manifests. |
 | `recipe` | The auth recipe schema: `VendorAuthRecipe`, `OAuth2CodeRecipe`, `PkceMode`, ingress-verification recipes, and friends. |
 | `state` | The installation state machine: `InstallationState`, `LifecyclePublicState`. |
 | `surface` | `CapabilitySurfaceKind` — the manifest surface kinds an extension may declare. |

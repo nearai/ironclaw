@@ -1161,10 +1161,23 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
+    // The inline-secret guard's vendor token prefixes. Repointed (not added)
+    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
+    // `ironclaw_extensions::host_api::product_adapter`; the guard stayed with
+    // the raw-TOML parse stage, so the entries moved file and nothing else.
+    // The schema half that went to `ironclaw_extension_contracts` carries no
+    // vendor name — its fixtures were rewritten generically rather than carved,
+    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
     (
-        "crates/ironclaw_product/src/adapter_registry.rs",
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "github",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
         "telegram",
     ),
     (
@@ -1201,7 +1214,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // forbidden outright, so the example was rewritten generically rather than
     // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
-    ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
     // the project-metadata doc example). Same terms, same debt, new file.
@@ -1407,11 +1419,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
+        "crates/ironclaw_product/src/blocked_auth_resume.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
+        "crates/ironclaw_product/src/blocked_auth_resume.rs",
         "slack",
     ),
     (
@@ -1654,7 +1666,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// above, by the ratchet's own failure message with the constant set to 0:
 /// the batch union is **123** — #7161's conversions repoint entries in place
 /// and add none.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 123;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

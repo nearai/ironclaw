@@ -11,10 +11,13 @@
 `ironclaw_extensions` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
 It also owns package manifests and caller-membership installation records.
 Caller membership is the only installation-lifecycle authority; runtime
-publication and administrator configuration are separate host concerns. Domain
-crates such as `ironclaw_product_adapter_registry` project their own host API
-sections from that generic state rather than owning a second installation
-store.
+publication and administrator configuration are separate host concerns. Host
+API sections are projected from that generic state rather than by a second
+installation store: the built-in contracts live in
+`ironclaw_extensions::host_api` (`capability_provider`, `product_adapter`), and
+each one's declared section *schema* is the neutral vocabulary crate's
+(`ironclaw_extension_contracts::product_adapter_section` for
+`[product_adapter.*]`).
 
 It answers:
 
@@ -489,10 +492,10 @@ Rules:
 
 Tests: `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
 (capability surface projection block) and
-`crates/ironclaw_product_adapter_registry/tests/manifest_ingestion.rs`
+`crates/ironclaw_extensions/tests/product_adapter_manifest_ingestion.rs`
 (channel-surface projection through the real product-adapter contract). Run:
 `cargo test -p ironclaw_extensions --test manifest_v2_contract` and
-`cargo test -p ironclaw_product_adapter_registry --test manifest_ingestion`.
+`cargo test -p ironclaw_extensions --test product_adapter_manifest_ingestion`.
 
 ---
 

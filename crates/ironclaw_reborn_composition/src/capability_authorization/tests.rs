@@ -465,7 +465,7 @@ async fn trace_commons_authorize_decision(
     let authorizer = capability_authorizer(
         None,
         policy,
-        Arc::new(crate::profile_approval_authorization::EmptyApprovalSettingsProvider),
+        Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
     );
     authorizer
         .authorize_dispatch_with_trust(
@@ -559,7 +559,7 @@ async fn native_memory_manifest_authorize_decision(
     let authorizer = capability_authorizer(
         None,
         policy,
-        Arc::new(crate::profile_approval_authorization::EmptyApprovalSettingsProvider),
+        Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
     );
     authorizer
         .authorize_dispatch_with_trust(

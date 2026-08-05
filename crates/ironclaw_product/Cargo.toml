@@ -38,7 +38,6 @@ ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
 ironclaw_event_streams = { path = "../ironclaw_event_streams", version = "0.1.0" }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
-ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
@@ -46,8 +45,15 @@ ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", versi
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
+# The blocked-auth resume fan-out (WS6 eviction from the composition root)
+# reads durable process-gate records to find the caller's other parked runs.
+ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
 ironclaw_projects = { path = "../ironclaw_projects", version = "0.1.0" }
+# The admin user-directory adapter (WS6 eviction from the composition root)
+# reads the identity directory and provisions per-user secrets through it.
+ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
@@ -65,7 +71,6 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
-ironclaw_processes = { path = "../ironclaw_processes" }
 # Enables the shared in-memory turn-state store double for tests only.
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 # Enables the in-memory-backed outbound-state store constructor for tests only.

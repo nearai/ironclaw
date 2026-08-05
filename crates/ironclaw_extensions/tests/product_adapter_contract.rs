@@ -1,21 +1,21 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use ironclaw_extensions::host_api::product_adapter::{
+    parse_product_adapter_manifest_record, product_adapter_sections,
+    register_product_adapter_host_api_contract,
+};
 use ironclaw_extensions::{
     ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
-    InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{ExtensionId, SecretHandle},
     path::VirtualPath,
-};
-use ironclaw_product::adapter_registry::{
-    ManifestHash, parse_product_adapter_manifest_record, product_adapter_sections,
-    register_product_adapter_host_api_contract,
 };
 
 fn extension_id() -> ExtensionId {
@@ -132,7 +132,10 @@ async fn installed_extension_surfaces_product_adapter_runtime_entries() {
         .expect("manifest for installation");
     let sections = product_adapter_sections(&manifest).unwrap();
     assert_eq!(sections.len(), 1);
-    assert_eq!(sections[0].adapter_id().as_str(), "telegram-v2/inbound");
+    assert_eq!(
+        sections[0].resolved().adapter_id().as_str(),
+        "telegram-v2/inbound"
+    );
 }
 
 #[tokio::test]
@@ -363,7 +366,7 @@ handle = "outbound_token"
     assert_eq!(sections.len(), 2, "both PA sections should project");
     let ids: Vec<_> = sections
         .iter()
-        .map(|section| section.adapter_id().as_str().to_owned())
+        .map(|section| section.resolved().adapter_id().as_str().to_owned())
         .collect();
     assert!(ids.contains(&"multi-adapter/inbound".to_owned()));
     assert!(ids.contains(&"multi-adapter/outbound".to_owned()));

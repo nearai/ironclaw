@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
+use crate::{ToolPermissionOverride, permission_mode_allows_persistent_approval};
 use async_trait::async_trait;
-use ironclaw_approvals::{ToolPermissionOverride, permission_mode_allows_persistent_approval};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
     Timestamp,
@@ -36,7 +36,7 @@ use ironclaw_trust::TrustDecision;
 /// Class-B modulation (tool overrides, leases, auto-approve, always-allow) stays
 /// entirely between the two tiers, exactly as for the effect gates it mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OriginGateRequirement {
+pub enum OriginGateRequirement {
     /// The origin may not invoke this capability at all — a hard deny
     /// (fail-closed), not suppressible by any class-B grant/lease or by the
     /// Minimal (yolo) approval bypass.
@@ -60,7 +60,7 @@ pub(crate) enum OriginGateRequirement {
     None,
 }
 
-pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
+pub trait ProfileApprovalGatePolicy: Send + Sync {
     fn capability_exempt_from_approval(&self, _capability: &CapabilityId) -> bool {
         false
     }
@@ -119,7 +119,7 @@ pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
 /// decision allows the candidate so settings apply without process restart
 /// while non-runnable candidates do not spend approval-store reads.
 #[async_trait]
-pub(crate) trait ApprovalSettingsProvider: Send + Sync {
+pub trait ApprovalSettingsProvider: Send + Sync {
     async fn tool_override(
         &self,
         scope: &ResourceScope,
@@ -137,12 +137,17 @@ pub(crate) trait ApprovalSettingsProvider: Send + Sync {
 }
 
 /// No stored overrides and global auto-approve off: the gate behaves exactly as
-/// it did before #4959. Test-only — production wires
+/// it did before #4959. Test-only — production wires composition's
 /// `StoreApprovalSettingsProvider`.
-#[cfg(test)]
-pub(crate) struct EmptyApprovalSettingsProvider;
+///
+/// Gated on `test-support` rather than `cfg(test)` because composition's own
+/// capability-host tests drive the gate through this double; the crate-local
+/// `cfg(test)` form it carried inside composition is unreachable across a crate
+/// boundary.
+#[cfg(any(test, feature = "test-support"))]
+pub struct EmptyApprovalSettingsProvider;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ApprovalSettingsProvider for EmptyApprovalSettingsProvider {
     async fn tool_override(
@@ -167,7 +172,7 @@ impl ApprovalSettingsProvider for EmptyApprovalSettingsProvider {
     }
 }
 
-pub(crate) fn profile_approval_authorizer(
+pub fn profile_approval_authorizer(
     approval_policy: ApprovalPolicy,
     gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
     settings: Arc<dyn ApprovalSettingsProvider>,
@@ -509,7 +514,7 @@ fn approval_request(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_approvals::persistent_approval_grant_issuer;
+    use crate::persistent_approval_grant_issuer;
     use ironclaw_host_api::{
         action::NetworkPolicy,
         capability::{
@@ -1424,7 +1429,7 @@ mod tests {
         use ironclaw_runtime_policy::MinimalApprovalBypass;
 
         use super::*;
-        use crate::runtime_profile_approval_policy::{
+        use crate::profile_gate_policy::{
             RuntimeProfileApprovalGateEffectSets, RuntimeProfileApprovalGatePolicy,
         };
 

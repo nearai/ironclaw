@@ -6,6 +6,7 @@
 //! `ConversationMessage` type that the legacy monolith's `history` module now
 //! re-exports for backward compatibility.
 
+pub mod capture;
 pub mod client;
 pub mod contribution;
 pub mod conversation_message;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::v2::{HostApiContractRegistry, ManifestV2Error};
 
 pub mod capability_provider;
+pub mod product_adapter;
 
 /// Build the default set of Extension Manifest v2 host API contracts: every
 /// contract this module owns, in one [`HostApiContractRegistry`].

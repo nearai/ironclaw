@@ -279,7 +279,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
         _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
-        _epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        _epoch: ironclaw_extension_contracts::external::ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError> {
         Ok(())
     }

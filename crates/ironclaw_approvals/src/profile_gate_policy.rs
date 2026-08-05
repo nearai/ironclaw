@@ -6,16 +6,16 @@ use ironclaw_host_api::{
 };
 use ironclaw_runtime_policy::MinimalApprovalBypass;
 
-use crate::profile_approval_authorization::{OriginGateRequirement, ProfileApprovalGatePolicy};
+use crate::profile_gate::{OriginGateRequirement, ProfileApprovalGatePolicy};
 
 #[derive(Debug, Clone)]
-pub(crate) struct RuntimeProfileApprovalGateEffectSets {
-    pub(crate) ask_writes: Vec<EffectKind>,
-    pub(crate) ask_destructive: Vec<EffectKind>,
+pub struct RuntimeProfileApprovalGateEffectSets {
+    pub ask_writes: Vec<EffectKind>,
+    pub ask_destructive: Vec<EffectKind>,
 }
 
 impl RuntimeProfileApprovalGateEffectSets {
-    pub(crate) fn new(ask_writes: Vec<EffectKind>, ask_destructive: Vec<EffectKind>) -> Self {
+    pub fn new(ask_writes: Vec<EffectKind>, ask_destructive: Vec<EffectKind>) -> Self {
         Self {
             ask_writes,
             ask_destructive,
@@ -24,7 +24,7 @@ impl RuntimeProfileApprovalGateEffectSets {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RuntimeProfileApprovalGatePolicy {
+pub struct RuntimeProfileApprovalGatePolicy {
     /// Whether `ApprovalPolicy::Minimal` may bypass effect gates, as a
     /// resolved policy *value* — not a deployment profile this type then asks
     /// about itself (§4.4). `ironclaw_runtime_policy::minimal_approval_bypass`
@@ -35,7 +35,7 @@ pub(crate) struct RuntimeProfileApprovalGatePolicy {
 }
 
 impl RuntimeProfileApprovalGatePolicy {
-    pub(crate) fn new(
+    pub fn new(
         minimal_bypass: MinimalApprovalBypass,
         effects: RuntimeProfileApprovalGateEffectSets,
     ) -> Self {
@@ -46,10 +46,7 @@ impl RuntimeProfileApprovalGatePolicy {
         }
     }
 
-    pub(crate) fn with_exempt_capabilities(
-        mut self,
-        exempt_capabilities: Vec<CapabilityId>,
-    ) -> Self {
+    pub fn with_exempt_capabilities(mut self, exempt_capabilities: Vec<CapabilityId>) -> Self {
         self.exempt_capabilities = exempt_capabilities;
         self
     }

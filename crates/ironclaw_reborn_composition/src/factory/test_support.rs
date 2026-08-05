@@ -124,7 +124,7 @@ impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn channel_disconnect_slot_for_test(
         &self,
-    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>> {
+    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>> {
         &self.channel_disconnect_slot
     }
 

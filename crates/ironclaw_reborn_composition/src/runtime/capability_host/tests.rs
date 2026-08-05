@@ -1580,9 +1580,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -1891,9 +1889,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -2436,9 +2432,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -2687,9 +2681,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -2774,9 +2766,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -2977,9 +2967,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -3315,9 +3303,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -3746,9 +3732,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -4763,9 +4747,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -4880,9 +4862,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -5130,9 +5110,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -5252,9 +5230,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),

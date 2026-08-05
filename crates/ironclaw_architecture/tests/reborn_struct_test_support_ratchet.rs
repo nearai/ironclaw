@@ -432,7 +432,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
+        // Re-keyed 2026-08-04 (WS6) from
+        // `ironclaw_reborn_composition/src/observability/trace_capture.rs`: the
+        // module moved to the turn-runner observer seam. Same struct, same
+        // `#[cfg(test)] with_history_source` seam, same count — a path-keyed
+        // inventory entry following its file, which is the WS10 hazard this
+        // gate exists to make loud rather than a new allowance.
+        path: "crates/ironclaw_runner/src/trace_capture.rs",
         count: 1,
     },
     FrozenPathCount {

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ironclaw_attachments::InboundAttachmentLander;
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, BlockedAuthFlowCanceller};
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
@@ -11,9 +12,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
-    ApprovalInteractionService, AuthChallengeProvider, AuthInteractionService,
-    BlockedAuthFlowCanceller, ExtensionAccountSetupRegistry, ProjectFilesystemReader,
-    RunDeliverySettings,
+    ApprovalInteractionService, AuthInteractionService, ExtensionAccountSetupRegistry,
+    ProjectFilesystemReader, RunDeliverySettings,
 };
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 use ironclaw_product_contracts::prompt_source::{
@@ -197,7 +197,7 @@ pub(crate) struct BackendChannelPairingAssemblyInput {
     pub(crate) account_status_reader:
         Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>,
     pub(crate) disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
 }
 
 pub(crate) async fn build_backend_channel_pairing(
@@ -433,10 +433,10 @@ pub(crate) fn channel_admin_users(
             identity.agent_id.clone(),
             identity.project_id.clone(),
         );
-    Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+    Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
         directory,
         Arc::clone(&services.admin_secret_provisioner),
-        Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+        Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
     ))
 }
 

@@ -937,15 +937,14 @@ fn channel_directions_from_manifest_record(
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.
-    let sections =
-        ironclaw_product::adapter_registry::product_adapter_sections(record).map_err(|error| {
-            ProductOperationFailure::InvalidBindingRequest {
-                reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-            }
+    let sections = ironclaw_extensions::host_api::product_adapter::product_adapter_sections(record)
+        .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
         })?;
     let mut directions: Option<LifecycleChannelDirections> = None;
     for section in sections
         .iter()
+        .map(|section| section.resolved())
         .filter(|section| section.surface_kind() == ProductSurfaceKind::ExternalChannel)
     {
         let flags = section.capabilities();

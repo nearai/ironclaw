@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_auth::ChannelConnectionService;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
@@ -23,9 +24,8 @@ use ironclaw_host_api::{
     ids::{ExtensionId, UserId, VendorId},
     resource::ResourceScope,
 };
-use ironclaw_product::{ChannelConnectionService, ExtensionAccountSetupRegistry};
 use ironclaw_product_contracts::account_setup::{
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupReader,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
@@ -195,7 +195,9 @@ pub struct ExtensionLifecycleManager {
     /// connection-requirement overrides). Descriptors are declared during
     /// composition; the activation success path consults it and the pairing
     /// seam extends it.
-    account_setups: ExtensionAccountSetupRegistry,
+    /// `None` behaves exactly as an empty registry: no descriptor, no missing
+    /// requirement (`ExtensionAccountSetupReader`'s doc pins the equivalence).
+    account_setups: Option<Arc<dyn ExtensionAccountSetupReader>>,
     /// Static per-provider instance-config readiness map. Opt-in, defaults
     /// empty via `new` — a third readiness axis alongside `account_setups`
     /// (per-user) and the package-level
@@ -356,7 +358,7 @@ impl ExtensionLifecycleManager {
             registry_install_operations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
-            account_setups: ExtensionAccountSetupRegistry::default(),
+            account_setups: None,
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
             provider_instance_readiness: std::collections::BTreeMap::new(),
         }
@@ -553,9 +555,9 @@ impl ExtensionLifecycleManager {
 
     pub fn with_account_setup_registry(
         mut self,
-        account_setups: ExtensionAccountSetupRegistry,
+        account_setups: Arc<dyn ExtensionAccountSetupReader>,
     ) -> Self {
-        self.account_setups = account_setups;
+        self.account_setups = Some(account_setups);
         self
     }
 
@@ -818,11 +820,11 @@ impl ExtensionLifecycleManager {
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
         let mut requirements = package_runtime_credential_auth_requirements(&package);
-        if let Some(requirement) = self
-            .account_setups
-            .missing_requirement(&extension_id, caller)
-            .await
-            .map_err(map_account_setup_error)?
+        if let Some(setups) = self.account_setups.as_ref()
+            && let Some(requirement) = setups
+                .missing_requirement(&extension_id, caller)
+                .await
+                .map_err(map_account_setup_error)?
         {
             requirements.push(requirement);
         }
@@ -1463,7 +1465,9 @@ impl ExtensionLifecycleManager {
             return Ok(activation_success_response(
                 package_ref,
                 &active_package,
-                self.account_setups.descriptor(extension_id),
+                self.account_setups
+                    .as_ref()
+                    .and_then(|setups| setups.descriptor(extension_id)),
             ));
         }
         self.enable_lifecycle_package(extension_id).await?;
@@ -1546,7 +1550,11 @@ impl ExtensionLifecycleManager {
         let visible_capability_ids = package_visible_capability_ids(&active_package);
         let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
-            .and_then(|id| self.account_setups.descriptor(&id));
+            .and_then(|id| {
+                self.account_setups
+                    .as_ref()
+                    .and_then(|setups| setups.descriptor(&id))
+            });
         let message = activation_success_message(
             &package_ref,
             &active_package,
