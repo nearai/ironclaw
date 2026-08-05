@@ -650,6 +650,9 @@ jobs:
       - name: Build Python sandbox worker
         run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
+      - name: Verify production local-sandbox profile wiring
+        run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
+
       - name: Run real-Docker user sandbox contract
         run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
 
