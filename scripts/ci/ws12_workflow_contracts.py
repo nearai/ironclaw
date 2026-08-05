@@ -194,6 +194,46 @@ PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 
 # ---------------------------------------------------------------------------
+# Docs publication-boundary guard ordering
+#
+# The guard in the code-style roll-up must run BEFORE the has_code early
+# exit: a docs-only PR has has_code=false, so a guard placed after `exit 0`
+# can never block. REQUIRED_MARKERS is presence-only and cannot see order —
+# relocating the guard below the early exit leaves every marker in the file
+# while the gate is fully broken — so the ordering is pinned separately here.
+# ---------------------------------------------------------------------------
+
+CODE_STYLE_DOCS_GUARD_MARKER = (
+    '"${{ needs.docs-publication-boundary.result }}" != "success"'
+)
+CODE_STYLE_HAS_CODE_EXIT_MARKER = (
+    'echo "No code changes — style checks skipped correctly"'
+)
+
+
+def validate_code_style_docs_guard_order(text: str) -> list[str]:
+    """Return every way the docs-gate guard could sit past the early exit."""
+
+    guard = text.find(CODE_STYLE_DOCS_GUARD_MARKER)
+    early_exit = text.find(CODE_STYLE_HAS_CODE_EXIT_MARKER)
+    if guard == -1 or early_exit == -1:
+        # Presence itself is REQUIRED_MARKERS' job; report only what this pin
+        # cannot delegate — a missing anchor makes the order unassertable.
+        return [
+            f"{CODE_STYLE_WORKFLOW}: docs-gate guard order unassertable — "
+            f"missing {'guard' if guard == -1 else 'has_code early-exit'} marker"
+        ]
+    if guard > early_exit:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: the docs publication-boundary guard sits "
+            "after the has_code early exit — docs-only PRs (has_code=false) "
+            "exit 0 before the guard runs, so the gate cannot block them. "
+            "Move the guard above the early exit in the roll-up step"
+        ]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Per-package clippy target selection (#6965)
 #
 # `Check production-target lints` runs `cargo clippy -p <changed package> …`,
@@ -907,6 +947,7 @@ def validate_workflow_texts(
     code_style = workflows.get(CODE_STYLE_WORKFLOW)
     if code_style is not None:
         errors.extend(validate_production_lint_targets(code_style))
+        errors.extend(validate_code_style_docs_guard_order(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))

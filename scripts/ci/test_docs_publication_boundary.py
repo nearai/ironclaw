@@ -202,6 +202,16 @@ class DocsPublicationBoundaryTest(unittest.TestCase):
         _, missing, _ = boundary.find_violations(docs)
         self.assertEqual(missing, [])
 
+    def test_mintignore_nested_directory_pattern_fences(self) -> None:
+        docs = make_docs_tree(
+            self.root,
+            ["index"],
+            "design/sub/\n",
+            {"index.mdx": "# Home", "design/sub/notes.md": "# Internal"},
+        )
+        unfenced, _, _ = boundary.find_violations(docs)
+        self.assertEqual(unfenced, [])
+
     def test_mintignore_nested_path_glob_pattern_fences(self) -> None:
         docs = make_docs_tree(
             self.root,
