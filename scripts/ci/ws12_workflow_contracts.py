@@ -69,8 +69,17 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "Smoke exact binaries before packaging upload",
         "scripts/ci/smoke-release-binary.py",
         "release-upgrade-canary:",
+        "id: upgrade-evidence",
+        'evidence_dir="$RUNNER_TEMP/release-upgrade-canary"',
+        "CANARY_ARTIFACT_DIR: ${{ steps.upgrade-evidence.outputs.path }}",
         "scripts/ci/release-upgrade-canary.py",
         "needs.release-upgrade-canary.result == 'success'",
+    ),
+}
+
+FORBIDDEN_MARKERS: dict[str, tuple[str, ...]] = {
+    ".github/workflows/ironclaw-release.yml": (
+        "CANARY_ARTIFACT_DIR: ${{ runner.temp }}/release-upgrade-canary",
     ),
 }
 
@@ -510,7 +519,7 @@ def validate_crate_scope_filters(
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
-    """Return every missing lane marker; an empty result is the only pass."""
+    """Return every broken lane marker; an empty result is the only pass."""
     errors: list[str] = []
     for path, markers in REQUIRED_MARKERS.items():
         text = workflows.get(path)
@@ -522,6 +531,15 @@ def validate_workflow_texts(
         )
         if UNCONDITIONAL_SKIP.search(text):
             errors.append(f"{path}: contains an unconditionally skipped lane")
+    for path, markers in FORBIDDEN_MARKERS.items():
+        text = workflows.get(path)
+        if text is None:
+            continue
+        errors.extend(
+            f"{path}: contains forbidden {marker!r}"
+            for marker in markers
+            if marker in text
+        )
     e2e = workflows.get(E2E_WORKFLOW)
     if e2e is not None:
         errors.extend(validate_e2e_scope_filters(e2e))

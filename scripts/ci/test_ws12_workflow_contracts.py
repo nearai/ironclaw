@@ -14,6 +14,7 @@ from ws12_workflow_contracts import (
     CODE_STYLE_WORKFLOW,
     CRATE_SCOPE_FILTERS,
     E2E_WORKFLOW,
+    FORBIDDEN_MARKERS,
     PLATFORM_WORKFLOW,
     REQUIRED_MARKERS,
     STRESS_WORKFLOW,
@@ -52,6 +53,18 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         del sabotaged[path]
 
         self.assertIn(f"missing workflow: {path}", validate_workflow_texts(sabotaged))
+
+    def test_reintroducing_each_forbidden_marker_fails_loudly(self) -> None:
+        for path, markers in FORBIDDEN_MARKERS.items():
+            for marker in markers:
+                with self.subTest(path=path, marker=marker):
+                    sabotaged = copy.deepcopy(self.workflows)
+                    sabotaged[path] += f"\n{marker}\n"
+                    errors = validate_workflow_texts(sabotaged)
+                    self.assertTrue(
+                        any(path in error and marker in error for error in errors),
+                        errors,
+                    )
 
     def test_unconditional_skip_fails_loudly(self) -> None:
         path = ".github/workflows/nightly-deep-ci.yml"

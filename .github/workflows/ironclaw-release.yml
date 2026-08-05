@@ -267,7 +267,6 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1
       CANARY_TARGET: x86_64-unknown-linux-gnu
-      CANARY_ARTIFACT_DIR: ${{ runner.temp }}/release-upgrade-canary
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -277,7 +276,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Prepare upgrade evidence directory
-        run: mkdir -p "$CANARY_ARTIFACT_DIR"
+        id: upgrade-evidence
+        shell: bash
+        run: |
+          evidence_dir="$RUNNER_TEMP/release-upgrade-canary"
+          mkdir -p "$evidence_dir"
+          echo "path=$evidence_dir" >> "$GITHUB_OUTPUT"
       - name: Fetch exact candidate artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -296,6 +300,8 @@ jobs:
             --dir target/previous-release
       - name: Gate publishing on exact release-pair upgrade
         shell: bash
+        env:
+          CANARY_ARTIFACT_DIR: ${{ steps.upgrade-evidence.outputs.path }}
         run: |
           archive="ironclaw-${CANARY_TARGET}.tar.gz"
           candidate_version="${GITHUB_REF_NAME#ironclaw-v}"
@@ -310,13 +316,15 @@ jobs:
             --artifact-dir "$CANARY_ARTIFACT_DIR"
       - name: Scrub upgrade evidence
         if: always()
+        env:
+          CANARY_ARTIFACT_DIR: ${{ steps.upgrade-evidence.outputs.path }}
         run: scripts/live-canary/scrub-artifacts.sh "$CANARY_ARTIFACT_DIR"
       - name: Upload upgrade evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-upgrade-canary-evidence
-          path: ${{ env.CANARY_ARTIFACT_DIR }}
+          path: ${{ steps.upgrade-evidence.outputs.path }}
           if-no-files-found: error
           retention-days: 30
 
