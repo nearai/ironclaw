@@ -376,6 +376,28 @@ async fn user_state_registry_fails_closed_when_all_entries_are_active() {
 }
 
 #[tokio::test]
+async fn user_state_registry_never_evicts_unconfirmed_cleanup() {
+    let transport = RailwayPreviewSandboxTransport::with_cli_and_capacity(
+        config(),
+        Arc::new(FakeRailwayCli::new()),
+        1,
+    );
+    let pending_key = user_key("tenant", "pending");
+    let pending = transport.state_for(pending_key.clone()).await.unwrap();
+    pending.lock().await.lifecycle = UserSandboxLifecycle::CleanupPending("sandbox-1".to_string());
+    drop(pending);
+
+    let error = transport
+        .state_for(user_key("tenant", "replacement"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("capacity is exhausted"))
+    );
+    assert!(transport.users.lock().await.contains_key(&pending_key));
+}
+
+#[tokio::test]
 async fn restores_the_deterministic_checkpoint_after_host_restart() {
     let cli = Arc::new(FakeRailwayCli::new());
     let first_host = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
@@ -622,6 +644,44 @@ async fn failed_workspace_bootstrap_destroys_the_new_untracked_sandbox() {
                 .windows(2)
                 .any(|pair| pair == ["--id", "sandbox-1"])
     }));
+}
+
+#[tokio::test]
+async fn unconfirmed_bootstrap_cleanup_is_retried_before_replacement() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_bootstrap_exec();
+    cli.fail_next_destroy();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    assert!(matches!(
+        transport
+            .run_command(request("tenant", "user", "true"))
+            .await,
+        Err(RuntimeProcessError::ExecutionFailed(message))
+            if message.contains("remote cleanup could not be confirmed")
+    ));
+    transport
+        .run_command(request("tenant", "user", "true"))
+        .await
+        .expect("cleanup retry succeeds before replacement provisioning");
+
+    let invocations = cli.invocations().await;
+    let retry_destroy = invocations
+        .iter()
+        .rposition(|call| {
+            call.args.starts_with(&["sandbox".into(), "destroy".into()])
+                && call
+                    .args
+                    .windows(2)
+                    .any(|pair| pair == ["--id", "sandbox-1"])
+        })
+        .expect("pending sandbox cleanup is retried");
+    let replacement_create = invocations
+        .iter()
+        .rposition(|call| call.args.starts_with(&["sandbox".into(), "create".into()]))
+        .expect("replacement sandbox is created");
+    assert!(retry_destroy < replacement_create);
+    assert_eq!(count_creates(&invocations), 2);
 }
 
 #[tokio::test]

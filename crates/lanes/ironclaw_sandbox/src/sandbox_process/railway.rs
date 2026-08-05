@@ -160,6 +160,13 @@ impl RailwayPreviewSandboxTransport {
             let idle_lru = users
                 .iter()
                 .filter(|(_, tracked)| Arc::strong_count(&tracked.state) == 1)
+                // Losing a pending ID could allow replacement provisioning
+                // while cleanup of the previous sandbox remains unconfirmed.
+                .filter(|(_, tracked)| {
+                    tracked.state.try_lock().is_ok_and(|state| {
+                        !matches!(state.lifecycle, UserSandboxLifecycle::CleanupPending(_))
+                    })
+                })
                 .min_by_key(|(_, tracked)| tracked.last_touched)
                 .map(|(key, _)| key.clone())
                 .ok_or_else(|| {
@@ -183,6 +190,7 @@ impl RailwayPreviewSandboxTransport {
     async fn provision(
         &self,
         key: &RebornSandboxUserKey,
+        state: &mut UserSandboxState,
         deadline: Instant,
         output_limit: usize,
     ) -> Result<String, RuntimeProcessError> {
@@ -214,6 +222,7 @@ impl RailwayPreviewSandboxTransport {
             )
             .await?;
         let sandbox_id = parse_sandbox_id(&created.stdout)?;
+        state.lifecycle = UserSandboxLifecycle::CleanupPending(sandbox_id.clone());
         let bootstrap = async {
             let timeout = deadline_remaining(deadline)?;
             self.execute_cli(
@@ -236,8 +245,10 @@ impl RailwayPreviewSandboxTransport {
         if let Err(bootstrap_error) = bootstrap {
             self.destroy_after_failed_execution(&sandbox_id, output_limit, &bootstrap_error)
                 .await?;
+            state.lifecycle = UserSandboxLifecycle::Absent;
             return Err(bootstrap_error);
         }
+        state.lifecycle = UserSandboxLifecycle::Live(sandbox_id.clone());
         Ok(sandbox_id)
     }
 
@@ -357,17 +368,31 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
         // Per-user lifecycle gate: first provision, worker bootstrap, and all
         // use of that worker serialize without blocking other tenant/users.
         let mut state = state.lock().await;
-        if let Some(sandbox_id) = state.sandbox_id.as_deref()
-            && !self.sandbox_is_live(sandbox_id, deadline).await?
-        {
-            state.sandbox_id = None;
+        if let UserSandboxLifecycle::CleanupPending(sandbox_id) = &state.lifecycle {
+            let sandbox_id = sandbox_id.clone();
+            let prior_error = RuntimeProcessError::ExecutionFailed(
+                "Railway preview sandbox cleanup was previously unconfirmed".to_string(),
+            );
+            self.destroy_after_failed_execution(&sandbox_id, output_limit, &prior_error)
+                .await?;
+            state.lifecycle = UserSandboxLifecycle::Absent;
         }
-        let sandbox_id = match state.sandbox_id.as_deref() {
-            Some(id) => id.to_string(),
-            None => {
-                let id = self.provision(&key, deadline, output_limit).await?;
-                state.sandbox_id = Some(id.clone());
-                id
+        if let UserSandboxLifecycle::Live(sandbox_id) = &state.lifecycle {
+            let sandbox_id = sandbox_id.clone();
+            if !self.sandbox_is_live(&sandbox_id, deadline).await? {
+                state.lifecycle = UserSandboxLifecycle::Absent;
+            }
+        }
+        let sandbox_id = match &state.lifecycle {
+            UserSandboxLifecycle::Live(id) => id.clone(),
+            UserSandboxLifecycle::Absent => {
+                self.provision(&key, &mut state, deadline, output_limit)
+                    .await?
+            }
+            UserSandboxLifecycle::CleanupPending(_) => {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "Railway preview sandbox cleanup remains pending".to_string(),
+                ));
             }
         };
         let output = self
@@ -398,9 +423,10 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
                 // remote command stopped. Destroy the whole outer sandbox on
                 // any worker-exec transport failure, then force reprovisioning
                 // from the last durable checkpoint on the next request.
-                state.sandbox_id = None;
+                state.lifecycle = UserSandboxLifecycle::CleanupPending(sandbox_id.clone());
                 self.destroy_after_failed_execution(&sandbox_id, output_limit, &execution_error)
                     .await?;
+                state.lifecycle = UserSandboxLifecycle::Absent;
                 return Err(execution_error);
             }
         };
@@ -463,7 +489,15 @@ struct TrackedUserState {
 
 #[derive(Debug, Default)]
 struct UserSandboxState {
-    sandbox_id: Option<String>,
+    lifecycle: UserSandboxLifecycle,
+}
+
+#[derive(Debug, Default)]
+enum UserSandboxLifecycle {
+    #[default]
+    Absent,
+    Live(String),
+    CleanupPending(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
