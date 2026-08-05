@@ -536,6 +536,11 @@ async fn deliver_triggered_run(
                 };
                 let replacement =
                     deliver_triggered_notification(services, &notification_context, notice).await;
+                // Handled ahead of the general mapping: an unconfirmed
+                // replacement proves nothing about vendor egress, so it must
+                // return BEFORE the stale-prompt drain below. Folding this
+                // into the generic `Err` arm would retract a prompt that may
+                // still be the user's only actionable message.
                 if matches!(
                     &replacement,
                     Err(TriggeredNotificationFailure::DeliveryUnconfirmed { .. })

@@ -748,12 +748,15 @@ Rules — kept short on purpose:
   guarded `Sending`→`Unknown` recovery transition cannot overwrite a
   concurrent `Delivered`/`Failed` settlement and never blindly resends without
   a vendor idempotency key. —
-  `coordinator_recovery_marks_interrupted_sending_attempts_unknown` and
-  `coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery`
+  `coordinator_recovery_marks_interrupted_sending_attempts_unknown`,
+  `coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery`,
+  and `coordinator_recovery_never_clobbers_concurrent_terminal_statuses`
   (`outbound_delivery_contract.rs`): interrupted `Sending` attempts from a
   prior lifetime settle `Unknown` (never re-driven) lazily before that
   scope's first delivery — the store enumerates per scope only, so recovery
-  is per-scope on first touch (owner call, flagged in the PR body).
+  is per-scope on first touch (owner call, flagged in the PR body) — and a
+  concurrent `Delivered`/`Failed` settlement is never overwritten by that
+  recovery transition.
 - [x] OUT-6a Approval/auth gate projection ids bind the canonical gate ref via
   a domain-separated, length-framed, full lowercase SHA-256 suffix. Distinct
   same-kind gates in one run no longer collide, same-gate replay stays stable,
