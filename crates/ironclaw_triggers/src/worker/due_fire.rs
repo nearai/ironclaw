@@ -116,14 +116,29 @@ impl TriggerPollerWorker {
             }
         };
         let submitted_fire = fire.clone();
+        // Minting runs the trusted-prompt safety scan (PROPOSAL §6.4.2): a fire
+        // whose durable prompt fails it never becomes a submit request, so it
+        // can never reach any `TrustedTriggerFireSubmitter`.
+        let submit_request = match TrustedTriggerSubmitRequest::new(fire, materialized_prompt, now)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                let classification = classify_submit_failure(&error);
+                let disposition = match classification.kind {
+                    SubmitFailureKind::Retryable => FailedFireDisposition::Retryable,
+                    SubmitFailureKind::Permanent => {
+                        permanent_failure_disposition(&record.schedule, fire_slot)?
+                    }
+                };
+                return self
+                    .persist_failed_fire(record, fire_slot, disposition, classification.reason)
+                    .await;
+            }
+        };
         match self
             .deps
             .trusted_submitter
-            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest::new(
-                fire,
-                materialized_prompt,
-                now,
-            ))
+            .submit_trusted_trigger_fire(submit_request)
             .await
         {
             Ok(TrustedTriggerFireSubmitOutcome::Accepted {

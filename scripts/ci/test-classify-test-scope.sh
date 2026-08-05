@@ -58,7 +58,7 @@ assert_empty_scope() {
 
 assert_scope \
   "reborn binary crate" \
-  "crates/ironclaw_reborn_cli/src/main.rs" \
+  "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -163,7 +163,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "named critical product invariant" \
-  "crates/ironclaw_product/src/run_delivery/observer.rs" \
+  "crates/ironclaw_assistant/src/run_delivery/observer.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -382,7 +382,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_runner/CLAUDE.md" \
+  "crates/ironclaw_turn_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -399,7 +399,7 @@ has_reborn_tests=true"
 assert_scope \
   "mixed tests and reborn" \
   "tests/e2e/scenarios/test_live_flow.py
-crates/ironclaw_reborn_composition/src/lib.rs" \
+crates/ironclaw_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -407,7 +407,7 @@ has_reborn_tests=true"
 
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
-  "crates/ironclaw_reborn_cli/src/main.rs" \
+  "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -665,6 +665,47 @@ if [ "${classifier_floor}" != "${python_floor}" ]; then
 fi
 printf 'PASS bash and python discovery floors agree (%s)\n' "${python_floor}"
 
+# Every `crates/...` pattern in the classifier must match at least one real
+# path. This is the check that was missing when the WS6 renames dropped the
+# `ironclaw_reborn_` prefix: the arm `crates/ironclaw_reborn_*/*` stopped
+# matching anything, and all seven of those crates silently reclassified as
+# legacy. A pattern that matches nothing fails OPEN — the classifier keeps
+# answering, just wrongly — so only the downstream self-test assertion caught
+# it, and only for the one crate that had a fixture. Same shape as
+# `sanctioned_paths_all_match_real_files` in reborn_retired_taxonomy.rs: an
+# exemption may not outlive the code it exempts.
+#
+# KNOWN-DEAD, shrink-only. Both predate WS6 and both match nothing today, so
+# neither is load-bearing. They are listed rather than repointed because
+# repointing changes which tests a change to those crates selects, which is a
+# behaviour change and not this PR's business:
+#   * crates/ironclaw_extension_support/ -- crate lives at
+#     crates/extensions/ironclaw_extension_support (already matched elsewhere
+#     by the `*/ironclaw_extension_support` arm).
+#   * crates/ironclaw_oauth/ -- no such crate anywhere in the tree.
+known_dead_patterns="crates/ironclaw_extension_support/
+crates/ironclaw_oauth/"
+
+dead_found=0
+while IFS= read -r pattern; do
+  [ -n "${pattern}" ] || continue
+  case "${known_dead_patterns}" in
+    *"${pattern}"*) continue ;;
+  esac
+  # shellcheck disable=SC2086
+  if ! compgen -G "${pattern}"* >/dev/null 2>&1; then
+    printf 'FAIL classifier pattern matches no real path: %s\n' "${pattern}" >&2
+    dead_found=1
+  fi
+done <<PATTERNS
+$(grep -oE 'crates/ironclaw_[A-Za-z0-9_]*/' scripts/ci/classify-test-scope.sh | sort -u || true)
+PATTERNS
+
+if [ "${dead_found}" -ne 0 ]; then
+  printf 'FAIL a classifier arm names a crate directory that does not exist\n' >&2
+  exit 1
+fi
+printf 'PASS every classifier crates/ pattern matches a real path\n'
 # ---------------------------------------------------------------------------
 # crate_tree.py --directory and its scripts/ci/crate-dir.sh shell wrapper
 # (CHECKLIST WS10, #6963 idiom)

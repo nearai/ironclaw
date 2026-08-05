@@ -33,7 +33,7 @@
 #   # A crate may not appear here AND as a whole-crate `coverage-exemptions.toml`
 #   # entry (conflict — the script rejects this at parse time).
 #   [[crate]]
-#   name = "ironclaw_reborn_composition"
+#   name = "ironclaw_composition"
 #   floor_percent = 38.0             # optional
 #   floor_covered_lines = 4200       # optional — immune to denominator growth
 #   tolerance_percent = 0.5          # optional, overrides [global].tolerance_percent
@@ -85,7 +85,7 @@ captured_date = "2026-08-04"
 captured_from = "4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf"
 
 [[crate]]
-name = "ironclaw_runner"
+name = "ironclaw_turn_runner"
 # WS3 runner sheds moved the model-gateway cluster (model_gateway,
 # model_routes, the driver-host port adapters) and the whole progressive
 # tool-disclosure cluster to `ironclaw_loop_host` — ~10.5k source lines out of
@@ -126,14 +126,14 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 [[crate]]
 name = "ironclaw_loop_host"
 # Added by the WS3 runner sheds so the ~10.5k lines that left
-# `ironclaw_runner` (above) keep a ratchet instead of falling out of per-crate
+# `ironclaw_turn_runner` (above) keep a ratchet instead of falling out of per-crate
 # enforcement entirely — the gap the WS1.2 `ironclaw_turns` split left open for
 # `ironclaw_loop_contracts`, not repeated here.
 #
 # CAPTURED from the same merged artifact as the entry above (merge_group run
 # 30855460733): 24,598 / 27,063 = 90.89%. `floor_percent` is RAISED to the
 # observed value rather than inherited from the source crate — an earlier draft
-# carried 85.55 across from `ironclaw_runner`, which would have left the
+# carried 85.55 across from `ironclaw_turn_runner`, which would have left the
 # absorbed code 5.34pp of unratcheted slack on arrival, i.e. room to lose ~1.4k
 # covered lines silently. The destination is floored at what it actually
 # measures, on arrival, in the same PR.
@@ -243,7 +243,7 @@ rationale = "Scheduling, deterministic fire identity, and durable fire settlemen
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
-name = "ironclaw_product"
+name = "ironclaw_assistant"
 floor_percent = 86.94
 floor_covered_lines = 21367
 captured_total_lines = 24576
@@ -365,7 +365,7 @@ rationale = "The extension-management product face: lifecycle capabilities and c
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
-name = "ironclaw_events"
+name = "ironclaw_event_log"
 floor_percent = 80.55
 floor_covered_lines = 1197
 captured_total_lines = 1486
@@ -489,7 +489,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 # deltas were the same two tests renamed by module path). The ratio falls
 # because the arriving skill-install executor carries a lower coverage profile
 # than this crate's existing average, and because #7094's floor was captured
-# before any of it arrived. Same shape as #7094's own ironclaw_runner recapture
+# before any of it arrived. Same shape as #7094's own ironclaw_turn_runner recapture
 # (85.55 -> 82.53), which set the precedent of taking the honest measured number
 # over the flattering one.
 #

@@ -9,7 +9,11 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionState,
 };
-use ironclaw_extensions::{
+use ironclaw_assistant::{
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID,
+};
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
@@ -24,10 +28,6 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
-};
-use ironclaw_product::{
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID,
 };
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,

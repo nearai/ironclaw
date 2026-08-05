@@ -290,7 +290,7 @@ impl OperatorServiceLifecycle {
     pub fn new_for_operator_with_boot_config(
         operator_tenant_id: TenantId,
         operator_user_id: UserId,
-        boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+        boot: Option<&ironclaw_config::RebornBootConfig>,
     ) -> Self {
         Self {
             platform: ServicePlatform::current(),
@@ -920,7 +920,7 @@ fn webui_boot_env_from_env() -> Result<WebuiBootEnv, String> {
 }
 
 fn webui_boot_env_from_env_for_boot_config(
-    boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+    boot: Option<&ironclaw_config::RebornBootConfig>,
     operator_user_id: &UserId,
 ) -> Result<WebuiBootEnv, String> {
     webui_env_names_for_boot_config(boot)
@@ -943,13 +943,13 @@ impl Default for WebuiEnvNames {
 }
 
 fn webui_env_names_for_boot_config(
-    boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+    boot: Option<&ironclaw_config::RebornBootConfig>,
 ) -> Result<WebuiEnvNames, String> {
     let Some(boot) = boot else {
         return Ok(WebuiEnvNames::default());
     };
     let config_path = boot.home().config_file_path();
-    let config = ironclaw_reborn_config::RebornConfigFile::load(&config_path).map_err(|error| {
+    let config = ironclaw_config::RebornConfigFile::load(&config_path).map_err(|error| {
         tracing::debug!(%error, "Reborn config file could not be loaded for service lifecycle");
         "Reborn config file could not be loaded".to_string()
     })?;
@@ -1263,7 +1263,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 "#,
         )
         .expect("config file");
-        let boot = ironclaw_reborn_config::RebornBootConfig::resolve_from_env_parts(
+        let boot = ironclaw_config::RebornBootConfig::resolve_from_env_parts(
             Some(temp.path().as_os_str().to_os_string()),
             None,
             None,
@@ -1281,7 +1281,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
     fn webui_env_names_sanitize_reborn_config_load_errors() {
         let temp = TempDir::new().expect("tempdir");
         std::fs::create_dir(temp.path().join("config.toml")).expect("config dir");
-        let boot = ironclaw_reborn_config::RebornBootConfig::resolve_from_env_parts(
+        let boot = ironclaw_config::RebornBootConfig::resolve_from_env_parts(
             Some(temp.path().as_os_str().to_os_string()),
             None,
             None,

@@ -3,7 +3,7 @@
 //!
 //! Driven through `operator_config_capability::insert_handler` and the
 //! resolved registry handlers — the seam composition wires
-//! (`ironclaw_reborn_composition::factory`) — rather than the private helper,
+//! (`ironclaw_composition::factory`) — rather than the private helper,
 //! so the branch selection (`state` string -> which store call runs) is under
 //! test alongside the failure mapping itself.
 //!
@@ -21,6 +21,10 @@ use ironclaw_approvals::{
     AutoApproveSettingStore, PersistentApprovalAction, PersistentApprovalPolicyError,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
 };
+use ironclaw_assistant::{
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID,
+};
 use ironclaw_extension_manager::operator_config_capability::insert_handler;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -33,10 +37,6 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_host_runtime::{FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest};
-use ironclaw_product::{
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID,
-};
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };

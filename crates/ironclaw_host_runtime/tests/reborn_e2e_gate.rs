@@ -15,11 +15,13 @@ use ironclaw_authorization::{
     TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
-use ironclaw_events::{
+use ironclaw_event_log::{
     DurableEventLog, EventStreamKey, InMemoryAuditSink, InMemoryDurableEventLog, InMemoryEventSink,
     ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
@@ -1053,11 +1055,11 @@ default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

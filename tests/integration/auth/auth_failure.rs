@@ -27,12 +27,12 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLookupRequest, CredentialAccountStatus,
 };
+use ironclaw_composition::{
+    KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
+};
 use ironclaw_host_api::{
     ids::{InvocationId, UserId},
     resource::ResourceScope,
-};
-use ironclaw_reborn_composition::{
-    KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
 };
 use reborn_support::oauth_flow::connect_google_account;
 
@@ -220,6 +220,7 @@ async fn normal_sweep_does_not_mark_account_revoked() {
 /// verify the FIFO + fallback path and [`captured_count`] in isolation.
 #[tokio::test]
 async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default() {
+    use ironclaw_composition::test_support::ScriptedOAuthTokenEgress;
     use ironclaw_host_api::{
         action::{NetworkMethod, NetworkPolicy},
         http::{RuntimeHttpEgress, RuntimeHttpEgressRequest},
@@ -227,7 +228,6 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
         resource::ResourceScope,
         runtime::RuntimeKind,
     };
-    use ironclaw_reborn_composition::test_support::ScriptedOAuthTokenEgress;
 
     let egress = ScriptedOAuthTokenEgress::with_error_response(400, "invalid_grant");
 

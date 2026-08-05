@@ -106,13 +106,13 @@ fn discarding_sink() -> Arc<dyn CompletionStreamSink> {
 /// see the PR's "Known limitation".
 #[tokio::test]
 async fn streaming_without_terminal_frame_is_a_retryable_incomplete_stream() {
-    let adapter = RigAdapter::new(
+    let adapter = with_native_streaming(RigAdapter::new(
         ScriptedStreamingModel {
             emit_tool_call: false,
             terminal_frame: None,
         },
         "streaming-truncated",
-    );
+    ));
 
     let error = adapter
         .complete_streaming(
@@ -135,13 +135,13 @@ async fn streaming_without_terminal_frame_is_a_retryable_incomplete_stream() {
 /// never reach a caller at all — the arguments may be cut off.
 #[tokio::test]
 async fn streaming_tool_call_without_terminal_frame_is_a_retryable_incomplete_stream() {
-    let adapter = RigAdapter::new(
+    let adapter = with_native_streaming(RigAdapter::new(
         ScriptedStreamingModel {
             emit_tool_call: true,
             terminal_frame: None,
         },
         "streaming-truncated",
-    );
+    ));
 
     let error = adapter
         .complete_with_tools_streaming(search_tool_request(), discarding_sink())
@@ -159,7 +159,7 @@ async fn streaming_tool_call_without_terminal_frame_is_a_retryable_incomplete_st
 /// the tool-call shape.
 #[tokio::test]
 async fn streaming_reads_the_terminal_frames_finish_reason() {
-    let adapter = RigAdapter::new(
+    let adapter = with_native_streaming(RigAdapter::new(
         ScriptedStreamingModel {
             emit_tool_call: true,
             terminal_frame: Some(OllamaShapedStreamingResponse {
@@ -167,7 +167,7 @@ async fn streaming_reads_the_terminal_frames_finish_reason() {
             }),
         },
         "streaming-ollama",
-    );
+    ));
 
     let response = adapter
         .complete_with_tools_streaming(search_tool_request(), discarding_sink())
@@ -187,13 +187,13 @@ async fn streaming_reads_the_terminal_frames_finish_reason() {
 /// for every streamed OpenAI turn would fail runs that actually succeeded.
 #[tokio::test]
 async fn streaming_terminal_frame_without_a_finish_reason_falls_back_to_shape() {
-    let adapter = RigAdapter::new(
+    let adapter = with_native_streaming(RigAdapter::new(
         ScriptedStreamingModel {
             emit_tool_call: true,
             terminal_frame: Some(OllamaShapedStreamingResponse { done_reason: None }),
         },
         "streaming-openai-like",
-    );
+    ));
 
     let response = adapter
         .complete_with_tools_streaming(search_tool_request(), discarding_sink())
@@ -587,7 +587,7 @@ fn finish_reason_paths_match_real_rig_response_types() {
 /// Precedence at the caller: what the provider reported outranks what the
 /// body looks like. A truncated or filtered response that *also* carried
 /// tool calls must not be laundered into `ToolUse` — the tool arguments
-/// may be cut off mid-JSON, and `ironclaw_runner`'s model gateway only
+/// may be cut off mid-JSON, and `ironclaw_turn_runner`'s model gateway only
 /// accepts provider tool calls when the finish reason is `ToolUse`/`Stop`.
 #[test]
 fn provider_finish_reason_outranks_response_shape() {

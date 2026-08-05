@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use ironclaw_extensions::*;
+use ironclaw_extension_registry::*;
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{CapabilityId, InvocationId, ProjectId, ResourceReservationId, TenantId, UserId},

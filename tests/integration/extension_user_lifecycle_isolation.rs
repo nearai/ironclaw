@@ -21,18 +21,18 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
-use ironclaw_extensions::{
+use ironclaw_composition::test_support::BudgetTestGateway;
+use ironclaw_composition::{
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    local_filesystem_build_input, standalone_runtime_policy,
+};
+use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionManifestRecord, InstallationOwner, PackageRootBinding,
 };
 use ironclaw_filesystem::{Filter, Page};
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_product_contracts::surface::{ProductSurface, ProductSurfaceCaller};
-use ironclaw_reborn_composition::test_support::BudgetTestGateway;
-use ironclaw_reborn_composition::{
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    local_filesystem_build_input, standalone_runtime_policy,
-};
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
@@ -264,11 +264,12 @@ async fn legacy_tenant_owned_installation_migrates_to_operator_private_state() {
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("open installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open installation store");
     let installation = store
         .list_installations()
         .await
@@ -415,11 +416,12 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
 
     let planted_root =
         VirtualPath::new("/system/extensions/planted-divergent-root").expect("planted root");
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("open installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open installation store");
     let record = store
         .get_manifest(&extension_id)
         .await
@@ -456,7 +458,7 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
     // activation fails loud (surfaced as `setup_needed` + a populated
     // `activation_error` naming the mismatch — durable `InstallationState`
     // stays `Failed`, but the wire never exposes a third state; see
-    // `crates/ironclaw_product/src/reborn_services/types.rs`) and no adapter
+    // `crates/ironclaw_assistant/src/reborn_services/types.rs`) and no adapter
     // ever binds.
     let (status, body) = get_json(
         rebuilt.member_router(rebuilt.operator()),
@@ -528,11 +530,12 @@ async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root(
 
     let extension_id =
         ironclaw_host_api::ids::ExtensionId::new(EXTENSION_ID).expect("extension id");
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("open installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open installation store");
     let record = store
         .get_manifest(&extension_id)
         .await

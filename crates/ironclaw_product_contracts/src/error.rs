@@ -10,12 +10,12 @@
 //!   ceiling (`ironclaw_host_api` + `ironclaw_extension_contracts`, §6.1.3).
 //!   A port implementor never needs more than this to describe its own
 //!   failure.
-//! - **`ironclaw_product::ProductSurfaceFailure`** — the workflow vocabulary.
+//! - **`ironclaw_assistant::ProductSurfaceFailure`** — the workflow vocabulary.
 //!   It is a strict superset: it adds the turn-coordinator, interaction, and
 //!   idempotency variants whose payloads are kernel types
 //!   (`ironclaw_turns::TurnError`) or product-internal rejection kinds, which
 //!   only the workflow crate produces and only the workflow crate reads.
-//!   `ironclaw_product` absorbs this type into that one with a total,
+//!   `ironclaw_assistant` absorbs this type into that one with a total,
 //!   information-preserving `From`, so `?` at a product call site keeps
 //!   working unchanged.
 //!
@@ -35,7 +35,7 @@ use crate::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 /// Constructed by whichever crate implements the port — the extension host,
 /// the extension manager, the operator surface, or composition — and either
 /// projected to [`ProductSurfaceError`] for a caller across the membrane, or
-/// absorbed into `ironclaw_product::ProductSurfaceFailure` when product itself
+/// absorbed into `ironclaw_assistant::ProductSurfaceFailure` when product itself
 /// is the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProductOperationFailure {
@@ -89,7 +89,7 @@ pub enum ProductOperationFailure {
     /// The turn coordinator rejected a submission before typed turn errors
     /// were available, carrying only the rendered cause.
     ///
-    /// The untyped half of `ironclaw_product::ProductSurfaceFailure`'s
+    /// The untyped half of `ironclaw_assistant::ProductSurfaceFailure`'s
     /// submission pair: the typed half (`TurnSubmissionFailed { error:
     /// TurnError }`) is minted only by product's own turn path and stays
     /// there, because `TurnError` is a kernel type this crate's ceiling
@@ -115,7 +115,7 @@ impl From<HostApiError> for ProductOperationFailure {
 /// only speaks [`ProductSurfaceError`].
 ///
 /// This is the *single* mapping table for these six discriminants —
-/// `ironclaw_product`'s `lifecycle_product_surface_error` delegates its
+/// `ironclaw_assistant`'s `lifecycle_product_surface_error` delegates its
 /// matching arms here rather than repeating the status choices, so the two
 /// paths cannot drift. It is a projection between two types this crate owns,
 /// not workflow classification: no reason text crosses (the wire contract has
@@ -358,7 +358,7 @@ mod tests {
     /// **Every variant is enumerated**, `InvariantViolation` included. That one
     /// is an internal protocol mismatch rather than caller input, so its 400
     /// arguably overstates client responsibility — but the classification is
-    /// not this slice's: `ironclaw_product`'s `From<HostApiError> for
+    /// not this slice's: `ironclaw_assistant`'s `From<HostApiError> for
     /// ProductSurfaceFailure` has always been the same blanket mapping, and the
     /// impl under test mirrors it so the two absorption paths cannot disagree.
     /// It is pinned here rather than changed so that reclassifying it is a

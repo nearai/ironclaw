@@ -7,6 +7,7 @@
 //! - Overrides `cost_per_token()` to return (0, 0) since billing is through subscription
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -16,8 +17,8 @@ use crate::error::LlmError;
 use crate::openai_codex_provider::OpenAiCodexProvider;
 use crate::openai_codex_session::OpenAiCodexSessionManager;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Decorator that refreshes OAuth tokens before API calls and reports zero cost.
@@ -25,8 +26,60 @@ use crate::provider::{
 /// The inner `OpenAiCodexProvider` manages its own token state, so after a
 /// refresh we just call `update_token()` -- no client rebuild is needed.
 pub struct TokenRefreshingProvider {
-    inner: Arc<OpenAiCodexProvider>,
+    inner: Arc<dyn TokenRefreshingInner>,
     session: Arc<OpenAiCodexSessionManager>,
+}
+
+#[async_trait]
+trait TokenRefreshingInner: LlmProvider {
+    async fn update_token(&self, token: &str) -> Result<(), LlmError>;
+}
+
+#[async_trait]
+impl TokenRefreshingInner for OpenAiCodexProvider {
+    async fn update_token(&self, token: &str) -> Result<(), LlmError> {
+        OpenAiCodexProvider::update_token(self, token).await
+    }
+}
+
+struct AuthRetryStreamSink {
+    inner: Arc<dyn CompletionStreamSink>,
+    emitted_text: AtomicBool,
+}
+
+impl AuthRetryStreamSink {
+    fn new(inner: Arc<dyn CompletionStreamSink>) -> Self {
+        Self {
+            inner,
+            emitted_text: AtomicBool::new(false),
+        }
+    }
+
+    fn emitted_text(&self) -> bool {
+        self.emitted_text.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl CompletionStreamSink for AuthRetryStreamSink {
+    async fn text_delta(&self, delta: String) {
+        if !delta.is_empty() {
+            self.emitted_text.store(true, Ordering::Relaxed);
+        }
+        self.inner.text_delta(delta).await;
+    }
+
+    fn supports_text_replacement(&self) -> bool {
+        self.inner.supports_text_replacement()
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.inner.replace_on_next_text_delta().await;
+    }
+
+    async fn finish_text_replacement(&self) {
+        self.inner.finish_text_replacement().await;
+    }
 }
 
 impl TokenRefreshingProvider {
@@ -94,6 +147,38 @@ impl LlmProvider for TokenRefreshingProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+
+        let attempt_sink = Arc::new(AuthRetryStreamSink::new(Arc::clone(&sink)));
+
+        match self
+            .inner
+            .complete_streaming(request.clone(), attempt_sink.clone())
+            .await
+        {
+            Err(error @ (LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }))
+                if attempt_sink.emitted_text() =>
+            {
+                tracing::warn!(
+                    error = %error,
+                    "Streaming auth failure occurred after emitting text; not retrying"
+                );
+                Err(error)
+            }
+            Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
+                self.session.handle_auth_failure().await?;
+                self.update_inner_token().await?;
+                self.inner.complete_streaming(request, sink).await
+            }
+            other => other,
+        }
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
@@ -108,6 +193,40 @@ impl LlmProvider for TokenRefreshingProvider {
                 self.session.handle_auth_failure().await?;
                 self.update_inner_token().await?;
                 self.inner.complete_with_tools(request).await
+            }
+            other => other,
+        }
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+
+        let attempt_sink = Arc::new(AuthRetryStreamSink::new(Arc::clone(&sink)));
+
+        match self
+            .inner
+            .complete_with_tools_streaming(request.clone(), attempt_sink.clone())
+            .await
+        {
+            Err(error @ (LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }))
+                if attempt_sink.emitted_text() =>
+            {
+                tracing::warn!(
+                    error = %error,
+                    "Streaming auth failure occurred after emitting text; not retrying tool completion"
+                );
+                Err(error)
+            }
+            Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
+                self.session.handle_auth_failure().await?;
+                self.update_inner_token().await?;
+                self.inner
+                    .complete_with_tools_streaming(request, sink)
+                    .await
             }
             other => other,
         }
@@ -159,8 +278,12 @@ impl LlmProvider for TokenRefreshingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
     use crate::codex_test_helpers::{make_test_jwt, test_codex_config};
-    use crate::openai_codex_session::OpenAiCodexSessionManager;
+    use crate::openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};
+    use crate::provider::{FinishReason, ToolCompletionRequest};
     use tempfile::tempdir;
 
     fn make_provider_and_session() -> (TokenRefreshingProvider, tempfile::TempDir) {
@@ -199,5 +322,246 @@ mod tests {
     fn test_active_model_name_delegates() {
         let (provider, _dir) = make_provider_and_session();
         assert_eq!(provider.active_model_name(), "gpt-5.3-codex");
+    }
+
+    struct StreamingAuthProvider {
+        emit_before_auth_failure: bool,
+        text_calls: AtomicUsize,
+        tool_calls: AtomicUsize,
+        token_updates: AtomicUsize,
+    }
+
+    impl StreamingAuthProvider {
+        fn new(emit_before_auth_failure: bool) -> Self {
+            Self {
+                emit_before_auth_failure,
+                text_calls: AtomicUsize::new(0),
+                tool_calls: AtomicUsize::new(0),
+                token_updates: AtomicUsize::new(0),
+            }
+        }
+
+        async fn first_attempt(
+            &self,
+            calls: &AtomicUsize,
+            sink: &Arc<dyn CompletionStreamSink>,
+        ) -> Result<(), LlmError> {
+            let attempt = calls.fetch_add(1, Ordering::Relaxed);
+            if attempt == 0 {
+                let delta = if self.emit_before_auth_failure {
+                    "partial"
+                } else {
+                    ""
+                };
+                sink.text_delta(delta.to_string()).await;
+                return Err(LlmError::AuthFailed {
+                    provider: "test".to_string(),
+                });
+            }
+            sink.text_delta("replacement".to_string()).await;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamingAuthProvider {
+        fn model_name(&self) -> &str {
+            "streaming-auth-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            panic!("streaming test must not use complete()")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.first_attempt(&self.text_calls, &sink).await?;
+            Ok(CompletionResponse {
+                content: "replacement".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("streaming test must not use complete_with_tools()")
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.first_attempt(&self.tool_calls, &sink).await?;
+            Ok(ToolCompletionResponse {
+                content: Some("replacement".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TokenRefreshingInner for StreamingAuthProvider {
+        async fn update_token(&self, _token: &str) -> Result<(), LlmError> {
+            self.token_updates.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        deltas: Mutex<Vec<String>>,
+        replacements: AtomicUsize,
+        finishes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingSink {
+        async fn text_delta(&self, delta: String) {
+            self.deltas.lock().unwrap().push(delta);
+        }
+
+        fn supports_text_replacement(&self) -> bool {
+            true
+        }
+
+        async fn replace_on_next_text_delta(&self) {
+            self.replacements.fetch_add(1, Ordering::Relaxed);
+        }
+
+        async fn finish_text_replacement(&self) {
+            self.finishes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    async fn make_streaming_auth_provider(
+        emit_before_auth_failure: bool,
+    ) -> (
+        TokenRefreshingProvider,
+        Arc<StreamingAuthProvider>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempdir().unwrap();
+        let config = test_codex_config(dir.path().join("session.json"));
+        let session = Arc::new(OpenAiCodexSessionManager::new(config).unwrap());
+        session
+            .set_session(OpenAiCodexSession {
+                access_token: make_test_jwt("acct_test"),
+                refresh_token: "refresh-token".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                created_at: chrono::Utc::now(),
+            })
+            .await;
+        let inner = Arc::new(StreamingAuthProvider::new(emit_before_auth_failure));
+        let provider = TokenRefreshingProvider {
+            inner: inner.clone(),
+            session,
+        };
+        (provider, inner, dir)
+    }
+
+    #[tokio::test]
+    async fn text_stream_retries_auth_failure_before_visible_delta() {
+        let (provider, inner, _dir) = make_streaming_auth_provider(false).await;
+        let sink = Arc::new(RecordingSink::default());
+
+        let response = provider
+            .complete_streaming(CompletionRequest::new(Vec::new()), sink.clone())
+            .await
+            .expect("auth failure before visible text should retry");
+
+        assert_eq!(response.content, "replacement");
+        assert_eq!(sink.deltas.lock().unwrap().as_slice(), ["", "replacement"]);
+        assert_eq!(inner.text_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(inner.token_updates.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn text_stream_does_not_retry_auth_failure_after_visible_delta() {
+        let (provider, inner, _dir) = make_streaming_auth_provider(true).await;
+        let sink = Arc::new(RecordingSink::default());
+
+        let result = provider
+            .complete_streaming(CompletionRequest::new(Vec::new()), sink.clone())
+            .await;
+
+        assert!(matches!(result, Err(LlmError::AuthFailed { .. })));
+        assert_eq!(sink.deltas.lock().unwrap().as_slice(), ["partial"]);
+        assert_eq!(inner.text_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.token_updates.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_stream_retries_auth_failure_before_visible_delta() {
+        let (provider, inner, _dir) = make_streaming_auth_provider(false).await;
+        let sink = Arc::new(RecordingSink::default());
+
+        let response = provider
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(Vec::new(), Vec::new()),
+                sink.clone(),
+            )
+            .await
+            .expect("auth failure before visible text should retry");
+
+        assert_eq!(response.content.as_deref(), Some("replacement"));
+        assert_eq!(sink.deltas.lock().unwrap().as_slice(), ["", "replacement"]);
+        assert_eq!(inner.tool_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(inner.token_updates.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_stream_does_not_retry_auth_failure_after_visible_delta() {
+        let (provider, inner, _dir) = make_streaming_auth_provider(true).await;
+        let sink = Arc::new(RecordingSink::default());
+
+        let result = provider
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(Vec::new(), Vec::new()),
+                sink.clone(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(LlmError::AuthFailed { .. })));
+        assert_eq!(sink.deltas.lock().unwrap().as_slice(), ["partial"]);
+        assert_eq!(inner.tool_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.token_updates.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn auth_retry_sink_delegates_replacement_capabilities() {
+        let inner = Arc::new(RecordingSink::default());
+        let sink = AuthRetryStreamSink::new(inner.clone());
+
+        assert!(sink.supports_text_replacement());
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert_eq!(inner.replacements.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.finishes.load(Ordering::Relaxed), 1);
     }
 }

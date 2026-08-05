@@ -1,7 +1,7 @@
 //! The attachment landing/read ports.
 //!
 //! These are declared here, next to the landing routine they front, rather than
-//! in `ironclaw_product` (PROPOSAL §6.4.9, "the single landing routine **plus
+//! in `ironclaw_assistant` (PROPOSAL §6.4.9, "the single landing routine **plus
 //! its ports**" — ending the three-crate spread where the contract, the routine
 //! and the adapter each lived in a different crate). The implementations stay
 //! wherever the behavior does: [`crate::ProjectScopedAttachmentLander`] is the

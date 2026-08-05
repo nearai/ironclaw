@@ -30,7 +30,7 @@
 //!      activate ext-a's `OwnCapabilities` hooks.
 //!   3. Missing hook_id on a lifecycle event — cannot be anchored to an owner.
 
-use ironclaw_events::{RuntimeEvent, RuntimeEventKind};
+use ironclaw_event_log::{RuntimeEvent, RuntimeEventKind};
 use ironclaw_host_api::ids::ExtensionId;
 
 /// Result of probing the hook registry for the owner of a `hook_id`.
@@ -161,7 +161,7 @@ pub(crate) fn resolve_event_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_events::RuntimeEvent;
+    use ironclaw_event_log::RuntimeEvent;
     use ironclaw_host_api::{
         ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
         resource::ResourceScope,

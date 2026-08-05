@@ -6,7 +6,7 @@
 // here because `ironclaw_loop_host` (which owns the trait) already depends on
 // `ironclaw_host_runtime`, so a reverse dependency would be circular. The
 // `impl HostUserProfileSource for MemoryBackedUserProfileSource` is added by the
-// composition layer (`ironclaw_reborn_composition`) that can see both crates. This
+// composition layer (`ironclaw_composition`) that can see both crates. This
 // matches how `WorkspaceIdentityContextSource` implements `HostIdentityContextSource`:
 // the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_host`.
 
@@ -44,7 +44,7 @@ const PROFILE_CACHE_MAX_ENTRIES: usize = 1024;
 /// exactly one place (the provider) and a future provider can swap profile reads
 /// alongside the rest of the memory facade. This source owns the
 /// `ironclaw_memory` / `ironclaw_memory_native` dependency so the loop driver and
-/// `ironclaw_runner` never import it.
+/// `ironclaw_turn_runner` never import it.
 ///
 /// A short-TTL read-through cache with single-flight dedup sits in front of the
 /// provider on this hot loop-start path: concurrent turns for the same

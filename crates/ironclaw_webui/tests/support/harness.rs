@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
+use ironclaw_assistant::RebornCreateThreadResponse;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
 };

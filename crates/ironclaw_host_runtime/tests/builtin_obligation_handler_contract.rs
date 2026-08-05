@@ -12,8 +12,10 @@ use ironclaw_capabilities::{
     CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
     CapabilityObligationRequest,
 };
-use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_event_log::InMemoryAuditSink;
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
@@ -1415,7 +1417,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
-        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        Arc::new(ironclaw_event_log::InMemoryAuditSink::new()),
         secret_store,
         governor,
     );
@@ -1454,7 +1456,7 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
-        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        Arc::new(ironclaw_event_log::InMemoryAuditSink::new()),
         secret_store,
         governor,
     )
@@ -1519,7 +1521,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
         .unwrap();
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
-        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        Arc::new(ironclaw_event_log::InMemoryAuditSink::new()),
         secret_store,
         governor,
     )
@@ -1569,7 +1571,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
         .unwrap();
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
-        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        Arc::new(ironclaw_event_log::InMemoryAuditSink::new()),
         secret_store,
         governor,
     )
@@ -1615,7 +1617,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral()); // empty store
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
-        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        Arc::new(ironclaw_event_log::InMemoryAuditSink::new()),
         secret_store,
         governor,
     )
@@ -1676,11 +1678,11 @@ default_permission = "allow"
 parameters_schema = {}
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

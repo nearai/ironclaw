@@ -2295,7 +2295,7 @@ mod tests {
         })
     }
 
-    /// Moved verbatim from the deleted `ironclaw_runner::tool_disclosure_bridge`
+    /// Moved verbatim from the deleted `ironclaw_turn_runner::tool_disclosure_bridge`
     /// delegate module (WS3 runner sheds): `bridge_capability_ids` is `pub` on
     /// this crate now, so the one-function forwarding module it needed is gone.
     #[test]

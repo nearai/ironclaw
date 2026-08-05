@@ -84,13 +84,13 @@ mod build_error;
 mod host_remediation_contract_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub async fn filesystem_installation_store_for_test()
--> ironclaw_extensions::ExtensionInstallationStore {
+-> ironclaw_extension_registry::ExtensionInstallationStore {
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
-    ironclaw_extensions::ExtensionInstallationStore::load_at(
+    ironclaw_extension_registry::ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
         HostPortCatalog::empty(),

@@ -5,7 +5,7 @@
 //! not depend on the turn kernel (`ironclaw_turns`) to run it. The orchestration
 //! touches the coordinator at exactly **one** call site (`submit_turn`, inside
 //! `submit_or_replay`), so that call site is declared here as a one-method port
-//! and implemented above by `ironclaw_reborn_composition` over the
+//! and implemented above by `ironclaw_composition` over the
 //! `TurnCoordinator` handle it already constructs. Dependency inversion:
 //! declared below, implemented above (`.claude/rules/type-placement.md` §2).
 //!
@@ -161,7 +161,7 @@ impl TurnSubmissionError {
 
 /// The one host capability the conversation inbound orchestration needs.
 ///
-/// Implemented by `ironclaw_reborn_composition` over the real turn coordinator.
+/// Implemented by `ironclaw_composition` over the real turn coordinator.
 #[async_trait]
 pub trait ConversationTurnSubmitter: Send + Sync {
     async fn submit_conversation_turn(

@@ -1,7 +1,7 @@
 # ironclaw_webui guardrails
 
 The **WebUI host stack** for Reborn WebChat v2 — the single `products`-layer
-crate, above `ironclaw_reborn_composition`, that turns composition's product/API
+crate, above `ironclaw_composition`, that turns composition's product/API
 surface into a running HTTP server a browser can talk to. It owns four
 subsystems that used to live apart (see `README.md` for the fold-in map):
 
@@ -10,7 +10,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE/WebSocket streaming, and the Vite SPA bundle.
 2. **Gateway assembly + middleware** (`src/webui_serve.rs`, `src/webui_*.rs`,
-   from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
+   from `ironclaw_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
    OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
@@ -33,7 +33,7 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
 `ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
-direct `ironclaw_product` dependency (see `Cargo.toml`), but as of the WS5
+direct `ironclaw_assistant` dependency (see `Cargo.toml`), but as of the WS5
 transport inversion it is limited to **the frozen operation inventory** — the
 `*_VIEW` / `*_COMMAND` / `*_CAPABILITY` descriptor constants a handler names to
 call the surface, which PROPOSAL §6.1.3 keeps in product — plus **nine** wire
@@ -47,9 +47,9 @@ other DTO, request body, and descriptor *type* now comes from
 `ironclaw_product_contracts`. Never behavior.
 
 That residue is exact, enumerated with per-entry reasons, and shrink-only in
-`ironclaw_architecture` (`tests/reborn_transport_product_boundary.rs`, alongside
+`ironclaw_architecture_tests` (`tests/reborn_transport_product_boundary.rs`, alongside
 `tests/reborn_dependency_boundaries.rs`). **Adding an import from
-`ironclaw_product` will fail that test** — put the type in
+`ironclaw_assistant` will fail that test** — put the type in
 `ironclaw_product_contracts` instead. Moving the inventory constants there to
 shrink the residue also fails it, deliberately: that is an unresolved §6.1.3 /
 §6.9.4 owner decision, not a cleanup.
@@ -129,9 +129,9 @@ candidate module.
 | `attachments` | Attachment download and the filename sanitizing that download depends on | A filesystem path rule — that is `workspace-fs` | `MAX_DOWNLOAD_FILENAME_BYTES`, `sanitized_download_filename`, `get_attachment` |
 | `streaming` | Both live transports and everything that shapes a frame: SSE poll/keepalive tuning, capacity and concurrency rejection, cursor tokens, the envelope→event mapping, and the WebSocket drain loop | A product decision — a stream carries what the surface already produced | `SSE_POLL_INTERVAL`, `SSE_IDLE_POLL_MAX_INTERVAL`, `SSE_KEEPALIVE_INTERVAL`, `LAST_EVENT_ID_HEADER`, `sse_poll_interval_for_idle_polls`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `webchat_sse_event_from_envelope`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token`, `cursor_token`, `stream_events_ws`, `ws_drain_loop`, `ws_send_with_timeout` |
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
-| `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_product`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
+| `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
 | `automations` | Automation listing and lifecycle (pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
-| `traces` | Trace credits, account traces, the account login link, and hold authorization | Trace *content* — that is `ironclaw_reborn_traces` | `trace_credits`, `trace_account_traces`, `trace_account_login_link`, `authorize_trace_hold` |
+| `traces` | Trace credits, account traces, the account login link, and hold authorization | Trace *content* — that is `ironclaw_trace_commons` | `trace_credits`, `trace_account_traces`, `trace_account_login_link`, `authorize_trace_hold` |
 | `outbound` | Outbound notification preferences, delivery targets, and the capability-failure→HTTP classification they introduced | Delivery itself — the host owns the coordinator | `get_outbound_preferences`, `set_outbound_preferences`, `CapabilityFailureHttpClass`, `capability_failure_http_class`, `capability_failure_bad_request`, `capability_resolution_succeeded`, `parse_thread_id_for_response`, `outbound_preferences_forbidden`, `outbound_preferences_unavailable`, `list_outbound_delivery_targets`, `outbound_preferences_activity_id` |
 | `skills` | Skill discovery, install/update/remove, content reads, and auto-activation | Skill *selection* — that is `ironclaw_skills` | `list_skills`, `search_skills`, `install_skill`, `get_skill_content`, `update_skill`, `remove_skill`, `set_skill_auto_activate`, `set_auto_activate_learned`, `skill_mutation_succeeded`, `skill_mutation_forbidden`, `skill_mutation_unavailable`, `SkillPath`, `SearchSkillsBody`, `InstallSkillBody`, `UpdateSkillBody`, `SetSkillAutoActivateBody` |
 | `extensions` | Extension listing, registry browse, install/import/remove, hosted-MCP registration, the setup handshake, and the lifecycle response projections | Admin *configuration* of an installed extension — that is `admin-config` | `list_extensions`, `list_extension_registry`, `install_extension`, `register_hosted_mcp_extension`, `import_extension`, `ironhub_deliver_install`, `remove_extension`, `extension_lifecycle_mutation_succeeded`, `extension_install_succeeded`, `membership_is_visible`, `membership_landed_pending_setup`, `ensure_extension_inventory_readback`, `extension_lifecycle_forbidden`, `extension_lifecycle_unavailable`, `extension_action_completed`, `get_extension_setup`, `setup_extension`, `public_lifecycle_json`, `extension_lifecycle_activity_id`, `ExtensionPackagePath`, `InstallExtensionBody`, `RegisterHostedMcpBody`, `RegisterHostedMcpResponse`, `bounded_hosted_mcp_name`, `RemoveExtensionBody`, `extension_package_ref_for_request` |
@@ -304,7 +304,7 @@ The crate already owns `WebuiAuthenticator` impls, `SignedTokenSessionStore`,
 and the session lifecycle types. The OAuth callback's job is exactly that
 — turn a provider profile into a signed session `create_session` call
 — so the login mint path belongs in the same host-owned crate, not
-behind the product/API seam in `ironclaw_reborn_composition`.
+behind the product/API seam in `ironclaw_composition`.
 
 SSO sessions are user identity only. They must not inherit operator
 WebUI configuration privileges from the deployment. When the CLI
@@ -413,7 +413,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - **Session transport** is one-time login ticket in the callback
   redirect (`?login_ticket=<ticket>`) followed by same-origin
   exchange for the bearer — see
-  `ironclaw_reborn_composition/CLAUDE.md` → "Session transport
+  `ironclaw_composition/CLAUDE.md` → "Session transport
   decision" for the rationale.
 
 ### What the SSO router deliberately does NOT do

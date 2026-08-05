@@ -46,9 +46,9 @@ proptest = "1"
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
 # used by the `adapter::tests` mod, and `ProtocolAuthEvidence::test_verified`,
 # which `payload::tests` uses to stand in for the host; both come from
-# `ironclaw_host_api`, which owns them. The `ironclaw_product` dev-dep that
+# `ironclaw_host_api`, which owns them. The `ironclaw_assistant` dev-dep that
 # used to sit here supplied neither and went with the crate's normal
-# `ironclaw_product` edge (WS1.3). WS1.5 removed the `host-auth-mint` opt-in:
+# `ironclaw_assistant` edge (WS1.3). WS1.5 removed the `host-auth-mint` opt-in:
 # minting is witness-gated and an adapter crate holds no grant, in tests or in
 # production.
 ironclaw_host_api = { path = "../../../ironclaw_host_api", version = "0.1.0", features = ["test-support"] }

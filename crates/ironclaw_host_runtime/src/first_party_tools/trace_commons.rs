@@ -15,7 +15,7 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
     capability::{EffectKind, PermissionMode},
@@ -28,7 +28,8 @@ use ironclaw_host_api::{
     resource::{ResourceEstimate, ResourceProfile, ResourceScope},
     runtime::RuntimeKind,
 };
-use ironclaw_reborn_traces::contribution::{
+use ironclaw_secrets::SecretMaterial;
+use ironclaw_trace_commons::contribution::{
     AccountLoginLink, AccountLoginLinkError, COMMUNITY_PROFILE_BIO_MAX_BYTES,
     COMMUNITY_PROFILE_HANDLE_MAX_CHARS, COMMUNITY_PROFILE_HANDLE_MIN_CHARS, CommunityProfileError,
     ContributionHttpError, ContributionHttpMethod, ContributionHttpRequest,
@@ -38,11 +39,10 @@ use ironclaw_reborn_traces::contribution::{
     mint_profile_attribution_token_for_user_via_sink, resolve_trace_credentials,
     set_community_profile_for_user_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
 };
-use ironclaw_reborn_traces::onboarding::{
+use ironclaw_trace_commons::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
     protocol::OnboardErrorCode,
 };
-use ironclaw_secrets::SecretMaterial;
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
@@ -549,7 +549,7 @@ pub(super) async fn dispatch_onboard(
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
     };
-    match ironclaw_reborn_traces::onboarding::onboard(
+    match ironclaw_trace_commons::onboarding::onboard(
         &scope,
         &input.invite_url,
         input.consents,
@@ -718,7 +718,7 @@ pub(super) async fn dispatch_credits(
     // failure (unreadable or corrupt records). Do NOT mask it as "no records" —
     // that would hide corruption/permission issues and under-report an active
     // contributor. Report the read failure honestly (mirrors `dispatch_status`).
-    match ironclaw_reborn_traces::contribution::scoped_credit_view(scope.as_str()) {
+    match ironclaw_trace_commons::contribution::scoped_credit_view(scope.as_str()) {
         Ok(view) => Ok(format_credits(&view.report)),
         Err(error) => {
             tracing::debug!(%error, "trace commons credits: local records read failed");
@@ -1340,7 +1340,7 @@ mod tests {
         ids::CapabilityId,
         resource::{ResourceEstimate, ResourceScope},
     };
-    use ironclaw_reborn_traces::contribution::{
+    use ironclaw_trace_commons::contribution::{
         StandingTraceContributionPolicy, TraceCreditReport,
     };
     use serde_json::json;

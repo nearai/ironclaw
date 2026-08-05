@@ -5,8 +5,8 @@
 //! metadata such as installation ids, reply binding refs, external conversation
 //! refs, or delivery attempt ids.
 
+use ironclaw_assistant::RebornGetRunStateResponse;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
-use ironclaw_product::RebornGetRunStateResponse;
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView, GatePromptView,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState, ProgressKind,

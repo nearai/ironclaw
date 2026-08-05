@@ -28,7 +28,7 @@
 - Create: `crates/ironclaw_libsql_runtime/src/lib.rs`
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
-- Modify: `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
+- Modify: `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
 
 **Interfaces:**
 - Produces: `LibSqlRuntime::new(Arc<libsql::Database>) -> Result<Self, LibSqlRuntimeError>`
@@ -141,7 +141,7 @@ Run:
 
 ```bash
 cargo test -p ironclaw_libsql_runtime -- --nocapture
-cargo test -p ironclaw_architecture reborn_workspace_crates_declare_layers_and_follow_layer_matrix -- --exact
+cargo test -p ironclaw_architecture_tests reborn_workspace_crates_declare_layers_and_follow_layer_matrix -- --exact
 ```
 
 Expected: both pass.
@@ -149,7 +149,7 @@ Expected: both pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/ironclaw_libsql_runtime crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
+git add Cargo.toml Cargo.lock crates/ironclaw_libsql_runtime crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
 git commit -m "feat(libsql): add shared read and writer runtime"
 ```
 
@@ -270,11 +270,11 @@ git commit -m "refactor(filesystem): use shared libsql writer lane"
 - Modify: `crates/ironclaw_triggers/Cargo.toml`
 - Modify: `crates/ironclaw_triggers/src/libsql.rs`
 - Test: `crates/ironclaw_triggers/src/libsql.rs`
-- Modify: `crates/ironclaw_reborn_event_store/src/lib.rs`
-- Test: `crates/ironclaw_reborn_event_store/src/lib.rs`
-- Modify: `crates/ironclaw_reborn_composition/Cargo.toml`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
-- Test: `crates/ironclaw_reborn_composition/src/factory.rs`
+- Modify: `crates/ironclaw_event_store/src/lib.rs`
+- Test: `crates/ironclaw_event_store/src/lib.rs`
+- Modify: `crates/ironclaw_composition/Cargo.toml`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
+- Test: `crates/ironclaw_composition/src/factory.rs`
 - Modify: `docs/reborn/contracts/triggers.md`
 - Modify: `docs/reborn/contracts/events.md`
 
@@ -370,8 +370,8 @@ Run:
 ```bash
 cargo test -p ironclaw_triggers libsql::tests::filesystem_and_trigger_writes_share_one_admission_lane -- --exact --nocapture
 cargo test -p ironclaw_triggers --lib libsql::tests -- --nocapture
-cargo test -p ironclaw_reborn_event_store --lib -- --nocapture
-cargo test -p ironclaw_reborn_composition --lib libsql -- --nocapture
+cargo test -p ironclaw_event_store --lib -- --nocapture
+cargo test -p ironclaw_composition --lib libsql -- --nocapture
 ```
 
 Expected: all pass.
@@ -379,7 +379,7 @@ Expected: all pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/ironclaw_triggers crates/ironclaw_reborn_event_store crates/ironclaw_reborn_composition docs/reborn/contracts/triggers.md docs/reborn/contracts/events.md
+git add crates/ironclaw_triggers crates/ironclaw_event_store crates/ironclaw_composition docs/reborn/contracts/triggers.md docs/reborn/contracts/events.md
 git commit -m "fix(composition): share one libsql runtime"
 ```
 
@@ -539,10 +539,10 @@ cargo fmt --check
 cargo test -p ironclaw_libsql_runtime
 cargo test -p ironclaw_filesystem
 cargo test -p ironclaw_triggers --lib
-cargo test -p ironclaw_reborn_event_store --lib
-cargo test -p ironclaw_reborn_composition --lib
+cargo test -p ironclaw_event_store --lib
+cargo test -p ironclaw_composition --lib
 cargo test -p ironclaw_turns --test row_store_crash_consistency
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_architecture_tests
 ```
 
 Expected: all pass with no warnings.
@@ -552,7 +552,7 @@ Expected: all pass with no warnings.
 Run:
 
 ```bash
-cargo clippy -p ironclaw_libsql_runtime -p ironclaw_filesystem -p ironclaw_triggers -p ironclaw_reborn_event_store -p ironclaw_reborn_composition -p ironclaw_turns --all-targets -- -D warnings
+cargo clippy -p ironclaw_libsql_runtime -p ironclaw_filesystem -p ironclaw_triggers -p ironclaw_event_store -p ironclaw_composition -p ironclaw_turns --all-targets -- -D warnings
 cargo test -p ironclaw_filesystem db::tests::postgres_transient_write_conflicts_are_retryable_contention -- --exact
 ```
 
@@ -578,7 +578,7 @@ only the required lockfile update.
 - [ ] **Step 5: Commit any verification-only fixes**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/ironclaw_libsql_runtime crates/ironclaw_filesystem crates/ironclaw_triggers crates/ironclaw_reborn_event_store crates/ironclaw_reborn_composition crates/ironclaw_turns crates/ironclaw_architecture docs/reborn/contracts
+git add Cargo.toml Cargo.lock crates/ironclaw_libsql_runtime crates/ironclaw_filesystem crates/ironclaw_triggers crates/ironclaw_event_store crates/ironclaw_composition crates/ironclaw_turns crates/ironclaw_architecture_tests docs/reborn/contracts
 git commit -m "test(libsql): complete writer recovery coverage"
 ```
 

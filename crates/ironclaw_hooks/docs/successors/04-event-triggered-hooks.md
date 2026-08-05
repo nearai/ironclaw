@@ -98,7 +98,7 @@ emit_audit.summary = "polymarket hook failed"
 
 - **Subscription side**: a new dispatcher path
   `dispatch_event_triggered_at(EventCursor, RuntimeEvent)`. The
-  reborn factory wires it to `ironclaw_events`'s event-stream
+  reborn factory wires it to `ironclaw_event_log`'s event-stream
   consumer (`EventStreamSubscriber`-like trait).
 - **Backpressure**: event-stream consumers must not block the
   event-emit path. The hook dispatcher reads events at its own pace
@@ -130,17 +130,17 @@ emit_audit.summary = "polymarket hook failed"
   while the host is alive. Restarting from the same cursor intentionally
   gives at-least-once replay; exact-once acknowledgement is deferred.
 - Hook dispatch receives the durable `RuntimeEvent` directly. `ironclaw_hooks`
-  depends on `ironclaw_events` as of PR #3640 — the milestone projection in
-  PR #3573 covered `ironclaw_runner`'s milestone wiring, but the hook crate
+  depends on `ironclaw_event_log` as of PR #3640 — the milestone projection in
+  PR #3573 covered `ironclaw_turn_runner`'s milestone wiring, but the hook crate
   itself did not gain the dep until the event-triggered consumer landed. The
   hook crate still does not depend on host runtime, dispatcher, secrets,
-  network, WASM, or Reborn internals; the `ironclaw_architecture` boundary
+  network, WASM, or Reborn internals; the `ironclaw_architecture_tests` boundary
   test enforces this.
 
 ## Cross-cutting constraints
 
 - **Cross-crate boundary**: `ironclaw_hooks` already depends on
-  `ironclaw_events` for the milestone projection (PR #3573), and it
+  `ironclaw_event_log` for the milestone projection (PR #3573), and it
   continues to forbid `host_runtime` / `network`. Event-triggered
   hooks need *some* access to `RuntimeEvent`. Phase 5 shipped with the
   full sealed-vocab `RuntimeEvent` for development velocity; the
@@ -185,9 +185,9 @@ emit_audit.summary = "polymarket hook failed"
    hook that calls `sink.deny(...)` (the trait doesn't expose it).
 5. **Backpressure**: a slow event-triggered hook doesn't block the
    loop's event-emit path. Drive with a recorder-style test.
-6. **Cross-crate boundary**: `ironclaw_architecture` test confirms
+6. **Cross-crate boundary**: `ironclaw_architecture_tests` test confirms
    `ironclaw_hooks` doesn't gain a forbidden dep on
-   `ironclaw_events` or `ironclaw_host_runtime`.
+   `ironclaw_event_log` or `ironclaw_host_runtime`.
 
 ## Threat-model notes
 
@@ -201,12 +201,12 @@ emit_audit.summary = "polymarket hook failed"
 
 ## Risk
 
-- Cross-crate dep direction: `ironclaw_events` is already a
+- Cross-crate dep direction: `ironclaw_event_log` is already a
   dependency of `ironclaw_hooks` (via the milestone projection in
   PR #3573), so the dep direction is established. The new traffic is
   the *consumer-side* of the event stream, which means
   `ironclaw_hooks` learns about `EventStreamSubscriber` or whatever
-  trait `ironclaw_events` exposes.
+  trait `ironclaw_event_log` exposes.
 - Coordination with PR #3635 (persistent counter): event-triggered
   hooks that need to aggregate across runs depend on the durable
   counter being available. This PR can ship the inline subscription

@@ -2,11 +2,12 @@ use std::{fs, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_event_log::{AuditSink, DurableAuditSink, EventError};
 use ironclaw_event_projections::{
     AuditProjectionRequest, AuditProjectionService, ProjectionScope, ReplayAuditProjectionService,
 };
-use ironclaw_events::{AuditSink, DurableAuditSink, EventError};
-use ironclaw_extensions::{
+use ironclaw_event_store::{RebornEventStoreConfig, RebornProfile, build_reborn_event_stores};
+use ironclaw_extension_registry::{
     ExtensionError, ExtensionLifecycleEvent, ExtensionLifecycleEventSink,
     ExtensionLifecycleService, ExtensionManifest, ExtensionPackage, ExtensionRegistry,
     ManifestSource,
@@ -23,9 +24,6 @@ use ironclaw_host_api::{
     path::VirtualPath,
     resource::ResourceScope,
     runtime::RuntimeKind,
-};
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
 };
 
 #[tokio::test]
@@ -261,11 +259,11 @@ input_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.input.v1.jso
 output_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.output.v1.json"
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

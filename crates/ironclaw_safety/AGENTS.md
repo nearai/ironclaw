@@ -24,7 +24,7 @@
 
 - Fast local check: `cargo test -p ironclaw_safety`
 - Fuzz-target check after parser/pattern changes: follow `crates/ironclaw_safety/fuzz/README.md`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

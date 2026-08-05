@@ -4,7 +4,7 @@
 //! This crate owns the host-facing `HostManagedModelGateway` contract, and this
 //! module is its only production implementation: the adapter that bridges that
 //! contract to the shared `ironclaw_llm` provider abstraction. It moved here
-//! from `ironclaw_runner` with the WS3 runner sheds (PROPOSAL §6.7.2 — "gains:
+//! from `ironclaw_turn_runner` with the WS3 runner sheds (PROPOSAL §6.7.2 — "gains:
 //! runner's model-gateway adapter (a host-port adapter by charter)"); the doc
 //! it replaces claimed the adapter lived "in the standalone Reborn composition
 //! crate", which was never true of any tree.

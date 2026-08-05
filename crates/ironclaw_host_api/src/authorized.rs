@@ -21,7 +21,7 @@
 //! the type but the *kernel* (`ironclaw_capabilities`) is the sole legitimate
 //! minter, and those are different crates. The witness gives the structural
 //! barrier (private fields + grant-gated construction); a companion
-//! `ironclaw_architecture` test restricts `impl CapabilityAuthorizer` to the
+//! `ironclaw_architecture_tests` test restricts `impl CapabilityAuthorizer` to the
 //! kernel crate — type-seal plus test-seal. **Per §9 the seal's *guarantee* is
 //! vacuous until `authorize()` inlines the four policy checks** (that later PR is
 //! the explicit security milestone); this slice lands the structural witness so
@@ -41,7 +41,7 @@ use crate::{
 
 /// Proof of authority to mint an [`Authorized`]. The kernel authorizer implements
 /// this trait on its own type; no one else legitimately does (enforced by an
-/// `ironclaw_architecture` test restricting implementors to
+/// `ironclaw_architecture_tests` test restricting implementors to
 /// `ironclaw_capabilities`).
 ///
 /// This trait is intentionally NOT sealed to `host_api` — sealing it here would

@@ -199,7 +199,7 @@ pub enum LoopHostMilestoneKind {
         /// The extension that authored this hook, when applicable.
         /// Populated for `Installed` hooks; `None` for `Builtin`, `Trusted`,
         /// and `SelfAuthored` hooks (which have no owning extension).
-        /// Carried into [`ironclaw_events::RuntimeEvent::provider`] so
+        /// Carried into [`ironclaw_event_log::RuntimeEvent::provider`] so
         /// event-triggered subscriptions scoped to `OwnCapabilities` can
         /// match hook milestone events from the same extension.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,7 +311,7 @@ pub trait LoopHostMilestoneSink: Send + Sync {
 /// that does not own a `LoopRunContext`. It therefore cannot construct a full
 /// [`LoopHostMilestone`] on its own. Instead, the dispatcher emits the
 /// hook-specific *kind* into a [`HookMilestoneSink`], and host composition in
-/// `ironclaw_runner` wraps the real [`LoopHostMilestoneSink`] in an adapter
+/// `ironclaw_turn_runner` wraps the real [`LoopHostMilestoneSink`] in an adapter
 /// that injects the active run's context before forwarding.
 ///
 /// The kinds emitted through this sink are always one of:

@@ -63,7 +63,7 @@ pub trait LifecycleProductService: Send + Sync {
     /// carried verbatim against its own prose;
     /// `bundle_import_defaults_to_service_unavailable` here and
     /// `webui_extension_import_reports_unavailable_when_no_service_is_wired`
-    /// in `ironclaw_product`'s surface contract pin the code at both tiers so
+    /// in `ironclaw_assistant`'s surface contract pin the code at both tiers so
     /// it cannot drift back silently.
     async fn import_extension_bundle(
         &self,

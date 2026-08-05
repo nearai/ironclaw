@@ -31,7 +31,7 @@ a legitimate Reborn target. Otherwise pick one per §1.
   may be queued for deletion rather than for de-slopping (`grep -rl "<crate>" crates/*/Cargo.toml
   Cargo.toml`). Verify each candidate's status with the orientation recipe (§1) before picking it.
 - **Local gate reality.** You can prove `cargo fmt`, `cargo clippy`, per-crate `cargo test -p <crate>`,
-  the workspace unit-test tier, and the architecture-boundary test (`cargo test -p ironclaw_architecture`)
+  the workspace unit-test tier, and the architecture-boundary test (`cargo test -p ironclaw_architecture_tests`)
   locally. The **integration tier** (`cargo test --features integration`) needs a running PostgreSQL;
   the **live tier** (`-- --ignored`) needs Postgres + LLM API keys; **Reborn e2e**
   (`scripts/reborn-e2e-rust.sh`) may need Docker. If a fix touches those paths, implement it fully and
@@ -57,7 +57,7 @@ List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
 **Selection bias:** prefer **smaller / leaf crates first** — they fit entirely in context, gate
 cleanly, and merge independently. A crate whose `src` is **under ~2k lines** can and SHOULD be read in
 full (§3). Clear the small, high-leverage crates before taking on the giants (e.g.
-`ironclaw_reborn_composition`, `ironclaw_product`, `ironclaw_extension_host`-scale surfaces need
+`ironclaw_composition`, `ironclaw_assistant`, `ironclaw_extension_host`-scale surfaces need
 targeted reading, not a full load, and may warrant splitting the de-slop across iterations
 module-by-module). When unsure, prefer a crate that is **load-bearing for invariants** (turns,
 dispatcher, authorization, approvals, secrets, run_state, event store) over a purely mechanical one —
@@ -76,7 +76,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
   crate, a dependency edge, or a re-export, apply the `ironclaw-reborn-architecture-review` skill first.
 - **Respect the Reborn layering.** Product/runtime composition flows **downward** through typed
   contracts (`crates/AGENTS.md` → "Dependency Mental Model"). Never introduce an upstream dependency in
-  a lower-level crate to make a fix convenient — `cargo test -p ironclaw_architecture` enforces the
+  a lower-level crate to make a fix convenient — `cargo test -p ironclaw_architecture_tests` enforces the
   boundaries and will fail. A de-slop that needs a new upward edge is out of scope; record it (§9).
 - **Scope = ONE coherent, single-crate PR.** If the crate is huge and the findings sprawl, do the
   **smallest self-contained slice** (one module / one invariant / one test gap) and record the rest in
@@ -222,7 +222,7 @@ the PR body. The bar is "every finding *resolved*" — fixed, or explicitly just
 seal/delete whose fallout is confined to this crate (+ its own tests) is in-scope — just do it. But when
 tightening a `pub` item would force edits to **other crates'** production code (routing their reads
 through a new accessor), or would require a new dependency edge / re-export (which
-`cargo test -p ironclaw_architecture` guards), that's a cross-crate change masquerading as de-slop:
+`cargo test -p ironclaw_architecture_tests` guards), that's a cross-crate change masquerading as de-slop:
 **defer it** rather than drag this PR into three crates. Likewise defer anything that **changes the
 crate's observable contract or adds a dependency**. Fix the clean, contained findings now; hand off the
 ripple-y ones per "Deferred findings" below.
@@ -262,7 +262,7 @@ detectors. A new test must actually pin behavior; a sealed `pub` must still comp
 cargo fmt --all --check
 cargo clippy -p <crate> --all-targets --all-features -- -D warnings
 cargo test  -p <crate>
-cargo test  -p ironclaw_architecture          # dependency-boundary enforcement for crates/
+cargo test  -p ironclaw_architecture_tests          # dependency-boundary enforcement for crates/
 cargo build --workspace --all-targets         # sealing a pub can break OTHER crates — this catches it
 cargo clippy --all --benches --tests --examples --all-features
 ```

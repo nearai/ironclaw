@@ -7,7 +7,7 @@
 //! `list_dir` at the recorded `storage_key` in this and later turns.
 //!
 //! The read counterpart (`ProjectScopedAttachmentReader`) stays in
-//! `ironclaw_product`: it also implements `ironclaw_loop_host`'s
+//! `ironclaw_assistant`: it also implements `ironclaw_loop_host`'s
 //! `LoopAttachmentReadPort`, and `ironclaw_loop_host` is a `loops`-layer crate
 //! this substrate may not name. See PROPOSAL §6.4.9 and the WS5 `attachments`
 //! CHECKLIST row.

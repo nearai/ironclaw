@@ -2,7 +2,7 @@
 //!
 //! Production wires `attachment_read_port` from the local-dev workspace
 //! filesystem (`ProjectScopedAttachmentReader`,
-//! `crates/ironclaw_reborn_composition/src/runtime.rs:3328-3334`) so the loop
+//! `crates/ironclaw_composition/src/runtime.rs:3328-3334`) so the loop
 //! model port reads landed attachment bytes back for the gateway
 //! (`convert_messages`) to build a `ContentPart::ImageUrl` for vision-capable
 //! models. Regression: this port was `None` everywhere pre-fix, so images
@@ -21,7 +21,7 @@ mod reborn_support;
 mod support;
 
 use axum::http::StatusCode;
-use ironclaw_product::RebornServices;
+use ironclaw_assistant::RebornServices;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;

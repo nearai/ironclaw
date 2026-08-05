@@ -21,8 +21,8 @@ use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the circuit breaker.
@@ -329,12 +329,52 @@ impl LlmProvider for CircuitBreakerProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let admission = self.check_allowed().await?;
+        match self.inner.complete_streaming(request, sink).await {
+            Ok(resp) => {
+                self.record_success(admission).await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(admission, &err).await;
+                Err(err)
+            }
+        }
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let admission = self.check_allowed().await?;
         match self.inner.complete_with_tools(request).await {
+            Ok(resp) => {
+                self.record_success(admission).await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(admission, &err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let admission = self.check_allowed().await?;
+        match self
+            .inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+        {
             Ok(resp) => {
                 self.record_success(admission).await;
                 Ok(resp)
@@ -387,6 +427,13 @@ mod tests {
 
     use crate::testing::StubLlm;
     use tokio::sync::{Notify, mpsc};
+
+    struct NoopStreamSink;
+
+    #[async_trait]
+    impl CompletionStreamSink for NoopStreamSink {
+        async fn text_delta(&self, _delta: String) {}
+    }
 
     fn make_request() -> CompletionRequest {
         CompletionRequest::new(vec![crate::ChatMessage::user("hello")])
@@ -556,6 +603,74 @@ mod tests {
         let _ = cb.complete_with_tools(make_tool_request()).await;
         let _ = cb.complete_with_tools(make_tool_request()).await;
         assert_eq!(cb.circuit_state().await, CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn streaming_failures_open_and_then_short_circuit_provider_calls() {
+        let stub = Arc::new(StubLlm::failing("test"));
+        let cb = CircuitBreakerProvider::new(stub.clone(), fast_config(2));
+        let sink: Arc<dyn CompletionStreamSink> = Arc::new(NoopStreamSink);
+
+        for _ in 0..2 {
+            let result = cb
+                .complete_streaming(make_request(), Arc::clone(&sink))
+                .await;
+            assert!(result.is_err());
+        }
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+        assert_eq!(stub.calls(), 2);
+
+        let blocked = cb
+            .complete_streaming(make_request(), sink)
+            .await
+            .expect_err("an open breaker must reject streaming completion");
+        assert!(
+            matches!(
+                blocked,
+                LlmError::RequestFailed { ref reason, .. }
+                    if reason.contains("Circuit breaker open")
+            ),
+            "caller should receive the circuit-breaker error, got {blocked:?}"
+        );
+        assert_eq!(
+            stub.calls(),
+            2,
+            "an open breaker must not call the streaming provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_streaming_failures_open_and_then_short_circuit_provider_calls() {
+        let stub = Arc::new(StubLlm::failing("test"));
+        let cb = CircuitBreakerProvider::new(stub.clone(), fast_config(2));
+        let sink: Arc<dyn CompletionStreamSink> = Arc::new(NoopStreamSink);
+
+        for _ in 0..2 {
+            let result = cb
+                .complete_with_tools_streaming(make_tool_request(), Arc::clone(&sink))
+                .await;
+            assert!(result.is_err());
+        }
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+        assert_eq!(stub.calls(), 2);
+
+        let blocked = cb
+            .complete_with_tools_streaming(make_tool_request(), sink)
+            .await
+            .expect_err("an open breaker must reject streaming tool completion");
+        assert!(
+            matches!(
+                blocked,
+                LlmError::RequestFailed { ref reason, .. }
+                    if reason.contains("Circuit breaker open")
+            ),
+            "caller should receive the circuit-breaker error, got {blocked:?}"
+        );
+        assert_eq!(
+            stub.calls(),
+            2,
+            "an open breaker must not call the streaming tool provider"
+        );
     }
 
     #[tokio::test]

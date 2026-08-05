@@ -236,7 +236,7 @@ class ReleaseTagTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
             _write_candidate_manifest(
-                candidate_root, "crates/ironclaw_reborn_cli", VERSION
+                candidate_root, "crates/ironclaw_cli", VERSION
             )
             self.assertEqual(release._manifest_version(candidate_root), VERSION)
 
@@ -250,21 +250,21 @@ class ReleaseTagTests(unittest.TestCase):
     def test_candidate_manifest_resolves_through_crate_inventory_when_nested(
         self,
     ) -> None:
-        """WS10: the candidate's ironclaw_reborn_cli manifest is found by
+        """WS10: the candidate's ironclaw_cli manifest is found by
         crate NAME even after the target-architecture family move
-        (crates/<family>/ironclaw_reborn_cli, PROPOSAL §5) — this is exactly
+        (crates/<family>/ironclaw_cli, PROPOSAL §5) — this is exactly
         the shape a release cut against a moved candidate commit hits."""
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
             _write_candidate_manifest(
-                candidate_root, "crates/substrates/ironclaw_reborn_cli", VERSION
+                candidate_root, "crates/substrates/ironclaw_cli", VERSION
             )
             self.assertEqual(release._manifest_version(candidate_root), VERSION)
 
     def test_candidate_manifest_resolution_fails_closed_when_crate_missing(
         self,
     ) -> None:
-        """A candidate checkout that cannot resolve ironclaw_reborn_cli must
+        """A candidate checkout that cannot resolve ironclaw_cli must
         refuse loudly, not silently read `manifest_version` as empty/wrong —
         the WS10 failure mode this whole module guards against."""
         with tempfile.TemporaryDirectory() as directory:
@@ -278,7 +278,7 @@ class ReleaseTagTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(
                 release.ReleaseTagError,
-                "cannot resolve the ironclaw_reborn_cli crate",
+                "cannot resolve the ironclaw_cli crate",
             ):
                 release._manifest_version(candidate_root)
 

@@ -12,7 +12,7 @@ use ironclaw_extension_host::{
     ActiveExtensionPublisher, AvailableExtensionCatalog,
     product_extension_host_api_contract_registry, restore_extension_lifecycle_state,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionLifecycleService, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRegistry, InstallationOwner, ManifestHash, ManifestSource,
@@ -27,14 +27,14 @@ fn host_port_catalog() -> ironclaw_host_api::host_port::HostPortCatalog {
     ironclaw_host_api::host_port::default_host_port_catalog().expect("default host port catalog")
 }
 
-fn contracts() -> ironclaw_extensions::HostApiContractRegistry {
+fn contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
     product_extension_host_api_contract_registry().expect("host API contracts")
 }
 
 /// A hosted-MCP `[mcp]` manifest, optionally carrying a statically-declared
 /// (already "discovered") model-visible tool. With `tool_toml` empty, the
 /// package declares nothing but the host-internal `{id}.mcp_server`
-/// connection-template capability (`ironclaw_extensions::v3::parse_v3`,
+/// connection-template capability (`ironclaw_extension_registry::v3::parse_v3`,
 /// `CapabilityVisibility::HostInternal`) — the exact shape of a hosted MCP
 /// registration that has not yet been discovered.
 fn hosted_mcp_manifest_record(id: &str, tool_toml: &str) -> ExtensionManifestRecord {
@@ -111,7 +111,7 @@ async fn persist_installation(
 /// declares no model-visible capability, channel, or hook — the shape of a
 /// hosted-MCP registration that has been installed but never discovered, which
 /// synthesizes only the host-internal `{id}.mcp_server` connection template
-/// (`ironclaw_extensions::v3`, `CapabilityVisibility::HostInternal`) — must be
+/// (`ironclaw_extension_registry::v3`, `CapabilityVisibility::HostInternal`) — must be
 /// installed into the lifecycle service WITHOUT being enabled or published.
 ///
 /// Before this guard existed, restore called `lifecycle.enable(..)`

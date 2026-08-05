@@ -1,7 +1,7 @@
 /// Test double substituting production's `TracingSecurityAuditSink`.
 use std::sync::Mutex;
 
-use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink};
+use ironclaw_event_log::{SecurityAuditEvent, SecurityAuditSink};
 
 #[derive(Debug, Default)]
 pub(crate) struct RecordingSecurityAuditSink {

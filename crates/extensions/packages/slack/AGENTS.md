@@ -10,7 +10,7 @@
   - `delivery.rs`, `attachment_transfer.rs`, `preference_targets.rs` — delivery DTOs, attachment transfer, reply-target codec.
   - Re-derive this list with `ls crates/extensions/packages/slack/src/`.
 - Read upstream contracts before changing adapter behavior:
-  - `crates/ironclaw_product/AGENTS.md`
+  - `crates/ironclaw_assistant/AGENTS.md`
 
 ## What This Crate Owns
 
@@ -29,8 +29,8 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_slack_extension`
-- Run `cargo test -p ironclaw_product` when shared DTO assumptions change.
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Run `cargo test -p ironclaw_assistant` when shared DTO assumptions change.
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

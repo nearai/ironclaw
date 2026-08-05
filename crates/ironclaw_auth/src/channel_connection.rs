@@ -8,7 +8,7 @@
 //! `ironclaw_attachments` already carries for its landing ports).
 //!
 //! The projection decision does **not** cross the port: `project_auth_account_state`
-//! stays a pure function of the two enums and is called by `ironclaw_product`'s
+//! stays a pure function of the two enums and is called by `ironclaw_assistant`'s
 //! extensions wire, so nothing authoritative moves with the vocabulary.
 
 use std::collections::HashMap;

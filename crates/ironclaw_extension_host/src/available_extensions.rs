@@ -3,12 +3,12 @@ use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_contracts::{
     channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
 };
-use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, nearai_bundle};
-use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
     ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
 };
+use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, nearai_bundle};
+use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_host_api::{
@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
 };
-// Imported from the contract that owns it. `ironclaw_product` only re-exports
+// Imported from the contract that owns it. `ironclaw_assistant` only re-exports
 // this type under an alias (`reborn_services.rs`), and retiring the `Reborn*`
 // prefix is CHECKLIST WS10's type-name row — so the path moves to the owner
 // here and the local name is left alone.
@@ -94,7 +94,7 @@ pub struct AvailableExtensionPackage {
     pub manifest_toml: String,
     /// The validated runtime contract compiled alongside `manifest_toml`.
     /// Catalog projections read this value directly and never reparse raw TOML.
-    pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
+    pub resolved_manifest: Arc<ironclaw_extension_registry::ResolvedExtensionManifest>,
     /// The loader-supplied [`ManifestSource`] this package was validated
     /// under. Carried so install/migration re-parses (`prepare_install`,
     /// `prepare_manifest_migration`) validate with the SAME source the
@@ -629,7 +629,9 @@ impl AvailableExtensionCatalog {
     /// Resolved deployment manifests for host-owned surfaces. This is a
     /// read-only projection of the available catalog; it does not install or
     /// activate any package.
-    pub fn resolved_manifests(&self) -> Vec<Arc<ironclaw_extensions::ResolvedExtensionManifest>> {
+    pub fn resolved_manifests(
+        &self,
+    ) -> Vec<Arc<ironclaw_extension_registry::ResolvedExtensionManifest>> {
         self.packages
             .iter()
             .map(|package| Arc::clone(&package.resolved_manifest))
@@ -801,7 +803,7 @@ fn bundled_extension_package(
         &host_ports,
         None,
         &contracts,
-        ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),
+        ironclaw_extension_registry::PackageRootBinding::Materialized(root.clone()),
     )
     .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -937,10 +939,11 @@ fn channel_directions_from_manifest_record(
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.
-    let sections = ironclaw_extensions::host_api::product_adapter::product_adapter_sections(record)
-        .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-        })?;
+    let sections =
+        ironclaw_extension_registry::host_api::product_adapter::product_adapter_sections(record)
+            .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
+            })?;
     let mut directions: Option<LifecycleChannelDirections> = None;
     for section in sections
         .iter()
@@ -1125,7 +1128,7 @@ where
         host_ports,
         None,
         contracts,
-        ironclaw_extensions::PackageRootBinding::Materialized(entry.path.clone()),
+        ironclaw_extension_registry::PackageRootBinding::Materialized(entry.path.clone()),
     )
     .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
@@ -1222,11 +1225,11 @@ fn visible_capabilities(
 #[cfg(test)]
 mod tests {
 
-    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+        let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");
@@ -1239,7 +1242,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{
         BackendCapabilities, DirEntry, Fault, FaultInjecting, FileStat, FilesystemError,
         FilesystemOperation, InMemoryBackend,
@@ -2119,7 +2122,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .iter()
                 .any(|surface| matches!(
                     surface,
-                    ironclaw_extensions::CapabilitySurfaceDeclV2::Channel { .. }
+                    ironclaw_extension_registry::CapabilitySurfaceDeclV2::Channel { .. }
                 )),
             "unified slack declares a channel surface"
         );

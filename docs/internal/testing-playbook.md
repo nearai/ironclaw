@@ -512,7 +512,7 @@ layer is omitted, explain why in one sentence.
 - Assert an observable outcome, not only `Completed` status or a mock call
   count.
 - Run the narrowest test during development, then expand based on risk.
-- Add `cargo test -p ironclaw_architecture` when dependency or ownership edges
+- Add `cargo test -p ironclaw_architecture_tests` when dependency or ownership edges
   change.
 - Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
   behavior changes.

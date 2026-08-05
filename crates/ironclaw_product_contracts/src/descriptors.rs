@@ -7,7 +7,7 @@
 //! speaks, and the encode/decode glue that saves every declaration site from
 //! hand-written `serde_json`. It carries no id of its own: the inventory of
 //! concrete commands, capabilities, and views is product's frozen surface and
-//! stays in `ironclaw_product`. What lives here is only the *shape* a
+//! stays in `ironclaw_assistant`. What lives here is only the *shape* a
 //! declaration takes, so a transport can hold a descriptor, call it on a
 //! [`BoundProductSurface`], and decode the answer without compiling product.
 //!

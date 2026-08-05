@@ -31,7 +31,7 @@ over from WS1.3 to sixteen; WS1.5's `verified_inbound` made seventeen; WS5's
 | `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
-| `product_adapter_section` | The `[product_adapter.*]` manifest surface: `PRODUCT_ADAPTER_HOST_API_ID`/`PRODUCT_ADAPTER_SECTION_PREFIX`, `ProductAdapterSectionDeclaration` (the `Deserialize` wire shape), `ProductAdapterSection` (resolved + validated), `HostIngressRoute`, `ProductAdapterSectionError`. Arrived with WS5 from `ironclaw_product::adapter_registry`. Same split as `channel`: the schema and its cross-field invariants are here; the *manifest parsing* — the `HostApiManifestContract`, the raw-TOML inline-secret guard, and pairing a resolved section with its `ManifestSectionPath` — is `ironclaw_extensions::host_api::product_adapter` (§6.8.1), because this crate parses no manifests. |
+| `product_adapter_section` | The `[product_adapter.*]` manifest surface: `PRODUCT_ADAPTER_HOST_API_ID`/`PRODUCT_ADAPTER_SECTION_PREFIX`, `ProductAdapterSectionDeclaration` (the `Deserialize` wire shape), `ProductAdapterSection` (resolved + validated), `HostIngressRoute`, `ProductAdapterSectionError`. Arrived with WS5 from `ironclaw_assistant::adapter_registry`. Same split as `channel`: the schema and its cross-field invariants are here; the *manifest parsing* — the `HostApiManifestContract`, the raw-TOML inline-secret guard, and pairing a resolved section with its `ManifestSectionPath` — is `ironclaw_extension_registry::host_api::product_adapter` (§6.8.1), because this crate parses no manifests. |
 | `recipe` | The auth recipe schema: `VendorAuthRecipe`, `OAuth2CodeRecipe`, `PkceMode`, ingress-verification recipes, and friends. |
 | `state` | The installation state machine: `InstallationState`, `LifecyclePublicState`. |
 | `surface` | `CapabilitySurfaceKind` — the manifest surface kinds an extension may declare. |
@@ -41,7 +41,7 @@ over from WS1.3 to sixteen; WS1.5's `verified_inbound` made seventeen; WS5's
 
 ## What must never be here
 
-The registry or installation stores (`ironclaw_extensions`); lifecycle
+The registry or installation stores (`ironclaw_extension_registry`); lifecycle
 execution, binding orchestration, or ingress routing
 (`ironclaw_extension_host`); product workflow; WASM/MCP mechanics; vendor names
 (the specificity scanner polices this crate like any other); any implementation
@@ -84,7 +84,7 @@ failures.
 ## Admission tests
 
 Three architecture tests hold the line, all runnable with
-`cargo test -p ironclaw_architecture`:
+`cargo test -p ironclaw_architecture_tests`:
 
 - `reborn_dependency_boundaries.rs` — the §11.2.3 internal-dependency allowlist
   (`ironclaw_host_api` only, an allowlist so a future edge cannot slip past a
@@ -116,7 +116,7 @@ names its UI projections explicitly), and the one type `hosted_mcp` structurally
 needs — `LifecyclePackageId` — stayed on this side in the new `lifecycle_id`
 module, with `package_lifecycle` importing it from below. The alternative,
 dragging `hosted_mcp` up into `product_contracts` with the projections, would
-have handed `ironclaw_mcp`, `ironclaw_extensions`, and `ironclaw_auth` a
+have handed `ironclaw_mcp`, `ironclaw_extension_registry`, and `ironclaw_auth` a
 product-tier edge — exactly what §6.1.2 exists to prevent.
 
 ## Resolved placements (WS1.4)

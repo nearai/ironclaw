@@ -2,7 +2,7 @@
 //! pure trigger-scope policy.
 //!
 //! Trigger-fire authorization is not a persisted parallel access table (it
-//! replaced `ironclaw_runner::local_trigger_access`, arch-simplification §4.4).
+//! replaced `ironclaw_turn_runner::local_trigger_access`, arch-simplification §4.4).
 //! It is a decision about *this crate's own noun* — may the user who created a
 //! persisted trigger still fire it for the exact tenant/agent/project scope
 //! stored on it — so the contract and the scope comparison live beside the
@@ -10,7 +10,7 @@
 //! (CHECKLIST WS6, PROPOSAL §6.10.1: "approval/authorization/trigger-fire
 //! policy → … `triggers`").
 //!
-//! Two things deliberately stay in `ironclaw_reborn_composition`:
+//! Two things deliberately stay in `ironclaw_composition`:
 //!
 //! - **`TriggerFireAccessPolicy`/`TriggerFireAccessGrant`** — the deployment
 //!   config value the `serve`/`run` edge resolves and the build turns into a

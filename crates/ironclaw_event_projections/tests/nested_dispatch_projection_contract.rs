@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use ironclaw_event_log::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
     ProjectionRequest, ProjectionScope, ReplayEventProjectionService, RunProjectionStatus,
     RunStatusProjection,
 };
-use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId, UserId},
     resource::ResourceScope,

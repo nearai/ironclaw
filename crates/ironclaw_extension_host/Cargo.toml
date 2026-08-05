@@ -47,7 +47,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false }
@@ -56,7 +56,7 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+ironclaw_config = { path = "../ironclaw_config" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
@@ -98,7 +98,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"]
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
-ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
+ironclaw_assistant = { path = "../ironclaw_assistant", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 ironclaw_slack_extension = { path = "../extensions/packages/slack" }
 http-body-util = "0.1"

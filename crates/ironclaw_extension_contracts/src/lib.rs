@@ -26,7 +26,7 @@
 //! policy engine, or workflow.
 //!
 //! Two rules this crate is enforced against, both in
-//! `crates/ironclaw_architecture/tests/`:
+//! `crates/ironclaw_architecture_tests/tests/`:
 //!
 //! - **Contracts purity** (§11.2.3, `reborn_dependency_boundaries.rs`): the
 //!   only internal dependency is `ironclaw_host_api`; no framework, driver, or

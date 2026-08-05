@@ -19,7 +19,7 @@ This slice is contract-first. `ironclaw_auth` defines Reborn-native vocabulary,
 traits, validation helpers, fake services, the production filesystem-backed
 product-auth service, provider-account selection/refresh, continuations, and
 cleanup. `ironclaw_webui` owns the host HTTP route serving surface.
-`ironclaw_reborn_composition` wires `AuthEngine`, stores, secrets, network, and
+`ironclaw_composition` wires `AuthEngine`, stores, secrets, network, and
 product/runtime adapters into those crates; it must not grow a parallel
 product-auth service tree. #3811 adds the Reborn service seam, #3812 adds
 callback completion handling, #3881 mounts the first Reborn-native OAuth
@@ -132,7 +132,7 @@ need host-only client metadata; the Google setup route builds the Google
 authorization URL from configured Reborn product-auth client metadata and keeps
 the static redirect URI aligned with the provider exchange client.
 
-`ironclaw_product::ProductAuthTurnGateResumeDispatcher` is the
+`ironclaw_assistant::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
 that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
 using the canonical turn scope, actor, run id, and gate ref carried by the auth
@@ -143,7 +143,7 @@ composition only fills and wires that decorator. It does not define auth state
 or credential vocabulary, and the provider callback route itself never owns
 those side effects.
 
-`ironclaw_product::AuthInteractionService` owns the product/WebUI
+`ironclaw_assistant::AuthInteractionService` owns the product/WebUI
 blocked-auth interaction loop from #3094. It reads auth-required gates from
 scoped blocked run-state plus auth-flow records, returns redacted
 adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
@@ -632,7 +632,7 @@ Rules:
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.
 
-`ironclaw_reborn_composition` caller-level tests additionally cover:
+`ironclaw_composition` caller-level tests additionally cover:
 
 - an incomplete provider redirect `scope` echo still reaching exchange with the
   server-owned requested scopes
@@ -690,7 +690,7 @@ token, `interaction_id`.
 
 ### Wire-shape tests
 
-`crates/ironclaw_reborn_composition/tests/webui_v2_product_auth_4201.rs`
+`crates/ironclaw_composition/tests/webui_v2_product_auth_4201.rs`
 covers:
 - Serialisation of the new optional fields when present.
 - Omission of all new fields when absent (backward-compat check).

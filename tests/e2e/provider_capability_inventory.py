@@ -14,7 +14,7 @@ ASSET_ROOT = ROOT / "crates/extensions/packages"
 # none of its tools declares `external_write` or `network` — there is no vendor
 # boundary for a journey to seed or assert against. Excluding them keeps this
 # inventory measuring exactly what it measured before the move.
-# `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs` carves
+# `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs` carves
 # the same two packages out of the vendor vocabulary, for the same reason.
 NON_PROVIDER_PACKAGE_DIRS = frozenset({"memory-native", "mem0"})
 

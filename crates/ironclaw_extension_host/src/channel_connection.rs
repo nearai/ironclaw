@@ -161,7 +161,8 @@ pub struct GenericChannelConnectionService {
     entries: Vec<ChannelConnectionEntry>,
     /// Generic discovery + scope source. `None` when the composed runtime
     /// has no durable installation store — only lane entries report then.
-    installation_store: Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
+    installation_store:
+        Option<Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     /// Genuinely optional: compositions without product auth cannot have
@@ -189,7 +190,9 @@ impl GenericChannelConnectionService {
     pub fn new(
         tenant_id: TenantId,
         entries: Vec<ChannelConnectionEntry>,
-        installation_store: Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
+        installation_store: Option<
+            Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
+        >,
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
         identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
@@ -940,7 +943,7 @@ mod tests {
     /// credential revoke and the binding delete.
     #[tokio::test]
     async fn discovered_extension_disconnect_drops_the_callers_dm_target() {
-        use ironclaw_extensions::{
+        use ironclaw_extension_registry::{
             ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
             ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
         };
@@ -1039,7 +1042,7 @@ team_id = "/team/id"
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -1066,7 +1069,8 @@ team_id = "/team/id"
             tenant(),
             Vec::new(),
             Some(
-                installation_store as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+                installation_store
+                    as Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
             ),
             identity_store.clone(),
             identity_store.clone(),
@@ -1115,7 +1119,7 @@ team_id = "/team/id"
     /// provider in production code.
     #[tokio::test]
     async fn connection_discovery_includes_channel_without_auth_vendor() {
-        use ironclaw_extensions::{
+        use ironclaw_extension_registry::{
             ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
             ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
         };
@@ -1185,7 +1189,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -1197,7 +1201,8 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
             tenant(),
             Vec::new(),
             Some(
-                installation_store as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+                installation_store
+                    as Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
             ),
             identity_store.clone(),
             identity_store,

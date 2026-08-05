@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::ResolvedExtensionManifest;
+use ironclaw_extension_registry::ResolvedExtensionManifest;
 
 use crate::entrypoint::{BindError, ExtensionEntrypoint};
 

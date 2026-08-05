@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -19,8 +19,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, FALLBACK_INDEX_METADATA_KEY, LlmProvider,
-    ModelFallbackRoute, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FALLBACK_INDEX_METADATA_KEY,
+    LlmProvider, ModelFallbackRoute, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 use crate::retry::is_retryable;
@@ -226,14 +226,16 @@ impl FailoverProvider {
     /// Providers in cooldown are skipped unless *all* providers are in
     /// cooldown, in which case the one with the oldest cooldown timestamp
     /// (most likely to have recovered) is tried.
-    async fn try_providers<T, F, Fut>(
+    async fn try_providers<T, F, Fut, C>(
         &self,
         requested_index: Option<u32>,
         mut call: F,
+        should_continue: C,
     ) -> Result<(usize, T), LlmError>
     where
         F: FnMut(Arc<dyn LlmProvider>) -> Fut,
         Fut: Future<Output = Result<T, LlmError>>,
+        C: Fn() -> bool,
     {
         if let Some(requested_index) = requested_index {
             let index = usize::try_from(requested_index)
@@ -326,6 +328,10 @@ impl FailoverProvider {
                         );
                     }
 
+                    if !should_continue() {
+                        return Err(err);
+                    }
+
                     if pos + 1 < available.len() {
                         let next_i = available[pos + 1];
                         tracing::warn!(
@@ -375,6 +381,33 @@ impl FailoverProvider {
     }
 }
 
+struct FailoverStreamSink {
+    inner: Arc<dyn CompletionStreamSink>,
+    emitted_text: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl CompletionStreamSink for FailoverStreamSink {
+    async fn text_delta(&self, delta: String) {
+        if !delta.is_empty() {
+            self.emitted_text.store(true, Ordering::Relaxed);
+        }
+        self.inner.text_delta(delta).await;
+    }
+
+    fn supports_text_replacement(&self) -> bool {
+        self.inner.supports_text_replacement()
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.inner.replace_on_next_text_delta().await;
+    }
+
+    async fn finish_text_replacement(&self) {
+        self.inner.finish_text_replacement().await;
+    }
+}
+
 #[async_trait]
 impl LlmProvider for FailoverProvider {
     fn provider_id(&self) -> String {
@@ -403,10 +436,42 @@ impl LlmProvider for FailoverProvider {
     ) -> Result<CompletionResponse, LlmError> {
         let requested_index = Self::take_requested_fallback_index(&mut request.metadata)?;
         let (provider_idx, response) = self
-            .try_providers(requested_index, |provider| {
-                let req = request.clone();
-                async move { provider.complete(req).await }
-            })
+            .try_providers(
+                requested_index,
+                |provider| {
+                    let req = request.clone();
+                    async move { provider.complete(req).await }
+                },
+                || true,
+            )
+            .await?;
+        if requested_index.is_none() {
+            self.bind_provider_to_current_task(provider_idx);
+        }
+        Ok(response)
+    }
+
+    async fn complete_streaming(
+        &self,
+        mut request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let requested_index = Self::take_requested_fallback_index(&mut request.metadata)?;
+        let emitted_text = Arc::new(AtomicBool::new(false));
+        let (provider_idx, response) = self
+            .try_providers(
+                requested_index,
+                |provider| {
+                    let req = request.clone();
+                    let attempt_sink: Arc<dyn CompletionStreamSink> =
+                        Arc::new(FailoverStreamSink {
+                            inner: Arc::clone(&sink),
+                            emitted_text: Arc::clone(&emitted_text),
+                        });
+                    async move { provider.complete_streaming(req, attempt_sink).await }
+                },
+                || !emitted_text.load(Ordering::Relaxed),
+            )
             .await?;
         if requested_index.is_none() {
             self.bind_provider_to_current_task(provider_idx);
@@ -420,10 +485,46 @@ impl LlmProvider for FailoverProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         let requested_index = Self::take_requested_fallback_index(&mut request.metadata)?;
         let (provider_idx, response) = self
-            .try_providers(requested_index, |provider| {
-                let req = request.clone();
-                async move { provider.complete_with_tools(req).await }
-            })
+            .try_providers(
+                requested_index,
+                |provider| {
+                    let req = request.clone();
+                    async move { provider.complete_with_tools(req).await }
+                },
+                || true,
+            )
+            .await?;
+        if requested_index.is_none() {
+            self.bind_provider_to_current_task(provider_idx);
+        }
+        Ok(response)
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        mut request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let requested_index = Self::take_requested_fallback_index(&mut request.metadata)?;
+        let emitted_text = Arc::new(AtomicBool::new(false));
+        let (provider_idx, response) = self
+            .try_providers(
+                requested_index,
+                |provider| {
+                    let req = request.clone();
+                    let attempt_sink: Arc<dyn CompletionStreamSink> =
+                        Arc::new(FailoverStreamSink {
+                            inner: Arc::clone(&sink),
+                            emitted_text: Arc::clone(&emitted_text),
+                        });
+                    async move {
+                        provider
+                            .complete_with_tools_streaming(req, attempt_sink)
+                            .await
+                    }
+                },
+                || !emitted_text.load(Ordering::Relaxed),
+            )
             .await?;
         if requested_index.is_none() {
             self.bind_provider_to_current_task(provider_idx);
@@ -515,6 +616,203 @@ mod tests {
     use std::time::Duration;
 
     use crate::provider::{CompletionResponse, FinishReason, ToolCompletionResponse};
+
+    struct StreamingOutcomeProvider {
+        calls: AtomicUsize,
+        delta: Option<&'static str>,
+        result: Result<&'static str, &'static str>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamingOutcomeProvider {
+        fn model_name(&self) -> &str {
+            "streaming-outcome"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            panic!("streaming test must not use complete()")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(delta) = self.delta {
+                sink.text_delta(delta.to_string()).await;
+            }
+            match self.result {
+                Ok(content) => Ok(CompletionResponse {
+                    content: content.to_string(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    reasoning: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                Err(reason) => Err(LlmError::StreamInterrupted {
+                    provider: "streaming-outcome".to_string(),
+                    reason: reason.to_string(),
+                }),
+            }
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("tool path is not used by this test")
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(delta) = self.delta {
+                sink.text_delta(delta.to_string()).await;
+            }
+            match self.result {
+                Ok(content) => Ok(ToolCompletionResponse {
+                    content: Some(content.to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    reasoning: None,
+                    reasoning_details: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                Err(reason) => Err(LlmError::StreamInterrupted {
+                    provider: "streaming-outcome".to_string(),
+                    reason: reason.to_string(),
+                }),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct DeltaSink(Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl CompletionStreamSink for DeltaSink {
+        async fn text_delta(&self, delta: String) {
+            self.0.lock().unwrap().push(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_failover_never_appends_a_second_provider_after_visible_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("partial"),
+            result: Err("disconnected"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("replacement"),
+            result: Ok("replacement"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+        let sink = Arc::new(DeltaSink::default());
+
+        let result = provider
+            .complete_streaming(make_request(), sink.clone())
+            .await;
+
+        assert!(matches!(result, Err(LlmError::StreamInterrupted { .. })));
+        assert_eq!(sink.0.lock().unwrap().as_slice(), ["partial"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_failover_advances_when_failure_precedes_any_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: None,
+            result: Err("unavailable"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("fallback"),
+            result: Ok("fallback"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+        let sink = Arc::new(DeltaSink::default());
+
+        let response = provider
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect("fallback streaming response");
+
+        assert_eq!(response.content, "fallback");
+        assert_eq!(sink.0.lock().unwrap().as_slice(), ["fallback"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_streaming_failover_never_replaces_visible_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("partial"),
+            result: Err("disconnected"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("replacement"),
+            result: Ok("replacement"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+        let sink = Arc::new(DeltaSink::default());
+
+        let result = provider
+            .complete_with_tools_streaming(make_tool_request(), sink.clone())
+            .await;
+
+        assert!(matches!(result, Err(LlmError::StreamInterrupted { .. })));
+        assert_eq!(sink.0.lock().unwrap().as_slice(), ["partial"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_streaming_failover_advances_before_visible_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: None,
+            result: Err("unavailable"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("fallback"),
+            result: Ok("fallback"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+        let sink = Arc::new(DeltaSink::default());
+
+        let response = provider
+            .complete_with_tools_streaming(make_tool_request(), sink.clone())
+            .await
+            .expect("fallback tool streaming response");
+
+        assert_eq!(response.content.as_deref(), Some("fallback"));
+        assert_eq!(sink.0.lock().unwrap().as_slice(), ["fallback"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
 
     /// A mock LLM provider that returns a predetermined result.
     struct MockProvider {

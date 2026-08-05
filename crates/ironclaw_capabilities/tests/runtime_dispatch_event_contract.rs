@@ -16,7 +16,7 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, ResolvedCapability, RuntimeAdapterResult, RuntimeDispatcher,
     ToolResolver,
 };
-use ironclaw_events::*;
+use ironclaw_event_log::*;
 use ironclaw_host_api::{
     authorized::Authorized,
     dispatch::{CapabilityDispatchRequest, DispatchError, RuntimeDispatchErrorKind},

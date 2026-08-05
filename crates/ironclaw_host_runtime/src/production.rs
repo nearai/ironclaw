@@ -27,7 +27,7 @@ use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationResult,
     CapabilityObligationHandler, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
-use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
@@ -1831,7 +1831,7 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
     };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
@@ -2878,11 +2878,11 @@ required = true
         }
     }
 
-    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+        let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");

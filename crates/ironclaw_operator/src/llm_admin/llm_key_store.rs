@@ -10,7 +10,7 @@
 //! **This crate does not name a secret substrate.** WS3 removed the direct
 //! `ironclaw_secrets` edge (PROPOSAL §8.2's product row, §12.1b): the port is
 //! declared in `ironclaw_product_contracts` and implemented by
-//! `ironclaw_reborn_composition::RuntimeOperatorSecretValueStore`, which is the
+//! `ironclaw_composition::RuntimeOperatorSecretValueStore`, which is the
 //! only layer allowed to name both sides. What stays here is the *policy* —
 //! the handle a provider id maps to, and what an absent value means.
 //!
@@ -61,10 +61,10 @@ impl LlmKeyStore {
     }
 
     /// [`Self::put`] taking a plain `String` rather than a [`SecretString`] —
-    /// for callers outside this crate (namely `ironclaw_reborn_cli::onboard`)
+    /// for callers outside this crate (namely `ironclaw_cli::onboard`)
     /// that must not depend on a secret substrate directly (see
-    /// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
-    /// which pins `ironclaw_reborn_cli`'s allowed workspace dependency set).
+    /// `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
+    /// which pins `ironclaw_cli`'s allowed workspace dependency set).
     pub async fn put_plaintext(
         &self,
         provider_id: &str,
@@ -209,7 +209,7 @@ mod tests {
     }
 
     // `read_is_repeatable_across_reloads` moved to
-    // `ironclaw_reborn_composition::operator_secret_store`: repeatability is a
+    // `ironclaw_composition::operator_secret_store`: repeatability is a
     // property of the lease protocol, which now lives behind the port, and a
     // fake asserting its own repeatability would prove nothing.
 

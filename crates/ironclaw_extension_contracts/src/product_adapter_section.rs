@@ -11,7 +11,7 @@
 //! `ManifestSectionPath` it was declared at, walking the manifest's host-API
 //! list, and the `HostApiManifestContract` that hooks this schema into v2
 //! manifest ingestion — is the registry's, in
-//! `ironclaw_extensions::host_api::product_adapter`. That split is PROPOSAL
+//! `ironclaw_extension_registry::host_api::product_adapter`. That split is PROPOSAL
 //! §6.1.2 (this crate: "manifest-surface descriptors", "parses no manifests")
 //! against §6.8.1 (the registry: "manifest schemas … resolved + digest").
 
@@ -530,7 +530,7 @@ handle = "example_bot_token"
     }
 
     /// The cross-field invariants that came over from
-    /// `ironclaw_product::adapter_registry` with WS5.
+    /// `ironclaw_assistant::adapter_registry` with WS5.
     ///
     /// Three of them arrived with no assertion anywhere: a duplicate
     /// credential handle, a duplicate `(host, handle)` egress pair, and the
