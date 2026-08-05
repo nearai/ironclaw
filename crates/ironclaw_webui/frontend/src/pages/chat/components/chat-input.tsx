@@ -219,7 +219,12 @@ export function ChatInput({
     window.requestAnimationFrame(() => {
       const node = textareaRef.current;
       if (!node) return;
-      if (!canStealFocus(window.document.activeElement, node)) return;
+      const active = window.document.activeElement;
+      if (!canStealFocus(active, node)) return;
+      // Already typing here (a same-route navigation, e.g. the first reply
+      // adopting a thread id): keep focus, but leave the caret where the user
+      // put it instead of yanking it to the end mid-edit.
+      if (active === node) return;
       node.focus();
       const end = textRef.current.length;
       node.setSelectionRange(end, end);

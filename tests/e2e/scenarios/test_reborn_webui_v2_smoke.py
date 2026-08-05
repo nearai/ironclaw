@@ -1712,6 +1712,73 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     )
 
 
+async def test_reborn_v2_composer_takes_focus_from_sidebar_navigation(reborn_v2_page):
+    """"+ New" and opening a thread both land keyboard focus in the composer.
+
+    This is the tier that matters for #7204: Chromium focuses a <button> on
+    click, so after either sidebar action the clicked button owns
+    document.activeElement when the composer's rAF runs. A component test that
+    stubs activeElement to None cannot see that, and the first fix shipped a
+    focus guard that refused to steal from the button — leaving the composer
+    unfocused on exactly the two paths the issue is about.
+    """
+    page = reborn_v2_page
+    composer = page.locator(SEL_V2["chat_composer"])
+
+    async def composer_is_focused() -> bool:
+        return await composer.evaluate("node => node === document.activeElement")
+
+    # Give the sidebar a thread to open later.
+    await composer.fill("first thread message")
+    await composer.press("Enter")
+    await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "first thread message", timeout=15000
+    )
+    await expect(composer).to_have_attribute(
+        "data-send-disabled", "false", timeout=15000
+    )
+
+    sidebar = page.locator(SEL_V2["sidebar"])
+    # Pin the row by thread id: "+ New" prepends a row, and a `.first` locator
+    # resolves lazily, so it would silently retarget the new empty thread.
+    first_thread_url = page.url
+    first_thread_id = first_thread_url.rsplit("/", 1)[-1]
+    assert first_thread_id, f"expected /chat/<id>, got {first_thread_url}"
+    existing_thread = sidebar.locator(
+        f"{SEL_V2['thread_item']}[data-thread-id='{first_thread_id}']"
+    )
+    await expect(existing_thread).to_be_visible(timeout=15000)
+
+    # "+ New": a real click, so the button holds focus until we take it back.
+    new_button = sidebar.locator(SEL_V2["thread_new"])
+    await expect(new_button).to_be_enabled(timeout=15000)
+    await new_button.click()
+    await expect(composer).to_have_value("", timeout=15000)
+    await page.wait_for_function(
+        "selector => document.activeElement === document.querySelector(selector)",
+        arg=SEL_V2["chat_composer"],
+        timeout=5000,
+    )
+    assert await composer_is_focused() is True
+
+    # Typing goes straight into the composer with no intermediate click.
+    await page.keyboard.type("typed without clicking")
+    await expect(composer).to_have_value("typed without clicking")
+
+    # Opening an existing thread does the same.
+    await existing_thread.click()
+    await expect(page).to_have_url(first_thread_url, timeout=15000)
+    await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "first thread message", timeout=15000
+    )
+    await page.wait_for_function(
+        "selector => document.activeElement === document.querySelector(selector)",
+        arg=SEL_V2["chat_composer"],
+        timeout=5000,
+    )
+    assert await composer_is_focused() is True
+
+
 async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
     """A failed cancel request preserves the active-run UI and shows a safe error."""
     cancel_requests = 0
