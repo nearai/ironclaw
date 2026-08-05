@@ -203,36 +203,33 @@ class TargetTreeGateTests(unittest.TestCase):
         self.assertIn("Delete the row", output)
 
     def test_exception_row_describing_a_different_delta_fails(self) -> None:
-        """Keyed on whichever rows are live, not on a package name.
+        """Synthesized divergence + wrong row, so the case survives the empty table.
 
-        Exception rows are *meant* to close and be deleted, so a case that names
-        one by hand stops testing anything the day that disposition lands — the
-        `ironclaw_projects` merge deleted its row on 2026-08-05 and this case
-        went red for that reason, not for a real defect. It now doctors every row
-        whose package is a live workspace member, and refuses to pass vacuously
-        if no such row remains.
+        The table hit its designed steady state (EMPTY) on 2026-08-05 when both
+        dissolutions landed, and the previous version — which doctored whichever
+        live rows existed — refused to run. At steady state nothing diverges
+        from §5, so exercising the "describes a different delta" arm requires
+        manufacturing BOTH halves: the metadata moves one member off its §5
+        path (the divergence), and an exception row excuses it with a wrong
+        `actual` (the stale record). The arm must then reject the row.
         """
-        members = {package["name"] for package in self.metadata["packages"]}
-        live = [row for row in GATE.EXCEPTIONS if row.package in members]
-        self.assertTrue(
-            live,
-            "no EXCEPTIONS row names a live workspace member, so this case would "
-            "assert nothing — retarget it rather than letting it pass vacuously",
+        document = copy.deepcopy(self.metadata)
+        victim = next(
+            p for p in document["packages"]
+            if p["name"] == "ironclaw_agent_loop"
         )
-        rows = tuple(
-            GATE.Exception_(
-                package=row.package,
-                actual="crates/somewhere_else",
-                documented=row.documented,
-                owner=row.owner,
-                why=row.why,
-            )
-            if row in live
-            else row
-            for row in GATE.EXCEPTIONS
+        victim["manifest_path"] = victim["manifest_path"].replace(
+            "crates/loop/ironclaw_agent_loop", "crates/kernel/ironclaw_agent_loop"
         )
-        with mock.patch.object(GATE, "EXCEPTIONS", rows):
-            code, output = self.run_gate()
+        stale = GATE.Exception_(
+            package="ironclaw_agent_loop",
+            actual="crates/somewhere_else",
+            documented="crates/loop/ironclaw_agent_loop",
+            owner="self-test synthetic row",
+            why="synthesized by the self-test; never a real disposition",
+        )
+        with mock.patch.object(GATE, "EXCEPTIONS", GATE.EXCEPTIONS + (stale,)):
+            code, output = self.run_gate(metadata=document)
         self.assertEqual(code, 1)
         self.assertIn("describes a different delta", output)
 

@@ -604,8 +604,8 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     /// failure message. Never counted by eye.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
-        ("ironclaw_extension_contracts", 8_156),
-        ("ironclaw_host_api", 17_928),
+        ("ironclaw_extension_contracts", 7_727),
+        ("ironclaw_host_api", 17_501),
         ("ironclaw_loop_contracts", 14_479),
         ("ironclaw_product_contracts", 14_471),
         ("ironclaw_prompt_envelope", 832),

@@ -115,7 +115,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// force.
 /// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
 /// repoint added one line in composition; recorded at the measured figure.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_406;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_419;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
