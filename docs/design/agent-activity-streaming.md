@@ -20,7 +20,7 @@ multi-channel handoff) — all on the real `--v2-*` tokens.
 
 SPA: `crates/ironclaw_webui/frontend/src` (React 19 + TypeScript + Tailwind v4; tokens in
 `styles/app.css`). Backend edge: `crates/ironclaw_webui/src/webui_v2/{schema.rs,handlers.rs}`.
-Producer/mapping: `crates/ironclaw_reborn_composition/src/projection/live_progress.rs`.
+Producer/mapping: `crates/ironclaw_composition/src/projection/live_progress.rs`.
 
 Chat components (`pages/chat/`): `chat.tsx`, `components/message-list.tsx`,
 `message-bubble.tsx` (incl. `ThinkingDisclosure`), `tool-activity.tsx`, `activity-run.tsx`,

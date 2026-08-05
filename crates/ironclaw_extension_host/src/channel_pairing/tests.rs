@@ -20,8 +20,8 @@ use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, In
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-use ironclaw_product::RebornChannelConnectStrategy;
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use ironclaw_product_contracts::prompt_source::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource,
@@ -279,7 +279,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
         _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
-        _epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        _epoch: ironclaw_extension_contracts::external::ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError> {
         Ok(())
     }

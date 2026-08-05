@@ -101,6 +101,15 @@
                 ]
               },
               {
+                "group": "IronHub",
+                "icon": "archive",
+                "pages": [
+                  "hub/overview",
+                  "hub/installing",
+                  "hub/contributing"
+                ]
+              },
+              {
                 "group": "API",
                 "icon": "code",
                 "pages": [

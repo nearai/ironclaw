@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex, mpsc},
 };
 
-use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     action::NetworkTargetPattern,
     capability::RuntimeCredentialRequirementSource,
@@ -357,7 +357,7 @@ static WASM_CREDENTIAL_RESTAGE_RUNTIME: LazyLock<
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_host_api::{
         action::{NetworkMethod, NetworkScheme, NetworkTargetPattern},
         host_port::HostPortCatalog,
@@ -672,11 +672,11 @@ runtime_credentials = [
         assert_eq!(result, Err(CredentialStageError::Backend));
     }
 
-    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+        let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");

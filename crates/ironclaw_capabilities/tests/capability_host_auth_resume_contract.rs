@@ -3144,7 +3144,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
     // Use a registry that does NOT contain the echo.say capability — simulates
     // a capability that was unregistered between the original invocation and
     // the auth resume.
-    let empty_registry = ironclaw_extensions::ExtensionRegistry::new();
+    let empty_registry = ironclaw_extension_registry::ExtensionRegistry::new();
     let authorizer = GrantAuthorizer::new();
     let dispatcher = recording_dispatcher();
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
@@ -3271,7 +3271,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
 async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_lease() {
     // Same setup as sub-case (a) except the lease starts in the Claimed state
     // (as it would be after a prior resume_json auth bounce left it Claimed).
-    let empty_registry = ironclaw_extensions::ExtensionRegistry::new();
+    let empty_registry = ironclaw_extension_registry::ExtensionRegistry::new();
     let authorizer = GrantAuthorizer::new();
     let dispatcher = recording_dispatcher();
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();

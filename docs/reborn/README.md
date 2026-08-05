@@ -10,7 +10,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 
 | Need | Start with |
 | --- | --- |
-| Standalone Reborn binary | `crates/ironclaw_reborn_cli/` and `docs/reborn/onboarding.md` |
+| Standalone Reborn binary | `crates/ironclaw_cli/` and `docs/reborn/onboarding.md` |
 | Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
 | Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
 | Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
@@ -19,11 +19,11 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Host API vocabulary | `crates/ironclaw_host_api/` |
 | Host API local rules | `crates/ironclaw_host_api/CLAUDE.md` |
 | Host/runtime composition and shared runtime HTTP egress | `crates/ironclaw_host_runtime/` |
-| Architecture dependency guardrails | `crates/ironclaw_architecture/` |
-| Reborn dependency-boundary tests | `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` |
-| Events substrate | `crates/ironclaw_events/` |
+| Architecture dependency guardrails | `crates/ironclaw_architecture_tests/` |
+| Reborn dependency-boundary tests | `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` |
+| Events substrate | `crates/ironclaw_event_log/` |
 | Event projection read models | `crates/ironclaw_event_projections/` |
-| Standalone durable event/audit stores | `crates/ironclaw_reborn_event_store/` |
+| Standalone durable event/audit stores | `crates/ironclaw_event_store/` |
 | Filesystem substrate | `crates/ironclaw_filesystem/` |
 | Network policy and HTTP transport substrate | `crates/ironclaw_network/` |
 | Secrets metadata and one-shot leases | `crates/ironclaw_secrets/` |
@@ -33,7 +33,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Process lifecycle state | `crates/ironclaw_processes/` |
 | Approval and gate state | `crates/ironclaw_approvals/` |
 | WASM runtime lane and WIT HTTP adapter | `crates/ironclaw_wasm/` |
-| Script runtime lane and host HTTP adapter | `crates/ironclaw_scripts/` |
+| Script runtime lane and host HTTP adapter | `crates/ironclaw_sandbox/` (`src/script.rs`) |
 | MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/ironclaw_mcp/` |
 | Replay / recorded-model fixtures | `tests/fixtures/llm_traces/README.md` |
 | Recorded-fixture gate | `.github/workflows/reborn-tests.yml` (`Reborn QA recorded fixtures` job) + `scripts/ci/check-reborn-qa-fixtures.sh` |
@@ -83,7 +83,7 @@ Reborn should reuse the existing IronClaw harness where possible:
 (The v1 `replay-gate.yml`, `e2e.yml`, `tests/support/LIVE_TESTING.md`, and
 `scripts/check_gateway_boundaries.py` were removed under Tier B; Reborn
 dependency/composition boundaries are enforced by
-`cargo test -p ironclaw_architecture`.)
+`cargo test -p ironclaw_architecture_tests`.)
 
 ## Harness principles
 
@@ -99,7 +99,7 @@ dependency/composition boundaries are enforced by
 Preserve these Reborn boundaries unless the relevant contract or architecture test is deliberately changed:
 
 1. `ironclaw_host_api` stays vocabulary/contract-only.
-2. `ironclaw_architecture` stays test-only architecture enforcement.
+2. `ironclaw_architecture_tests` stays test-only architecture enforcement.
 3. Low-level substrate crates should not depend upward on product/runtime orchestration.
 4. Product flows should not bypass authorization, approval, resource, network, secret, or event boundaries.
 5. Secrets and credential material must not appear in user-facing errors, logs, events, snapshots, or debug bundles.

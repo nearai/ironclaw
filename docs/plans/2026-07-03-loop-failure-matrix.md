@@ -141,7 +141,7 @@ silently fixed:
 
 5. **CLOSED (2026-07-21) — `interrupted_unexpectedly` is preserved at the
    runner boundary.**
-   `sanitized_driver_failure` (`ironclaw_runner::turn_runner`) now preserves
+   `sanitized_driver_failure` (`ironclaw_turn_runner::turn_runner`) now preserves
    the driver-mapped `interrupted_unexpectedly` category instead of
    overwriting it with `driver_failed`; the binary E2E
    (`reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly`)
@@ -163,13 +163,13 @@ silently fixed:
 
 #5390 owns the pure classifier unit tests: `failure_lane(category, retryable)`
 and `retry_disposition(category, retryable)` are tested exhaustively against the
-canonical category list in `ironclaw_reborn_composition`.
+canonical category list in `ironclaw_composition`.
 
 This matrix is complementary. It drives real executor/binary paths and proves
 the emitted sanitized categories and retryable checkpoint signal are the inputs
 the classifier expects. The actual `failure_lane()` / `retry_disposition()`
 calls live in the binary E2E test because `ironclaw_agent_loop` has no dependency
-on `ironclaw_reborn_composition`, and adding that dependency would be outside
+on `ironclaw_composition`, and adding that dependency would be outside
 this test/doc-only change. Executor-tier rows still assert their real terminal
 or recovered loop outcome; binary rows assert the classifier alignment for the
 observed `(category, retryable)` pair.

@@ -1,22 +1,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_safety::{
-    InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
-};
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_host_api::turn::{RunOriginAdapter, RunProfileId, RunProfileRequest, TurnSurfaceType};
 use ironclaw_triggers::{
     TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
     TrustedTriggerSubmitRequest,
 };
-use ironclaw_turns::{
-    AdmissionRejectionReason, RunOriginAdapter, RunProfileId, RunProfileRequest, SubmitTurnRequest,
-    TurnCoordinator, TurnError, TurnSurfaceType,
-};
-
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 
 use crate::ids::map_external_ref_error;
 use crate::trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error};
+use crate::turn_submission::{
+    ConversationInboundClassification, ConversationTurnSubmission, ConversationTurnSubmitter,
+    TurnSubmissionError, TurnSubmissionRetry,
+};
 use crate::types::{TrustedInboundKind, TrustedInboundTurnRequest};
 use crate::{
     AcceptConversationMessageRequest, AcceptedConversationMessage,
@@ -30,20 +27,20 @@ use crate::{
 pub struct InboundTurnService<B, S, C: ?Sized> {
     binding_service: B,
     conversation_service: S,
-    turn_coordinator: Arc<C>,
+    turn_submitter: Arc<C>,
 }
 
 impl<B, S, C> InboundTurnService<B, S, C>
 where
     B: ConversationBindingService,
     S: InboundConversationService,
-    C: TurnCoordinator + ?Sized,
+    C: ConversationTurnSubmitter + ?Sized,
 {
-    pub fn new(binding_service: B, conversation_service: S, turn_coordinator: Arc<C>) -> Self {
+    pub fn new(binding_service: B, conversation_service: S, turn_submitter: Arc<C>) -> Self {
         Self {
             binding_service,
             conversation_service,
-            turn_coordinator,
+            turn_submitter,
         }
     }
 
@@ -106,13 +103,11 @@ where
             BindingResolutionPolicy::Trusted {
                 kind: TrustedInboundKind::Trigger,
                 ..
-            } => ironclaw_turns::product_context::InboundClassification::TrustedTrigger,
+            } => ConversationInboundClassification::TrustedTrigger,
             BindingResolutionPolicy::Trusted { .. } => {
-                ironclaw_turns::product_context::InboundClassification::TrustedOther
+                ConversationInboundClassification::TrustedOther
             }
-            BindingResolutionPolicy::Untrusted => {
-                ironclaw_turns::product_context::InboundClassification::Untrusted
-            }
+            BindingResolutionPolicy::Untrusted => ConversationInboundClassification::Untrusted,
         };
         let surface_type = match &route_kind {
             ConversationRouteKind::Direct => Some(TurnSurfaceType::Direct),
@@ -219,7 +214,7 @@ where
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedConversationMessage,
-        classification: ironclaw_turns::product_context::InboundClassification,
+        classification: ConversationInboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
@@ -244,9 +239,8 @@ where
             .inbound_message_turn_submission_key(&accepted_message.message_ref)
             .await?;
         let turn_submission_result = self
-            .turn_coordinator
-            .submit_turn(SubmitTurnRequest {
-                requested_model: None,
+            .turn_submitter
+            .submit_conversation_turn(ConversationTurnSubmission {
                 scope: resolution.turn_scope.clone(),
                 actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),
@@ -255,16 +249,9 @@ where
                 requested_run_profile: accepted_message.requested_run_profile.clone(),
                 idempotency_key,
                 received_at: accepted_message.received_at,
-                requested_run_id: None,
-                parent_run_id: None,
-                subagent_depth: 0,
-                spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_turns::product_context::resolve_inbound(
-                    classification,
-                    run_adapter,
-                    surface_type,
-                    resolution.turn_scope.product_owner(&accepted_message.actor),
-                )),
+                classification,
+                origin_adapter: run_adapter,
+                surface_type,
             })
             .await;
         let turn_submission = match turn_submission_result {
@@ -294,30 +281,27 @@ where
     }
 }
 
+/// Conversations-owned implementation of the trusted-trigger submit seam.
+///
+/// It converts an already-validated `TrustedTriggerSubmitRequest` into this
+/// crate's private trusted inbound request and submits it. Prompt safety is
+/// *not* checked here: PROPOSAL §6.4.2 moved that scan behind the seam, into
+/// `ironclaw_triggers`' mint of the sealed request, so it applies to every
+/// submitter rather than only to this one.
 #[derive(Clone)]
 pub(crate) struct ConversationTrustedTriggerSubmitter<B, S, C: ?Sized> {
     inbound: InboundTurnService<B, S, C>,
-    prompt_safety: Arc<dyn InjectionScanner>,
 }
 
 impl<B, S, C> ConversationTrustedTriggerSubmitter<B, S, C>
 where
     B: ConversationBindingService,
     S: InboundConversationService,
-    C: TurnCoordinator + ?Sized,
+    C: ConversationTurnSubmitter + ?Sized,
 {
-    pub(crate) fn new(
-        binding_service: B,
-        conversation_service: S,
-        turn_coordinator: Arc<C>,
-    ) -> Self {
+    pub(crate) fn new(binding_service: B, conversation_service: S, turn_submitter: Arc<C>) -> Self {
         Self {
-            inbound: InboundTurnService::new(
-                binding_service,
-                conversation_service,
-                turn_coordinator,
-            ),
-            prompt_safety: Arc::new(Sanitizer::new()),
+            inbound: InboundTurnService::new(binding_service, conversation_service, turn_submitter),
         }
     }
 }
@@ -331,17 +315,17 @@ where
 pub fn trusted_trigger_fire_submitter<B, S, C>(
     binding_service: B,
     conversation_service: S,
-    turn_coordinator: Arc<C>,
+    turn_submitter: Arc<C>,
 ) -> Arc<dyn TrustedTriggerFireSubmitter>
 where
     B: ConversationBindingService + 'static,
     S: InboundConversationService + 'static,
-    C: TurnCoordinator + ?Sized + 'static,
+    C: ConversationTurnSubmitter + ?Sized + 'static,
 {
     Arc::new(ConversationTrustedTriggerSubmitter::new(
         binding_service,
         conversation_service,
-        turn_coordinator,
+        turn_submitter,
     ))
 }
 
@@ -350,18 +334,13 @@ impl<B, S, C> TrustedTriggerFireSubmitter for ConversationTrustedTriggerSubmitte
 where
     B: ConversationBindingService,
     S: InboundConversationService,
-    C: TurnCoordinator + ?Sized,
+    C: ConversationTurnSubmitter + ?Sized,
 {
     async fn submit_trusted_trigger_fire(
         &self,
         request: TrustedTriggerSubmitRequest,
     ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
         let submitted_at = request.received_at();
-        // Defense in depth: composition scans before materializing/recording the
-        // prompt, and conversations scans again at the final trusted submission
-        // boundary before converting into the private trusted inbound request.
-        validate_trusted_trigger_prompt(&*self.prompt_safety, &request.fire().prompt)
-            .map_err(trigger_prompt_safety_rejection)?;
         let response = self
             .inbound
             .handle_inbound_turn_with_trusted_scope(
@@ -408,7 +387,7 @@ fn trusted_inbound_request_from_trigger(
             received_at,
             // Issue #5505: a trusted trigger fire must run under the
             // dedicated scheduled_trigger profile so the host deny-map
-            // (ironclaw_runner runtime.rs) strips the trigger mutator
+            // (ironclaw_turn_runner runtime.rs) strips the trigger mutator
             // capabilities from the fire's model-visible surface — a fire
             // must not be able to create/remove/pause/resume triggers.
             requested_run_profile: Some(
@@ -438,22 +417,10 @@ enum BindingResolutionPolicy {
     },
 }
 
-fn should_rotate_submit_key(error: &TurnError) -> bool {
-    match error {
-        TurnError::ThreadBusy(_) | TurnError::Unavailable { .. } => true,
-        TurnError::AdmissionRejected(rejection) => matches!(
-            rejection.reason,
-            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable
-        ),
-        TurnError::ScopeNotFound
-        | TurnError::Unauthorized
-        | TurnError::InvalidRequest { .. }
-        | TurnError::CapacityExceeded { .. }
-        | TurnError::Conflict { .. }
-        | TurnError::RunNotRetryable { .. }
-        | TurnError::InvalidTransition { .. }
-        | TurnError::LeaseMismatch
-        | TurnError::InvalidRunOriginAdapter => false,
+fn should_rotate_submit_key(error: &TurnSubmissionError) -> bool {
+    match error.retry() {
+        TurnSubmissionRetry::RetryableAfterKeyRotation => true,
+        TurnSubmissionRetry::RetryableWithSameKey | TurnSubmissionRetry::Permanent => false,
     }
 }
 
@@ -462,7 +429,7 @@ fn submit_trusted_trigger_outcome(
     submitted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
     let run_id = match &response.turn_submission {
-        Some(ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. }) => *run_id,
+        Some(ironclaw_host_api::turn::SubmitTurnResponse::Accepted { run_id, .. }) => *run_id,
         None => {
             return Err(TriggerError::Backend {
                 reason: "trusted trigger fire accepted no turn submission".to_string(),
@@ -481,12 +448,6 @@ fn submit_trusted_trigger_outcome(
         submitted_at,
         turn_scope: response.resolution.turn_scope.clone(),
     })
-}
-
-fn trigger_prompt_safety_rejection(error: PromptSafetyRejection) -> TriggerError {
-    TriggerError::InvalidMaterialization {
-        reason: error.to_string(),
-    }
 }
 
 /// Classify conversation inbound failures for the trusted trigger submit path.
@@ -548,18 +509,23 @@ mod tests {
         TriggerInboundContentRef, TriggerMaterializedPrompt, TrustedTriggerFireSubmitOutcome,
         TrustedTriggerSubmitRequest,
     };
+    // Dev-only: `ironclaw_turns` is a dev-dependency here, never a normal one.
+    // These fakes stand in for the composition adapter that implements the
+    // submission port, so they speak the kernel request the real adapter mints
+    // — see `submit_turn_request` below and the manifest comment.
     use ironclaw_turns::{
-        AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
-        CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
-        ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId,
-        RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-        TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus, TurnSurfaceType,
+        AcceptedMessageRef, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnId,
+        TurnOriginKind, TurnRunId, TurnScope, TurnStatus, TurnSurfaceType, product_context,
     };
 
     use super::{
         classify_trusted_trigger_inbound_error, submit_trusted_trigger_outcome,
         trusted_trigger_fire_submitter,
+    };
+    use crate::turn_submission::{
+        ConversationInboundClassification, ConversationTurnSubmission, ConversationTurnSubmitter,
+        TurnSubmissionError, TurnSubmissionErrorCategory, TurnSubmissionRetry,
     };
     use crate::types::{TrustedInboundKind, TrustedInboundTurnRequest};
     use crate::{
@@ -827,7 +793,8 @@ mod tests {
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)
+                .expect("a clean trigger prompt mints a trusted submit request");
 
         let outcome = submitter
             .submit_trusted_trigger_fire(request)
@@ -843,7 +810,7 @@ mod tests {
             "submit_trusted_trigger_fire must surface the creator as explicit turn-scope owner"
         );
         // Issue #5505: a trusted trigger fire must request the dedicated
-        // scheduled_trigger run profile so the host deny-map (ironclaw_runner
+        // scheduled_trigger run profile so the host deny-map (ironclaw_turn_runner
         // runtime.rs) strips the trigger mutator capabilities from the fire's
         // model-visible surface. Assert through the same recording
         // coordinator already used above, on the SubmitTurnRequest that
@@ -917,40 +884,31 @@ mod tests {
 
     #[test]
     fn classify_trusted_trigger_inbound_error_maps_retryable_backend_cases_to_opaque_backend() {
+        // Both retryable port classes, across every category the production
+        // adapter can put in them, plus the durable-state failure that is not a
+        // submission failure at all. Which `TurnError` lands in which class is
+        // the adapter's total mapping, pinned at that seam.
         for error in [
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::ThreadBusy(ThreadBusy {
-                    active_run_id: TurnRunId::new(),
-                    status: TurnStatus::Running,
-                    event_cursor: EventCursor(7),
-                }),
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                    AdmissionRejectionReason::TenantLimit,
-                )),
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                    AdmissionRejectionReason::Unavailable,
-                )),
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::Unavailable {
-                    reason: "turn store unavailable".to_string(),
-                },
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::CapacityExceeded {
-                    resource: TurnCapacityResource::SubmitTurn,
-                    cap: 1,
-                },
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::Conflict {
-                    reason: "cas mismatch".to_string(),
-                },
-            },
+            submission_failure(
+                TurnSubmissionErrorCategory::ThreadBusy,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::Unavailable,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::CapacityExceeded,
+                TurnSubmissionRetry::RetryableWithSameKey,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::Conflict,
+                TurnSubmissionRetry::RetryableWithSameKey,
+            ),
             InboundTurnError::DurableState {
                 reason: "disk write failed".to_string(),
             },
@@ -963,42 +921,28 @@ mod tests {
             ));
         }
 
+        // The permanent port class, across every category the production
+        // adapter can put in it — including `Conflict`, which straddles the two
+        // classes (`TurnError::Conflict` is retryable, `LeaseMismatch` and
+        // `InvalidTransition` are not) and so proves this classifier reads the
+        // retry class rather than the category.
         for error in [
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                    AdmissionRejectionReason::ProfileRejected,
-                )),
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                    AdmissionRejectionReason::Policy,
-                )),
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                    AdmissionRejectionReason::Unauthorized,
-                )),
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::ScopeNotFound,
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::Unauthorized,
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::InvalidRequest {
-                    reason: "bad request".to_string(),
-                },
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::InvalidTransition {
-                    from: TurnStatus::Queued,
-                    to: TurnStatus::Completed,
-                },
-            },
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::LeaseMismatch,
-            },
+            submission_failure(
+                TurnSubmissionErrorCategory::InvalidRequest,
+                TurnSubmissionRetry::Permanent,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::Unauthorized,
+                TurnSubmissionRetry::Permanent,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::ScopeNotFound,
+                TurnSubmissionRetry::Permanent,
+            ),
+            submission_failure(
+                TurnSubmissionErrorCategory::Conflict,
+                TurnSubmissionRetry::Permanent,
+            ),
         ] {
             let classified = classify_trusted_trigger_inbound_error(error);
             assert!(matches!(
@@ -1051,6 +995,17 @@ mod tests {
         }
     }
 
+    /// A submission failure in the given `(category, retry)` class, carrying a
+    /// rendered cause the way the production adapter carries the coordinator's.
+    fn submission_failure(
+        category: TurnSubmissionErrorCategory,
+        retry: TurnSubmissionRetry,
+    ) -> InboundTurnError {
+        InboundTurnError::TurnSubmissionFailed {
+            error: TurnSubmissionError::new(category, retry, format!("{category:?} from the host")),
+        }
+    }
+
     fn trusted_trigger_response(
         run_id: TurnRunId,
         idempotency: MessageIdempotencyStatus,
@@ -1098,7 +1053,7 @@ mod tests {
                 status: TurnStatus::Completed,
                 resolved_run_profile_id: RunProfileId::default_profile(),
                 resolved_run_profile_version: RunProfileVersion::new(1),
-                event_cursor: EventCursor(0),
+                event_cursor: ironclaw_host_api::turn::EventCursor(0),
                 accepted_message_ref,
                 reply_target_binding_ref,
             }),
@@ -1364,6 +1319,69 @@ mod tests {
         }
     }
 
+    /// Mirror of the production port adapter
+    /// (`ironclaw_composition::automation::conversation_turn_submitter`):
+    /// it derives the owner and resolves the classification through the same
+    /// `product_context::resolve_inbound` call, producing the same
+    /// `SubmitTurnRequest` the real adapter hands the coordinator. The fakes
+    /// below record that request, so every run-origin, run-profile and
+    /// idempotency-key assertion in this module keeps asserting on the exact
+    /// value a coordinator receives rather than a paraphrase of it. The
+    /// production copy is pinned by that adapter's own seam tests.
+    fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequest {
+        let product_context = product_context::resolve_inbound(
+            inbound_classification(submission.classification),
+            submission.origin_adapter,
+            submission.surface_type,
+            submission.scope.product_owner(&submission.actor),
+        );
+        SubmitTurnRequest {
+            requested_model: None,
+            scope: submission.scope,
+            actor: submission.actor,
+            accepted_message_ref: submission.accepted_message_ref,
+            source_binding_ref: submission.source_binding_ref,
+            reply_target_binding_ref: submission.reply_target_binding_ref,
+            requested_run_profile: submission.requested_run_profile,
+            idempotency_key: submission.idempotency_key,
+            received_at: submission.received_at,
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: Some(product_context),
+        }
+    }
+
+    fn inbound_classification(
+        classification: ConversationInboundClassification,
+    ) -> product_context::InboundClassification {
+        match classification {
+            ConversationInboundClassification::TrustedTrigger => {
+                product_context::InboundClassification::TrustedTrigger
+            }
+            ConversationInboundClassification::TrustedOther => {
+                product_context::InboundClassification::TrustedOther
+            }
+            ConversationInboundClassification::Untrusted => {
+                product_context::InboundClassification::Untrusted
+            }
+        }
+    }
+
+    fn accepted_response(request: &SubmitTurnRequest) -> SubmitTurnResponse {
+        SubmitTurnResponse::Accepted {
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Completed,
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
+            event_cursor: ironclaw_host_api::turn::EventCursor(0),
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+        }
+    }
+
     #[derive(Default)]
     struct RecordingTurnCoordinator {
         submissions: Mutex<Vec<SubmitTurnRequest>>,
@@ -1376,54 +1394,15 @@ mod tests {
     }
 
     #[async_trait]
-    impl TurnCoordinator for RecordingTurnCoordinator {
-        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-            Ok(TurnRunId::new())
-        }
-
-        async fn submit_turn(
+    impl ConversationTurnSubmitter for RecordingTurnCoordinator {
+        async fn submit_conversation_turn(
             &self,
-            request: SubmitTurnRequest,
-        ) -> Result<SubmitTurnResponse, TurnError> {
-            self.submissions.lock().unwrap().push(request.clone());
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id: TurnId::new(),
-                run_id: TurnRunId::new(),
-                status: TurnStatus::Completed,
-                resolved_run_profile_id: RunProfileId::default_profile(),
-                resolved_run_profile_version: RunProfileVersion::new(1),
-                event_cursor: EventCursor(0),
-                accepted_message_ref: request.accepted_message_ref,
-                reply_target_binding_ref: request.reply_target_binding_ref,
-            })
-        }
-
-        async fn resume_turn(
-            &self,
-            _request: ResumeTurnRequest,
-        ) -> Result<ResumeTurnResponse, TurnError> {
-            unimplemented!("not used by inbound service tests")
-        }
-
-        async fn retry_turn(
-            &self,
-            _request: RetryTurnRequest,
-        ) -> Result<RetryTurnResponse, TurnError> {
-            unimplemented!("not used by inbound service tests")
-        }
-
-        async fn cancel_run(
-            &self,
-            _request: CancelRunRequest,
-        ) -> Result<CancelRunResponse, TurnError> {
-            unimplemented!("not used by inbound service tests")
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<TurnRunState, TurnError> {
-            unimplemented!("not used by inbound service tests")
+            submission: ConversationTurnSubmission,
+        ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+            let request = submit_turn_request(submission);
+            let response = accepted_response(&request);
+            self.submissions.lock().unwrap().push(request);
+            Ok(response)
         }
     }
 
@@ -1431,8 +1410,11 @@ mod tests {
 
     #[test]
     fn classify_trusted_trigger_inbound_error_maps_invalid_run_origin_adapter_to_submit_rejected() {
+        // `TurnError::InvalidRunOriginAdapter` arrives through the port in its
+        // permanent/invalid-request class (pinned at the adapter seam by
+        // `conversation_turn_submitter_maps_every_turn_error_to_its_class`).
         let error = InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::InvalidRunOriginAdapter,
+            error: invalid_run_origin_adapter_failure(),
         };
         let classified = classify_trusted_trigger_inbound_error(error);
         assert!(
@@ -1464,17 +1446,25 @@ mod tests {
             InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
         let request = trusted_inbound_request(Some(agent()), Some(project()));
 
-        // First call: coordinator returns InvalidRunOriginAdapter — inbound returns an error.
+        // First call: the port rejects with InvalidRunOriginAdapter's class —
+        // inbound returns an error, and the typed port error survives.
         let err = inbound
             .handle_inbound_turn_with_trusted_scope(request.clone())
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::InvalidRunOriginAdapter
-            }
-        ));
+        let InboundTurnError::TurnSubmissionFailed { error } = &err else {
+            panic!("expected structured turn submission failure, got: {err:?}");
+        };
+        assert_eq!(
+            error.category(),
+            TurnSubmissionErrorCategory::InvalidRequest
+        );
+        assert_eq!(error.retry(), TurnSubmissionRetry::Permanent);
+        assert_eq!(
+            error.to_string(),
+            "invalid run-origin adapter: must be 1..=512 bytes",
+            "the host's rendered cause must survive the port boundary"
+        );
 
         // Second call: same request (same external_event_id → same accepted_message_ref).
         // The first attempt never called mark_inbound_message_turn_submitted, so the
@@ -1501,8 +1491,20 @@ mod tests {
         );
     }
 
-    /// A `TurnCoordinator` that returns `TurnError::InvalidRunOriginAdapter` on the
-    /// first `submit_turn` call and succeeds on all subsequent calls.
+    /// The submission port's rendering of `TurnError::InvalidRunOriginAdapter`
+    /// — the exact `(category, retry, detail)` triple the production adapter
+    /// maps that failure onto, pinned there by
+    /// `conversation_turn_submitter_maps_every_turn_error_to_its_class`.
+    fn invalid_run_origin_adapter_failure() -> TurnSubmissionError {
+        TurnSubmissionError::new(
+            TurnSubmissionErrorCategory::InvalidRequest,
+            TurnSubmissionRetry::Permanent,
+            "invalid run-origin adapter: must be 1..=512 bytes",
+        )
+    }
+
+    /// A submitter that rejects the first submission with the port's rendering
+    /// of `TurnError::InvalidRunOriginAdapter` and accepts every later one.
     #[derive(Default)]
     struct FailingOnFirstTurnCoordinator {
         submissions: Mutex<Vec<SubmitTurnRequest>>,
@@ -1515,58 +1517,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl TurnCoordinator for FailingOnFirstTurnCoordinator {
-        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-            Ok(TurnRunId::new())
-        }
-
-        async fn submit_turn(
+    impl ConversationTurnSubmitter for FailingOnFirstTurnCoordinator {
+        async fn submit_conversation_turn(
             &self,
-            request: SubmitTurnRequest,
-        ) -> Result<SubmitTurnResponse, TurnError> {
+            submission: ConversationTurnSubmission,
+        ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+            let request = submit_turn_request(submission);
             let mut submissions = self.submissions.lock().unwrap();
             submissions.push(request.clone());
             if submissions.len() == 1 {
-                return Err(TurnError::InvalidRunOriginAdapter);
+                return Err(invalid_run_origin_adapter_failure());
             }
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id: TurnId::new(),
-                run_id: TurnRunId::new(),
-                status: TurnStatus::Completed,
-                resolved_run_profile_id: RunProfileId::default_profile(),
-                resolved_run_profile_version: RunProfileVersion::new(1),
-                event_cursor: EventCursor(0),
-                accepted_message_ref: request.accepted_message_ref,
-                reply_target_binding_ref: request.reply_target_binding_ref,
-            })
-        }
-
-        async fn resume_turn(
-            &self,
-            _request: ResumeTurnRequest,
-        ) -> Result<ResumeTurnResponse, TurnError> {
-            unimplemented!("not used by submit-key rotation tests")
-        }
-
-        async fn retry_turn(
-            &self,
-            _request: RetryTurnRequest,
-        ) -> Result<RetryTurnResponse, TurnError> {
-            unimplemented!("not used by submit-key rotation tests")
-        }
-
-        async fn cancel_run(
-            &self,
-            _request: CancelRunRequest,
-        ) -> Result<CancelRunResponse, TurnError> {
-            unimplemented!("not used by submit-key rotation tests")
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<TurnRunState, TurnError> {
-            unimplemented!("not used by submit-key rotation tests")
+            Ok(accepted_response(&request))
         }
     }
 

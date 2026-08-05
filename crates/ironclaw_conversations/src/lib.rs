@@ -1,10 +1,15 @@
 //! Conversation binding and inbound-message contracts for IronClaw Reborn.
 //!
 //! This crate is the adapter-safe boundary between product/channel adapters and
-//! `ironclaw_turns::TurnCoordinator`. It resolves external actor/conversation
-//! identifiers into canonical tenant/thread/message/binding references without
-//! asking the turn coordinator to parse raw channel payloads or store message
-//! content.
+//! turn submission. It resolves external actor/conversation identifiers into
+//! canonical tenant/thread/message/binding references without asking the turn
+//! coordinator to parse raw channel payloads or store message content.
+//!
+//! It does **not** hold the turn coordinator. The orchestration reaches it
+//! through the one-method [`ConversationTurnSubmitter`] port declared in
+//! [`turn_submission`], which `ironclaw_composition` implements over the
+//! real handle — so this crate speaks only `ironclaw_host_api::turn` vocabulary
+//! plus its own types.
 //!
 //! **It is not the transcript.** `ironclaw_threads` owns canonical threads and
 //! their message content; this crate owns the *binding* from an external
@@ -31,6 +36,7 @@ mod state_store;
 mod stored_refs;
 mod traits;
 mod trusted_trigger;
+mod turn_submission;
 mod types;
 
 pub use conversation_state_store::{ConversationStateStore, RebornFilesystemConversationServices};
@@ -50,13 +56,16 @@ pub use memory::InMemoryConversationServices;
 pub use traits::{
     ConversationActorPairingService, ConversationBindingService, InboundConversationService,
 };
+pub use turn_submission::{
+    ConversationInboundClassification, ConversationTurnSubmission, ConversationTurnSubmitter,
+    TurnSubmissionError, TurnSubmissionErrorCategory, TurnSubmissionRetry,
+};
 pub use types::{
     AcceptConversationMessageRequest, AcceptedConversationMessage,
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, ConditionalUnpairOutcome,
     ConversationBindingResolution, ConversationMessageRecord, ConversationRouteKind,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, InboundTurnRequest, InboundTurnResponse,
-    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
-    StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
-    ValidateReplyTargetRequest,
+    ExpectedExternalActorOwner, InboundTurnRequest, InboundTurnResponse, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
+    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
 };

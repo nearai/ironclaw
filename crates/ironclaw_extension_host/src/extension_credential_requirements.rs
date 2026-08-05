@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
+use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage};
 use ironclaw_host_api::{
     capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
     decision::RuntimeCredentialAuthRequirement,

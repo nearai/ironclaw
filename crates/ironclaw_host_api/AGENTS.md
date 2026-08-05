@@ -19,7 +19,7 @@
 - Budget/resource scopes, estimates, usage, and quota contracts (`resource`).
 - Redacted durable audit envelopes (`audit`).
 - HTTP vocabulary (`http`) and host-owned ingress route/policy descriptors — `IngressPolicy`, route/listener/auth/rate-limit/CORS/streaming enums (`ingress`).
-- Dispatch port contracts (`dispatch`) and host-port catalog/grant/view types (`host_port`, incl. `HOST_RUNTIME_HTTP_EGRESS_PORT_ID`).
+- Dispatch port contracts (`dispatch`) and host-port catalog/grant/view types (`host_port`, incl. `HOST_RUNTIME_HTTP_EGRESS_PORT_ID`) plus the **default validation catalog** that enumerates every port name the module defines, `default_host_port_catalog` (moved down from `ironclaw_host_runtime` in WS3 row 3, PROPOSAL §6.5.9). It is a validation helper, not authority: a new host-port constant is added to the catalog *there*, beside its name — not in a kernel caller.
 - Runtime vocabulary `RuntimeKind`/`TrustClass` (`runtime`) and deployment-mode/profile/effective runtime-policy types (`runtime_policy`).
 - Requested-trust vocabulary and `PackageIdentity` (`trust`).
 - The **complete** turn vocabulary (`turn`): typed turn/run/checkpoint/lease/runner ids, the bounded `AcceptedMessageRef`/`SourceBindingRef`/`ReplyTargetBindingRef`/`TurnGateRef`/`IdempotencyKey`/`RunProfileId`/`RunProfileRequest` refs and the `Loop*Ref` family, `TurnScope`/`TurnActor`/`TurnThreadOwner`/`TurnOwner`, `TurnStatus` with its `GateKind`/`BlockedReason` gate correspondence, `EventCursor`, `RunOriginAdapter`, and the sanitized failure/cancel shapes. A crate that only *names* turns depends on this crate, never on `ironclaw_turns`.
@@ -35,7 +35,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_host_api`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 - If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 
 ## Agent Notes

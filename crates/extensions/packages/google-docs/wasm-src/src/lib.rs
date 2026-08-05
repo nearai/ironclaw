@@ -51,7 +51,7 @@ use types::{GoogleDocsAction, ToolContext};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../../wit/tool.wit",
+    path: "../../../../ironclaw_wasm/wit/tool.wit",
 });
 
 struct GoogleDocsTool;

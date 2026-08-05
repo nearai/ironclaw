@@ -15,7 +15,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
@@ -24,6 +24,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     approval::ApprovalRequest,
@@ -58,7 +59,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance,
+    HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -2566,11 +2567,11 @@ default_permission = "allow"
 parameters_schema = {}
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

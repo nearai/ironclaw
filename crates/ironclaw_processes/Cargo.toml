@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [package.metadata.ironclaw]
-layer = "runtimes"
+layer = "kernel"
 
 [features]
 # In-memory-backed process store constructors for this crate's own tests and
@@ -19,7 +19,7 @@ blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 hex = "0.4"
-ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_resources = { path = "../ironclaw_resources" }
@@ -33,7 +33,7 @@ tracing = "0.1"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
+ironclaw_event_store = { path = "../ironclaw_event_store" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 deadpool-postgres = "0.14"
 tempfile = "3"

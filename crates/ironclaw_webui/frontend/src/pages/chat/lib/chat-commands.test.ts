@@ -162,7 +162,7 @@ describe("renderCommandResultMarkdown", () => {
 
 // Classification driving command-result.tsx's dispatch (success card /
 // dropdown-echoing command list / calm denial notice). See
-// `ironclaw_product/src/reborn_services/product_commands.rs`:
+// `ironclaw_assistant/src/reborn_services/product_commands.rs`:
 // `execute_product_command` always answers with exactly one of
 // `result`/`rejection`, and the only rejection `kind` it emits for the
 // unknown/malformed-command help text is `invalid_request` — every other

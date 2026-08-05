@@ -189,7 +189,7 @@ pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
     /// [`ProductSurfaceCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
-    /// `crates/ironclaw_product/CLAUDE.md`.
+    /// `crates/ironclaw_assistant/CLAUDE.md`.
     pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
@@ -217,6 +217,14 @@ pub struct WebuiServeConfig {
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
+    /// Whether `/fs/*` workspace list/stat/read handlers must confine reads to
+    /// the caller's own subtree (`tenants/{tenant}/users/{user}`) instead of
+    /// the shared `/projects/workspace` root, and the `/session` feature flag
+    /// advertises the same mode to the browser. Hosted profiles enable this so
+    /// one user cannot list another user's workspace artifacts; local/operator
+    /// profiles keep it off so single-user workspaces stay visible. The flag
+    /// controls filesystem-handler path selection, not only UI display.
+    pub(crate) workspace_requires_scoped_projection: bool,
     /// Trusted default agent id stamped onto every
     /// [`ProductSurfaceCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
@@ -277,6 +285,7 @@ impl WebuiServeConfig {
             allowed_origins,
             csp_header: None,
             canonical_host: None,
+            workspace_requires_scoped_projection: false,
             default_agent_id: None,
             default_project_id: None,
             public_mounts: Vec::new(),
@@ -339,6 +348,14 @@ impl WebuiServeConfig {
     /// trusting the request's `Host` header.
     pub fn with_canonical_host(mut self, host: impl Into<String>) -> Self {
         self.canonical_host = Some(host.into());
+        self
+    }
+
+    /// Require the WebUI workspace browser to show only caller-scoped
+    /// workspace projections. Local development should leave this disabled so
+    /// raw single-user `/workspace` roots remain visible.
+    pub fn with_workspace_requires_scoped_projection(mut self, enabled: bool) -> Self {
+        self.workspace_requires_scoped_projection = enabled;
         self
     }
 
@@ -596,6 +613,7 @@ pub fn webui_v2_app_with_lifecycle(
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
         .with_reborn_projects_enabled(reborn_projects_enabled())
+        .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
         .with_regression_artifact_export_enabled(regression_artifact_export_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
@@ -759,7 +777,7 @@ struct AuthLayerState {
 /// the grant source is not even nameable outside the crate: the only place a
 /// `HostAuthenticationGrant` can come from is a few lines below, immediately
 /// after `authenticator.authenticate(&token)` returned `Some`. Before WS1.5 the
-/// same mint was reached through `ironclaw_product`'s re-export behind a
+/// same mint was reached through `ironclaw_assistant`'s re-export behind a
 /// `host-auth-mint` cargo feature that cargo's feature unification made
 /// vacuous — see `ironclaw_host_api::product_adapter::auth`.
 impl HostProtocolAuthenticator for AuthLayerState {}
@@ -811,7 +829,7 @@ async fn authenticate_request(
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     {
-        let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
+        let scope = ironclaw_openai_compat::OpenAiCompatActorScope::new(
             state.tenant_id.clone(),
             openai_user_id.clone(),
             state.default_agent_id.clone(),
@@ -825,7 +843,7 @@ async fn authenticate_request(
             openai_user_id.as_str(),
             state.tenant_id.clone(),
         );
-        let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
+        let caller = match ironclaw_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,
         ) {

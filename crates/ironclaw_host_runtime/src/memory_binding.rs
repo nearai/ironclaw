@@ -34,7 +34,7 @@ pub const MEMORY_DISABLED_BINDING_SENTINEL: &str = "memory.disabled";
 
 /// Deployment-profile axis for memory binding resolution and override scoping.
 ///
-/// Mirrors `ironclaw_reborn_config::RebornProfile` by name, but is defined here
+/// Mirrors `ironclaw_config::RebornProfile` by name, but is defined here
 /// so `ironclaw_host_runtime` does not depend on the config crate; composition
 /// maps one to the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

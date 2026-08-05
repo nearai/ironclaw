@@ -10,6 +10,7 @@ fi
 
 frontend_corepack_home=""
 postgres_image_prepared=0
+webui_frontend_dir=""
 
 cleanup() {
   if [[ -n "${frontend_corepack_home}" && -d "${frontend_corepack_home}" ]]; then
@@ -20,6 +21,19 @@ trap cleanup EXIT
 
 run() {
   "${hermetic}" -- "$@"
+}
+
+# Resolved by crate NAME through the shared inventory
+# (scripts/ci/lib/crate_tree.py) rather than a literal `crates/ironclaw_webui`
+# path, so the target-architecture family move (PROPOSAL §5) cannot leave the
+# frontend prep/test stages pointed at a directory that no longer exists
+# (docs/reborn/target-architecture/CHECKLIST.md WS10). Memoized: called from
+# both prepare_frontend_dependencies and run_frontend_tests.
+resolve_webui_frontend_dir() {
+  if [[ -n "${webui_frontend_dir}" ]]; then
+    return
+  fi
+  webui_frontend_dir="$("${repo_root}/scripts/ci/crate-dir.sh" ironclaw_webui "${repo_root}")/frontend"
 }
 
 prepare_rust_dependencies() {
@@ -76,7 +90,7 @@ run_integration_tier() {
   prepare_postgres_test_image
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
-    run cargo test -p ironclaw_reborn_integration_tests \
+    run cargo test -p ironclaw_integration_tests \
       --test "${test_name}" -- --nocapture
   done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")
 }
@@ -112,9 +126,10 @@ prepare_frontend_dependencies() {
     return
   fi
 
+  resolve_webui_frontend_dir
   package_manager="$(
     jq -r '.packageManager' \
-      "${repo_root}/crates/ironclaw_webui/frontend/package.json"
+      "${webui_frontend_dir}/package.json"
   )"
   if [[ "${package_manager}" != pnpm@* ]]; then
     echo "frontend packageManager must pin pnpm: ${package_manager}" >&2
@@ -128,7 +143,7 @@ prepare_frontend_dependencies() {
     corepack install --global "${package_manager}"
   export COREPACK_HOME="${frontend_corepack_home}"
   (
-    cd "${repo_root}/crates/ironclaw_webui/frontend"
+    cd "${webui_frontend_dir}"
     COREPACK_HOME="${frontend_corepack_home}" \
       corepack pnpm install --frozen-lockfile
   )
@@ -137,9 +152,10 @@ prepare_frontend_dependencies() {
 run_frontend_tests() {
   # Run from the package directory so Corepack honors its pinned packageManager
   # version and its isolated setup cache without registry access in the guard.
+  resolve_webui_frontend_dir
   COREPACK_HOME="${frontend_corepack_home}" \
     run bash -c 'cd "$1" && exec corepack pnpm test' \
-      _ "${repo_root}/crates/ironclaw_webui/frontend"
+      _ "${webui_frontend_dir}"
 }
 
 case "${stage}" in
@@ -167,7 +183,7 @@ case "${stage}" in
   qa)
     prepare_rust_dependencies
     run "${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
-    run cargo test -p ironclaw_reborn_integration_tests \
+    run cargo test -p ironclaw_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     ;;
   rust-e2e)
@@ -195,7 +211,7 @@ case "${stage}" in
       run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
     run_integration_tier
     run "${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
-    run cargo test -p ironclaw_reborn_integration_tests \
+    run cargo test -p ironclaw_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     run "${repo_root}/scripts/reborn-e2e-rust.sh" all
     run_frontend_tests

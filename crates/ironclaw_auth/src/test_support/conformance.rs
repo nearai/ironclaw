@@ -4,7 +4,7 @@
 //! Two production-facing implementations exist: this crate's
 //! [`InMemoryAuthProductServices`](crate::InMemoryAuthProductServices) fake
 //! (what most consumer tests run against) and the durable
-//! `FilesystemAuthProductServices` in `ironclaw_reborn_composition` (what
+//! `FilesystemAuthProductServices` in `ironclaw_composition` (what
 //! production runs). Their VALIDATION core is shared (`domain.rs`'s
 //! `validate_callback_claim` / `prepare_callback_flow`), but each hand-rolls
 //! its orchestration around it — terminal-idempotency sets, expiry

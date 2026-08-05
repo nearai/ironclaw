@@ -6,7 +6,7 @@
 //! stub [`ProductSurface`] so the regression target is the wire
 //! contract — body shape, path/query plumbing, error mapping — not just
 //! the service method bodies that are already covered in
-//! `ironclaw_product`.
+//! `ironclaw_assistant`.
 
 // arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
 
@@ -27,20 +27,7 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
-use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::{
-    ids::{
-        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
-        ResultRef, TenantId, ThreadId, UserId,
-    },
-    resolution::{
-        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
-    },
-    result_meta::{ResultProgress, TerminateHint},
-    runtime::RuntimeKind,
-    safe_summary::SafeSummary,
-};
-use ironclaw_product::{
+use ironclaw_assistant::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
@@ -104,11 +91,24 @@ use ironclaw_product::{
     THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
     TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
-use ironclaw_product::{
+use ironclaw_assistant::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
+};
+use ironclaw_extension_contracts::state::LifecyclePublicState;
+use ironclaw_host_api::{
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
+        ResultRef, TenantId, ThreadId, UserId,
+    },
+    resolution::{
+        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
+    },
+    result_meta::{ResultProgress, TerminateHint},
+    runtime::RuntimeKind,
+    safe_summary::SafeSummary,
 };
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
@@ -1255,13 +1255,18 @@ impl StubServices {
                     .lock()
                     .expect("lock")
                     .push(request.clone());
+                let entry_path = if request.path.is_empty() {
+                    "today.md".to_string()
+                } else {
+                    format!("{}/today.md", request.path.trim_end_matches('/'))
+                };
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornFsListResponse {
                         mount: request.mount,
                         path: request.path,
                         entries: vec![ProjectFsEntry {
                             name: "today.md".to_string(),
-                            path: "daily/today.md".to_string(),
+                            path: entry_path,
                             kind: ProjectFsEntryKind::File,
                         }],
                     })
@@ -2807,9 +2812,9 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // the captured RebornStreamEventsRequest — if a future refactor flips
     // the `.or()` order, the service will see cursor-B and this test fails.
     let header_cursor =
-        ironclaw_product::ProjectionCursor::new("cursor-from-header").expect("cursor");
+        ironclaw_assistant::ProjectionCursor::new("cursor-from-header").expect("cursor");
     let query_cursor =
-        ironclaw_product::ProjectionCursor::new("cursor-from-query").expect("cursor");
+        ironclaw_assistant::ProjectionCursor::new("cursor-from-query").expect("cursor");
     let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
     let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
     let query_encoded = url_encode(&query_json);
@@ -3910,6 +3915,45 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_reports_effective_workspace_scoped_projection_feature() {
+    for (state_enabled, operator_capability, expected) in [
+        (false, false, true),
+        (false, true, false),
+        (true, false, true),
+        (true, true, true),
+    ] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(state_enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: operator_capability,
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["workspace_requires_scoped_projection"], expected,
+            "features.workspace_requires_scoped_projection must be state flag OR non-operator token \
+             (state_enabled={state_enabled}, operator_capability={operator_capability})"
         );
     }
 }
@@ -6807,7 +6851,7 @@ async fn stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime
 
 /// Build a minimal `ProductOutboundEnvelope` with a caller-supplied
 /// projection cursor and reply text. The exact payload shape is not the
-/// contract under test (it lives in `ironclaw_product`); these
+/// contract under test (it lives in `ironclaw_assistant`); these
 /// tests only care that whatever the service hands back becomes a
 /// well-formed SSE event.
 fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
@@ -8046,6 +8090,316 @@ async fn stat_fs_path_returns_metadata() {
     assert_eq!(body["stat"]["mime_type"], "text/markdown");
     let queries = services.view_queries.lock().expect("lock");
     assert_eq!(queries[0].view_id.as_str(), FS_STAT_VIEW.id);
+}
+
+#[tokio::test]
+async fn browse_fs_dir_prefixes_workspace_path_with_scoped_projection() {
+    // Scoped projection ON + non-operator caller: the browser must confine
+    // Workspace reads to the caller's own subtree. The server prepends
+    // `tenants/{tenant}/users/{user}` before forwarding to the product layer,
+    // so one user can never list another user's workspace artifacts.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    // The response echoes the *requested* mount-relative root, not the prefixed
+    // served path, so the browser never sees the caller storage prefix.
+    assert_eq!(body["path"], "");
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "tenants/tenant-alpha/users/user-alpha",
+        "workspace list must be confined to the caller subtree under scoped projection"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_keeps_raw_workspace_root_for_operator_fallback() {
+    // Operator bypass with scoped projection OFF: raw shared workspace root is
+    // served unchanged so local/single-user workspaces stay visible. The
+    // deployment flag gates scoping; operator capability alone does not override
+    // a deployment that requires scoped projection.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(false),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=shared.txt")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "shared.txt",
+        "operator fallback must not prefix the workspace path"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_scopes_workspace_for_non_operator_even_when_state_flag_off() {
+    // Non-operator caller is always scoped (state flag OR not-operator), so a
+    // hosted user without operator capability is confined to their own subtree
+    // even on a deployment that has not set the scoped-projection flag.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(false),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=notes/idea.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "tenants/tenant-alpha/users/user-alpha/notes/idea.md",
+        "non-operator callers must be scoped to their own workspace subtree"
+    );
+}
+
+#[tokio::test]
+async fn stat_fs_path_prefixes_workspace_path_with_scoped_projection() {
+    // The stat route must apply the same caller-subtree prefixing so a user
+    // cannot stat another user's file. The echoed stat path is stripped back
+    // to the mount-relative request.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=workspace&path=report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["stat"]["path"], "report.md",
+        "stat response must echo the mount-relative path, not the prefixed served path"
+    );
+}
+
+#[tokio::test]
+async fn read_fs_file_prefixes_workspace_path_with_scoped_projection() {
+    // The download route applies the same caller-subtree prefixing as list/stat.
+    // The stub records the dispatched command input, so assert it received the
+    // prefixed path (the caller can never request another user's subtree).
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=workspace&path=report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.surface_calls.lock().expect("lock");
+    let read_call = calls
+        .iter()
+        .rev()
+        .find(|call| call.call_id == "fs.read")
+        .expect("fs.read command dispatched");
+    let request: RebornFsReadRequest =
+        serde_json::from_value(read_call.input.clone()).expect("fs read input");
+    assert_eq!(
+        request.path, "tenants/tenant-alpha/users/user-alpha/report.md",
+        "read_fs_file must confine the workspace download to the caller subtree under scoped projection"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
+    // A `..` segment must be rejected before the caller prefix is prepended, so
+    // `../other-user/secret` can never become `tenants/.../users/.../../other-user`.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=../tenant-b/users/bob/secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "parent-directory traversal must be rejected before dispatching to the product layer"
+    );
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert!(
+        calls.is_empty(),
+        "traversal request must not reach the product layer"
+    );
+}
+
+/// `stat_fs_path` and `read_fs_file` run the identical
+/// `workspace_projection_for` / `workspace_served_path` sequence as
+/// `browse_fs_dir`; the `..` guard must hold on every route that prepends the
+/// caller prefix, not just the listing.
+#[tokio::test]
+async fn stat_and_read_fs_routes_reject_parent_traversal_under_scoped_projection() {
+    for uri in [
+        "/api/webchat/v2/fs/stat?mount=workspace&path=../tenant-b/users/bob/secret",
+        "/api/webchat/v2/fs/content?mount=workspace&path=../tenant-b/users/bob/secret",
+    ] {
+        let services = Arc::new(StubServices::default());
+        let caller = caller_for_user("user-alpha");
+        let router = webui_v2_router(
+            WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(true),
+        )
+        .layer(axum::Extension(caller))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: false,
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "parent-directory traversal must be rejected on {uri}"
+        );
+        assert!(
+            services.surface_calls.lock().expect("lock").is_empty(),
+            "traversal request on {uri} must not reach the product layer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn browse_fs_dir_strips_prefixed_entry_paths_under_scoped_projection() {
+    // The stub now echoes entry paths under the served (prefixed) root, as the
+    // product layer does. The handler must strip the caller prefix from every
+    // entry path so the browser navigates with mount-relative paths and never
+    // sees the storage ownership prefix.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["entries"][0]["path"], "today.md",
+        "entry paths must be stripped to mount-relative, not the prefixed served path"
+    );
+    assert_eq!(body["entries"][0]["name"], "today.md");
 }
 
 #[tokio::test]

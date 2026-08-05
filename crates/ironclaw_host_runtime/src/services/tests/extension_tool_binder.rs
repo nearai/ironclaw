@@ -8,7 +8,10 @@ use std::collections::BTreeSet;
 use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
-use ironclaw_host_api::{path::VirtualPath, runtime::TrustClass, trust::RequestedTrustClass};
+use ironclaw_host_api::{
+    path::VirtualPath, resource::RuntimeResourceBudget, runtime::TrustClass,
+    trust::RequestedTrustClass,
+};
 
 use super::super::ExtensionToolBindError;
 use super::*;
@@ -16,7 +19,7 @@ use super::*;
 fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPackage {
     ExtensionPackage::from_manifest(
         ExtensionManifest {
-            schema_version: ironclaw_extensions::MANIFEST_SCHEMA_VERSION.to_string(),
+            schema_version: ironclaw_extension_registry::MANIFEST_SCHEMA_VERSION.to_string(),
             id: ExtensionId::new(service).unwrap(),
             name: "Binder fixture".to_string(),
             version: "0.1.0".to_string(),
@@ -24,19 +27,19 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
             source: ManifestSource::HostBundled,
             requested_trust: RequestedTrustClass::FirstPartyRequested,
             descriptor_trust_default: TrustClass::Sandbox,
-            runtime: ironclaw_extensions::ExtensionRuntime::FirstParty {
+            runtime: ironclaw_extension_contracts::runtime::ExtensionRuntime::FirstParty {
                 service: service.to_string(),
             },
             host_apis: Vec::new(),
             host_api_surfaces: Vec::new(),
-            capabilities: vec![ironclaw_extensions::CapabilityManifest {
+            capabilities: vec![ironclaw_extension_registry::CapabilityManifest {
                 id: CapabilityId::new(capability_id).unwrap(),
                 description: "binder fixture capability".to_string(),
                 effects: vec![EffectKind::DispatchCapability],
                 network_targets: Vec::new(),
                 max_egress_bytes: None,
                 default_permission: PermissionMode::Allow,
-                visibility: ironclaw_extensions::CapabilityVisibility::Model,
+                visibility: ironclaw_extension_registry::CapabilityVisibility::Model,
                 input_schema_ref:
                     ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef::new(
                         "schemas/fixture/input.v1.json",
@@ -212,7 +215,7 @@ struct RecordingMcpExecutor {
 impl ironclaw_mcp::McpExecutor for RecordingMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         request: ironclaw_mcp::McpExecutionRequest<'_>,
     ) -> Result<ironclaw_mcp::McpExecutionResult, ironclaw_mcp::McpError> {
         *self.invoked.lock().expect("invoked lock") = Some((
@@ -274,17 +277,20 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
     // "discovered vs declared" — a discovered capability carries
     // `RuntimeKind::Mcp`, so it resolves the MCP lane and dispatches identically.
     let base = test_package(MCP_TEST_MANIFEST, "test-mcp");
-    let discovered = ironclaw_extensions::package_with_discovered_hosted_mcp_tools(
+    let discovered = ironclaw_extension_registry::package_with_discovered_hosted_mcp_tools(
         &base,
-        &[ironclaw_extensions::HostedMcpDiscoveredTool {
-            name: "search".to_string(),
-            description: "Discovered search tool".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-            annotations: ironclaw_extensions::HostedMcpDiscoveredToolAnnotations {
-                read_only_hint: true,
-                ..Default::default()
+        &[
+            ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredTool {
+                name: "search".to_string(),
+                description: "Discovered search tool".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations:
+                    ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredToolAnnotations {
+                        read_only_hint: true,
+                        ..Default::default()
+                    },
             },
-        }],
+        ],
     )
     .expect("discovered hosted-MCP package builds");
 
@@ -336,7 +342,7 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
 #[tokio::test]
 async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
     use ironclaw_capabilities::ToolResolver;
-    use ironclaw_extensions::SharedExtensionRegistry;
+    use ironclaw_extension_registry::SharedExtensionRegistry;
 
     let mut registry = ExtensionRegistry::new();
     registry

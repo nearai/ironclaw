@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_common::normalize_mime_type;
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_filesystem::{FileType, FilesystemError, ScopedFilesystem};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},

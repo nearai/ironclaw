@@ -453,6 +453,8 @@ fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    const DEFAULT_MAX_TOKENS: u32 = 8192;
+
     // Route to OAuth provider when an OAuth token is present and no real API
     // key was provided. When both are set, the API key takes priority (standard
     // x-api-key auth via rig-core).
@@ -549,6 +551,7 @@ fn create_anthropic_from_registry(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
             .with_cache_retention(cache_retention)
+            .with_default_max_tokens(DEFAULT_MAX_TOKENS)
             .with_unsupported_params(config.unsupported_params.clone())
             .with_model_listing(models_endpoint),
     ))
@@ -1291,6 +1294,146 @@ fn normalize_openai_base_url(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::NearAiConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StreamingProbe {
+        streaming_calls: AtomicUsize,
+        completion_gate: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StreamingProbe {
+        fn model_name(&self) -> &str {
+            "streaming-probe"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            panic!("decorator chain downgraded a streaming call to complete()")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+            sink.text_delta("live".to_string()).await;
+            if let Some(gate) = &self.completion_gate {
+                gate.notified().await;
+            }
+            Ok(CompletionResponse {
+                content: "live".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("decorator chain downgraded a tool streaming call")
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+            sink.text_delta("tool-live".to_string()).await;
+            if let Some(gate) = &self.completion_gate {
+                gate.notified().await;
+            }
+            Ok(ToolCompletionResponse {
+                content: Some("tool-live".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
+    }
+
+    struct RecordingSink(tokio::sync::mpsc::UnboundedSender<String>);
+
+    #[async_trait::async_trait]
+    impl CompletionStreamSink for RecordingSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.0.send(delta);
+        }
+    }
+
+    struct InterruptingStreamingProbe {
+        model_name: &'static str,
+        streaming_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for InterruptingStreamingProbe {
+        fn model_name(&self) -> &str {
+            self.model_name
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            panic!("failure-path test must use complete_streaming()")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+            sink.text_delta("partial".to_string()).await;
+            Err(LlmError::StreamInterrupted {
+                provider: self.model_name.to_string(),
+                reason: "test stream interrupted after visible text".to_string(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("failure-path test must use complete_with_tools_streaming()")
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+            sink.text_delta("tool-partial".to_string()).await;
+            Err(LlmError::StreamInterrupted {
+                provider: self.model_name.to_string(),
+                reason: "test tool stream interrupted after visible text".to_string(),
+            })
+        }
+    }
 
     fn test_nearai_config() -> NearAiConfig {
         NearAiConfig {
@@ -1330,6 +1473,159 @@ mod tests {
             response_cache_ttl_secs: 3600,
             response_cache_max_entries: 1000,
         }
+    }
+
+    #[tokio::test]
+    async fn configured_decorator_chain_preserves_native_streaming() {
+        let completion_gate = Arc::new(tokio::sync::Notify::new());
+        let raw = Arc::new(StreamingProbe {
+            streaming_calls: AtomicUsize::new(0),
+            completion_gate: Some(Arc::clone(&completion_gate)),
+        });
+        let fallback: Arc<dyn LlmProvider> = Arc::new(StreamingProbe {
+            streaming_calls: AtomicUsize::new(0),
+            completion_gate: None,
+        });
+        let mut config = test_llm_config();
+        config.max_retries = 1;
+        config.nearai.fallback_model = Some("fallback-probe".to_string());
+        config.circuit_breaker_threshold = Some(2);
+        config.response_cache_enabled = true;
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let provider =
+            apply_decorator_chain_with_fallback(raw.clone(), Some(fallback), &config, session)
+                .await
+                .expect("decorator chain");
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let streaming_provider = Arc::clone(&provider);
+        let streaming_call = tokio::spawn(async move {
+            streaming_provider
+                .complete_streaming(
+                    CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                    Arc::new(RecordingSink(sender)),
+                )
+                .await
+        });
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("delta must arrive before completion is released")
+                .as_deref(),
+            Some("live")
+        );
+        assert!(!streaming_call.is_finished());
+        completion_gate.notify_one();
+        let response = streaming_call
+            .await
+            .expect("streaming task")
+            .expect("streaming response");
+        assert_eq!(response.content, "live");
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let tool_provider = Arc::clone(&provider);
+        let tool_call = tokio::spawn(async move {
+            tool_provider
+                .complete_with_tools_streaming(
+                    ToolCompletionRequest::new(vec![ChatMessage::user("use a tool")], Vec::new()),
+                    Arc::new(RecordingSink(sender)),
+                )
+                .await
+        });
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("tool delta must arrive before completion is released")
+                .as_deref(),
+            Some("tool-live")
+        );
+        assert!(!tool_call.is_finished());
+        completion_gate.notify_one();
+        let response = tool_call
+            .await
+            .expect("tool streaming task")
+            .expect("tool streaming response");
+        assert_eq!(response.content.as_deref(), Some("tool-live"));
+        assert_eq!(raw.streaming_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn configured_decorator_chain_suppresses_recovery_after_visible_partial_output() {
+        let raw = Arc::new(InterruptingStreamingProbe {
+            model_name: "raw-probe",
+            streaming_calls: AtomicUsize::new(0),
+        });
+        let fallback = Arc::new(InterruptingStreamingProbe {
+            model_name: "fallback-probe",
+            streaming_calls: AtomicUsize::new(0),
+        });
+        let mut config = test_llm_config();
+        config.max_retries = 1;
+        config.nearai.fallback_model = Some("fallback-probe".to_string());
+        config.nearai.failover_cooldown_threshold = 10;
+        config.circuit_breaker_threshold = Some(4);
+        config.response_cache_enabled = true;
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let provider = apply_decorator_chain_with_fallback(
+            raw.clone(),
+            Some(fallback.clone()),
+            &config,
+            session,
+        )
+        .await
+        .expect("decorator chain");
+
+        let text_request = CompletionRequest::new(vec![ChatMessage::user("same request")]);
+        for _ in 0..2 {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let error = provider
+                .complete_streaming(text_request.clone(), Arc::new(RecordingSink(sender)))
+                .await
+                .expect_err("partial stream must remain interrupted");
+            assert!(matches!(error, LlmError::StreamInterrupted { .. }));
+            assert_eq!(receiver.recv().await.as_deref(), Some("partial"));
+            assert!(receiver.try_recv().is_err());
+        }
+
+        let tool_request =
+            ToolCompletionRequest::new(vec![ChatMessage::user("same tool request")], Vec::new());
+        for _ in 0..2 {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let error = provider
+                .complete_with_tools_streaming(
+                    tool_request.clone(),
+                    Arc::new(RecordingSink(sender)),
+                )
+                .await
+                .expect_err("partial tool stream must remain interrupted");
+            assert!(matches!(error, LlmError::StreamInterrupted { .. }));
+            assert_eq!(receiver.recv().await.as_deref(), Some("tool-partial"));
+            assert!(receiver.try_recv().is_err());
+        }
+
+        assert_eq!(
+            raw.streaming_calls.load(Ordering::Relaxed),
+            4,
+            "retry and cache wrappers must not replay visible partial output"
+        );
+        assert_eq!(
+            fallback.streaming_calls.load(Ordering::Relaxed),
+            0,
+            "failover must not append a replacement after visible partial output"
+        );
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let error = provider
+            .complete_streaming(text_request, Arc::new(RecordingSink(sender)))
+            .await
+            .expect_err("the fourth interruption must open the circuit");
+        assert!(matches!(
+            error,
+            LlmError::RequestFailed { reason, .. } if reason.contains("Circuit breaker open")
+        ));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(raw.streaming_calls.load(Ordering::Relaxed), 4);
     }
 
     #[test]
@@ -1573,6 +1869,98 @@ mod tests {
             normalize_openai_base_url("https://my-server.example.com"),
             "https://my-server.example.com/v1"
         );
+    }
+
+    #[tokio::test]
+    async fn rig_registry_factories_keep_streaming_on_the_buffered_fallback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn capture_request_body(listener: TcpListener) -> String {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let (body_start, content_length) = loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert!(read > 0, "connection closed before request body arrived");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let body_start = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .expect("content-length header");
+                    break (body_start, content_length);
+                }
+            };
+            while request.len() < body_start + content_length {
+                let read = socket.read(&mut buffer).await.expect("read request body");
+                assert!(read > 0, "connection closed before request body completed");
+                request.extend_from_slice(&buffer[..read]);
+            }
+
+            let response_body = r#"{"error":{"message":"test rejection"}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                .expect("request body is UTF-8 JSON")
+        }
+
+        for (protocol, provider_id) in [
+            (ProviderProtocol::OpenAiCompletions, "openai"),
+            (ProviderProtocol::Anthropic, "anthropic"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback listener");
+            let address = listener.local_addr().expect("loopback address");
+            let server = tokio::spawn(capture_request_body(listener));
+            let config = RegistryProviderConfig::generic(
+                protocol,
+                provider_id,
+                Some(secrecy::SecretString::from("test-key".to_string())),
+                format!("http://{address}"),
+                "test-model",
+            );
+            let provider = create_registry_provider_inner(&config, 5)
+                .expect("registry provider construction succeeds");
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+            let error = provider
+                .complete_streaming(
+                    CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                    Arc::new(RecordingSink(sender)),
+                )
+                .await
+                .expect_err("loopback server rejects the request");
+            assert!(matches!(error, LlmError::InvalidRequest { .. }));
+            let body = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+                .await
+                .expect("loopback server must observe a request")
+                .expect("loopback server task");
+            let body: serde_json::Value =
+                serde_json::from_str(&body).expect("request body is valid JSON");
+            assert_ne!(
+                body.get("stream").and_then(serde_json::Value::as_bool),
+                Some(true),
+                "{provider_id} must not use rig-core streaming until terminal events are observable"
+            );
+            assert!(receiver.try_recv().is_err());
+        }
     }
 
     #[test]

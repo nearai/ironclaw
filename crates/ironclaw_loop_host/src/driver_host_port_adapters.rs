@@ -395,7 +395,7 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
 /// `TurnError` -> `AgentLoopHostError` at the checkpoint-state seam.
 ///
 /// Moved here with the checkpoint port that calls it (WS3 runner sheds). It is
-/// `pub` because `ironclaw_runner`'s driver host maps the same errors on its
+/// `pub` because `ironclaw_turn_runner`'s driver host maps the same errors on its
 /// own checkpoint path; every arm is typed on `ironclaw_turns` and
 /// `ironclaw_loop_contracts` vocabulary, with no runner-specific concept in it.
 pub fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {

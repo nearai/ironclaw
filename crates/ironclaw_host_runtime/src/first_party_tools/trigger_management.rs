@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
@@ -262,7 +262,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         // self-referential automation that could silence or reschedule itself.
         //
         // The PRIMARY structural guarantees live one layer up, in the runner's
-        // capability surface (`ironclaw_runner::runtime`):
+        // capability surface (`ironclaw_turn_runner::runtime`):
         //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
         //     profile, whose `PerSurfaceCapabilityDenyDecorator`
         //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation

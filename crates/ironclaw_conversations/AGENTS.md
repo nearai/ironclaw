@@ -5,12 +5,15 @@
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and backend feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_turns/AGENTS.md`
+  - `crates/ironclaw_turns/AGENTS.md` — background only; since 2026-08-04 this
+    crate has **no normal dependency** on it. The seam is the port in
+    `src/turn_submission.rs`, implemented by
+    `crates/ironclaw_composition/src/automation/conversation_turn_submitter.rs`.
   - `crates/ironclaw_threads/CLAUDE.md`
   - `crates/ironclaw_extension_contracts/CLAUDE.md` — it declares the external
     actor/conversation ref pair this crate binds on (added 2026-08-02; the dep
     arrived with the WS5 unification and this list did not).
-  - `crates/ironclaw_product/CLAUDE.md`
+  - `crates/ironclaw_assistant/CLAUDE.md`
   - `docs/reborn/contracts/events-projections.md`
 
 ## What This Crate Owns
@@ -33,7 +36,12 @@
   > fails `reborn_conversations_threads_attachments.rs`. What this crate owns is
   > the record grammar, above.
 - Binding/state-store persistence for conversation binding, accepted-message idempotency, and turn-submission state.
-- Canonical `TurnCoordinator` inputs: `TurnScope`, `TurnActor`, `AcceptedMessageRef`, `SourceBindingRef`, and `ReplyTargetBindingRef`.
+- Canonical turn-submission inputs: `TurnScope`, `TurnActor`, `AcceptedMessageRef`, `SourceBindingRef`, and `ReplyTargetBindingRef` — all `ironclaw_host_api::turn`'s.
+- The **turn-submission port** (`src/turn_submission.rs`): the one-method
+  `ConversationTurnSubmitter`, its `ConversationTurnSubmission` request, the
+  `ConversationInboundClassification` trust value, and the
+  `TurnSubmissionError` cone. Declared here, implemented by
+  `ironclaw_composition` (WS5 port inversion, 2026-08-04).
 
 ## Do Not Move In Here
 
@@ -41,15 +49,26 @@
 - Raw user/assistant message content in turn-facing records; transcript content belongs to thread/transcript storage.
 - Capability runtime internals, runtime dispatch, model/provider behavior, or UI transport.
 - Silent retargeting of explicit links or route drift during adapter retries.
+- Trusted-trigger prompt safety scanning, and with it any `ironclaw_safety`
+  dependency. The scan is `ironclaw_triggers`' — it runs at the mint of the
+  sealed `TrustedTriggerSubmitRequest`, so it covers every
+  `TrustedTriggerFireSubmitter` rather than only the one wired here (moved
+  2026-08-04, PROPOSAL §6.4.2; the absent dependency is pinned by
+  `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`).
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_conversations`
 - Backend parity check when durable adapters change: run crate tests with all relevant features and DB harness settings.
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 
 - Binding resolution must fail closed for unknown threads, invalid refs, tenant/installation mismatches, participant-policy denial, or delimiter-like external IDs.
 - Source binding refs and reply target binding refs are distinct; egress must revalidate current reply targets.
-- Preserve typed `ironclaw_turns::TurnError`; do not flatten turn failures to strings.
+- Preserve the typed `TurnSubmissionError` the `ConversationTurnSubmitter` port returns; do not flatten turn failures to strings. Branch on `retry()`, project `category()`/`adapter_status_code()`, never parse the message. *(Amended 2026-08-04, WS5 port inversion — this invariant used to name `ironclaw_turns::TurnError`, which this crate no longer depends on. The `TurnError` → port-error mapping lives in the host adapter, `ironclaw_composition::automation::conversation_turn_submitter`, and preserves the class partition plus both accessors.)*
+- Do not reintroduce a `TurnCoordinator` handle or an `ironclaw_turns` normal
+  dependency here; that is the layer-matrix exception this crate closed. The
+  port is declared in `src/turn_submission.rs` and implemented by composition.
+  `ironclaw_turns` remains a **dev**-dependency only, so the test fakes can
+  stand in for that adapter on the real `SubmitTurnRequest` shape.

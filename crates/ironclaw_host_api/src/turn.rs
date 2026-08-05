@@ -750,7 +750,7 @@ impl SanitizedCancelReason {
 /// Monotonic position in a turn's lifecycle event stream. Projections and
 /// delivery handoffs carry it so a reader can resume exactly where it stopped.
 ///
-/// Distinct from `ironclaw_events::EventCursor`, which positions the generic
+/// Distinct from `ironclaw_event_log::EventCursor`, which positions the generic
 /// durable event log rather than one turn's lifecycle stream.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
@@ -1101,6 +1101,30 @@ impl ProductTurnContext {
     }
 }
 
+/// The accepted-submission record for a turn.
+///
+/// Turn *vocabulary*, not turn authority: every field is already this module's,
+/// and the value is durable state that non-kernel crates persist and replay —
+/// `ironclaw_conversations` stores it in the inbound idempotency ledger and
+/// replays it on duplicate delivery without ever holding a coordinator. It
+/// descended here from `ironclaw_turns::response` so that ledger contract can
+/// name it without importing the kernel (PROPOSAL §6.4.2, "turn vocabulary via
+/// `host_api`"); `ironclaw_turns` re-exports it through its documented
+/// `host_api::turn` facade, so coordinator callers keep one import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmitTurnResponse {
+    Accepted {
+        turn_id: TurnId,
+        run_id: TurnRunId,
+        status: TurnStatus,
+        resolved_run_profile_id: RunProfileId,
+        resolved_run_profile_version: RunProfileVersion,
+        event_cursor: EventCursor,
+        accepted_message_ref: AcceptedMessageRef,
+        reply_target_binding_ref: ReplyTargetBindingRef,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,7 +1218,7 @@ mod tests {
 
     #[test]
     fn run_origin_adapter_rejection_message_is_the_one_callers_render() {
-        // `ironclaw_product` and `ironclaw_conversations` surface this string
+        // `ironclaw_assistant` and `ironclaw_conversations` surface this string
         // verbatim inside their own submission errors, and `TurnError::
         // InvalidRunOriginAdapter` renders the same wording, so the text is a
         // contract rather than an implementation detail.

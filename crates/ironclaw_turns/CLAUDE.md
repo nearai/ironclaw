@@ -21,7 +21,7 @@
   **validation** — the exit applier, the validation policy, and the violation
   taxonomy that turn a driver's claim into a durable transition.
 - Implementations of those contracts live elsewhere: host adapters in
-  `ironclaw_loop_host`, driver-side integration in `ironclaw_runner`, and
+  `ironclaw_loop_host`, driver-side integration in `ironclaw_turn_runner`, and
   reusable loop mechanics in `ironclaw_agent_loop`. Two are still resident here
   under `host_managed_ports/` — `HostManagedLoopModelPort` and
   `HostManagedLoopPromptPort` — because PROPOSAL §6.1.4 forbids a contracts

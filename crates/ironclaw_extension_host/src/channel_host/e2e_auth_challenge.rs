@@ -6,7 +6,7 @@ use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_host_api::ids::{AgentId, ProjectId, UserId};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-use ironclaw_product::{AuthChallengeProvider, AuthChallengeView};
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, AuthChallengeView};
 
 use super::{AGENT, AUTH_GATE, PROJECT, TENANT, USER};
 

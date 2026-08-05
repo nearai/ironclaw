@@ -11,11 +11,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::{CapabilityHost, CredentialPresence, HostPolicyFacts, PolicyAction};
-use ironclaw_extensions::*;
+use ironclaw_extension_registry::*;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
     ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     approval::{ApprovalRequest, InvocationFingerprint},
@@ -42,8 +43,7 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_trust::{
-    AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy,
-    TrustPolicyInput, TrustProvenance,
+    AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy, TrustProvenance,
 };
 use serde_json::json;
 
@@ -661,11 +661,11 @@ output_schema_ref = "schemas/github/comment_issue.output.v1.json"
 prompt_doc_ref = "prompts/github/comment_issue.md"
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

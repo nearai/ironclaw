@@ -4,12 +4,12 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use ironclaw_assistant::{
+    RebornGetRunStateRequest, RebornStreamEventsRequest, RebornStreamEventsResponse,
+};
 use ironclaw_host_api::{
     ids::{ActivityId, CapabilityId},
     resolution::Resolution,
-};
-use ironclaw_product::{
-    RebornGetRunStateRequest, RebornStreamEventsRequest, RebornStreamEventsResponse,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
@@ -214,7 +214,7 @@ impl ProductSurface for ProgrammableProductSurface {
             })?,
             after_cursor: request
                 .after_cursor
-                .map(ironclaw_product::ProjectionCursor::new)
+                .map(ironclaw_assistant::ProjectionCursor::new)
                 .transpose()
                 .map_err(ProductSurfaceError::internal_from)?,
         };

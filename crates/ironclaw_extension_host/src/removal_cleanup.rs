@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use ironclaw_extensions::ExtensionRemovalChannelId;
-pub use ironclaw_extensions::{
+pub use ironclaw_extension_registry::ExtensionRemovalChannelId;
+pub use ironclaw_extension_registry::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };

@@ -3896,7 +3896,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["delivery_target_present"], True)
         self.assertIn("preflight", result.details)
 
-    def test_start_reborn_server_does_not_seed_retired_slack_redirect_env(self):
+    def test_start_reborn_server_forwards_slack_oauth_env(self):
         captured: dict[str, object] = {}
 
         class FakeProcess:
@@ -3937,9 +3937,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["health_url"], "http://127.0.0.1:38555/api/health")
         env = captured["env"]
         self.assertIsInstance(env, dict)
-        self.assertNotIn(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-            env,
+        self.assertEqual(
+            env["REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID"],
+            "slack-client",
         )
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
@@ -5572,13 +5572,40 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
 
             slack = prepared.preflight["slack"]
-            self.assertTrue(slack["enabled_in_config"])
             self.assertTrue(slack["requires_slack"])
             self.assertFalse(slack["env_present"])
             self.assertEqual(slack["auth_test"]["error"], "Slack env unavailable")
             self.assertIsNone(slack["setup"]["installation_id"])
             self.assertIsNone(slack["setup"]["team_id"])
             self.assertIsNone(slack["setup"]["api_app_id"])
+
+    def test_prepare_reborn_home_skips_slack_auth_for_non_slack_cases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = argparse.Namespace(
+                output_dir=root / "out",
+                reborn_home=root / "missing-source-home",
+                require_slack_live=False,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret",
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot-token",
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(run_live_qa, "_slack_auth_test") as slack_auth_test,
+            ):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3b_endpoint_status_live_chat"],
+                )
+
+            slack_auth_test.assert_not_called()
+            self.assertFalse(prepared.preflight["slack"]["requires_slack"])
+            self.assertFalse(prepared.preflight["slack"]["auth_test"]["checked"])
 
     def test_slack_setup_payload_uses_persisted_oauth_client_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5784,7 +5811,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_home = Path(tmpdir) / "reborn-home"
             reborn_home.mkdir()
             (reborn_home / "config.toml").write_text(
-                "[slack]\nenabled = true\n",
+                "",
                 encoding="utf-8",
             )
             prepared = run_live_qa.PreparedRebornHome(
@@ -6231,7 +6258,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             config = (prepared.path / "config.toml").read_text(encoding="utf-8")
             self.assertIn('profile = "local-dev"', config)
             self.assertIn("[llm.default]", config)
-            self.assertIn("[slack]", config)
+            self.assertNotIn("[slack]", config)
             self.assertIn('api_key_env = "LIVE_OPENAI_COMPATIBLE_API_KEY"', config)
             for rejected in (
                 "installation_id",
@@ -6262,8 +6289,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa.create_generated_reborn_home(home, include_slack=True)
 
             config = (home / "config.toml").read_text(encoding="utf-8")
-            self.assertIn("[slack]", config)
-            self.assertIn("enabled = true", config)
+            self.assertNotIn("[slack]", config)
+            self.assertNotIn("enabled = true", config)
             for rejected in (
                 "installation_id",
                 "team_id",

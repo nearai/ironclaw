@@ -44,7 +44,9 @@ not a raw handle:
 
 The vocabulary and contract are landed: the storage and audit ports
 (`host.storage.sql_transaction.first_party`, `host.events.audit`) are registered
-in `default_host_port_catalog()`. The live `ironclaw.memory` manifest is
+in `ironclaw_host_api::host_port::default_host_port_catalog()` (moved down from
+`ironclaw_host_runtime` in WS3 row 3, PROPOSAL §6.5.9). The live
+`ironclaw.memory` manifest is
 filesystem-backed and declares **no** host ports; these stay catalogued
 vocabulary that the deferred SQL-backed variant will declare and validate against. The **concrete `reborn_memory_*` dual-backend SQL
 repository behind the storage port** is delivered behind the non-default

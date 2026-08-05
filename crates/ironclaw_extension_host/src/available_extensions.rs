@@ -1,12 +1,14 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_contracts::{
     channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
-    ManifestSource,
+    ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
 };
+use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, nearai_bundle};
+use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_host_api::{
@@ -14,8 +16,12 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
 };
-use ironclaw_product::RebornChannelConnectStrategy;
+// Imported from the contract that owns it. `ironclaw_assistant` only re-exports
+// this type under an alias (`reborn_services.rs`), and retiring the `Reborn*`
+// prefix is CHECKLIST WS10's type-name row — so the path moves to the owner
+// here and the local name is left alone.
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
@@ -40,8 +46,6 @@ pub use crate::available_extension_import::{
     imported_extension_package, inline_extension_dir_assets, materialize_available_extension,
 };
 
-const NEARAI_MCP_MANIFEST: &str =
-    include_str!("../../extensions/packages/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +94,7 @@ pub struct AvailableExtensionPackage {
     pub manifest_toml: String,
     /// The validated runtime contract compiled alongside `manifest_toml`.
     /// Catalog projections read this value directly and never reparse raw TOML.
-    pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
+    pub resolved_manifest: Arc<ironclaw_extension_registry::ResolvedExtensionManifest>,
     /// The loader-supplied [`ManifestSource`] this package was validated
     /// under. Carried so install/migration re-parses (`prepare_install`,
     /// `prepare_manifest_migration`) validate with the SAME source the
@@ -425,11 +429,12 @@ impl AvailableExtensionCatalog {
     ) -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductOperationFailure> {
         let catalog =
             Self::from_first_party_assets_with_nearai_mcp_config(None, first_party_bundles)?;
-        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            ProductOperationFailure::InvalidBindingRequest {
-                reason: format!("host port catalog unavailable for recipe resolution: {error}"),
-            }
-        })?;
+        let host_ports =
+            ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!("host port catalog unavailable for recipe resolution: {error}"),
+                }
+            })?;
         let contracts = product_extension_host_api_contract_registry().map_err(|error| {
             ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host API contracts unavailable for recipe resolution: {error}"),
@@ -624,7 +629,9 @@ impl AvailableExtensionCatalog {
     /// Resolved deployment manifests for host-owned surfaces. This is a
     /// read-only projection of the available catalog; it does not install or
     /// activate any package.
-    pub fn resolved_manifests(&self) -> Vec<Arc<ironclaw_extensions::ResolvedExtensionManifest>> {
+    pub fn resolved_manifests(
+        &self,
+    ) -> Vec<Arc<ironclaw_extension_registry::ResolvedExtensionManifest>> {
         self.packages
             .iter()
             .map(|package| Arc::clone(&package.resolved_manifest))
@@ -671,11 +678,12 @@ fn nearai_mcp_package(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let manifest = nearai_mcp_manifest_toml_for_config(config)?;
+    let bundle = nearai_bundle();
     bundled_extension_package(
-        NEARAI_EXTENSION_ID,
-        "NEAR AI",
+        bundle.id,
+        bundle.display_name,
         &manifest,
-        nearai_mcp_assets(&manifest),
+        nearai_mcp_assets(bundle, &manifest),
     )
 }
 
@@ -696,9 +704,10 @@ pub fn nearai_mcp_manifest_toml_for_config(
 fn nearai_mcp_manifest_toml_for_endpoint(
     endpoint: &NearAiMcpEndpoint,
 ) -> Result<String, ProductOperationFailure> {
-    let mut manifest = toml::from_str::<Value>(NEARAI_MCP_MANIFEST).map_err(|error| {
-        map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
-    })?;
+    let mut manifest =
+        toml::from_str::<Value>(nearai_bundle().manifest_toml.as_ref()).map_err(|error| {
+            map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
+        })?;
     // The v3 manifest declares the proxied server once ([mcp].server); the
     // connection credential's audience derives from the server host, so the
     // endpoint override patches exactly one field.
@@ -777,11 +786,12 @@ fn bundled_extension_package(
 ) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)?;
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected bundled {label} extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected bundled {label} extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
@@ -793,7 +803,7 @@ fn bundled_extension_package(
         &host_ports,
         None,
         &contracts,
-        ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),
+        ironclaw_extension_registry::PackageRootBinding::Materialized(root.clone()),
     )
     .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -930,14 +940,14 @@ fn channel_directions_from_manifest_record(
     }
     // Manifest v2: derive from the product-adapter section capability flags.
     let sections =
-        ironclaw_product::adapter_registry::product_adapter_sections(record).map_err(|error| {
-            ProductOperationFailure::InvalidBindingRequest {
+        ironclaw_extension_registry::host_api::product_adapter::product_adapter_sections(record)
+            .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-            }
-        })?;
+            })?;
     let mut directions: Option<LifecycleChannelDirections> = None;
     for section in sections
         .iter()
+        .map(|section| section.resolved())
         .filter(|section| section.surface_kind() == ProductSurfaceKind::ExternalChannel)
     {
         let flags = section.capabilities();
@@ -965,26 +975,28 @@ fn channel_presentation_from_manifest_record(
         .map(|channel| channel.presentation.clone())
 }
 
-fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", manifest.as_bytes()),
-        bytes_asset(
-            "schemas/nearai/web_search.input.v1.json",
-            include_bytes!(
-                "../../extensions/packages/nearai-mcp/schemas/nearai/web_search.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/nearai/web_search.output.v1.json",
-            include_bytes!(
-                "../../extensions/packages/nearai-mcp/schemas/nearai/web_search.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/nearai/web_search.md",
-            include_bytes!("../../extensions/packages/nearai-mcp/prompts/nearai/web_search.md"),
-        ),
-    ]
+/// Project the inventory bundle's assets onto the available-extension asset
+/// shape, substituting the endpoint-patched manifest for the shipped one.
+///
+/// The package's bytes live in the inventory (`ironclaw_extension_support`);
+/// only the manifest patch is this crate's, because only this crate holds the
+/// endpoint. See that module's docs for why NEAR AI is not an ordinary
+/// inventory entry.
+fn nearai_mcp_assets(bundle: PackageBundle, manifest: &str) -> Vec<AvailableExtensionAsset> {
+    bundle
+        .assets
+        .into_iter()
+        .map(|asset| {
+            if asset.path == NEARAI_MANIFEST_ASSET_PATH {
+                return bytes_asset(&asset.path, manifest.as_bytes());
+            }
+            let PackageAssetContent::Bytes(bytes) = asset.content;
+            AvailableExtensionAsset {
+                path: asset.path,
+                content: AvailableExtensionAssetContent::Bytes(bytes),
+            }
+        })
+        .collect()
 }
 
 pub fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
@@ -1017,11 +1029,12 @@ where
     };
     entries.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected available extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected available extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected available extension: {error}"),
@@ -1115,7 +1128,7 @@ where
         host_ports,
         None,
         contracts,
-        ironclaw_extensions::PackageRootBinding::Materialized(entry.path.clone()),
+        ironclaw_extension_registry::PackageRootBinding::Materialized(entry.path.clone()),
     )
     .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
@@ -1212,11 +1225,11 @@ fn visible_capabilities(
 #[cfg(test)]
 mod tests {
 
-    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+        let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");
@@ -1229,7 +1242,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{
         BackendCapabilities, DirEntry, Fault, FaultInjecting, FileStat, FilesystemError,
         FilesystemOperation, InMemoryBackend,
@@ -2109,7 +2122,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .iter()
                 .any(|surface| matches!(
                     surface,
-                    ironclaw_extensions::CapabilitySurfaceDeclV2::Channel { .. }
+                    ironclaw_extension_registry::CapabilitySurfaceDeclV2::Channel { .. }
                 )),
             "unified slack declares a channel surface"
         );
@@ -2322,7 +2335,7 @@ handle = "web_token"
             NEARAI_EXTENSION_ID,
             "NEAR AI",
             &manifest_toml,
-            nearai_mcp_assets(&manifest_toml),
+            nearai_mcp_assets(nearai_bundle(), &manifest_toml),
         )
         .expect("patched NEAR AI manifest parses");
         let template = package

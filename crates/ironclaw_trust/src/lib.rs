@@ -46,7 +46,7 @@ pub use decision::{
 };
 pub use error::TrustError;
 pub use invalidation::{InvalidationBus, TrustChange, TrustChangeListener};
-pub use policy::{HostTrustPolicy, TrustPolicy, TrustPolicyInput};
+pub use policy::{HostTrustPolicy, TrustPolicy};
 pub use sources::{AdminConfig, AdminEntry, BundledEntry, BundledRegistry, PolicySource};
 
 #[cfg(test)]
@@ -55,6 +55,8 @@ mod tests {
     //! The full contract suite lives in `policy_contract_tests` below. If
     //! this module is empty, anyone running the bare command sees `0 passed`
     //! and might think nothing exercised the crate — which would be misleading.
+    use ironclaw_host_api::trust::TrustPolicyInput;
+
     use super::*;
 
     #[test]

@@ -5,7 +5,10 @@ Owns the Reborn WASM component runtime lane.
 ## Responsibilities
 
 - Load, compile, validate, meter, and execute already-selected WASM components for Reborn.
-- Use the canonical WIT/component-model ABI from the repo-root `wit/` directory (`wit/tool.wit` and `wit/channel.wit`, both present today; `src/bindings.rs` reaches them as `../../wit/tool.wit`).
+- Own and use the canonical WIT/component-model ABI in this crate's own `wit/` directory (`wit/tool.wit` and `wit/channel.wit`, both present today; `src/bindings.rs` reaches `wit/tool.wit` relative to the crate root, the wit-bindgen default). The directory moved here from the repo root under CHECKLIST WS4 / PROPOSAL §6.6.1: this crate is the ABI's owner, so the files live inside it and travel with it through the WS7 family move.
+  - Every consumer of the *text* of `wit/tool.wit` reads `ironclaw_wasm::TOOL_WIT` rather than writing its own `include_str!`. The crate holds the single `include_str!`; `ironclaw_host_runtime` (which builds component fixtures the same way) uses the const over its existing cargo edge. Adding a second `include_str!` that reaches into this directory from another crate re-creates the §11.2.7 cross-crate reach-in the move removed.
+  - `wit/tool.wit` (`near:agent@0.3.0`) and `wit/channel.wit` (`near:agent@0.3.1`) are the *same* WIT package name at two versions, so the directory cannot be handed to bindgen as a directory — always name the single file.
+  - `scripts/check-version-bumps.sh` keys the ABI version gate off these two exact paths, and `WIT_TOOL_VERSION` in `src/config.rs` must equal `wit/tool.wit`'s package version.
 - Provide thin host-import adapters for workspace, time, logging, secret-existence checks, tool invocation, and HTTP egress.
 - Provide the folded `wasm_sandbox_core` module for domain-free Wasmtime/WASI sandbox primitives shared by runtime crates.
 - Fail closed by default for host capabilities that are not explicitly wired by the Reborn composition root.

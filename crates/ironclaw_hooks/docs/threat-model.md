@@ -21,7 +21,7 @@ In scope:
 - The predicate evaluator and its in-memory state
 - The middleware ports (capability/prompt/model/transcript/checkpoint)
 - The cross-crate seam to `ironclaw_turns` (milestone sink) and
-  `ironclaw_events` (RuntimeEvent projection)
+  `ironclaw_event_log` (RuntimeEvent projection)
 - The `ironclaw_prompt_envelope` leaf crate
 
 Out of scope (separate threat models needed when these land):
@@ -77,7 +77,7 @@ Ranked by blast radius of compromise:
 | T3 | Tamper with manifest scope at install time (claim `Global` after install) | A1 | Manifest is part of the extension bundle; bundle integrity is the extension installer's concern (out of scope here); `HookBinding.{owning_extension, scope}` are set from manifest at registration, not mutable after | Registry doesn't expose mutation methods on `HookBinding` | Low (delegates to extension installer security) |
 | T4 | Tamper with dispatch ordering to skip a gate (e.g., re-register at higher priority) | A1 | Phase → priority → hook-id ordering is stable and computed at dispatch time; duplicate-id rejected; re-registration not supported | `dispatch::tests::ordering_is_stable` | Low |
 | T5 | Tamper with `EnvelopeTrust` to upgrade an Installed-authored snippet | A1/A2 | Trust is set by middleware from binding's trust class, not from hook input; closed-vocabulary enum | Trust derivation is in middleware, not hook | Low |
-| T6 | Tamper with milestone-event projection to drop `HookFailed` events | A5 | Projector is in `ironclaw_runner`; sits behind the same audit substrate as the rest of the loop; events are append-only | `milestone_events::tests::all_hook_milestones_projected` | Med (depends on `ironclaw_events` substrate integrity, which is its own threat model) |
+| T6 | Tamper with milestone-event projection to drop `HookFailed` events | A5 | Projector is in `ironclaw_turn_runner`; sits behind the same audit substrate as the rest of the loop; events are append-only | `milestone_events::tests::all_hook_milestones_projected` | Med (depends on `ironclaw_event_log` substrate integrity, which is its own threat model) |
 | T7 | Tamper with `ironclaw_prompt_envelope` byte cap to exfiltrate larger payload | A1 | 4 KiB cap enforced in `wrap_untrusted`; cap is a const, not configurable per call | `prompt_envelope::tests::body_cap_enforced` | Low |
 
 ### R — Repudiation
@@ -99,7 +99,7 @@ Ranked by blast radius of compromise:
 | I3 | Hook leaks state via milestone summary (e.g., embeds user data in decision reason) | A2 | `HookDecisionSummary` is closed-vocabulary enum, not free-text — Trusted hook can't smuggle data in reason | `run_profile::tests::decision_summary_is_closed_vocab` | Low |
 | I4 | Hook timing side-channel to infer capability invocation patterns of other tenants | A4 | Per-build dispatcher; timing-based inference of in-process state requires high precision; rate-limit predicates aren't published cross-tenant | None (acknowledged residual) | Low-Med |
 | I5 | Prompt envelope leaks instruction-marker bypass via clever encoding | A1 | `INSTRUCTION_LIKE_MARKERS` denylist in `wrap_untrusted`; envelope wraps with `Untrusted hook content: <body>` prefix | `prompt_envelope::tests::instruction_markers_denied` | Med (denylists are inherently incomplete vs determined attacker; mitigated by the fact that the LLM is also trained to be skeptical of `Untrusted hook content:` markers) |
-| I6 | Audit log itself leaks user data to operators who shouldn't see it | A5 | Audit substrate access is governed by `ironclaw_events` policies (separate threat model) | N/A here | Defer |
+| I6 | Audit log itself leaks user data to operators who shouldn't see it | A5 | Audit substrate access is governed by `ironclaw_event_log` policies (separate threat model) | N/A here | Defer |
 
 ### D — Denial of service
 

@@ -1,13 +1,13 @@
 # ironclaw_webui
 
 The **WebUI host stack** for IronClaw Reborn: the single crate that turns
-`ironclaw_reborn_composition`'s product/API surface into a running WebChat v2
+`ironclaw_composition`'s product/API surface into a running WebChat v2
 HTTP server a browser can talk to. It owns the route handlers, the single-page
 app bundle, the gateway assembly + middleware, the listener/serve loop, and all
 host-side authentication.
 
 It sits in the `products` layer, one level **above** composition, and is driven
-by the `ironclaw` binary (`crates/ironclaw_reborn_cli`). Composition
+by the `ironclaw` binary (`crates/ironclaw_cli`). Composition
 deliberately stops at the `reborn_product_api_crates_do_not_bind_http_ingress`
 boundary — it returns a fully composed `axum::Router` but must never bind a
 socket. This crate is the host-owned counterpart that does.
@@ -88,12 +88,12 @@ attach (unconditionally — there is no feature flag; see the note further down)
 - Reaches the rest of Reborn **only** through
   `ironclaw_host_api::product_surface::ProductSurface` and the neutral
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary supplied by the host.
-- Direct `ironclaw_product` access is limited to wire DTOs and ProductSurface
+- Direct `ironclaw_assistant` access is limited to wire DTOs and ProductSurface
   descriptors; handlers reach behavior through `ironclaw_host_api::product_surface::ProductSurface`.
   There is no v1 `src/` import, v1 secrets/settings/DB, or lower-substrate
   access. Host auth stays host-owned here (Path A of
   `docs/reborn/how-to-port-channel-to-reborn.md`).
-- These edges are enforced by `crates/ironclaw_architecture` — see
+- These edges are enforced by `crates/ironclaw_architecture_tests` — see
   `tests/reborn_dependency_boundaries.rs`.
 
 ## Feature flags
@@ -120,7 +120,7 @@ cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
 
 # Dependency boundaries (this crate's allowed edges are asserted here)
-cargo test  -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
+cargo test  -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold
 ```
 
 The SPA frontend builds through `build.rs` (Vite). `frontend/README.md` covers

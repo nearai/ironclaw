@@ -184,7 +184,7 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).expect("fixture WAT must parse");
     let mut resolve = Resolve::default();
     let package = resolve
-        .push_str("tool.wit", include_str!("../../../wit/tool.wit"))
+        .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
         .expect("tool WIT must parse");
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))

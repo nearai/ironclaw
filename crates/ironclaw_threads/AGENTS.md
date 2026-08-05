@@ -27,7 +27,7 @@
 
 - Fast local check: `cargo test -p ironclaw_threads`
 - Focused contract checks: `session_thread_contract`, `db_session_thread_contract`.
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

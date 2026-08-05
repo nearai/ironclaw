@@ -92,8 +92,8 @@ crates/
 │   └── host_runtime           mediated services & the lane executor
 │
 ├── lanes/                     execution for already-authorized work
-│   ├── wit/                   component-model interface definitions
-│   ├── wasm                   WASM component sandbox
+│   ├── wasm                   WASM component sandbox (owns wit/ — the
+│   │                          component-model interface definitions)
 │   ├── wasm_limiter           shared wasmtime resource limiter
 │   ├── mcp                    MCP over host-mediated HTTP
 │   └── sandbox                container process lane                  NEW
@@ -176,7 +176,7 @@ Every other cut is firm: substrate vs domains is mechanisms vs records; the kern
 
 ## The five decisions reviewers should weigh
 
-1. **Three new contracts crates** — the load-bearing change. They exist because the dependency graph *proves* the need: `loop_contracts` (six crates consume the loop-port tier through the turn kernel today), `extension_contracts` (lanes/hosts consume adapter+manifest vocabulary through the registry or product today), `product_contracts` (ports defined in product force extension_host/operator/telegram *above* product today). Each is thin, allowlisted, and mass-ratcheted.
+1. **Three new contracts crates** — the load-bearing change. They exist because the dependency graph *proves* the need: `loop_contracts` (six crates consume the loop-port tier through the turn kernel today), `extension_contracts` (lanes/hosts consume adapter+manifest vocabulary through the registry or product today), `product_contracts` (ports defined in product force extension_host/operator/telegram *above* product today). Each is thin, allowlisted, and mass-ratcheted. ✎ *Corrected 2026-08-04: two of the three clauses do not hold as built — no size ratchet exists anywhere (PROPOSAL §11.2 item 3's amendment records the "checked size ceiling" as still-owed WS10 work), and "thin" is refuted by measurement (`loop_contracts` 14,079 / `product_contracts` 13,609 src lines; `extension_contracts` 6,647). The allowlists are real and enforced. The sentence survives as the target, not the state.*
 2. **Six layer reassignments, zero matrix changes** — `extensions` (becoming `extension_registry`)→substrates, `skills`→substrates, `extension_host`→loops, `runner`→loops, `hooks`→loops, `processes`→kernel. Together with the contracts crates, these make every current exception's `removes_in` condition true.
 3. **Kernel = nine crates, on purpose.** Each pipeline stage (trust → authorization → approvals → resources → policy → capability membrane → lifecycle → admission → mediated services) is an independently consumed contract with fail-closed rules; merging them trades compiler-proven stage separation for module discipline.
 4. **Packages are directories first, crates when earned** — a package crate exists iff it has a channel adapter (binary-only linking is already enforced), a provider surface, or a heavy isolated dependency; everything else is manifest+assets+modules. Slack is already the model citizen; Telegram reaches parity by merging its two crates and depending only on contracts. The memory providers follow the same rule: both ship as provider packages (`memory-native/`, `mem0/`) declaring a `[memory]` manifest surface, while the provider-neutral contract they implement stays in `domains/`.

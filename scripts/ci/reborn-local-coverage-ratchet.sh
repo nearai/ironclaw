@@ -70,7 +70,7 @@ while IFS= read -r bucket; do
         cargo llvm-cov clean --profraw-only
 
         incremental_env=()
-        if [ "${package}" = "ironclaw_reborn_composition" ]; then
+        if [ "${package}" = "ironclaw_composition" ]; then
             incremental_env=(env CARGO_INCREMENTAL=0)
         fi
 

@@ -20,7 +20,7 @@
 ### Task 1: Package the migration binary
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_cli/tests/smoke.rs`
+- Modify: `crates/ironclaw_cli/tests/smoke.rs`
 - Modify: `Dockerfile.reborn`
 - Modify: `crates/ironclaw_reborn_migration/Cargo.toml`
 - Modify: `crates/ironclaw_reborn_migration/src/lib.rs`
@@ -33,7 +33,7 @@
 
 - [x] **Step 1: Write the failing Dockerfile contract test**
 
-Add `dockerfile_reborn_ships_extension_ownership_migration` to `crates/ironclaw_reborn_cli/tests/smoke.rs`. It must assert that the builder stage contains all of:
+Add `dockerfile_reborn_ships_extension_ownership_migration` to `crates/ironclaw_cli/tests/smoke.rs`. It must assert that the builder stage contains all of:
 
 ```text
 --package ironclaw_reborn_migration
@@ -53,7 +53,7 @@ COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migrati
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
+cargo test -p ironclaw_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
 ```
 
 Expected: FAIL because `Dockerfile.reborn` does not yet build or copy the migration binary.
@@ -86,10 +86,10 @@ Make the existing full migration an explicit default feature and gate its source
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
-cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn_builds_with_postgres_feature -- --exact
-cargo test -p ironclaw_reborn_cli
-cargo clippy -p ironclaw_reborn_cli --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
+cargo test -p ironclaw_cli --test smoke dockerfile_reborn_builds_with_postgres_feature -- --exact
+cargo test -p ironclaw_cli
+cargo clippy -p ironclaw_cli --all-targets --all-features -- -D warnings
 git diff --check
 ```
 
@@ -98,7 +98,7 @@ Expected: every command exits successfully with zero test failures and zero warn
 - [x] **Step 6: Commit and publish**
 
 ```bash
-git add Dockerfile.reborn crates/ironclaw_reborn_cli/tests/smoke.rs crates/ironclaw_reborn_migration/Cargo.toml crates/ironclaw_reborn_migration/src/lib.rs crates/ironclaw_reborn_migration/src/report.rs crates/ironclaw_reborn_migration/src/target.rs docs/superpowers/plans/2026-07-13-railway-extension-ownership-migration-packaging.md
+git add Dockerfile.reborn crates/ironclaw_cli/tests/smoke.rs crates/ironclaw_reborn_migration/Cargo.toml crates/ironclaw_reborn_migration/src/lib.rs crates/ironclaw_reborn_migration/src/report.rs crates/ironclaw_reborn_migration/src/target.rs docs/superpowers/plans/2026-07-13-railway-extension-ownership-migration-packaging.md
 git commit -m "build(reborn): ship extension ownership migration"
 git push -u origin codex/ship-extension-ownership-migration
 ```

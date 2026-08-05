@@ -9,7 +9,9 @@ use std::sync::{Arc, LazyLock};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    dispatch::RuntimeDispatchErrorKind, mount::MountView, resource::ResourceScope,
+    dispatch::RuntimeDispatchErrorKind,
+    mount::MountView,
+    resource::{ResourceScope, ResourceUsage},
 };
 use ironclaw_skills::{
     InstalledSkillMetadataSource, SkillContentRequest, SkillInstallFile, SkillInstallRequest,
@@ -17,7 +19,11 @@ use ironclaw_skills::{
     SkillRemoveRequest, SkillUpdateRequest, install_skill, list_skills, read_skill_content,
     remove_skill, skill_summary_json, update_skill,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+
+mod url_install;
+
+pub use url_install::{SkillUrlFetchContext, is_allowed_code_artifact_host};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillManagementCapabilityKind {
@@ -59,15 +65,32 @@ impl<'a> SkillManagementCapabilityRequest<'a> {
 #[error("skill management capability dispatch failed: {kind}")]
 pub struct SkillManagementCapabilityError {
     kind: RuntimeDispatchErrorKind,
+    /// Resource consumed before the failure. Only the URL-install path sets it
+    /// (a denied or panicking fetch still burns egress bytes the host must
+    /// account for); the filesystem paths leave it `None` and the host runtime
+    /// supplies its own wall-clock accounting.
+    usage: Option<ResourceUsage>,
 }
 
 impl SkillManagementCapabilityError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind }
+        Self { kind, usage: None }
     }
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    #[must_use]
+    pub fn with_usage(self, usage: ResourceUsage) -> Self {
+        Self {
+            usage: Some(usage),
+            ..self
+        }
+    }
+
+    pub fn usage(&self) -> Option<&ResourceUsage> {
+        self.usage.as_ref()
     }
 }
 
@@ -75,6 +98,102 @@ impl SkillManagementCapabilityError {
 struct ParsedInstallFile {
     path: String,
     contents: Vec<u8>,
+}
+
+/// Normalize a `builtin.skill_install` input before [`dispatch`] sees it.
+///
+/// Inline-`content` installs pass through untouched. A `url` install is
+/// resolved here — the HTTPS/GitHub source is fetched through the mediated
+/// egress port on `fetch`, and the fetched SKILL.md plus any bundle files are
+/// rewritten into the same `content`/`files` shape the inline form uses, with
+/// `source`/`source_url` recording the provenance. Anything else (both, or
+/// neither, or `url` combined with `files`/`source`/`source_url`) is an input
+/// error.
+///
+/// `usage` accumulates the fetch's network egress so the host runtime can
+/// account for a failed install exactly as it accounts for a successful one.
+pub async fn resolve_install_input(
+    input: &Value,
+    fetch: &SkillUrlFetchContext,
+    usage: &mut ResourceUsage,
+) -> Result<Value, SkillManagementCapabilityError> {
+    let Some(object) = input.as_object() else {
+        return Err(SkillManagementCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    };
+    let has_content = object.contains_key("content");
+    let url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    // `files`, `source` and `source_url` are PROVENANCE fields this resolver
+    // sets itself on the url path. A caller may never supply them, on either
+    // arm, and the two arms refuse them differently on purpose:
+    //
+    //   * inline `content` + any of them -> hard `InputEncode`, nothing written.
+    //     Accepting them would let a caller forge provenance (claim an inline
+    //     skill was installed from a trusted URL) or smuggle arbitrary bundle
+    //     files past the fetch. Pinned by
+    //     `builtin_skill_install_rejects_hidden_url_install_fields`.
+    //   * `url` + any of them -> the url arm below rebuilds a fresh object from
+    //     the fetched payload and simply does not carry them over, so the
+    //     install succeeds with the caller's files DROPPED (`files_installed`
+    //     is 0). Pinned by
+    //     `builtin_skill_install_url_path_ignores_caller_supplied_hidden_bundle_files`.
+    //
+    // Do not "fix" the asymmetry by making the url arm reject, and do not relax
+    // the inline arm to accept a bundle: `dispatch_install` reading `files` is
+    // not evidence that a *caller* may send it — that support exists for the
+    // rewritten payload this resolver constructs. Both were proposed in review
+    // on #7141 and both are refuted by the two integration tests named above.
+    match (has_content, url) {
+        (true, None)
+            if !object.contains_key("files")
+                && !object.contains_key("source")
+                && !object.contains_key("source_url") =>
+        {
+            Ok(input.clone())
+        }
+        (false, Some(url)) => {
+            let payload = url_install::fetch_skill_url_payload(fetch, url, usage).await?;
+            let mut rewritten = Map::new();
+            if let Some(name) = object.get("name").cloned() {
+                rewritten.insert("name".to_string(), name);
+            }
+            rewritten.insert("content".to_string(), Value::String(payload.content));
+            rewritten.insert(
+                "source".to_string(),
+                Value::String(
+                    InstalledSkillMetadataSource::InstalledUrl
+                        .as_str()
+                        .to_string(),
+                ),
+            );
+            rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
+            if !payload.files.is_empty() {
+                rewritten.insert(
+                    "files".to_string(),
+                    Value::Array(
+                        payload
+                            .files
+                            .into_iter()
+                            .map(|file| {
+                                json!({
+                                    "path": file.path.display().to_string(),
+                                    "bytes_base64": BASE64_STANDARD.encode(file.contents),
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            Ok(Value::Object(rewritten))
+        }
+        _ => Err(SkillManagementCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        )),
+    }
 }
 
 #[tracing::instrument(
@@ -416,7 +535,7 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
+        ids::{CapabilityId, InvocationId, UserId},
         mount::MountView,
         resource::ResourceScope,
     };
@@ -442,5 +561,26 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    /// A fetch context with no egress, which must never be used.
+    ///
+    /// Both cases below are decided from the input shape alone, so reaching the
+    /// network at all would itself be the bug — and with `runtime_http_egress:
+    /// None` a fetch could not succeed anyway, so a regression that started
+    /// taking the url arm fails loudly here instead of going quiet.
+    ///
+    /// Deliberately kept with no caller: it is the negative control a future
+    /// url-arm test reaches for. `dead_code` is allowed rather than the fixture
+    /// deleted, because deleting it is what would let such a test quietly wire
+    /// a real egress instead.
+    #[allow(dead_code)]
+    fn unused_fetch_context() -> SkillUrlFetchContext {
+        SkillUrlFetchContext {
+            capability_id: CapabilityId::new("ironclaw.skill.install").unwrap(),
+            scope: ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            runtime_http_egress: None,
+        }
     }
 }

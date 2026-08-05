@@ -23,23 +23,23 @@
 ### Task 1: Form the combined branch and reconcile merge conflicts
 
 **Files:**
-- Modify only conflict paths selected by Git, especially `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
-- Preserve `crates/ironclaw_reborn_composition/src/extension_host/extension_removal_cleanup.rs`
+- Modify only conflict paths selected by Git, especially `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
+- Preserve `crates/ironclaw_composition/src/extension_host/extension_removal_cleanup.rs`
 
 - [ ] Merge `origin/main` into `codex/slack-idempotent-remove` without rewriting published history.
 - [ ] Merge exact PR #5983 head `origin/pr-5983` into the same branch.
 - [ ] Resolve overlap by retaining explicit `ExtensionRemovalCleanupRequirements` and typed cleanup adapters while retaining #5957's OAuth, continuation, stale-tool, and durable state machinery.
 - [ ] Confirm both exact original heads and current main are ancestors with `git merge-base --is-ancestor`.
-- [ ] Run merge-baseline compilation/tests for `ironclaw_auth`, `ironclaw_reborn_composition`, and the WebUI frontend before authored fixes; record any merge-only failure separately.
+- [ ] Run merge-baseline compilation/tests for `ironclaw_auth`, `ironclaw_composition`, and the WebUI frontend before authored fixes; record any merge-only failure separately.
 
 ### Task 2: Make explicit extension removal retryable across failure and restart
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_removal_cleanup.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_removal_cleanup.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/available_extensions.rs`
 - Modify: lifecycle persistence/store modules selected by the live code owner
-- Test: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/`
+- Test: `crates/ironclaw_composition/src/extension_host/extension_lifecycle/tests/`
 - Test: `tests/integration/group_extensions/`
 - Test support: `tests/integration/support/harness/profiles/extension.rs`
 
@@ -61,7 +61,7 @@
 - Modify: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
 - Modify: product-workflow/auth route descriptors if the command surface changes
 - Test: route tests beside the above modules
-- Test: `crates/ironclaw_reborn_composition/tests/auth_callbacks.rs`
+- Test: `crates/ironclaw_composition/tests/auth_callbacks.rs`
 
 - [ ] Add failing callback tests for known flows with missing code, missing PKCE, invalid scope, and provider denial; each must persist a terminal failure before one-shot material is discarded and expose `failed` on status read.
 - [ ] Route known malformed callbacks through the typed `RebornOAuthCallbackOutcome::Malformed`/`fail_oauth_callback` path while preserving state-hash and scope checks.
@@ -73,11 +73,11 @@
 ### Task 4: Fix lifecycle continuation correctness and concurrency
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/lifecycle_auth_continuation.rs`
+- Modify: `crates/ironclaw_composition/src/lifecycle_auth_continuation.rs`
 - Modify: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
 - Modify: extension credential-readiness contracts in their owning module
-- Test: `crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`
+- Test: `crates/ironclaw_composition/src/factory/auth_tests.rs`
 - Test: `crates/ironclaw_auth/src/product_auth/durable/tests.rs`
 - Test: `tests/integration/` production-factory OAuth lifecycle scenario
 
@@ -92,7 +92,7 @@
 ### Task 5: Fence Slack cleanup before fallible identity deletion and close OAuth/removal races
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs`
+- Modify: `crates/ironclaw_composition/src/slack/slack_personal_oauth.rs`
 - Modify: Slack connection lifecycle/store owner selected from live code
 - Modify: `crates/ironclaw_webui/src/product_auth/mod.rs`
 - Modify: narrow installed-extension/lifecycle operation port and factory wiring
@@ -146,7 +146,7 @@
 - [ ] Exercise real composition/factory wiring with only hermetic external-service doubles for Slack removal and OAuth lifecycle activation.
 - [ ] Assert external cleanup evidence and read-back, not only `removed: false/true` response fields.
 - [ ] Run owning-crate tests and Clippy with all targets/features and `-D warnings`.
-- [ ] Run `cargo test -p ironclaw_architecture`.
+- [ ] Run `cargo test -p ironclaw_architecture_tests`.
 - [ ] Run the focused root integration binaries/scenarios, `bash scripts/reborn-e2e-rust.sh`, and `scripts/pre-commit-safety.sh`.
 - [ ] Run the workspace-wide Clippy command from `.claude/rules/review-discipline.md`.
 - [ ] Search changed production files for `.unwrap()`, `.expect()`, hardcoded temporary paths, suspicious slicing, swallowed causes, and sibling instances of fixed patterns.

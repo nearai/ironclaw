@@ -30,6 +30,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_assistant::{EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, RebornExtensionListResponse};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
     AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
@@ -54,7 +55,6 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
-use ironclaw_product::{EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, RebornExtensionListResponse};
 use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
 use ironclaw_product_contracts::product_wire::{
     RebornExtensionCredentialSetup, RebornSetupExtensionResponse,

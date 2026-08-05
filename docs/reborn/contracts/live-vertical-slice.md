@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Runnable V1 demo
-**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_events`, `ironclaw_capabilities`, `ironclaw_host_runtime`, `ironclaw_scripts`
+**Crates:** `ironclaw_filesystem`, `ironclaw_extension_registry`, `ironclaw_resources`, `ironclaw_event_log`, `ironclaw_capabilities`, `ironclaw_host_runtime`, `ironclaw_sandbox`
 
 ---
 

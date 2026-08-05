@@ -1,7 +1,7 @@
 -- Durable predicate sliding-window state for the reborn hook framework.
 --
 -- This crate owns its own schema (per-crate pattern, like
--- ironclaw_reborn_event_store / ironclaw_filesystem) rather than going
+-- ironclaw_event_store / ironclaw_filesystem) rather than going
 -- through the legacy main-binary refinery `migrations/` directory. The
 -- DDL is embedded verbatim into `schema.rs` via `include_str!` and applied
 -- as an idempotent `CREATE TABLE IF NOT EXISTS` batch by `run_migrations()`;

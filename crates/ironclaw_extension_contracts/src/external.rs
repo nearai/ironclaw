@@ -63,6 +63,60 @@ impl std::fmt::Display for ExternalEventId {
     }
 }
 
+/// Generation marker for an external actor's pairing binding.
+///
+/// The epoch is provider-neutral: the conversation layer only preserves and
+/// compares it, and product adapters own its meaning. It lives here, beside
+/// [`ExternalActorRef`] whose binding it versions, because both sides of the
+/// pairing seam name it — the conversation ledger that stores it and the
+/// product-tier actor-resolution port that carries it — and neither may
+/// import the other.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ExternalActorBindingEpoch(String);
+
+impl ExternalActorBindingEpoch {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_external_id("external_actor_binding_epoch", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ExternalActorBindingEpoch {
+    type Error = ProductAdapterError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ExternalActorBindingEpoch {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ExternalActorBindingEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<ExternalActorBindingEpoch> for String {
+    fn from(epoch: ExternalActorBindingEpoch) -> Self {
+        epoch.0
+    }
+}
+
 /// External actor reference. Equality/hash use only stable identity
 /// (`kind`, `id`); `display_name` is presentation metadata.
 #[derive(Debug, Clone, Serialize)]

@@ -5,9 +5,9 @@ hooks across the Reborn loop. It does not own:
 
 - The runner-facing `AgentLoopDriver` trait — that stays in `ironclaw_turns`.
 - The concrete `LoopCapabilityPort` / `LoopPromptPort` / `LoopModelPort` impls —
-  those stay in `ironclaw_loop_host` and `ironclaw_runner`.
+  those stay in `ironclaw_loop_host` and `ironclaw_turn_runner`.
 - The Reborn-side middleware composition that wraps host ports — that lives in
-  `ironclaw_runner::loop_driver_host` and consumes types from this crate.
+  `ironclaw_turn_runner::loop_driver_host` and consumes types from this crate.
 - Extension bundle loading and installation. Installed-tier WASM hooks execute
   here once their module bytes are resolved, but the extension installer remains
   the authority for sourcing those bytes.
@@ -17,10 +17,10 @@ hooks across the Reborn loop. It does not own:
 ```
 ironclaw_turns       -> no dependency on ironclaw_hooks
 ironclaw_hooks       -> depends on ironclaw_turns + ironclaw_host_api
-ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-up)
+ironclaw_turn_runner      -> depends on ironclaw_hooks for host composition (follow-up)
 ```
 
-Architecture test in `ironclaw_architecture::tests::reborn_dependency_boundaries`
+Architecture test in `ironclaw_architecture_tests::tests::reborn_dependency_boundaries`
 proves the `ironclaw_turns -> ironclaw_hooks` edge stays absent.
 
 ## Trust model
@@ -69,7 +69,7 @@ type-level fact that an `Installed`-tier installer cannot accept a
 `PrivilegedBeforeCapabilityHook`.
 
 What the type system **does not** enforce is *origin*. If loader code inside
-`ironclaw_runner` (or any other internal crate) reads a hook from the
+`ironclaw_turn_runner` (or any other internal crate) reads a hook from the
 extension registry and accidentally routes it through
 `install_builtin_before_capability`, the trust-class ↔ impl-tier pairing at
 the registry-binding boundary breaks — the dispatcher will happily install
@@ -183,18 +183,30 @@ same `Arc`, so a hook poisoned in run N stays poisoned for run N+1. New
 call sites should reach for `with_hook_dispatcher_factory` for real per-run
 isolation.
 
-Cross-run isolation was described here as covered by
-`crates/ironclaw_runner/tests/hooks_integration.rs` with the tests
-`per_build_dispatcher_state_does_not_leak_across_runs` and
-`legacy_with_hook_dispatcher_shares_state_across_builds`. **None of those
-exist** (`ls crates/ironclaw_runner/tests/`; `rg` for either name returns only
-this file). The intended semantic — a fresh dispatcher per build has an
-un-poisoned slot and re-applies the fail-closed deny, while the legacy
-`with_hook_dispatcher` adapter shares state across builds — is currently
-**unpinned by any test**, tracked in
-[#6945](https://github.com/nearai/ironclaw/issues/6945). The property holds in
-production today (composition wires the isolating
-`with_hook_dispatcher_builder_factory`), but nothing fails if that changes.
+Cross-run isolation is pinned by
+**`poisoned_hook_slot_does_not_leak_into_the_next_run`** in
+`tests/integration/hooks.rs` ([#6945](https://github.com/nearai/ironclaw/issues/6945),
+landed 2026-08-04 with [ADR 0004](../../docs/adr/0004-hooks-keeps-its-predicate-state-backends.md)).
+It drives two turns on one harness — two `build_text_only_host*` calls, so two
+dispatcher mints — with a hook that commits a gate-sink protocol violation.
+Run 1 fails closed and poisons its slot; run 2 must get a clean slot, fire the
+hook **again**, and re-apply the deny. Under the legacy shared-dispatcher
+adapter run 2 would skip the poisoned hook and let the capability reach the
+wire, so both the fire count and the egress count flip — verified red by
+temporarily pointing `ironclaw_turn_runner::runtime` at `with_hook_dispatcher`.
+
+⚠ **Read the history before trusting any claim in this section.** It previously
+named `crates/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests
+(`per_build_dispatcher_state_does_not_leak_across_runs`,
+`legacy_with_hook_dispatcher_shares_state_across_builds`) that **never
+existed**; #6944 corrected the false claim and #6945 tracked the real gap it
+was hiding. Verify a named test exists (`rg` for it) before relying on it here.
+
+Two things remain pinned elsewhere rather than by that test, deliberately:
 `dispatch/mod.rs::poisoned_during_dispatch_skips_subsequent_invocations` covers
-poisoning *within* one dispatcher, not across builds. Treat the legacy adapter
-as the explicit opt-in baseline.
+poisoning *within* one dispatcher (the legacy adapter's shared-state contract
+follows from that plus its one-line delegation to
+`with_hook_dispatcher_factory(|| Arc::clone(&d))`), and **predicate counter
+state is deliberately NOT asserted isolated** — it is tenant-scoped and shared
+across runs by design, so a test asserting isolation for it would pin a
+rate-cap bypass. Treat the legacy adapter as the explicit opt-in baseline.

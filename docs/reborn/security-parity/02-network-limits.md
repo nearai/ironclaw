@@ -7,7 +7,7 @@ and `03-headers-errors.md` for headers + error sanitization.
 - **v1** lives in `src/channels/web/` (`platform/router.rs`,
   `platform/state.rs`, `features/chat/mod.rs`, `oauth/state_store.rs`).
 - **v2** controls are descriptor-driven middleware in
-  `crates/ironclaw_reborn_composition/src/` (`webui_serve.rs`,
+  `crates/ironclaw_composition/src/` (`webui_serve.rs`,
   `webui_ws_origin.rs`, `webui_rate_limit.rs`, `webui_body_limit.rs`),
   reading per-route policy from `ironclaw_webui::webui_v2_routes()`
   and the host SSO mount descriptors from
@@ -47,7 +47,7 @@ default.
 
 **Already locked (cross-referenced, not duplicated)** —
 
-- `ironclaw_reborn_composition/tests/webui_v2_serve.rs`: CORS
+- `ironclaw_composition/tests/webui_v2_serve.rs`: CORS
   allow + reject-disallowed-origin; body-limit 413 on `create_thread`
   and NoBody-on-read; rate-limit 429 after the 60/60s budget +
   per-caller independence; WS same-origin 101/403 (missing, mismatched,
@@ -58,7 +58,7 @@ default.
 - `ironclaw_webui/src/auth/pending.rs::tests`: state TTL,
   1024-entry eviction, single-use, redirect/CRLF/fragment sanitization
   (rows 3, 4).
-- `ironclaw_reborn_composition/src/webui/webui_rate_limit.rs::tests`: PerIp
+- `ironclaw_composition/src/webui/webui_rate_limit.rs::tests`: PerIp
   uses transport peer not forwarded headers, fail-closed on missing
   peer, unsupported scope rejected at composition (rows 6, 8).
 - `ironclaw_webui/src/sse_capacity.rs::tests`: 3-stream per-caller

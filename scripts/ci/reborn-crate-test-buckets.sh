@@ -42,16 +42,16 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_loop_contracts: "agent-runtime",
       ironclaw_loop_host: "agent-runtime",
 
-      ironclaw_runner: "reborn-core",
+      ironclaw_turn_runner: "reborn-core",
       ironclaw: "reborn-core",
-      ironclaw_reborn_config: "reborn-core",
-      ironclaw_reborn_event_store: "reborn-core",
-      ironclaw_reborn_identity: "reborn-core",
-      ironclaw_reborn_openai_compat: "reborn-core",
+      ironclaw_config: "reborn-core",
+      ironclaw_event_store: "reborn-core",
+      ironclaw_identity: "reborn-core",
+      ironclaw_openai_compat: "reborn-core",
 
-      ironclaw_reborn_composition: "composition-core",
+      ironclaw_composition: "composition-core",
 
-      ironclaw_product: "product-workflow",
+      ironclaw_assistant: "product-workflow",
       # The product-tier contract crate rides with the product workflow it
       # describes: a change to the membrane or its DTOs breaks product first.
       # Buckets group by what a change can break, not by layer.
@@ -73,13 +73,13 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_mcp: "llm-mcp",
       ironclaw_network: "llm-mcp",
       ironclaw_outbound: "llm-mcp",
-      ironclaw_process_sandbox: "llm-mcp",
+      ironclaw_sandbox: "llm-mcp",
       ironclaw_processes: "llm-mcp",
 
       ironclaw_conversations: "events-conversations",
       ironclaw_event_projections: "events-conversations",
       ironclaw_event_streams: "events-conversations",
-      ironclaw_events: "events-conversations",
+      ironclaw_event_log: "events-conversations",
       ironclaw_prompt_envelope: "events-conversations",
       ironclaw_threads: "events-conversations",
       ironclaw_turns: "events-conversations",
@@ -97,7 +97,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_memory_native: "memory-skills",
       ironclaw_memory_mem0: "memory-skills",
       ironclaw_observability: "memory-skills",
-      ironclaw_scripts: "memory-skills",
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
 
@@ -108,13 +107,13 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_extension_contracts: "extension-operator",
       ironclaw_extension_host: "extension-operator",
       ironclaw_extension_manager: "extension-operator",
-      ironclaw_extensions: "extension-operator",
+      ironclaw_extension_registry: "extension-operator",
       ironclaw_operator: "extension-operator",
 
-      ironclaw_architecture: "architecture-misc",
+      ironclaw_architecture_tests: "architecture-misc",
       ironclaw_common: "architecture-misc",
       ironclaw_libsql_runtime: "architecture-misc",
-      ironclaw_reborn_traces: "architecture-misc",
+      ironclaw_trace_commons: "architecture-misc",
       ironclaw_triggers: "architecture-misc"
     };
 

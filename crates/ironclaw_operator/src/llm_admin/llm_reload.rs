@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_reborn_config::{RebornBootConfig, RebornConfigFile};
+use ironclaw_config::{RebornBootConfig, RebornConfigFile};
 
 use crate::LlmKeyStore;
 use crate::llm_admin::ResolvedRebornLlm;

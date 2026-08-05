@@ -1,12 +1,27 @@
 //! Type-aware text extraction: turn a file's bytes into plain text by format.
 //!
-//! [`extract_text`] is the single entry point — give it the bytes, a MIME type,
-//! and an optional filename and it dispatches to the right format extractor
-//! (PDF, OOXML word/slide/sheet, legacy Office, RTF, UTF-8 text/code). It is a
-//! pure function with no I/O and no knowledge of where the bytes came from, so
-//! it can be used for chat attachments, agent file reads, or any other file
-//! consumption path. ZIP-based formats are decompression-bomb safe (per-entry
-//! and cumulative caps).
+//! Give the crate bytes, a MIME type, and an optional filename and it
+//! dispatches to the right format extractor (PDF, OOXML word/slide/sheet,
+//! legacy Office, RTF, UTF-8 text/code). Everything here is pure: no I/O, no
+//! knowledge of where the bytes came from, so the same functions serve chat
+//! attachments, agent file reads, and capability download output. ZIP-based
+//! formats are decompression-bomb safe (per-entry and cumulative caps).
+//!
+//! Three entry points, in the order a caller usually reaches for them:
+//!
+//! - [`extract_document`] — MIME-driven, classifies the outcome as
+//!   [`DocumentExtraction::Text`] / [`Empty`](DocumentExtraction::Empty) /
+//!   [`Failed`](DocumentExtraction::Failed) so callers cannot drift on what
+//!   "no text" means.
+//! - [`extract_document_text_by_filename`] — extension-driven, for callers
+//!   that have a filename but no trustworthy MIME type. Deliberately excludes
+//!   UTF-8 passthrough formats.
+//! - [`truncate_to_chars`] — the canonical char-boundary-safe cap applied
+//!   before extracted text reaches a model.
+//!
+//! Failures cross the boundary as [`ExtractionError`], never as a `String`.
+//! Its `Display` renders the *classification only* — read [`ExtractionError`]'s
+//! own docs before putting any part of it in front of a model.
 
 use std::io::Read;
 
@@ -15,9 +30,70 @@ const MAX_DECOMPRESSED_ENTRY: u64 = 50 * 1024 * 1024;
 /// Maximum total decompressed size across all ZIP entries (100 MB).
 const MAX_DECOMPRESSED_TOTAL: u64 = 100 * 1024 * 1024;
 
+/// Why a document's bytes could not be turned into text.
+///
+/// **This type carries diagnostic detail that must not reach a model.** The
+/// payload of [`NotExtractable`](Self::NotExtractable) is whatever the
+/// underlying parser said about bytes the *user* supplied — a `pdf-extract`
+/// message, a ZIP entry name, an offset into the document. It is untrusted
+/// text of unbounded shape from a third-party parser, which is reason enough
+/// never to render it. So the safety property is built into the type rather
+/// than asked for in a comment:
+///
+/// - **`Display` renders the classification and nothing else.** It names no
+///   MIME type, no filename, no parser output. Interpolating an
+///   `ExtractionError` into model-facing text with `{error}` is safe by
+///   construction, which is the whole point of the type.
+/// - **`Debug` renders everything**, so it is the wrong thing to render and
+///   belongs only in an **operator log** (`tracing::debug!(?error, …)`) —
+///   never in a model result, a capability output, a projected event, a
+///   snapshot, or a user-visible error. Consumers bound by a stricter
+///   redaction charter than a debug log (see
+///   `crates/ironclaw_host_runtime/AGENTS.md`) should re-check that ceiling
+///   before widening where the payload goes; what it carries today is
+///   container/parser *structure* — `lopdf`'s object ids, byte offsets and
+///   dictionary keys, `zip`'s archive diagnostics and the fixed OOXML entry
+///   paths this crate reads — not document text.
+///
+/// Before this was a type the same rule lived as a doc comment on
+/// `DocumentExtraction::Failed(String)` — and the *other* boundary site,
+/// [`extract_document_text_by_filename`], had no such comment and leaked the
+/// raw string into a model-facing safe summary. That is the class of bug the
+/// type exists to make unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExtractionError {
+    /// Neither the MIME type nor the filename named an extractor for these
+    /// bytes — nothing was attempted.
+    ///
+    /// `mime` is the caller's own normalized MIME type, echoed back for logs.
+    #[error("unsupported document type")]
+    UnsupportedType {
+        /// The normalized MIME type that matched no extractor.
+        mime: String,
+    },
+
+    /// An extractor ran and could not produce text: the container was
+    /// malformed, a parser rejected the bytes, a decompression cap tripped, or
+    /// the format simply yielded nothing readable.
+    #[error("document text could not be extracted")]
+    NotExtractable {
+        /// Parser/container diagnostic. **Logs only** — see the type docs.
+        detail: String,
+    },
+}
+
+impl ExtractionError {
+    /// Wrap a format extractor's diagnostic string.
+    fn not_extractable(detail: impl Into<String>) -> Self {
+        Self::NotExtractable {
+            detail: detail.into(),
+        }
+    }
+}
+
 /// Typed errors for ZIP decompression safety checks.
 #[derive(Debug, thiserror::Error)]
-enum ExtractionError {
+enum ZipEntryError {
     #[error("entry '{name}' decompressed size {size} exceeds per-entry limit {max}")]
     EntryTooLarge { name: String, size: u64, max: u64 },
 
@@ -32,14 +108,23 @@ enum ExtractionError {
 }
 
 /// Extract text from document bytes based on MIME type and optional filename.
-pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<String, String> {
+///
+/// Crate-internal: [`extract_document`] is the public MIME-driven entry point,
+/// and it exists so every caller gets the same empty/failed classification.
+/// This function returns raw text and was public with zero callers outside the
+/// crate; it stays private so the classification cannot be bypassed.
+fn extract_text(
+    data: &[u8],
+    mime: &str,
+    filename: Option<&str>,
+) -> Result<String, ExtractionError> {
     // Normalize through the workspace's single MIME normalizer (strip params,
     // trim, lowercase) so callers can hand us a raw header value like
     // `Application/PDF; charset=binary` and still dispatch to the right
     // extractor — the format match below is over lowercase canonical types.
     let base_mime = ironclaw_common::normalize_mime_type(mime);
 
-    match base_mime.as_str() {
+    let extracted: Result<String, String> = match base_mime.as_str() {
         // PDF
         "application/pdf" => extract_pdf(data),
 
@@ -88,13 +173,16 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
 
         // Fallback: try to infer from filename extension
         _ => {
-            if let Some(text) = try_extract_by_extension(data, filename) {
-                Ok(text)
-            } else {
-                Err(format!("unsupported document type: {base_mime}"))
-            }
+            return match try_extract_by_extension(data, filename) {
+                Some(text) => Ok(text),
+                None => Err(ExtractionError::UnsupportedType { mime: base_mime }),
+            };
         }
-    }
+    };
+
+    // One conversion point: every format extractor above is private and speaks
+    // diagnostic strings; the boundary speaks `ExtractionError`.
+    extracted.map_err(ExtractionError::not_extractable)
 }
 
 /// Outcome of running the type-aware extractor over a document's bytes.
@@ -108,12 +196,16 @@ pub enum DocumentExtraction {
     Text(String),
     /// The extractor succeeded but produced no usable text.
     Empty,
-    /// The extractor failed (unsupported/corrupt). Carries the error reason for
-    /// logging only; callers render a model-safe marker, never this string.
-    Failed(String),
+    /// The extractor failed (unsupported/corrupt). See [`ExtractionError`] for
+    /// what may and may not be rendered from it.
+    Failed(ExtractionError),
 }
 
-/// Run the type-aware extractor and classify the outcome. See [`extract_text`].
+/// Run the type-aware extractor over `data` and classify the outcome.
+///
+/// The MIME-driven entry point. Callers render their own model-facing text and
+/// apply their own truncation ([`truncate_to_chars`]) from the returned
+/// [`DocumentExtraction`].
 pub fn extract_document(data: &[u8], mime: &str, filename: Option<&str>) -> DocumentExtraction {
     match extract_text(data, mime, filename) {
         Ok(text) => {
@@ -137,24 +229,24 @@ pub fn extract_document(data: &[u8], mime: &str, filename: Option<&str>) -> Docu
 pub fn extract_document_text_by_filename(
     data: &[u8],
     filename: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ExtractionError> {
     let ext = filename
         .and_then(|filename| filename.rsplit('.').next())
-        .map(str::to_lowercase);
+        .map(str::to_ascii_lowercase);
     let Some(ext) = ext else {
         return Ok(None);
     };
 
-    let text = match ext.as_str() {
-        "pdf" => extract_pdf(data)?,
-        "docx" => extract_docx(data)?,
-        "pptx" => extract_pptx(data)?,
-        "xlsx" => extract_xlsx(data)?,
-        "doc" | "ppt" | "xls" => extract_binary_strings(data)?,
-        "rtf" => extract_rtf(data)?,
+    let extracted: Result<String, String> = match ext.as_str() {
+        "pdf" => extract_pdf(data),
+        "docx" => extract_docx(data),
+        "pptx" => extract_pptx(data),
+        "xlsx" => extract_xlsx(data),
+        "doc" | "ppt" | "xls" => extract_binary_strings(data),
+        "rtf" => extract_rtf(data),
         _ => return Ok(None),
     };
-    Ok(Some(text))
+    Ok(Some(extracted.map_err(ExtractionError::not_extractable)?))
 }
 
 /// Read a zip entry into a string with configurable decompressed size limits.
@@ -163,14 +255,14 @@ fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
     total_decompressed: &mut u64,
     max_entry: u64,
     max_total: u64,
-) -> Result<String, ExtractionError> {
+) -> Result<String, ZipEntryError> {
     let entry_size = file.size();
     let entry_name = file.name().to_string();
 
     // Fast pre-check using declared header size (untrusted, but cheap reject)
     // against per-entry limit.
     if entry_size > max_entry {
-        return Err(ExtractionError::EntryTooLarge {
+        return Err(ZipEntryError::EntryTooLarge {
             name: entry_name,
             size: entry_size,
             max: max_entry,
@@ -181,7 +273,7 @@ fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
     // budget. The header value is untrusted, but it lets us reject obviously
     // oversized archives without decompressing.
     if *total_decompressed + entry_size > max_total {
-        return Err(ExtractionError::TotalSizeLimitExceeded {
+        return Err(ZipEntryError::TotalSizeLimitExceeded {
             limit: max_total,
             current: *total_decompressed + entry_size,
         });
@@ -191,7 +283,7 @@ fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
     let mut xml = String::new();
     bounded
         .read_to_string(&mut xml)
-        .map_err(|e| ExtractionError::EntryReadFailed {
+        .map_err(|e| ZipEntryError::EntryReadFailed {
             name: entry_name.clone(),
             source: e,
         })?;
@@ -201,7 +293,7 @@ fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
     // Fail closed: if we read exactly the cap, the entry was truncated and
     // the real decompressed size exceeds the per-entry limit.
     if actual_size >= max_entry {
-        return Err(ExtractionError::EntryTooLarge {
+        return Err(ZipEntryError::EntryTooLarge {
             name: entry_name,
             size: actual_size,
             max: max_entry,
@@ -211,7 +303,7 @@ fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
     // Track cumulative budget using actual bytes, not header metadata.
     *total_decompressed += actual_size;
     if *total_decompressed > max_total {
-        return Err(ExtractionError::TotalSizeLimitExceeded {
+        return Err(ZipEntryError::TotalSizeLimitExceeded {
             limit: max_total,
             current: *total_decompressed,
         });
@@ -231,7 +323,7 @@ fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
 fn bounded_read_zip_entry<R: Read + ?Sized>(
     file: &mut zip::read::ZipFile<'_, R>,
     total_decompressed: &mut u64,
-) -> Result<String, ExtractionError> {
+) -> Result<String, ZipEntryError> {
     bounded_read_zip_entry_with_limits(
         file,
         total_decompressed,
@@ -621,7 +713,7 @@ fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<Strin
     if let Ok(Some(text)) = extract_document_text_by_filename(data, filename) {
         return Some(text);
     }
-    let ext = filename?.rsplit('.').next()?.to_lowercase();
+    let ext = filename?.rsplit('.').next()?.to_ascii_lowercase();
 
     match ext.as_str() {
         "txt" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "markdown"
@@ -633,10 +725,17 @@ fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<Strin
 }
 
 /// Marker appended to extracted text that was truncated for length.
-pub const TRUNCATION_MARKER: &str = "\n[... truncated, document too long ...]";
+///
+/// Crate-internal: it is an implementation detail of [`truncate_to_chars`],
+/// which is the only thing that appends it. It was `pub` with zero callers
+/// outside the crate, and two *other* crates declare their own constants of
+/// the same name with different values (`ironclaw_agent_loop`,
+/// `ironclaw_mcp`) — so a public one here invited a cross-crate mix-up for a
+/// value nobody imported.
+const TRUNCATION_MARKER: &str = "\n[... truncated, document too long ...]";
 
 /// Truncate `text`'s content to at most `max_chars` characters on a UTF-8
-/// character boundary. When truncation occurs, [`TRUNCATION_MARKER`] is appended
+/// character boundary. When truncation occurs a fixed marker is appended
 /// to signal it — so the returned string is at most `max_chars` characters of
 /// content **plus** the fixed-length marker, i.e. it can exceed `max_chars` by
 /// the marker's length. Text already within the limit is returned unchanged.
@@ -743,10 +842,76 @@ mod tests {
             "image/png",
             Some("image.png"),
         );
-        assert!(
-            matches!(outcome, DocumentExtraction::Failed(reason) if !reason.is_empty()),
-            "unsupported binary must classify as Failed with a reason"
+        assert_eq!(
+            outcome,
+            DocumentExtraction::Failed(ExtractionError::UnsupportedType {
+                mime: "image/png".to_string()
+            }),
+            "unsupported binary must classify as Failed, naming the type it could not handle"
         );
+    }
+
+    #[test]
+    fn failed_extraction_display_leaks_neither_mime_nor_parser_detail() {
+        // The whole point of the typed error: a caller may interpolate it into
+        // model-facing text with `{error}` and cannot leak the document.
+        // `Debug` is the logging shape and does carry the detail.
+        let unsupported = ExtractionError::UnsupportedType {
+            mime: "application/x-secret-format".to_string(),
+        };
+        assert_eq!(unsupported.to_string(), "unsupported document type");
+        assert!(!unsupported.to_string().contains("x-secret-format"));
+        assert!(format!("{unsupported:?}").contains("x-secret-format"));
+
+        let not_extractable = ExtractionError::NotExtractable {
+            detail: "PDF extraction failed: object 12 at /Users/someone/secret.pdf".to_string(),
+        };
+        assert_eq!(
+            not_extractable.to_string(),
+            "document text could not be extracted"
+        );
+        assert!(!not_extractable.to_string().contains("secret.pdf"));
+        assert!(!not_extractable.to_string().contains("object 12"));
+        assert!(format!("{not_extractable:?}").contains("secret.pdf"));
+    }
+
+    #[test]
+    fn every_extraction_failure_display_is_content_free() {
+        // Drive the two public boundary functions with inputs that exercise
+        // both variants and every private extractor's diagnostic string, and
+        // assert none of it reaches `Display`. This is the guard that keeps a
+        // future variant from re-opening the leak: a new variant whose
+        // `#[error(...)]` interpolates a field fails here.
+        let corrupt_zip = b"PK\x03\x04corrupt-archive-bytes";
+        let failures: Vec<ExtractionError> = vec![
+            match extract_document(&[0xff, 0xfe, 0x00], "image/png", Some("x.png")) {
+                DocumentExtraction::Failed(error) => error,
+                other => panic!("expected Failed, got {other:?}"),
+            },
+            match extract_document(corrupt_zip, "application/pdf", None) {
+                DocumentExtraction::Failed(error) => error,
+                other => panic!("expected Failed, got {other:?}"),
+            },
+            extract_document_text_by_filename(corrupt_zip, Some("deck.pptx"))
+                .expect_err("a corrupt PPTX archive must fail"),
+            extract_document_text_by_filename(corrupt_zip, Some("book.xlsx"))
+                .expect_err("a corrupt XLSX archive must fail"),
+            extract_document_text_by_filename(corrupt_zip, Some("doc.docx"))
+                .expect_err("a corrupt DOCX archive must fail"),
+            extract_document_text_by_filename(&[0x00, 0x01], Some("old.doc"))
+                .expect_err("a binary with no readable runs must fail"),
+            extract_document_text_by_filename(b"{}", Some("note.rtf"))
+                .expect_err("an RTF with no text must fail"),
+        ];
+
+        for failure in &failures {
+            let rendered = failure.to_string();
+            assert!(
+                rendered == "unsupported document type"
+                    || rendered == "document text could not be extracted",
+                "Display must render the classification only, got {rendered:?}"
+            );
+        }
     }
 
     #[test]
@@ -759,6 +924,58 @@ mod tests {
     fn extract_document_text_by_filename_ignores_text_extensions() {
         let result = extract_document_text_by_filename(b"content", Some("notes.txt")).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn extension_matching_is_ascii_case_insensitive_and_nothing_more() {
+        // Both extension registries normalize with `to_ascii_lowercase`, not
+        // `to_lowercase` (`.claude/rules/types.md`): ASCII case must still
+        // match, and Unicode case folding must not be able to fold a foreign
+        // codepoint into an ASCII key.
+        //
+        // The `markdown` case below is a live regression, not a hypothetical.
+        // `try_extract_by_extension`'s key set includes `markdown`, and
+        // `"MAR\u{212A}DOWN".to_lowercase()` is exactly `"markdown"` (U+212A
+        // KELVIN SIGN folds to `k`) — so before the `to_ascii_lowercase`
+        // switch, a file named `notes.MAR<U+212A>DOWN` with an unrecognized
+        // MIME type was UTF-8-decoded and handed to the model as markdown
+        // instead of rejected as an unsupported type. The eight keys of
+        // `extract_document_text_by_filename` happen to have no such fold,
+        // which is why the two registries need separate cases here.
+        let pdf = include_bytes!("../../../tests/fixtures/hello.pdf");
+        assert!(
+            extract_document_text_by_filename(pdf, Some("HELLO.PDF"))
+                .expect("uppercase .PDF must still route to the PDF extractor")
+                .is_some()
+        );
+        assert_eq!(
+            extract_document_text_by_filename(pdf, Some("hello.pd\u{212A}")).unwrap(),
+            None,
+            "a non-ASCII extension must not be folded into an ASCII key"
+        );
+        assert_eq!(
+            try_extract_by_extension(b"content", Some("notes.MARKDOWN")),
+            Some("content".to_string()),
+            "ASCII case-insensitivity must survive the switch"
+        );
+        assert_eq!(
+            try_extract_by_extension(b"content", Some("notes.MAR\u{212A}DOWN")),
+            None,
+            "U+212A must not fold into the `markdown` key"
+        );
+        // Same shape through the public MIME entry point, which is how the
+        // fallback is actually reached in production.
+        assert_eq!(
+            extract_document(
+                b"content",
+                "application/octet-stream",
+                Some("n.MAR\u{212A}DOWN")
+            ),
+            DocumentExtraction::Failed(ExtractionError::UnsupportedType {
+                mime: "application/octet-stream".to_string()
+            }),
+            "the filename fallback must not decode a Unicode-folded extension"
+        );
     }
 
     #[test]
@@ -887,7 +1104,7 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ExtractionError::TotalSizeLimitExceeded { .. }),
+            matches!(err, ZipEntryError::TotalSizeLimitExceeded { .. }),
             "error should be TotalSizeLimitExceeded, got: {err}"
         );
     }
@@ -921,7 +1138,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                ExtractionError::TotalSizeLimitExceeded { .. }
+                ZipEntryError::TotalSizeLimitExceeded { .. }
             ),
             "error should be TotalSizeLimitExceeded"
         );
@@ -956,7 +1173,7 @@ mod tests {
             "should reject entry exceeding per-entry limit"
         );
         assert!(
-            matches!(result.unwrap_err(), ExtractionError::EntryTooLarge { .. }),
+            matches!(result.unwrap_err(), ZipEntryError::EntryTooLarge { .. }),
             "error should be EntryTooLarge"
         );
     }
@@ -988,7 +1205,7 @@ mod tests {
             "pre-check should reject based on declared size"
         );
         assert!(
-            matches!(result.unwrap_err(), ExtractionError::EntryTooLarge { .. }),
+            matches!(result.unwrap_err(), ZipEntryError::EntryTooLarge { .. }),
             "error should be EntryTooLarge"
         );
     }
@@ -1026,7 +1243,7 @@ mod tests {
         assert!(
             matches!(
                 r1.unwrap_err(),
-                ExtractionError::TotalSizeLimitExceeded { .. }
+                ZipEntryError::TotalSizeLimitExceeded { .. }
             ),
             "error should be TotalSizeLimitExceeded"
         );

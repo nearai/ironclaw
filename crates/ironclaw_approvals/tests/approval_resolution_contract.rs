@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
-use ironclaw_events::{AuditSink, EventError, InMemoryAuditSink};
+use ironclaw_event_log::{AuditSink, EventError, InMemoryAuditSink};
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };

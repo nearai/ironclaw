@@ -470,6 +470,42 @@ mod tests {
         );
     }
 
+    /// The refusal arm had NO test: `from_env_value` returns
+    /// `UnavailableInRelease` when `!cfg!(debug_assertions)`, and nothing
+    /// exercised it, so the guard that keeps a shipped binary un-redirectable
+    /// was unpinned. This pins BOTH profiles from one body — it is the same
+    /// input either way, and only the profile differs:
+    ///
+    ///   cargo test -p ironclaw_network                      -> debug arm
+    ///   cargo test --release -p ironclaw_network \
+    ///       --features test-support                          -> release arm
+    ///
+    /// Production/dist builds enable neither `debug_assertions` nor
+    /// `test-support`, so this module is not compiled into them at all; this
+    /// test covers the defence-in-depth runtime guard that remains.
+    #[test]
+    fn a_set_rewrite_map_activates_only_in_debug_and_is_refused_in_release() {
+        let result = RewriteNetworkTransport::from_env_value(
+            ReqwestNetworkTransport::default(),
+            Some("api.example.test=127.0.0.1:8443"),
+        );
+
+        if cfg!(debug_assertions) {
+            let transport = result.expect("debug build activates the seam");
+            assert!(
+                transport.is_active(),
+                "a well-formed map must activate the seam in a debug build"
+            );
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(HostRewriteMapError::UnavailableInRelease),
+                "a release build must REFUSE a set rewrite map, fail-closed, \
+                 so a shipped binary cannot be redirected"
+            );
+        }
+    }
+
     #[test]
     fn default_policy_http_egress_builds_without_the_env_var() {
         // The seam constructor must be inert (and infallible) when the env

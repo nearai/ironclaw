@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use ironclaw_extensions::{ExtensionAssetPath, ExtensionRuntimeV2, ManifestSource};
+use ironclaw_extension_contracts::runtime::ExtensionAssetPath;
+use ironclaw_extension_registry::{ExtensionRuntimeV2, ManifestSource};
 
 use ironclaw_extension_host::{
     AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,

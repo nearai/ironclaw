@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
@@ -18,8 +18,6 @@ use crate::{
 };
 // One classifier for `ExtensionError` — see the note in `active_publication.rs`.
 use crate::product_lifecycle::map_extension_error;
-
-const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
 pub async fn restore_extension_lifecycle_state(
     catalog: &mut AvailableExtensionCatalog,
@@ -44,9 +42,6 @@ pub async fn restore_extension_lifecycle_state(
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
             catalog_registered_user_extension_ids
                 .insert(installation.extension_id().as_str().to_string());
-        }
-        if remove_retired_internal_installation(installation_store, &installation).await? {
-            continue;
         }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
@@ -211,33 +206,6 @@ async fn canonicalize_persisted_installation_rows(
     Ok(canonical)
 }
 
-async fn remove_retired_internal_installation(
-    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
-    installation: &ExtensionInstallation,
-) -> Result<bool, ProductOperationFailure> {
-    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
-        return Ok(false);
-    }
-
-    tracing::info!(
-        extension_id = installation.extension_id().as_str(),
-        installation_id = installation.installation_id().as_str(),
-        "removing retired internal extension installation during lifecycle restore"
-    );
-    installation_store
-        .delete_installation(installation.installation_id())
-        .await
-        .map_err(map_extension_installation_error)?;
-    match installation_store
-        .delete_manifest(installation.extension_id())
-        .await
-    {
-        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
-        Err(error) => return Err(map_extension_installation_error(error)),
-    }
-    Ok(true)
-}
-
 pub struct ExtensionInstallPlan {
     pub manifest_record: ExtensionManifestRecord,
     pub installation: ExtensionInstallation,
@@ -249,11 +217,12 @@ pub fn prepare_install(
     retained_definition: Option<ExtensionManifestRecord>,
 ) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
     let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected extension install: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected extension install: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected extension install: {error}"),
@@ -310,8 +279,8 @@ pub fn prepare_install(
 fn manifest_record_for_available(
     available: &AvailableExtensionPackage,
     host_ports: &ironclaw_host_api::host_port::HostPortCatalog,
-    contracts: &ironclaw_extensions::HostApiContractRegistry,
-    manifest_hash: Option<ironclaw_extensions::ManifestHash>,
+    contracts: &ironclaw_extension_registry::HostApiContractRegistry,
+    manifest_hash: Option<ironclaw_extension_registry::ManifestHash>,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     let _ = (host_ports, contracts);
     let mut resolved = available.resolved_manifest.as_ref().clone();
@@ -330,11 +299,12 @@ fn prepare_manifest_migration(
     existing: &ExtensionInstallation,
 ) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
     let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected manifest migration: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected manifest migration: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected manifest migration: {error}"),
@@ -441,16 +411,11 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RETIRED_SLACK_USER_EXTENSION_ID, map_extension_error, map_extension_installation_error,
+    use super::{map_extension_error, map_extension_installation_error};
+    use ironclaw_extension_registry::{
+        ExtensionError, ExtensionInstallationError, InstallationOwner,
     };
-    use ironclaw_extensions::{ExtensionError, ExtensionInstallationError, InstallationOwner};
     use ironclaw_product_contracts::error::ProductOperationFailure;
-
-    #[test]
-    fn retired_slack_user_id_remains_stable() {
-        assert_eq!(RETIRED_SLACK_USER_EXTENSION_ID, "slack_user");
-    }
 
     /// Restore runs at boot over every persisted installation. Misclassifying
     /// an infrastructure failure as a malformed request would make restore
@@ -515,17 +480,17 @@ default_permission = "ask"
 effects = ["network", "use_secret"]
 "#
         );
-        let manifest_hash = ironclaw_extensions::ManifestHash::new(
+        let manifest_hash = ironclaw_extension_registry::ManifestHash::new(
             ironclaw_host_api::approval::sha256_digest_token(raw.as_bytes()),
         )
         .expect("manifest hash");
         super::ExtensionManifestRecord::from_toml_with_root_binding(
             raw,
-            ironclaw_extensions::ManifestSource::UserRegistered,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            ironclaw_extension_registry::ManifestSource::UserRegistered,
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
             Some(manifest_hash),
             &crate::product_extension_host_api_contract_registry().expect("host contracts"),
-            ironclaw_extensions::PackageRootBinding::Virtual,
+            ironclaw_extension_registry::PackageRootBinding::Virtual,
         )
         .expect("fixture manifest parses")
     }

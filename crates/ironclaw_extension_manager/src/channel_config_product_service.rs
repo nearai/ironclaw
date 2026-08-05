@@ -132,7 +132,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigReactivationError};
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
         ExtensionManifestRef, MembershipDeactivation,
@@ -188,8 +188,9 @@ mod tests {
         let installation_store = ExtensionInstallationStore::load_at(
             Arc::clone(&backend) as Arc<dyn RootFilesystem>,
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-            ironclaw_host_runtime::default_host_api_contract_registry().expect("host contracts"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+            ironclaw_extension_registry::default_host_api_contract_registry()
+                .expect("host contracts"),
         )
         .await
         .expect("filesystem extension installation store");
@@ -252,8 +253,11 @@ mod tests {
             InvocationId::new(),
         )
         .expect("resource scope");
-        let installation_store =
-            installed_store(&[(TELEGRAM_MANIFEST, "telegram"), (SLACK_MANIFEST, "slack")]).await;
+        let installation_store = installed_store(&[
+            (shipped_manifest("telegram").as_str(), "telegram"),
+            (shipped_manifest("slack").as_str(), "slack"),
+        ])
+        .await;
         let secrets = Arc::new(SecretStore::ephemeral());
         // One field already has stored material, so `provided` cannot pass by
         // being uniformly false.
@@ -425,11 +429,24 @@ mod tests {
         }
     }
 
-    /// Real first-party manifests, so the projected field set is the shipped
-    /// one rather than a fixture that can drift from it.
-    const TELEGRAM_MANIFEST: &str =
-        include_str!("../../extensions/packages/telegram/manifest.toml");
-    const SLACK_MANIFEST: &str = include_str!("../../extensions/packages/slack/manifest.toml");
+    /// The shipped manifest for a first-party package, read from the package
+    /// **inventory** rather than by `include_str!`-ing another crate's file.
+    ///
+    /// The intent is unchanged and still worth stating: these tests project the
+    /// *shipped* field set, not a fixture that can drift from it. What changed
+    /// is how the bytes arrive — `ironclaw_extension_support::packages` is the
+    /// one owner of every package's embeds, and reaching past it into
+    /// `packages/<ext>/manifest.toml` was a cross-crate reach-in (WS2 §11.2.7;
+    /// slack and telegram carry adapter crates, so those two sites were
+    /// classified cross-crate, not repo-root asset).
+    fn shipped_manifest(id: &str) -> String {
+        ironclaw_extension_support::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == id)
+            .unwrap_or_else(|| panic!("{id} is a bundled first-party package"))
+            .manifest_toml
+            .into_owned()
+    }
 
     async fn installed_store(manifests: &[(&str, &str)]) -> Arc<ExtensionInstallationStore> {
         let store = Arc::new(
@@ -437,8 +454,9 @@ mod tests {
                 Arc::new(InMemoryBackend::new()),
                 VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-                ironclaw_host_runtime::default_host_api_contract_registry()
+                ironclaw_host_api::host_port::default_host_port_catalog()
+                    .expect("host port catalog"),
+                ironclaw_extension_registry::default_host_api_contract_registry()
                     .expect("host contracts"),
             )
             .await
@@ -447,10 +465,11 @@ mod tests {
         for (manifest_toml, id) in manifests {
             let record = ExtensionManifestRecord::from_toml(
                 *manifest_toml,
-                ironclaw_extensions::ManifestSource::HostBundled,
-                &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+                ironclaw_extension_registry::ManifestSource::HostBundled,
+                &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
                 None,
-                &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+                &ironclaw_extension_registry::default_host_api_contract_registry()
+                    .expect("contracts"),
                 None,
             )
             .expect("fixture manifest parses");
@@ -464,7 +483,7 @@ mod tests {
                         ExtensionManifestRef::new(extension_id, None),
                         Vec::new(),
                         chrono::Utc::now(),
-                        ironclaw_extensions::InstallationOwner::Tenant,
+                        ironclaw_extension_registry::InstallationOwner::Tenant,
                     )
                     .expect("installation"),
                 )

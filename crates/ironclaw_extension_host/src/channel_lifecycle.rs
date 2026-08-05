@@ -1,9 +1,10 @@
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extension_contracts::product_adapter_section::PRODUCT_ADAPTER_HOST_API_ID;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::capability::RuntimeCredentialAccountSetup;
-use ironclaw_product::RebornChannelConnectStrategy;
-use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
-use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
+use ironclaw_product_contracts::package_lifecycle::{
+    ChannelConnectStrategy as RebornChannelConnectStrategy, ChannelConnectionRequirement,
+};
 
 use crate::package_runtime_credential_auth_requirements;
 
@@ -75,7 +76,7 @@ pub fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> b
     }) || package.manifest.host_api_surfaces.iter().any(|surface| {
         matches!(
             surface,
-            ironclaw_extensions::CapabilitySurfaceDeclV2::Channel { .. }
+            ironclaw_extension_registry::CapabilitySurfaceDeclV2::Channel { .. }
         )
     })
 }

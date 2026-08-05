@@ -1,4 +1,4 @@
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
@@ -11,9 +11,11 @@ use ironclaw_host_api::{
 use serde_json::{Value, json};
 
 use crate::{
-    CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
-    RuntimeProcessError, SavedCommandOutput, SavedCommandOutputSanitization,
-    process_output::saved_output_filename,
+    FirstPartyCapabilityError, FirstPartyCapabilityRequest, process_output::saved_output_filename,
+};
+use ironclaw_host_api::process::{
+    CommandExecutionRequest, RuntimeProcessError, SavedCommandOutput,
+    SavedCommandOutputSanitization,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};

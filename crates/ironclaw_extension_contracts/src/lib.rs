@@ -26,7 +26,7 @@
 //! policy engine, or workflow.
 //!
 //! Two rules this crate is enforced against, both in
-//! `crates/ironclaw_architecture/tests/`:
+//! `crates/ironclaw_architecture_tests/tests/`:
 //!
 //! - **Contracts purity** (§11.2.3, `reborn_dependency_boundaries.rs`): the
 //!   only internal dependency is `ironclaw_host_api`; no framework, driver, or
@@ -49,7 +49,9 @@ pub mod hosted_mcp;
 pub mod lifecycle_id;
 pub mod memory;
 pub mod preference_target;
+pub mod product_adapter_section;
 pub mod recipe;
+pub mod runtime;
 pub mod state;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]

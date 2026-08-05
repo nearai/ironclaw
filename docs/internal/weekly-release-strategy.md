@@ -36,7 +36,9 @@ owner, and deployment approver can synchronize on a predictable window.
    artifact to a stable, production-like RC environment. The `ironclaw-`
    namespace matches the tag-only cargo-dist publisher in
    `.github/workflows/ironclaw-release.yml`; a tag without that namespace never
-   invokes the publisher.
+   invokes the publisher. The release owner creates that tag with the
+   `Cut Ironclaw Release` workflow, supplying the exact approved commit SHA and
+   matching Cargo version.
 4. Freeze the release branch after the cut. Do not add features, merge `main`
    into it, or rebase it. The approximately 30 PRs per day that continue landing
    on `main` are for the next release.

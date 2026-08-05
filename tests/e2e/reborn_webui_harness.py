@@ -408,10 +408,11 @@ def write_config_toml(
     mock_llm_server: str,
     profile: str = DEFAULT_PROFILE,
     model: str = DEFAULT_MODEL,
+    *,
+    seed_default_llm: bool = True,
 ) -> None:
-    """Seed a sparse Reborn config that selects the mock OpenAI-compatible LLM."""
-    path.write_text(
-        f"""api_version = "ironclaw.runtime/v1"
+    """Seed a sparse config, optionally selecting the mock LLM at boot."""
+    config = f"""api_version = "ironclaw.runtime/v1"
 
 [boot]
 profile = "{profile}"
@@ -424,15 +425,17 @@ default_agent = "reborn-v2-e2e-agent"
 [webui]
 env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
 env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+"""
+    if seed_default_llm:
+        config += f"""
 
 [llm.default]
 provider_id = "openai"
 model = "{model}"
 api_key_env = "MOCK_LLM_API_KEY"
 base_url = "{mock_llm_server}/v1"
-""",
-        encoding="utf-8",
-    )
+"""
+    path.write_text(config, encoding="utf-8")
 
 
 async def start_reborn_webui_v2_server(
@@ -445,6 +448,9 @@ async def start_reborn_webui_v2_server(
     log_prefix: str = "reborn-v2",
     extra_env: dict[str, str] | None = None,
     use_listener_as_webui_base_url: bool = False,
+    seed_default_llm: bool = True,
+    preserve_existing_config: bool = False,
+    log_paths: list[Path] | None = None,
 ) -> tuple[object, str]:
     """Start ``ironclaw serve`` and return ``(process, base_url)``."""
     configured_artifact_root = os.environ.get(
@@ -463,12 +469,15 @@ async def start_reborn_webui_v2_server(
     reborn_home.mkdir(parents=True, exist_ok=True)
     workspace_dir = home_dir / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    write_config_toml(
-        reborn_home / "config.toml",
-        mock_llm_server,
-        profile=profile,
-        model=model,
-    )
+    config_path = reborn_home / "config.toml"
+    if not preserve_existing_config or not config_path.exists():
+        write_config_toml(
+            config_path,
+            mock_llm_server,
+            profile=profile,
+            model=model,
+            seed_default_llm=seed_default_llm,
+        )
 
     proc = None
     last_stderr = ""
@@ -485,6 +494,8 @@ async def start_reborn_webui_v2_server(
             log_dir = home_dir
         stdout_path = log_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
         stderr_path = log_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
+        if log_paths is not None:
+            log_paths.extend((stdout_path, stderr_path))
 
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -496,7 +507,7 @@ async def start_reborn_webui_v2_server(
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
+            "RUST_LOG": "ironclaw=warn,ironclaw_turn_runner=warn",
             "RUST_BACKTRACE": "1",
         }
         if extra_env:
@@ -745,6 +756,60 @@ async def reborn_v2_restartable_server(
             await kill_reborn_server(state["proc"])
         else:
             await close_reborn_server(state["proc"])
+        state["proc"] = None
+
+    await start()
+    try:
+        yield state, start, stop
+    finally:
+        await stop()
+
+
+@pytest.fixture
+async def reborn_v2_first_run_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Restartable server whose config deliberately has no active LLM."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-first-run-home")
+    provider_log_filter = (
+        "warn,"
+        "ironclaw_webui=debug,"
+        "ironclaw_composition=debug,"
+        "ironclaw_operator=debug,"
+        "ironclaw_llm=debug"
+    )
+    state = {
+        "proc": None,
+        "base_url": None,
+        "home_dir": home_dir,
+        "log_paths": [],
+        "starts": 0,
+    }
+
+    async def start() -> str:
+        state["starts"] += 1
+        proc, base_url = await start_reborn_webui_v2_server(
+            ironclaw_reborn_binary=ironclaw_reborn_binary,
+            mock_llm_server=mock_llm_server,
+            home_dir=home_dir,
+            profile=DEFAULT_PROFILE,
+            log_prefix=f"reborn-v2-first-run-{state['starts']}",
+            seed_default_llm=False,
+            preserve_existing_config=True,
+            log_paths=state["log_paths"],
+            extra_env={
+                # Reborn uses its own stderr filter; keep RUST_LOG aligned for
+                # subprocesses that use tracing's conventional environment.
+                "IRONCLAW_REBORN_LOG": provider_log_filter,
+                "RUST_LOG": provider_log_filter,
+            },
+        )
+        state["proc"] = proc
+        state["base_url"] = base_url
+        return base_url
+
+    async def stop() -> None:
+        await close_reborn_server(state["proc"])
         state["proc"] = None
 
     await start()

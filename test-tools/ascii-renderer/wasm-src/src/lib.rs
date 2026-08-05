@@ -11,7 +11,7 @@ use types::{AsciiArt, DrawInput};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../wit/tool.wit",
+    path: "../../../crates/ironclaw_wasm/wit/tool.wit",
 });
 
 struct AsciiRendererTool;

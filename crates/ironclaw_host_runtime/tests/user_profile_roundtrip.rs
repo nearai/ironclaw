@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_event_log::InMemoryAuditSink;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     action::NetworkPolicy,

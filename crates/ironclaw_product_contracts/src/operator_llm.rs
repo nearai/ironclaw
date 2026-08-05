@@ -12,7 +12,7 @@
 //! the config-file writer, and the live provider-reload handle.
 //!
 //! Declaring [`LlmConfigService`] and [`ActiveModelReader`] here rather than in
-//! `ironclaw_product` is what un-inverts the ownership: `ironclaw_operator` is a
+//! `ironclaw_assistant` is what un-inverts the ownership: `ironclaw_operator` is a
 //! *sibling* of product, not a consumer of it, so the port it satisfies belongs
 //! at the boundary. Product keeps the frozen `llm_config` view descriptor, the
 //! "no service wired" fail-closed error, and the `RebornServices` wiring that
@@ -35,7 +35,7 @@ use crate::surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceEr
 /// A WebChat v2 run submitted without an explicit `model` carries no
 /// `resolved_model_route`, so its captured `model_usage` has no model id to
 /// price against and `RebornGetRunStateResponse::cost` (declared in
-/// `ironclaw_product`, so named in prose rather than linked from here) would be
+/// `ironclaw_assistant`, so named in prose rather than linked from here) would be
 /// `None` even though a real model ran. This port lets the service price such a
 /// default-model run against the live provider's active model — which, for a
 /// default (unrouted) run, is exactly the model that ran.

@@ -31,7 +31,7 @@ pub use auth::{AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim};
 // §11.2.4's rule applied to the evidence seam, pinned by
 // `reborn_sealed_evidence_mint_ratchet`. A second path is how the family
 // reached `ironclaw_extension_host` and `ironclaw_webui` through
-// `ironclaw_product` before WS1.5.
+// `ironclaw_assistant` before WS1.5.
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
 pub use error::{ProductAdapterError, ProductSurfaceRejectionKind};
 pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};

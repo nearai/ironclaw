@@ -1,4 +1,4 @@
-use ironclaw_extensions::InstallationOwner;
+use ironclaw_extension_registry::InstallationOwner;
 use ironclaw_host_api::{
     action::NetworkTargetPattern,
     capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},

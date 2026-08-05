@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_auth::ChannelConnectionService;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
@@ -12,7 +13,7 @@ use ironclaw_auth::{
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef;
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
     InstallationOwner, MembershipDeactivation, canonicalize_installation_rows,
@@ -23,13 +24,11 @@ use ironclaw_host_api::{
     ids::{ExtensionId, UserId, VendorId},
     resource::ResourceScope,
 };
-use ironclaw_product::{
-    ChannelConnectionService, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
-};
 use ironclaw_product_contracts::account_setup::{
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupReader,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
@@ -115,7 +114,7 @@ trait ExtensionInstallationStoreActivationCompat {
 #[async_trait]
 impl<T> ExtensionInstallationStoreActivationCompat for T
 where
-    T: ironclaw_extensions::ExtensionInstallationStorePort + ?Sized,
+    T: ironclaw_extension_registry::ExtensionInstallationStorePort + ?Sized,
 {
     async fn set_activation_state(
         &self,
@@ -136,7 +135,7 @@ where
 pub struct ExtensionLifecycleManager {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: Arc<RwLock<AvailableExtensionCatalog>>,
-    installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
@@ -196,7 +195,9 @@ pub struct ExtensionLifecycleManager {
     /// connection-requirement overrides). Descriptors are declared during
     /// composition; the activation success path consults it and the pairing
     /// seam extends it.
-    account_setups: ExtensionAccountSetupRegistry,
+    /// `None` behaves exactly as an empty registry: no descriptor, no missing
+    /// requirement (`ExtensionAccountSetupReader`'s doc pins the equivalence).
+    account_setups: Option<Arc<dyn ExtensionAccountSetupReader>>,
     /// Static per-provider instance-config readiness map. Opt-in, defaults
     /// empty via `new` — a third readiness axis alongside `account_setups`
     /// (per-user) and the package-level
@@ -273,7 +274,7 @@ async fn acquire_registry_install_permit(
 pub struct ExtensionLifecycleManagerDependencies {
     pub filesystem: Arc<dyn RootFilesystem>,
     pub catalog: AvailableExtensionCatalog,
-    pub installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    pub installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
     pub lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     pub active_extensions: ActiveExtensionPublisher,
     pub credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
@@ -357,7 +358,7 @@ impl ExtensionLifecycleManager {
             registry_install_operations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
-            account_setups: ExtensionAccountSetupRegistry::default(),
+            account_setups: None,
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
             provider_instance_readiness: std::collections::BTreeMap::new(),
         }
@@ -367,7 +368,7 @@ impl ExtensionLifecycleManager {
     /// working set from it at boot).
     pub fn installation_store_handle(
         &self,
-    ) -> Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> {
+    ) -> Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
     }
 
@@ -452,7 +453,7 @@ impl ExtensionLifecycleManager {
     pub async fn publish_bundled_package_for_test(
         &self,
         package: &ExtensionPackage,
-        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
+        resolved: Option<&ironclaw_extension_registry::ResolvedExtensionManifest>,
     ) -> Result<(), ProductOperationFailure> {
         self.active_extensions.publish(package)?;
         let Some(host) = self.generic_host.get() else {
@@ -466,13 +467,9 @@ impl ExtensionLifecycleManager {
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package.id.as_str())?;
                 let available = self.catalog.read().await.resolve(&package_ref)?;
-                let host_ports =
-                    ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-                        ProductOperationFailure::InvalidBindingRequest {
-                            reason: format!(
-                                "host port catalog rejected bundled extension: {error}"
-                            ),
-                        }
+                let host_ports = ironclaw_host_api::host_port::default_host_port_catalog()
+                    .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+                        reason: format!("host port catalog rejected bundled extension: {error}"),
                     })?;
                 let contracts =
                     crate::product_extension_host_api_contract_registry().map_err(|error| {
@@ -482,9 +479,9 @@ impl ExtensionLifecycleManager {
                             ),
                         }
                     })?;
-                ironclaw_extensions::ExtensionManifestRecord::from_toml_with_root_binding(
+                ironclaw_extension_registry::ExtensionManifestRecord::from_toml_with_root_binding(
                     available.manifest_toml.clone(),
-                    ironclaw_extensions::ManifestSource::HostBundled,
+                    ironclaw_extension_registry::ManifestSource::HostBundled,
                     &host_ports,
                     None,
                     &contracts,
@@ -558,9 +555,9 @@ impl ExtensionLifecycleManager {
 
     pub fn with_account_setup_registry(
         mut self,
-        account_setups: ExtensionAccountSetupRegistry,
+        account_setups: Arc<dyn ExtensionAccountSetupReader>,
     ) -> Self {
-        self.account_setups = account_setups;
+        self.account_setups = Some(account_setups);
         self
     }
 
@@ -603,7 +600,7 @@ impl ExtensionLifecycleManager {
     /// only — zero bytes shipped in production builds.
     pub fn installation_store_for_test(
         &self,
-    ) -> Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> {
+    ) -> Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
     }
 
@@ -730,7 +727,7 @@ impl ExtensionLifecycleManager {
             .map(|installation| install_scope_for_owner(installation.owner()));
         let summary = available.summary();
         let auth_selection_required = available.source
-            == ironclaw_extensions::ManifestSource::UserRegistered
+            == ironclaw_extension_registry::ManifestSource::UserRegistered
             && available.resolved_manifest.mcp.as_ref().is_some_and(|mcp| {
                 matches!(
                     mcp.registration_auth,
@@ -823,11 +820,11 @@ impl ExtensionLifecycleManager {
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
         let mut requirements = package_runtime_credential_auth_requirements(&package);
-        if let Some(requirement) = self
-            .account_setups
-            .missing_requirement(&extension_id, caller)
-            .await
-            .map_err(map_account_setup_error)?
+        if let Some(setups) = self.account_setups.as_ref()
+            && let Some(requirement) = setups
+                .missing_requirement(&extension_id, caller)
+                .await
+                .map_err(map_account_setup_error)?
         {
             requirements.push(requirement);
         }
@@ -1067,7 +1064,7 @@ impl ExtensionLifecycleManager {
         caller: &UserId,
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        if package.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+        if package.source != ironclaw_extension_registry::ManifestSource::RegistryInstalled {
             return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: "registry install requires a registry-validated package".to_string(),
             });
@@ -1099,7 +1096,7 @@ impl ExtensionLifecycleManager {
                     ),
                 });
             }
-            if previous.source == ironclaw_extensions::ManifestSource::HostBundled {
+            if previous.source == ironclaw_extension_registry::ManifestSource::HostBundled {
                 return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} is host-bundled and cannot be replaced by a registry package",
@@ -1468,7 +1465,9 @@ impl ExtensionLifecycleManager {
             return Ok(activation_success_response(
                 package_ref,
                 &active_package,
-                self.account_setups.descriptor(extension_id),
+                self.account_setups
+                    .as_ref()
+                    .and_then(|setups| setups.descriptor(extension_id)),
             ));
         }
         self.enable_lifecycle_package(extension_id).await?;
@@ -1551,7 +1550,11 @@ impl ExtensionLifecycleManager {
         let visible_capability_ids = package_visible_capability_ids(&active_package);
         let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
-            .and_then(|id| self.account_setups.descriptor(&id));
+            .and_then(|id| {
+                self.account_setups
+                    .as_ref()
+                    .and_then(|setups| setups.descriptor(&id))
+            });
         let message = activation_success_message(
             &package_ref,
             &active_package,
@@ -1671,7 +1674,7 @@ impl ExtensionLifecycleManager {
                 .manifest_record
             };
             let retain_definition = removal_manifest.definition_retention()
-                == ironclaw_extensions::PackageDefinitionRetention::RetainInCatalog;
+                == ironclaw_extension_registry::PackageDefinitionRetention::RetainInCatalog;
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
             let cleanup_requirements = removal_manifest.removal_cleanup_requirements().to_vec();
@@ -1756,7 +1759,7 @@ impl ExtensionLifecycleManager {
                             removal_scope.agent_id.clone(),
                             removal_scope.project_id.clone(),
                         ),
-                        extension_id.as_str(),
+                        &extension_id,
                     )
                     .await
                     .map_err(|error| ProductOperationFailure::Transient {
@@ -2647,7 +2650,7 @@ pub(crate) async fn lifecycle_package_from(
 /// Shared with [`crate::hosted_mcp_preparation::HostedMcpPreparationService`].
 /// See [`ExtensionLifecycleManager::ensure_lifecycle_package_registered_from_aggregate`].
 pub(crate) async fn ensure_lifecycle_package_registered(
-    installation_store: &Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    installation_store: &Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     extension_id: &ExtensionId,
 ) -> Result<(), ProductOperationFailure> {
@@ -2681,7 +2684,7 @@ pub(crate) async fn ensure_lifecycle_package_registered(
     {
         return Ok(());
     }
-    let manifest: ironclaw_extensions::ExtensionManifest = record
+    let manifest: ironclaw_extension_registry::ExtensionManifest = record
         .manifest()
         .clone()
         .try_into()
@@ -3298,7 +3301,7 @@ mod tests {
         );
     }
 
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallationStore, ExtensionInstallationStorePort as _, ExtensionLifecycleService,
         ExtensionManifest, ExtensionManifestRecord, ExtensionRegistry, HostApiContractRegistry,
         ManifestSource, SharedExtensionRegistry,
@@ -3639,7 +3642,7 @@ mod tests {
         ExtensionInstallation::new(
             ExtensionInstallationId::new(id).expect("valid installation id"),
             extension_id.clone(),
-            ironclaw_extensions::ExtensionManifestRef::new(extension_id, None),
+            ironclaw_extension_registry::ExtensionManifestRef::new(extension_id, None),
             Vec::new(),
             chrono::Utc::now(),
             owner,
@@ -3689,7 +3692,7 @@ mod tests {
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -3781,7 +3784,7 @@ mod tests {
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -3923,12 +3926,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl ironclaw_extensions::ExtensionInstallationStorePort for PauseOnAdmitStore {
+    impl ironclaw_extension_registry::ExtensionInstallationStorePort for PauseOnAdmitStore {
         async fn admit_package_definition(
             &self,
             record: ExtensionManifestRecord,
         ) -> Result<
-            ironclaw_extensions::PackageDefinitionAdmissionOutcome,
+            ironclaw_extension_registry::PackageDefinitionAdmissionOutcome,
             ExtensionInstallationError,
         > {
             self.holding.notify_one();
@@ -4107,19 +4110,20 @@ output_schema_ref = "schemas/run.output.json"
         let inner_store = ExtensionInstallationStore::load_at(
             filesystem.clone(),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
             crate::product_extension_host_api_contract_registry().expect("host contracts"),
         )
         .await
         .expect("installation store");
         let holding = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> =
-            Arc::new(PauseOnAdmitStore {
-                inner: inner_store,
-                holding: Arc::clone(&holding),
-                release: Arc::clone(&release),
-            });
+        let installation_store: Arc<
+            dyn ironclaw_extension_registry::ExtensionInstallationStorePort,
+        > = Arc::new(PauseOnAdmitStore {
+            inner: inner_store,
+            holding: Arc::clone(&holding),
+            release: Arc::clone(&release),
+        });
         let catalog = AvailableExtensionCatalog::from_packages(Vec::new());
         let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
             ExtensionRegistry::new(),
@@ -4233,7 +4237,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4316,7 +4320,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4423,7 +4427,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4503,7 +4507,7 @@ output_schema_ref = "schemas/run.output.json"
         let mut contracts = HostApiContractRegistry::new();
         contracts
             .register(Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");

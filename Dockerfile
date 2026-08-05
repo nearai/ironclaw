@@ -38,8 +38,6 @@ COPY crates/ crates/
 COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY skills/ skills/
 COPY tests/ tests/
-COPY wit/ wit/
-COPY providers.json providers.json
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
@@ -68,8 +66,6 @@ COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY migrations/ migrations/
 COPY skills/ skills/
 COPY tests/ tests/
-COPY wit/ wit/
-COPY providers.json providers.json
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs

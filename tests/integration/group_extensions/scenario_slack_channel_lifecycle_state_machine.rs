@@ -24,7 +24,7 @@
 //!   stale-binding carryover from before the removal.
 //!
 //! Uses the group's generic channel-connection bundle
-//! (`ironclaw_reborn_composition::test_support`), whose connect drives the
+//! (`ironclaw_composition::test_support`), whose connect drives the
 //! production OAuth-callback identity-binding hook
 //! (`bind_channel_identities_for_callback`) and whose service is late-bound
 //! into the same cleanup slot `extension_remove` dispatches to.
@@ -51,8 +51,8 @@
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use ironclaw_auth::OAuthProviderIdentity;
+use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_host_api::ids::UserId;
-use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_secrets::SecretMaterial;
 use serde_json::json;
 

@@ -4,13 +4,13 @@
 //! Every one of these is a browser/API *body shape*: the JSON a WebUI route or
 //! the OpenAI-compatible adapter deserializes before it reaches product. They
 //! belong at the boundary because both transports construct them and neither
-//! should compile `ironclaw_product` to do it.
+//! should compile `ironclaw_assistant` to do it.
 //!
 //! Deliberately **not** here — the normalization that turns a body into a
 //! canonical command:
 //!
 //! - `ProductInboundCommand` and the `into_command` family stay in
-//!   `ironclaw_product`, because the command carries
+//!   `ironclaw_assistant`, because the command carries
 //!   `ironclaw_turns::CancelRunRequest` and contracts may not name the kernel.
 //! - `decode_attachments` and `ProductAttachmentCapabilities` stay there too,
 //!   because the byte budgets are `ironclaw_attachments` types. (CHECKLIST WS5

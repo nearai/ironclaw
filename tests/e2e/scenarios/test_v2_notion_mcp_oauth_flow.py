@@ -12,9 +12,9 @@ Tests the MCP + OAuth integration path:
 Browser tests are skipped until an E2E browser binary is available.
 
 Note: The Notion MCP OAuth path requires the Reborn composition's MCP adapter
-(``ironclaw_reborn_composition::nearai_mcp``) to be active. Tests that
+(``ironclaw_composition::nearai_mcp``) to be active. Tests that
 exercise the HTTP API prove the route surface; the MCP OAuth trigger is
-exercised in ``crates/ironclaw_reborn_composition`` Rust integration tests.
+exercised in ``crates/ironclaw_composition`` Rust integration tests.
 """
 
 import asyncio

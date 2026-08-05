@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{capability::EffectKind, trust::PackageSource};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_trust::{
@@ -139,7 +139,7 @@ impl ActiveExtensionPublisher {
 
 pub fn extension_trust_policy_input(
     package: &ExtensionPackage,
-) -> Result<ironclaw_trust::TrustPolicyInput, ProductOperationFailure> {
+) -> Result<ironclaw_host_api::trust::TrustPolicyInput, ProductOperationFailure> {
     package
         .trust_policy_input(
             package.trust_policy_source().map_err(map_extension_error)?,
@@ -184,7 +184,7 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint};
-    use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
+    use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
     use ironclaw_host_api::{ids::ExtensionId, runtime::TrustClass};
     use ironclaw_trust::{
         AdminConfig, HostTrustPolicy, InvalidationBus, TrustPolicy, TrustProvenance,
@@ -194,7 +194,7 @@ mod tests {
         ActiveExtensionPublisher, compensation_failure, extension_trust_policy_input,
         map_extension_error, map_trust_policy_error,
     };
-    use ironclaw_extensions::ExtensionError;
+    use ironclaw_extension_registry::ExtensionError;
     use ironclaw_product_contracts::error::ProductOperationFailure;
     use ironclaw_trust::TrustError;
 

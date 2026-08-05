@@ -54,14 +54,14 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Key modules:** `profile.rs`, `permission.rs`, `limits.rs`
 - **Depends on:** serde, toml
 
-### ironclaw_architecture
+### ironclaw_architecture_tests
 **Role:** Architecture boundary tests and enforcement
 - Dependency graph checking
 - Composition boundary tests
 - Reborn vs v1 boundary enforcement
 - **When to touch:** Refactoring crate dependencies
 - **Key modules:** `tests/reborn_composition_boundaries.rs`
-- **Tests:** Run with `cargo test -p ironclaw_architecture --test '*'`
+- **Tests:** Run with `cargo test -p ironclaw_architecture_tests --test '*'`
 
 ---
 
@@ -222,7 +222,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - Tool mapping to MCP capabilities
 - **When to touch:** Adding MCP features or new protocol versions
 - **Key modules:** `discovery.rs`, `protocol.rs`
-- **Depends on:** `ironclaw_host_api`, `ironclaw_extensions`
+- **Depends on:** `ironclaw_host_api`, `ironclaw_extension_registry`
 
 ### ironclaw_scripts
 **Role:** Script execution (Python, Bash, etc.)
@@ -233,7 +233,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Key modules:** `lib.rs`, `executor.rs`
 - **Depends on:** `ironclaw_host_api`, `ironclaw_process_sandbox`
 
-### ironclaw_extensions
+### ironclaw_extension_registry
 **Role:** Extension lifecycle and discovery
 - Manifest parsing (capabilities, metadata)
 - Installation/activation/removal flow
@@ -282,7 +282,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 
 **Purpose:** Persistence, event sourcing, and state recovery.
 
-### ironclaw_events
+### ironclaw_event_log
 **Role:** Immutable event log
 - Event types (capability executed, approval requested, etc.)
 - Event serialization (JSONL format)
@@ -302,7 +302,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **When to touch:** Adding new projections or snapshot types
 - **Key modules:** `pending_gate_projection.rs`, `runtime_projection.rs`
 - **Tests:** `tests/memory_prompt_safety_projection_contract.rs`, `tests/replay_projection_contract.rs`
-- **Depends on:** `ironclaw_events`, `ironclaw_common`
+- **Depends on:** `ironclaw_event_log`, `ironclaw_common`
 
 ### ironclaw_event_streams
 **Role:** Event subscription and delivery
@@ -313,9 +313,9 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **When to touch:** Adding new event filters or admission rules
 - **Key modules:** `manager.rs`, `redaction.rs`, `admission.rs`
 - **Tests:** `tests/event_stream_manager_contract.rs`
-- **Depends on:** `ironclaw_events`, `ironclaw_common`
+- **Depends on:** `ironclaw_event_log`, `ironclaw_common`
 
-### ironclaw_reborn_event_store
+### ironclaw_event_store
 **Role:** Backend-agnostic event storage
 - Trait: `EventStore`
 - Implementations: PostgreSQL, libSQL (Turso)
@@ -323,7 +323,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **When to touch:** Adding new backends or storage operations
 - **Key modules:** `lib.rs`
 - **Features:** `postgres`, `libsql` (enable both for dual-backend testing)
-- **Depends on:** `ironclaw_events`, database drivers
+- **Depends on:** `ironclaw_event_log`, database drivers
 
 ### ironclaw_run_state
 **Role:** Checkpoint and recovery state
@@ -332,7 +332,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - Step tracking
 - **When to touch:** Changing checkpoint format or recovery logic
 - **Key modules:** `lib.rs`
-- **Depends on:** `ironclaw_events`, `ironclaw_common`
+- **Depends on:** `ironclaw_event_log`, `ironclaw_common`
 
 ### ironclaw_threads
 **Role:** Thread (conversation) lifecycle and metadata
@@ -456,18 +456,18 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Tests:** Core runtime contract tests
 - **Depends on:** `ironclaw_host_api`, `ironclaw_capabilities`, `ironclaw_agent_loop`
 
-### ironclaw_reborn_cli
+### ironclaw_cli
 **Role:** Primary CLI/WebUI binary entrypoint
 - `ironclaw-reborn` binary
 - Commands: `run`, `repl`, `serve`, `models`, `config`, `doctor`, `doctor-profile`
 - CLI argument parsing
 - **When to touch:** Adding new commands or CLI flags
 - **Key modules:** `main.rs`, `commands/`
-- **Build:** `cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn`
+- **Build:** `cargo build -p ironclaw_cli --bin ironclaw-reborn`
 - **Features:** `webui-v2-beta` (for serve command), `slack-v2-host-beta` (for Slack)
-- **Depends on:** `ironclaw_reborn`, `ironclaw_reborn_config`, `clap`
+- **Depends on:** `ironclaw_reborn`, `ironclaw_config`, `clap`
 
-### ironclaw_reborn_config
+### ironclaw_config
 **Role:** Configuration parsing and resolution
 - `config.toml` parsing
 - Environment variable resolution
@@ -478,7 +478,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Config schema:** See README.md or crate docs for TOML format
 - **Depends on:** `serde`, `toml`, `ironclaw_runtime_policy`
 
-### ironclaw_reborn_composition
+### ironclaw_composition
 **Role:** Dependency injection and app builder
 - AppBuilder (wires database, LLM, tools, etc.)
 - Service registration
@@ -487,14 +487,14 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Key modules:** `lib.rs`, `builder.rs`
 - **Depends on:** All infrastructure crates
 
-### ironclaw_reborn_identity
+### ironclaw_identity
 **Role:** User/owner identity and session management
 - Owner identification
 - Session creation and validation
 - **When to touch:** Changing identity model or session format
 - **Depends on:** `ironclaw_common`
 
-### ironclaw_reborn_traces
+### ironclaw_trace_commons
 **Role:** Trace recording and replay
 - Record execution traces (for testing and debugging)
 - Replay traces (deterministic test fixtures)
@@ -503,7 +503,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Key modules:** `lib.rs`, `recorder.rs`
 - **Depends on:** `ironclaw_common`
 
-### ironclaw_reborn_openai_compat
+### ironclaw_openai_compat
 **Role:** OpenAI-compatible API surface
 - `/v1/chat/completions` endpoint
 - Streaming responses
@@ -517,7 +517,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 **Role:** PostgreSQL/libSQL adapters for OpenAI API
 - Backend for OpenAI-compatible conversation storage
 - **When to touch:** Adding new storage operations for API
-- **Depends on:** `ironclaw_reborn_openai_compat`, database drivers
+- **Depends on:** `ironclaw_openai_compat`, database drivers
 
 ### ironclaw_reborn_webui_ingress
 **Role:** WebUI HTTP routing and session management
@@ -573,7 +573,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - Adapter discovery (installed vs. available)
 - Version management
 - **When to touch:** Changing adapter lifecycle
-- **Depends on:** `ironclaw_product_adapters`, `ironclaw_extensions`
+- **Depends on:** `ironclaw_product_adapters`, `ironclaw_extension_registry`
 
 ### ironclaw_wasm_product_adapters
 **Role:** WASM-based adapter implementations
@@ -615,7 +615,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - Automation execution
 - **When to touch:** Adding new trigger types or evaluation rules
 - **Key modules:** `lib.rs`, `trigger.rs`
-- **Depends on:** `ironclaw_events`, `ironclaw_dispatcher`
+- **Depends on:** `ironclaw_event_log`, `ironclaw_dispatcher`
 
 ### ironclaw_skill_learning
 **Role:** Skill extraction and classification
@@ -664,13 +664,13 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 ### Dual-Backend Crates
 These crates support both PostgreSQL and libSQL transparently:
 
-- **ironclaw_reborn_event_store** — Event storage with `Db` trait
+- **ironclaw_event_store** — Event storage with `Db` trait
 - **ironclaw_run_state** — Checkpoint storage
 - **ironclaw_threads** — Thread metadata storage
 - **ironclaw_conversations** — Conversation state storage
 - **ironclaw_filesystem** (with `db.rs`) — File catalog storage
 
-**Pattern:** Each has a `Db` trait; implementations for PostgreSQL and libSQL are registered at startup in `ironclaw_reborn_composition`.
+**Pattern:** Each has a `Db` trait; implementations for PostgreSQL and libSQL are registered at startup in `ironclaw_composition`.
 
 ---
 
@@ -747,7 +747,7 @@ The v1 monolith in `src/` coexists with Reborn but is being phased out:
 
 - **v1 crates:** `ironclaw_executor`, `ironclaw_engine` (in `crates/`)
 - **v1 code:** `src/` directory (agent, channels, db, extensions, tools, workspace, etc.)
-- **Dual binary:** `src/main.rs` (legacy) and `crates/ironclaw_reborn_cli` (modern)
+- **Dual binary:** `src/main.rs` (legacy) and `crates/ironclaw_cli` (modern)
 
 **When to use each:**
 - **v1 (src/):** Only maintain existing v1 behavior; don't add features
@@ -762,7 +762,7 @@ For architectural decisions about v1, see the [Architecture Overview](overview.m
 ### Pattern: Dual-Backend Support
 
 ```rust
-// In ironclaw_reborn_composition startup:
+// In ironclaw_composition startup:
 let db: Box<dyn Db> = if use_postgres {
     Box::new(PostgresDb::new(...).await?)
 } else {
@@ -789,7 +789,7 @@ let llm: Arc<dyn LlmProvider> = match config.llm_backend {
 let response = llm.complete(request).await?;
 ```
 
-**Relevant crates:** `ironclaw_llm`, composition in `ironclaw_reborn_cli`
+**Relevant crates:** `ironclaw_llm`, composition in `ironclaw_cli`
 
 ### Pattern: Event Subscriptions
 
@@ -805,7 +805,7 @@ subscriber.subscribe(filter, |event| async {
 // When events occur, all subscribers are notified
 ```
 
-**Relevant crates:** `ironclaw_events`, `ironclaw_event_streams`, `ironclaw_event_projections`
+**Relevant crates:** `ironclaw_event_log`, `ironclaw_event_streams`, `ironclaw_event_projections`
 
 ---
 

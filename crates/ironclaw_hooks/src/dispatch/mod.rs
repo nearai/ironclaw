@@ -4,7 +4,7 @@
 //!
 //! This crate ships the dispatcher contract; the Reborn-side middleware that
 //! wires it into `LoopCapabilityPort` / `LoopPromptPort` / etc. lives in
-//! `ironclaw_runner::loop_driver_host` and lands in a follow-up slice.
+//! `ironclaw_turn_runner::loop_driver_host` and lands in a follow-up slice.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
-use ironclaw_events::{
+use ironclaw_event_log::{
     EventCursor, RuntimeEvent, RuntimeEventKind, SecurityAuditEvent, SecurityAuditSink,
     SecurityBoundary, SecurityDecision,
 };
@@ -1280,7 +1280,7 @@ impl HookDispatcher {
     /// Dispatch event-triggered observer hooks for a durable runtime event.
     ///
     /// This path is intentionally separate from `dispatch_observer_at`: event
-    /// hooks are fed by durable event-log replay in `ironclaw_runner`, not by
+    /// hooks are fed by durable event-log replay in `ironclaw_turn_runner`, not by
     /// the inline loop tick. The hook sink is observer-only, so a hook can
     /// record audit facts but cannot gate or patch already-completed work.
     pub async fn dispatch_event_triggered_at(
@@ -2479,7 +2479,7 @@ mod tests {
     /// inside `dispatch_before_capability`'s `Decision { … }` arm.
     #[tokio::test]
     async fn hook_deny_records_security_audit_event_with_no_payload() {
-        use ironclaw_events::{
+        use ironclaw_event_log::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
         };
 
@@ -2556,7 +2556,7 @@ mod tests {
     /// shape, just with no capability id attached.
     #[tokio::test]
     async fn hook_deny_with_unparseable_capability_name_records_event_without_capability_id() {
-        use ironclaw_events::{
+        use ironclaw_event_log::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
         };
 
@@ -2625,7 +2625,7 @@ mod tests {
     /// how many hooks (across phases) deny the same logical invocation.
     #[tokio::test]
     async fn multiple_phase_denies_record_exactly_one_hook_deny_event() {
-        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary};
+        use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary};
 
         let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
         let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
@@ -2707,7 +2707,7 @@ mod tests {
     /// gate). `HookDeny` is reserved for explicit hook denies.
     #[tokio::test]
     async fn pause_approval_does_not_record_hook_deny_event() {
-        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+        use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityAuditSink};
 
         let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
         let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
@@ -2739,7 +2739,7 @@ mod tests {
     /// not a denial and must not emit a `HookDeny` security-audit event.
     #[tokio::test]
     async fn pause_auth_does_not_record_hook_deny_event() {
-        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+        use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityAuditSink};
 
         let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
         let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
@@ -2773,7 +2773,7 @@ mod tests {
     /// audit event must be recorded.
     #[tokio::test]
     async fn fail_closed_panic_does_not_record_hook_deny_event() {
-        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+        use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityAuditSink};
 
         let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
         let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
@@ -2816,7 +2816,7 @@ mod tests {
     /// `HookFailed`, not `HookDeny`. No `HookDeny` event must be recorded.
     #[tokio::test]
     async fn fail_closed_timeout_does_not_record_hook_deny_event() {
-        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+        use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityAuditSink};
 
         let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
         let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
@@ -2861,7 +2861,7 @@ mod tests {
     /// It must surface as `HookFailed`, never `HookDeny`.
     #[tokio::test]
     async fn fail_closed_missing_impl_does_not_record_hook_deny_event() {
-        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+        use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityAuditSink};
 
         let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
         let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
@@ -3469,7 +3469,7 @@ mod tests {
     /// pair a wrong-tier impl with a binding.
     ///
     /// What the type system **does not** enforce is *origin*: if a loader in
-    /// `ironclaw_runner` reads a registry-sourced extension hook and
+    /// `ironclaw_turn_runner` reads a registry-sourced extension hook and
     /// accidentally routes it through `install_builtin_before_capability`,
     /// the dispatcher will install it as a Builtin. That trust-class ↔ source
     /// pairing is the loader's contractual responsibility — see the

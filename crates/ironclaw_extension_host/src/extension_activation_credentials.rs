@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement, dispatch::CredentialStageError,
     resource::ResourceScope,

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
-use ironclaw_extensions::{
-    ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
-    ManifestSource,
+use ironclaw_extension_contracts::runtime::ExtensionAssetPath;
+use ironclaw_extension_registry::{
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
@@ -77,10 +77,8 @@ pub fn extension_asset_path(
 ) -> Result<VirtualPath, ProductOperationFailure> {
     let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
         .map_err(map_binding_error)?;
-    ExtensionAssetPath::new(asset_path.to_string())
-        .map_err(map_binding_error)?
-        .resolve_under(&root)
-        .map_err(map_binding_error)
+    let asset = ExtensionAssetPath::new(asset_path.to_string()).map_err(map_binding_error)?;
+    ironclaw_extension_registry::resolve_asset_under(&asset, &root).map_err(map_binding_error)
 }
 
 /// Read every file under `root` into inline bytes (paths relative to `root`),
@@ -188,11 +186,12 @@ pub fn parse_imported_manifest(
     manifest_toml: &str,
     source: ManifestSource,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected imported extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected imported extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected imported extension: {error}"),
@@ -206,7 +205,7 @@ pub fn parse_imported_manifest(
         &host_ports,
         None,
         &contracts,
-        ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
+        ironclaw_extension_registry::PackageRootBinding::FabricateOnLoad,
     )
     .map_err(map_binding_error)
 }
@@ -246,7 +245,7 @@ fn extension_package_from_files(
     // contract).
     let mut resolved_with_root = record.resolved().clone();
     resolved_with_root.root_binding =
-        ironclaw_extensions::PackageRootBinding::Materialized(root.clone());
+        ironclaw_extension_registry::PackageRootBinding::Materialized(root.clone());
     let record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
         source,
@@ -326,7 +325,7 @@ fn extension_package_from_files(
 /// declares exactly one, and concatenating several vendors' instructions would
 /// produce guidance for a credential the user was not asked for.
 fn onboarding_from_auth_recipes(
-    manifest: &ironclaw_extensions::ResolvedExtensionManifest,
+    manifest: &ironclaw_extension_registry::ResolvedExtensionManifest,
 ) -> Option<LifecycleExtensionOnboarding> {
     manifest.auth.iter().find_map(|surface| {
         let (display_name, instructions, setup_url) = match surface.recipe.as_ref()? {
@@ -354,7 +353,7 @@ fn onboarding_from_auth_recipes(
 }
 
 fn manifest_declared_asset_paths(
-    manifest: &ironclaw_extensions::ExtensionManifestV2,
+    manifest: &ironclaw_extension_registry::ExtensionManifestV2,
 ) -> Vec<String> {
     let mut declared = Vec::new();
     if let ExtensionRuntimeV2::Wasm { module } = &manifest.runtime {
@@ -376,7 +375,7 @@ fn manifest_declared_asset_paths(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ironclaw_extensions::ManifestSource;
+    use ironclaw_extension_registry::ManifestSource;
     use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::runtime::RuntimeKind;
 
@@ -793,8 +792,8 @@ setup_url = "{expected_url}"
                 include_str!("../../../test-tools/ascii-renderer/manifest.toml"),
             ),
         ] {
-            let host_ports =
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+            let host_ports = ironclaw_host_api::host_port::default_host_port_catalog()
+                .expect("host port catalog");
             let contracts =
                 product_extension_host_api_contract_registry().expect("host API contracts");
             let record = ExtensionManifestRecord::from_toml(
@@ -822,7 +821,7 @@ setup_url = "{expected_url}"
         // survive onto the resolved contract, not just `package.package.root`.
         assert_eq!(
             package.resolved_manifest.root_binding,
-            ironclaw_extensions::PackageRootBinding::Materialized(
+            ironclaw_extension_registry::PackageRootBinding::Materialized(
                 VirtualPath::new("/system/extensions/uploaded-tool").unwrap()
             )
         );
@@ -851,23 +850,46 @@ setup_url = "{expected_url}"
         assert_eq!(reloaded.source, ManifestSource::InstalledLocal);
     }
 
+    /// A v3 manifest asserting first-party trust. Inline rather than an
+    /// `include_str!` of `packages/github/manifest.toml`: the only property
+    /// this test needs is `trust = "first_party_requested"` on a v3 manifest,
+    /// and reaching into a shipped product package for a fixture coupled the
+    /// test to 200 lines it does not own (WS2 §11.2.7 cross-package reach-ins).
+    const FIRST_PARTY_TRUST_CLAIM_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "veridian"
+name = "Veridian"
+version = "0.1.0"
+description = "fixture: an imported manifest claiming first-party trust"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/veridian_tool.wasm"
+
+[[tools]]
+id = "veridian.echo"
+description = "Echoes input"
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/veridian/echo.input.v1.json"
+"#;
+
     #[test]
     fn imported_extension_package_rejects_first_party_trust_claims() {
         let error = imported_extension_package(
             vec![(
                 "manifest.toml".to_string(),
-                include_str!("../../extensions/packages/github/manifest.toml")
-                    .as_bytes()
-                    .to_vec(),
+                FIRST_PARTY_TRUST_CLAIM_FIXTURE.as_bytes().to_vec(),
             )],
             &[],
         )
         .expect_err("first-party trust claims must be rejected");
-        // The bundled github manifest is v3, so the rejection comes from the
-        // v3 reader's source/trust gate ("trust `FirstPartyRequested` is not
-        // allowed for this manifest source"); the v2 wording is "not allowed
-        // to assert trust". Pin the shared semantic: the error names trust
-        // and ties the rejection to the manifest source.
+        // The fixture is v3, so the rejection comes from the v3 reader's
+        // source/trust gate ("trust `FirstPartyRequested` is not allowed for
+        // this manifest source"); the v2 wording is "not allowed to assert
+        // trust". Pin the shared semantic: the error names trust and ties the
+        // rejection to the manifest source.
         let message = format!("{error}");
         assert!(
             message.contains("trust") && message.contains("not allowed for this manifest source"),

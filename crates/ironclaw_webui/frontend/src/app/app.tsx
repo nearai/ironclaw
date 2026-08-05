@@ -193,6 +193,7 @@ function AuthenticatedLayout({ auth }) {
           isChecking={auth.isChecking}
           isAdmin={auth.isAdmin}
           rebornProjectsEnabled={auth.rebornProjectsEnabled}
+          workspaceRequiresScopedProjection={auth.workspaceRequiresScopedProjection}
           regressionArtifactExportEnabled={
             auth.regressionArtifactExportEnabled
           }

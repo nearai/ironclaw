@@ -12,7 +12,7 @@ let stagedSeq = 0;
 
 // Default budgets used only as a fallback when the session has not yet
 // resolved the server contract. They mirror `MAX_INLINE_*` in
-// `crates/ironclaw_product/src/product_surface_inbound.rs`; the server still
+// `crates/ironclaw_assistant/src/product_surface_inbound.rs`; the server still
 // re-validates, so a drift here only changes how early the UX warns.
 export const FALLBACK_ATTACHMENT_LIMITS = {
   accept: [],
