@@ -73,6 +73,10 @@ ironclaw ironhub install <name> --kind tool --force
 
 让代理搜索 IronHub、查看条目或安装包。它将获取目录、展示匹配结果，并在安装任何内容之前征求你的批准。
 
+<Note>
+在对话中批准无法安装社区条目（来源为 `New`）。模型侧的安装路径不会设置门控所需的确认标志，因此无论你如何回答，安装都会被拒绝。此类包请改用 CLI 并加上 `--acknowledge-unverified`。
+</Note>
+
 ---
 
 ## 安装位置
