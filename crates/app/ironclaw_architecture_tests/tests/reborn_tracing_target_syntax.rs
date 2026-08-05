@@ -133,14 +133,23 @@ fn line_of(source: &str, offset: usize) -> usize {
         + 1
 }
 
+/// Fail-closed traversal: a directory or entry this scan cannot read is a
+/// broken gate, not a file to skip — silently narrowing the scan is how a
+/// regression gate goes green while enforcing nothing (the same shape the
+/// `scanned > 100` floor below guards from the other side).
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("scan cannot read directory {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("scan cannot read an entry of {}: {error}", dir.display())
+        });
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "target") {
+            if path
+                .file_name()
+                .is_some_and(|name| name == "target" || name == "node_modules")
+            {
                 continue;
             }
             rust_files(&path, out);
@@ -170,9 +179,13 @@ fn tracing_macros_set_the_metadata_target() {
         if file.file_name().is_some_and(|name| name == SELF_FILE) {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(file) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(file).unwrap_or_else(|error| {
+            panic!(
+                "scan cannot read {}: {error} — an unreadable production source \
+                 must fail the gate, not shrink it",
+                file.display()
+            )
+        });
         scanned += 1;
         // Comments and string bodies are stripped so a doc comment quoting the
         // wrong form is not a build failure. Newlines survive, so line numbers

@@ -3806,7 +3806,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         class FakeResponse:
-            def raise_for_status(self):
+            def raise_for_status(self) -> None:
                 return None
 
             def json(self):
@@ -5885,7 +5885,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             def json(self):
                 return self._body
 
-            def raise_for_status(self):
+            def raise_for_status(self) -> None:
                 # The production extension-setup path calls this on the catalog
                 # response. A double that omits a method its caller uses turns a
                 # real assertion into an AttributeError — the suite has never run
@@ -6081,7 +6081,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             def json(self):
                 return self._body
 
-            def raise_for_status(self):
+            def raise_for_status(self) -> None:
                 # The production extension-setup path calls this on the catalog
                 # response. A double that omits a method its caller uses turns a
                 # real assertion into an AttributeError — the suite has never run
@@ -6188,7 +6188,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             def json(self):
                 return self.body
 
-            def raise_for_status(self):
+            def raise_for_status(self) -> None:
                 # The production extension-setup path calls this on the catalog
                 # response. A double that omits a method its caller uses turns a
                 # real assertion into an AttributeError — the suite has never run

@@ -403,60 +403,132 @@ impl PrivacyFilterAdapter for CommandPrivacyFilterAdapter {
             drop(stdin);
             Ok::<(), std::io::Error>(())
         };
-        let (write_result, output) = tokio::time::timeout(self.timeout, async move {
-            tokio::join!(write_request, child.wait_with_output())
-        })
-        .await
-        .map_err(|_| TraceContributionError::RedactionFailed {
-            reason: format!(
-                "privacy filter sidecar timed out after {}ms",
-                self.timeout.as_millis()
-            ),
-        })?;
+        // Both output pipes are drained with a **capped capture**: at most
+        // `limit + 1` bytes are retained per stream (enough to prove an
+        // overflow) and the rest is read and discarded. `wait_with_output`
+        // buffered both streams unbounded *before* the length checks ran, so a
+        // runaway sidecar could exhaust process memory before
+        // `max_stdout_bytes` ever rejected it. Discard-draining keeps the
+        // child from blocking on a full pipe (so it can still exit and the
+        // limit error surfaces), keeps peak memory bounded by the limits, and
+        // leaves the timeout as the backstop for a sidecar that never stops.
+        let mut stdout_pipe =
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| TraceContributionError::RedactionFailed {
+                    reason: "privacy filter sidecar stdout was not available".to_string(),
+                })?;
+        let mut stderr_pipe =
+            child
+                .stderr
+                .take()
+                .ok_or_else(|| TraceContributionError::RedactionFailed {
+                    reason: "privacy filter sidecar stderr was not available".to_string(),
+                })?;
+        let stdout_cap = self.max_stdout_bytes;
+        let stderr_cap = self.max_stderr_bytes;
+        let (write_result, stdout_result, stderr_result, status_result) =
+            tokio::time::timeout(self.timeout, async move {
+                tokio::join!(
+                    write_request,
+                    read_pipe_capped(&mut stdout_pipe, stdout_cap),
+                    read_pipe_capped(&mut stderr_pipe, stderr_cap),
+                    child.wait()
+                )
+            })
+            .await
+            .map_err(|_| TraceContributionError::RedactionFailed {
+                reason: format!(
+                    "privacy filter sidecar timed out after {}ms",
+                    self.timeout.as_millis()
+                ),
+            })?;
         write_result.map_err(|error| TraceContributionError::RedactionFailed {
             reason: format!("failed to write privacy filter request: {error}"),
         })?;
-        let output = output.map_err(|error| TraceContributionError::RedactionFailed {
+        let (stdout, stdout_total) =
+            stdout_result.map_err(|error| TraceContributionError::RedactionFailed {
+                reason: format!("privacy filter sidecar failed: {error}"),
+            })?;
+        let (stderr, stderr_total) =
+            stderr_result.map_err(|error| TraceContributionError::RedactionFailed {
+                reason: format!("privacy filter sidecar failed: {error}"),
+            })?;
+        let status = status_result.map_err(|error| TraceContributionError::RedactionFailed {
             reason: format!("privacy filter sidecar failed: {error}"),
         })?;
 
-        if output.stdout.len() > self.max_stdout_bytes {
+        if stdout_total > self.max_stdout_bytes {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
                     "stdout exceeded privacy filter sidecar limit: stdout_len={} max_stdout_bytes={}",
-                    output.stdout.len(),
-                    self.max_stdout_bytes
+                    stdout_total, self.max_stdout_bytes
                 ),
             });
         }
-        if output.stderr.len() > self.max_stderr_bytes {
+        if stderr_total > self.max_stderr_bytes {
+            // The hash fingerprints the retained prefix — the overflowed tail
+            // was discarded unread, by design.
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
                     "stderr exceeded privacy filter sidecar limit: stderr_len={} stderr_hash={} max_stderr_bytes={}",
-                    output.stderr.len(),
-                    privacy_filter_bytes_hash(&output.stderr),
+                    stderr_total,
+                    privacy_filter_bytes_hash(&stderr),
                     self.max_stderr_bytes
                 ),
             });
         }
 
-        if !output.status.success() {
+        if !status.success() {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
                     "privacy filter sidecar exited with {}; stderr_len={} stderr_hash={}",
-                    output.status,
-                    output.stderr.len(),
-                    privacy_filter_bytes_hash(&output.stderr)
+                    status,
+                    stderr_total,
+                    privacy_filter_bytes_hash(&stderr)
                 ),
             });
         }
 
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        let value: Value = serde_json::from_slice(&stdout).map_err(|error| {
             TraceContributionError::RedactionFailed {
                 reason: format!("failed to parse privacy filter output: {error}"),
             }
         })?;
         safe_privacy_filter_redaction_from_output(&value).map(Some)
+    }
+}
+
+/// Reads `reader` to EOF, **capturing at most `cap + 1` bytes** and discarding
+/// the rest, returning `(captured, total_read)`.
+///
+/// The one extra byte is what lets the caller distinguish "exactly at the
+/// limit" from "over it" without retaining an unbounded buffer; `total_read`
+/// keeps the limit-violation message honest about how much the sidecar
+/// actually produced.
+async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, usize)> {
+    use tokio::io::AsyncReadExt;
+
+    let mut captured = Vec::new();
+    let mut total = 0usize;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok((captured, total));
+        }
+        total = total.saturating_add(read);
+        if captured.len() <= cap {
+            let keep = cap
+                .saturating_add(1)
+                .saturating_sub(captured.len())
+                .min(read);
+            captured.extend_from_slice(&buffer[..keep]);
+        }
     }
 }
 

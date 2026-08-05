@@ -905,17 +905,29 @@ mod tests {
     fn text_free_but_valid_documents_classify_as_empty_not_failed() {
         use std::io::{Cursor, Write};
 
-        fn pptx_with_slides(slides: &[&str]) -> Vec<u8> {
+        fn zip_with_entries(entries: &[(&str, &str)]) -> Vec<u8> {
             let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
-            for (index, xml) in slides.iter().enumerate() {
-                writer
-                    .start_file(format!("ppt/slides/slide{}.xml", index + 1), options)
-                    .expect("start slide");
-                writer.write_all(xml.as_bytes()).expect("write slide");
+            for (name, xml) in entries {
+                writer.start_file(*name, options).expect("start entry");
+                writer.write_all(xml.as_bytes()).expect("write entry");
             }
             writer.finish().expect("finish zip").into_inner()
+        }
+
+        fn pptx_with_slides(slides: &[&str]) -> Vec<u8> {
+            let entries = slides
+                .iter()
+                .enumerate()
+                .map(|(index, xml)| (format!("ppt/slides/slide{}.xml", index + 1), *xml))
+                .collect::<Vec<_>>();
+            zip_with_entries(
+                &entries
+                    .iter()
+                    .map(|(name, xml)| (name.as_str(), *xml))
+                    .collect::<Vec<_>>(),
+            )
         }
 
         // A valid deck whose slides carry only markup — an image-only deck.
@@ -928,6 +940,36 @@ mod tests {
             ),
             DocumentExtraction::Empty,
             "an image-only deck was processed fine and simply has no text"
+        );
+
+        // A valid workbook whose one sheet has structure but no cell values.
+        let empty_workbook = zip_with_entries(&[(
+            "xl/worksheets/sheet1.xml",
+            "<worksheet><sheetData/></worksheet>",
+        )]);
+        assert_eq!(
+            extract_document(
+                &empty_workbook,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                Some("book.xlsx"),
+            ),
+            DocumentExtraction::Empty,
+            "an empty spreadsheet was processed fine and simply has no text"
+        );
+
+        // A valid word document whose body is markup only — a picture-only file.
+        let picture_only_doc = zip_with_entries(&[(
+            "word/document.xml",
+            "<w:document><w:body><w:p/></w:body></w:document>",
+        )]);
+        assert_eq!(
+            extract_document(
+                &picture_only_doc,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                Some("report.docx"),
+            ),
+            DocumentExtraction::Empty,
+            "a picture-only document was processed fine and simply has no text"
         );
 
         // A structurally valid RTF document with no text runs.

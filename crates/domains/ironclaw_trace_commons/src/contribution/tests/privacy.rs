@@ -419,7 +419,11 @@ fn require_posix_shell() {
 /// Every pre-existing sidecar test opens with `cat >/dev/null`, i.e. drains
 /// stdin first — structurally the one ordering that cannot deadlock — and
 /// passes 5 bytes of input. This one inverts both: the sidecar writes
-/// ~256 KiB of stdout *before* reading, against ~256 KiB of input.
+/// ~256 KiB of stdout *before* reading, against ~256 KiB of input. The
+/// padding is spaces, which `serde_json` skips as leading whitespace, so the
+/// exchange must also *succeed* — a test that only outlived the timeout would
+/// pass on any immediate adapter failure. (`printf '%262144s'` rather than
+/// `seq`, which POSIX does not guarantee `/bin/sh` can reach.)
 ///
 /// Wrapped in an outer timeout so a regression fails the suite in seconds
 /// instead of hanging CI until the job limit.
@@ -431,7 +435,7 @@ async fn command_privacy_filter_does_not_deadlock_on_a_sidecar_that_writes_befor
         .with_args([
             "-c",
             // Fill the stdout pipe well past its buffer, then read stdin.
-            "printf 'x%.0s' $(seq 1 262144); cat >/dev/null; \
+            "printf '%262144s' ''; cat >/dev/null; \
              printf '{\"redacted_text\":\"ok\"}'",
         ])
         .with_output_limits(2 * 1024 * 1024, 64 * 1024);
@@ -443,12 +447,15 @@ async fn command_privacy_filter_does_not_deadlock_on_a_sidecar_that_writes_befor
     )
     .await;
 
-    assert!(
-        result.is_ok(),
-        "the sidecar exchange deadlocked: stdin must be written concurrently \
-         with draining stdout, and the whole exchange must sit under the \
-         adapter timeout"
-    );
+    let redaction = result
+        .expect(
+            "the sidecar exchange deadlocked: stdin must be written concurrently \
+             with draining stdout, and the whole exchange must sit under the \
+             adapter timeout",
+        )
+        .expect("the sidecar exchange must succeed")
+        .expect("the sidecar must return a redaction");
+    assert_eq!(redaction.redacted_text, "ok");
 }
 
 #[cfg(unix)]
