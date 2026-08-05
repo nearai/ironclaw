@@ -395,25 +395,39 @@ async fn startup_imports_exact_rc1_hosted_monolithic_extension_snapshot() {
             "source": "host_bundled",
             "manifest_hash": "sha256:abc"
         }],
-        "installations": [{
-            "installation_id": "acme-tools-prod",
-            "extension_id": "acme-tools",
-            "activation_state": "enabled",
-            "manifest_ref": {
+        "installations": [
+            {
+                "installation_id": "acme-tools-prod",
                 "extension_id": "acme-tools",
-                "manifest_hash": "sha256:abc"
+                "activation_state": "enabled",
+                "manifest_ref": {
+                    "extension_id": "acme-tools",
+                    "manifest_hash": "sha256:abc"
+                },
+                "credential_bindings": [{
+                    "credential_handle": "api-token",
+                    "secret_handle": "secret-api-token"
+                }],
+                "health": {
+                    "status": "degraded",
+                    "message": "diagnostic-only rc1 state",
+                    "checked_at": "2026-07-01T00:00:00Z"
+                },
+                "updated_at": "2026-07-01T00:00:00Z"
             },
-            "credential_bindings": [{
-                "credential_handle": "api-token",
-                "secret_handle": "secret-api-token"
-            }],
-            "health": {
-                "status": "degraded",
-                "message": "diagnostic-only rc1 state",
-                "checked_at": "2026-07-01T00:00:00Z"
-            },
-            "updated_at": "2026-07-01T00:00:00Z"
-        }]
+            {
+                "installation_id": "acme-tools-disabled",
+                "extension_id": "acme-tools",
+                "activation_state": "disabled",
+                "manifest_ref": {
+                    "extension_id": "acme-tools",
+                    "manifest_hash": "sha256:abc"
+                },
+                "credential_bindings": [],
+                "health": null,
+                "updated_at": "2026-07-01T00:00:00Z"
+            }
+        ]
     });
     filesystem
         .put(
@@ -437,7 +451,7 @@ async fn startup_imports_exact_rc1_hosted_monolithic_extension_snapshot() {
         .await
         .expect("hosted rc1 snapshot imports into the 1.1 global authority");
     assert_eq!(first_report.sources_migrated, 1);
-    assert_eq!(first_report.installations_migrated, 1);
+    assert_eq!(first_report.installations_migrated, 2);
     let imported = store
         .get_installation(&installation_id("acme-tools-prod"))
         .await
@@ -445,6 +459,16 @@ async fn startup_imports_exact_rc1_hosted_monolithic_extension_snapshot() {
         .expect("rc1 installation is visible through the normalized store");
     assert_eq!(imported.extension_id().as_str(), "acme-tools");
     assert_eq!(imported.credential_bindings().len(), 1);
+    let disabled = store
+        .get_installation(&installation_id("acme-tools-disabled"))
+        .await
+        .unwrap()
+        .expect("disabled rc1 installation remains visible but disabled");
+    assert_eq!(
+        disabled.persisted_activation_state(),
+        ironclaw_extensions::ExtensionActivationState::Disabled,
+        "migration must never widen a disabled rc1 extension to enabled"
+    );
     assert!(
         filesystem.get(&snapshot_path).await.unwrap().is_some(),
         "the exact rc1 source stays available for rollback"

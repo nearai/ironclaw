@@ -18,6 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_processes = { path = "../ironclaw_processes" }

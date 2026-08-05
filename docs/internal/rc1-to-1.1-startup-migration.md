@@ -23,11 +23,11 @@ transforms.
 | Channel conversations | rc1 conversation roots | canonical conversation state | Merge roots collision-safely and verify every referenced canonical thread | rc1 roots are retained |
 | Idempotency | rc1 action records and transient leases | canonical filesystem ledger | Page all actions, copy durable outcomes, expire transient leases | rc1 action records are retained |
 | Processes | legacy process journal, locks, checkpoints, reservations | canonical process journal | Page all records; import journal; explicitly expire or supersede non-replayable control state | Legacy records are retained |
-| Slack OAuth | `slack_personal` provider/account/flow rows | `slack` provider rows | Copy exact account identities, handles, and tokens; expire incomplete flows; verify readback | Versioned backup plus original provider rows |
+| Slack OAuth | `slack_personal` provider/account/flow rows | `slack` provider rows | Copy exact account identities and secret handles without exposing or duplicating token material; expire incomplete flows; verify readback | Versioned backup plus original provider rows |
 | Extension installations | per-tenant `.installations/state.json` snapshots | global compatibility rows plus normalized v2 records | Discover every hosted snapshot, import manifests/installations, preserve owner, bindings, and activation state | Monolithic snapshots are retained |
 | Extension activation | rc1 `installed`/`disabled`/`enabled` state | normalized installation activation state | Preserve state; restore must never widen installed/disabled to enabled | rc1 snapshot plus compatibility row |
 | Slack setup | setup, identities, routes, DM targets, connection rows | admin configuration, generic identities/routes/DM targets | Import usable setup; active connections are superseded by canonical identity/OAuth state; stale connections expire; interrupted disconnect fails closed | All provider-specific rows are retained |
-| Telegram setup | setup, identities, DM targets, pairing rows | admin configuration, generic identities/DM targets | Import usable setup; one-time pairing challenges and pending completions expire explicitly | All provider-specific rows are retained |
+| Telegram setup | setup, identities, DM targets, pairing rows | admin configuration, generic identities/DM targets | Import usable setup; migrate a DM target only when exactly one active canonical identity can own it; count and retain targets with no active identity; fail on ambiguous ownership; expire one-time pairing challenges and pending completions explicitly | All provider-specific rows are retained |
 | Triggers | backend trigger repository | same backend repository | Run existing backend schema migration and verify repository access; no record transform | Same trigger rows |
 | User/system skills | scoped filesystem skill roots | same roots through 1.1 mount catalog | Inventory and verify paths remain reachable; no content transform | Same skill files |
 
@@ -48,8 +48,11 @@ identifiers, message contents, credentials, or secret handles.
 - A normal error path marks the attempt failed immediately. A dropped lease has
   a best-effort fail guard so an ordinary builder failure does not impose the
   full lease timeout.
-- Every transform is CAS-guarded and repeatable. A restart revalidates retained
-  source authorities and produces a zero-change aggregate report.
+- Every transform is repeatable and uses its owning store's write controls:
+  bounded CAS for read-modify-write records, create-only writes for immutable
+  rows, and idempotent page writes plus read-back verification for transcript
+  projections. A restart revalidates retained source authorities and produces
+  a zero-change aggregate report.
 - Non-replayable ephemeral state is never guessed: active process locks,
   reservations, incomplete OAuth flows, stale connection attempts, and pairing
   challenges receive explicit expiration/supersession dispositions.

@@ -5,7 +5,7 @@
 //! only after domain-level read-back verification succeeds.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -13,8 +13,9 @@ use std::{
 };
 
 use chrono::{Duration, Utc};
+use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FilesystemError, Filter, Page, RecordKind, RecordVersion,
+    CasExpectation, Entry, FileType, FilesystemError, Filter, Page, RecordKind, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::path::VirtualPath;
@@ -32,6 +33,8 @@ const DOMAIN_MIGRATION_ROOT: &str =
 const LEASE_MINUTES: i64 = 10;
 const HEARTBEAT_SECONDS: u64 = 60;
 const ACQUIRE_RETRIES: usize = 8;
+const MAX_MIGRATION_TENANTS: usize = 100_000;
+const MAX_CHANNEL_THREAD_REFERENCES: usize = 1_000_000;
 
 #[derive(Debug, Error)]
 pub enum ReleasePairMigrationError {
@@ -241,11 +244,11 @@ where
 {
     pub async fn acquire(filesystem: Arc<F>) -> Result<Self, ReleasePairMigrationError> {
         let path = migration_path()?;
+        let mut source_fingerprint = None;
         for _ in 0..ACQUIRE_RETRIES {
             let existing = filesystem.get(&path).await?;
             let now = Utc::now();
-            let fingerprint = fingerprint_source(filesystem.as_ref()).await?;
-            let (cas, was_complete) = match existing {
+            let (cas, was_complete, retained_fingerprint) = match existing {
                 Some(versioned) => {
                     let prior: MigrationRecord = serde_json::from_slice(&versioned.entry.body)
                         .map_err(|error| ReleasePairMigrationError::Malformed(error.to_string()))?;
@@ -256,9 +259,19 @@ where
                     (
                         CasExpectation::Version(versioned.version),
                         prior.status == MigrationStatus::Complete,
+                        (prior.status == MigrationStatus::Complete)
+                            .then_some(prior.source_fingerprint),
                     )
                 }
-                None => (CasExpectation::Absent, false),
+                None => (CasExpectation::Absent, false, None),
+            };
+            let fingerprint = match retained_fingerprint.or_else(|| source_fingerprint.clone()) {
+                Some(fingerprint) => fingerprint,
+                None => {
+                    let fingerprint = fingerprint_source(filesystem.as_ref()).await?;
+                    source_fingerprint = Some(fingerprint.clone());
+                    fingerprint
+                }
             };
             let record = MigrationRecord {
                 schema: MIGRATION_SCHEMA.to_string(),
@@ -315,18 +328,18 @@ where
     }
 
     pub async fn complete(mut self, report: Value) -> Result<(), ReleasePairMigrationError> {
-        self.write_domain_completion_records(&report).await?;
-        self.stop_heartbeat();
+        self.stop_heartbeat().await?;
         self.record.status = MigrationStatus::Complete;
         self.record.finished_at = Some(Utc::now());
-        self.record.report = Some(report);
+        self.record.report = Some(report.clone());
         self.replace().await?;
         self.finished_locally = true;
+        self.write_domain_completion_records(&report).await?;
         Ok(())
     }
 
     pub async fn fail(mut self) -> Result<(), ReleasePairMigrationError> {
-        self.stop_heartbeat();
+        self.stop_heartbeat().await?;
         self.record.status = MigrationStatus::Failed;
         self.record.finished_at = Some(Utc::now());
         self.record.report = None;
@@ -360,10 +373,25 @@ where
         }
     }
 
-    fn stop_heartbeat(&mut self) {
+    async fn stop_heartbeat(&mut self) -> Result<(), ReleasePairMigrationError> {
         if let Some(heartbeat) = self.heartbeat.take() {
             heartbeat.abort();
+            let _ = heartbeat.await;
         }
+        let observed = self
+            .filesystem
+            .get(&self.path)
+            .await?
+            .ok_or(ReleasePairMigrationError::LostLease)?;
+        let stored: MigrationRecord = serde_json::from_slice(&observed.entry.body)
+            .map_err(|error| ReleasePairMigrationError::Malformed(error.to_string()))?;
+        if stored.attempt_id != self.record.attempt_id
+            || stored.status != MigrationStatus::InProgress
+        {
+            return Err(ReleasePairMigrationError::LostLease);
+        }
+        *self.version.lock().await = observed.version;
+        Ok(())
     }
 
     async fn write_domain_completion_records(
@@ -415,17 +443,31 @@ where
                             "domain completion disappeared during verification".to_string(),
                         )
                     })?;
-                    let existing: DomainCompletionRecord =
+                    let existing_record: DomainCompletionRecord =
                         serde_json::from_slice(&existing.entry.body).map_err(|error| {
                             ReleasePairMigrationError::Malformed(error.to_string())
                         })?;
-                    if existing.schema != record.schema
-                        || existing.source_release != SOURCE_RELEASE
-                        || existing.target_release != TARGET_RELEASE
-                        || existing.domain != *domain
-                        || existing.status != MigrationStatus::Complete
+                    if existing_record.schema != record.schema
+                        || existing_record.source_release != SOURCE_RELEASE
+                        || existing_record.target_release != TARGET_RELEASE
+                        || existing_record.domain != *domain
+                        || existing_record.status != MigrationStatus::Complete
                     {
                         return Err(ReleasePairMigrationError::UnsupportedReleasePair);
+                    }
+                    if existing_record.report != record.report {
+                        let entry = Entry::record(
+                            RecordKind::new("release_pair_domain_completion").map_err(|error| {
+                                ReleasePairMigrationError::Malformed(error.to_string())
+                            })?,
+                            &serde_json::to_value(&record).map_err(|error| {
+                                ReleasePairMigrationError::Malformed(error.to_string())
+                            })?,
+                        )
+                        .map_err(|error| ReleasePairMigrationError::Malformed(error.to_string()))?;
+                        self.filesystem
+                            .put(&path, entry, CasExpectation::Version(existing.version))
+                            .await?;
                     }
                 }
                 Err(error) => return Err(error.into()),
@@ -480,7 +522,9 @@ where
         if self.finished_locally || self.record.status != MigrationStatus::InProgress {
             return;
         }
-        self.stop_heartbeat();
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -579,40 +623,7 @@ pub async fn migrate_channel_roots<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    let tenants_root = VirtualPath::new("/tenants")
-        .map_err(|error| ReleasePairMigrationError::Malformed(error.to_string()))?;
-    let mut tenant_segments = BTreeSet::new();
-    let mut offset = 0u64;
-    loop {
-        let rows = filesystem
-            .query(
-                &tenants_root,
-                &Filter::All,
-                Page::new(offset, Page::MAX_LIMIT),
-            )
-            .await?;
-        if rows.is_empty() {
-            break;
-        }
-        let received = rows.len();
-        for row in rows {
-            let path = row.path.as_str();
-            if !ironclaw_extension_host::is_rc1_channel_state_path(path) {
-                continue;
-            }
-            if let Some(segment) = path
-                .strip_prefix("/tenants/")
-                .and_then(|rest| rest.split('/').next())
-                && !segment.is_empty()
-            {
-                tenant_segments.insert(segment.to_string());
-            }
-        }
-        if received < Page::MAX_LIMIT as usize {
-            break;
-        }
-        offset = offset.saturating_add(received as u64);
-    }
+    let tenant_segments = tenant_segments(filesystem).await?;
 
     let mut aggregate = ChannelRootMigrationReport {
         tenants: tenant_segments.len(),
@@ -706,6 +717,12 @@ where
             ))
     });
     aggregate.referenced_threads.dedup();
+    if aggregate.referenced_threads.len() > MAX_CHANNEL_THREAD_REFERENCES {
+        return Err(ReleasePairMigrationError::Domain {
+            domain: "channel canonical-thread verification",
+            reason: "channel thread-reference bound exceeded".to_string(),
+        });
+    }
     Ok(aggregate)
 }
 
@@ -719,38 +736,69 @@ pub async fn discover_rc1_hosted_extension_snapshots<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    let tenants_root = virtual_path("/tenants")?;
     let mut snapshots = BTreeSet::new();
-    let mut offset = 0u64;
-    loop {
-        let rows = filesystem
-            .query(
-                &tenants_root,
-                &Filter::All,
-                Page::new(offset, Page::MAX_LIMIT),
-            )
-            .await?;
-        if rows.is_empty() {
-            break;
+    for tenant in tenant_segments(filesystem).await? {
+        let path = format!("/tenants/{tenant}/system/extensions/.installations/state.json");
+        let snapshot = virtual_path(&path)?;
+        if filesystem.get(&snapshot).await?.is_some() {
+            snapshots.insert(path);
         }
-        let received = rows.len();
-        for row in rows {
-            let path = row.path.as_str();
-            if path.starts_with("/tenants/")
-                && path.ends_with("/system/extensions/.installations/state.json")
-            {
-                snapshots.insert(path.to_string());
-            }
-        }
-        if received < Page::MAX_LIMIT as usize {
-            break;
-        }
-        offset = offset.saturating_add(received as u64);
     }
     snapshots
         .into_iter()
         .map(|path| virtual_path(&path))
         .collect()
+}
+
+/// Import every hosted rc1 installation authority and return the aggregate
+/// redacted report. Keeping the loop here prevents composition from owning a
+/// release-specific restoration policy.
+pub async fn migrate_rc1_hosted_extension_snapshots<F>(
+    filesystem: &F,
+    store: &mut ExtensionInstallationStore,
+) -> Result<ExtensionInstallationMigrationReport, ReleasePairMigrationError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    for snapshot in discover_rc1_hosted_extension_snapshots(filesystem).await? {
+        store
+            .import_rc1_snapshot_at(&snapshot)
+            .await
+            .map_err(|error| ReleasePairMigrationError::Domain {
+                domain: "extension installation",
+                reason: error.to_string(),
+            })?;
+    }
+    let report = store.rc1_snapshot_migration_report();
+    Ok(ExtensionInstallationMigrationReport {
+        sources_migrated: report.sources_migrated,
+        sources_unchanged: report.sources_unchanged,
+        manifests_migrated: report.manifests_migrated,
+        manifests_unchanged: report.manifests_unchanged,
+        installations_migrated: report.installations_migrated,
+        installations_unchanged: report.installations_unchanged,
+    })
+}
+
+async fn tenant_segments<F>(filesystem: &F) -> Result<BTreeSet<String>, ReleasePairMigrationError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let tenants_root = virtual_path("/tenants")?;
+    let entries = filesystem
+        .list_dir_bounded(&tenants_root, MAX_MIGRATION_TENANTS.saturating_add(1))
+        .await?;
+    if entries.len() > MAX_MIGRATION_TENANTS {
+        return Err(ReleasePairMigrationError::Domain {
+            domain: "tenant discovery",
+            reason: "tenant bound exceeded".to_string(),
+        });
+    }
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry.file_type == FileType::Directory && entry.name != "__system__")
+        .map(|entry| entry.name)
+        .collect())
 }
 
 /// Verify that every channel binding still resolves to a durable canonical
@@ -766,56 +814,87 @@ where
         return Ok(());
     }
 
-    let tenants_root = virtual_path("/tenants")?;
-    let mut headers = Vec::new();
-    let mut offset = 0u64;
-    loop {
-        let rows = filesystem
-            .query(
-                &tenants_root,
-                &Filter::All,
-                Page::new(offset, Page::MAX_LIMIT),
-            )
-            .await?;
-        if rows.is_empty() {
-            break;
-        }
-        let received = rows.len();
-        for row in rows {
-            if !row.path.as_str().ends_with("/thread.json") {
-                continue;
-            }
-            let header =
-                serde_json::from_slice::<ironclaw_threads::SessionThreadRecord>(&row.entry.body)
-                    .map_err(|error| ReleasePairMigrationError::Domain {
-                        domain: "channel canonical-thread verification",
-                        reason: format!("malformed canonical thread header: {error}"),
-                    })?;
-            headers.push(header);
-        }
-        if received < Page::MAX_LIMIT as usize {
-            break;
-        }
-        offset = offset.saturating_add(received as u64);
-    }
-
+    let mut remaining =
+        BTreeMap::<(String, String, Option<String>), BTreeSet<Option<String>>>::new();
     for reference in &report.referenced_threads {
-        let found = headers.iter().any(|header| {
-            header.scope.tenant_id == reference.tenant_id
-                && header.thread_id == reference.thread_id
-                && reference
+        remaining
+            .entry((
+                reference.tenant_id.as_str().to_string(),
+                reference.thread_id.as_str().to_string(),
+                reference
+                    .project_id
+                    .as_ref()
+                    .map(|value| value.as_str().to_string()),
+            ))
+            .or_default()
+            .insert(
+                reference
                     .agent_id
                     .as_ref()
-                    .is_none_or(|agent| header.scope.agent_id == *agent)
-                && header.scope.project_id == reference.project_id
-        });
-        if !found {
-            return Err(ReleasePairMigrationError::Domain {
-                domain: "channel canonical-thread verification",
-                reason: "a migrated channel binding references a missing canonical thread"
-                    .to_string(),
-            });
+                    .map(|value| value.as_str().to_string()),
+            );
+    }
+    let referenced_tenants = remaining
+        .keys()
+        .map(|(tenant, _, _)| tenant.clone())
+        .collect::<BTreeSet<_>>();
+    for tenant in referenced_tenants {
+        let tenant_root = virtual_path(&format!("/tenants/{tenant}"))?;
+        let mut offset = 0u64;
+        loop {
+            let rows = filesystem
+                .query(
+                    &tenant_root,
+                    &Filter::All,
+                    Page::new(offset, Page::MAX_LIMIT),
+                )
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let received = rows.len();
+            for row in rows {
+                if !row.path.as_str().ends_with("/thread.json")
+                    || row.entry.kind.as_ref().map(RecordKind::as_str) != Some("session_thread")
+                {
+                    continue;
+                }
+                let header = serde_json::from_slice::<ironclaw_threads::SessionThreadRecord>(
+                    &row.entry.body,
+                )
+                .map_err(|error| ReleasePairMigrationError::Domain {
+                    domain: "channel canonical-thread verification",
+                    reason: format!("malformed canonical thread header: {error}"),
+                })?;
+                let key = (
+                    header.scope.tenant_id.as_str().to_string(),
+                    header.thread_id.as_str().to_string(),
+                    header
+                        .scope
+                        .project_id
+                        .as_ref()
+                        .map(|value| value.as_str().to_string()),
+                );
+                if let Some(agents) = remaining.get_mut(&key) {
+                    agents.remove(&None);
+                    agents.remove(&Some(header.scope.agent_id.as_str().to_string()));
+                    if agents.is_empty() {
+                        remaining.remove(&key);
+                    }
+                }
+            }
+            if received < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(received as u64);
         }
+    }
+
+    if !remaining.is_empty() {
+        return Err(ReleasePairMigrationError::Domain {
+            domain: "channel canonical-thread verification",
+            reason: "a migrated channel binding references a missing canonical thread".to_string(),
+        });
     }
     Ok(())
 }
@@ -832,21 +911,6 @@ pub fn redacted_core_report(
     installations: Option<&ExtensionInstallationMigrationReport>,
     extension_state: Option<&ironclaw_extension_host::Rc1ChannelStateMigrationReport>,
 ) -> Value {
-    let installations = installations.copied().unwrap_or_default();
-    let extension_state = extension_state.cloned().unwrap_or_default();
-    let extension_state_scopes = extension_state
-        .scopes
-        .iter()
-        .map(|scope| {
-            json!({
-                "migrated": scope.migrated,
-                "unchanged": scope.unchanged,
-                "skipped": scope.skipped,
-                "conflicting": scope.conflicting,
-                "failed": scope.failed,
-            })
-        })
-        .collect::<Vec<_>>();
     let thread_scopes = threads
         .scopes
         .iter()
@@ -877,7 +941,7 @@ pub fn redacted_core_report(
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut report = json!({
         "processes": {
             "already_complete": process.already_complete,
             "migrated": process.imported_journal_entries,
@@ -930,19 +994,39 @@ pub fn redacted_core_report(
             "expired_flows": oauth.incomplete_flows_expired,
             "backups_created": oauth.rollback_backups_created,
             "backups_reused": oauth.rollback_backups_reused,
-        },
-        "extension_installations": {
-            "migrated": installations.manifests_migrated
-                .saturating_add(installations.installations_migrated),
-            "unchanged": installations.manifests_unchanged
-                .saturating_add(installations.installations_unchanged),
-            "skipped": 0,
-            "conflicting": 0,
-            "failed": 0,
-            "sources_migrated": installations.sources_migrated,
-            "sources_unchanged": installations.sources_unchanged,
-        },
-        "channel_extension_state": {
+        }
+    });
+    if let (Value::Object(domains), Some(installations)) = (&mut report, installations) {
+        domains.insert(
+            "extension_installations".to_string(),
+            json!({
+                "migrated": installations.manifests_migrated
+                    .saturating_add(installations.installations_migrated),
+                "unchanged": installations.manifests_unchanged
+                    .saturating_add(installations.installations_unchanged),
+                "skipped": 0,
+                "conflicting": 0,
+                "failed": 0,
+                "sources_migrated": installations.sources_migrated,
+                "sources_unchanged": installations.sources_unchanged,
+            }),
+        );
+    }
+    if let (Value::Object(domains), Some(extension_state)) = (&mut report, extension_state) {
+        let extension_state_scopes = extension_state
+            .scopes
+            .iter()
+            .map(|scope| {
+                json!({
+                    "migrated": scope.migrated,
+                    "unchanged": scope.unchanged,
+                    "skipped": scope.skipped,
+                    "conflicting": scope.conflicting,
+                    "failed": scope.failed,
+                })
+            })
+            .collect::<Vec<_>>();
+        domains.insert("channel_extension_state".to_string(), json!({
             "migrated": extension_state.configuration_values
                 .saturating_add(extension_state.identities)
                 .saturating_add(extension_state.route_values)
@@ -951,6 +1035,7 @@ pub fn redacted_core_report(
                 .saturating_add(extension_state.proof_code_pairing_rows_unchanged),
             "skipped": extension_state.proof_code_pairing_challenges_expired
                 .saturating_add(extension_state.proof_code_pending_completions_expired)
+                .saturating_add(extension_state.unbound_dm_targets_skipped)
                 .saturating_add(extension_state.oauth_channel_stale_connections_expired)
                 .saturating_add(extension_state.oauth_channel_active_connections_superseded)
                 .saturating_add(extension_state.oauth_channel_disconnected_connections_superseded),
@@ -960,6 +1045,7 @@ pub fn redacted_core_report(
             "identities": extension_state.identities,
             "route_values": extension_state.route_values,
             "dm_targets": extension_state.dm_targets,
+            "unbound_dm_targets_skipped": extension_state.unbound_dm_targets_skipped,
             "oauth_channel_connections_unchanged": extension_state.oauth_channel_connections_unchanged,
             "oauth_channel_active_connections_superseded": extension_state
                 .oauth_channel_active_connections_superseded,
@@ -974,8 +1060,9 @@ pub fn redacted_core_report(
             "proof_code_pairing_rows_unchanged": extension_state
                 .proof_code_pairing_rows_unchanged,
             "scopes": extension_state_scopes,
-        }
-    })
+        }));
+    }
+    report
 }
 
 #[cfg(test)]
@@ -984,6 +1071,20 @@ mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
     use ironclaw_threads::{SessionThreadRecord, ThreadScope};
+
+    #[test]
+    fn absent_extension_domains_are_not_reported_as_completed() {
+        let report = redacted_core_report(
+            &ironclaw_processes::LegacyProcessMigrationReport::default(),
+            &ironclaw_threads::ThreadStartupMigrationReport::default(),
+            &ChannelRootMigrationReport::default(),
+            &ironclaw_auth::OAuthProviderAliasMigrationReport::default(),
+            None,
+            None,
+        );
+        assert!(report.get("extension_installations").is_none());
+        assert!(report.get("channel_extension_state").is_none());
+    }
 
     #[tokio::test]
     async fn database_wide_lease_fails_concurrent_startup_and_allows_failed_retry() {
@@ -1042,7 +1143,7 @@ mod tests {
             serde_json::from_slice(&domain.entry.body).expect("decode domain completion");
         assert_eq!(domain.domain, "threads");
         assert_eq!(domain.status, MigrationStatus::Complete);
-        assert_eq!(domain.report, json!({"migrated": 1}));
+        assert_eq!(domain.report, json!({"migrated": 0, "unchanged": 1}));
     }
 
     #[tokio::test]
@@ -1189,7 +1290,7 @@ mod tests {
             "/tenants/tenant-a/users/__system__/threads/agents/agent-a/owners/__system__/thread-a/thread.json",
         )
         .expect("header path");
-        let kind = RecordKind::new("thread").expect("thread kind");
+        let kind = RecordKind::new("session_thread").expect("thread kind");
         let header = serde_json::to_value(header).expect("serialize header");
         backend
             .put(

@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{
-    CasExpectation, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    CasExpectation, FileType, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
 };
 use ironclaw_host_api::path::VirtualPath;
 use thiserror::Error;
@@ -24,6 +25,9 @@ const LEGACY_SLACK_PROVIDER_ID: &str = "slack_personal";
 const CURRENT_SLACK_PROVIDER_ID: &str = "slack";
 const TENANTS_ROOT: &str = "/tenants";
 const BACKUP_SUFFIX: &str = ".ironclaw-1.0.0-rc1-slack-oauth-backup";
+const MAX_MIGRATION_TENANTS: usize = 100_000;
+const MAX_MIGRATION_USERS_PER_TENANT: usize = 100_000;
+const MAX_MIGRATION_CANDIDATES: usize = 1_000_000;
 
 /// Redacted aggregate for the startup coordinator and operator diagnostics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,16 @@ pub enum OAuthProviderAliasMigrationError {
     WriteConflict,
 }
 
+fn malformed_record(error: impl std::fmt::Display) -> OAuthProviderAliasMigrationError {
+    tracing::error!(%error, "product-auth migration record validation failed");
+    OAuthProviderAliasMigrationError::MalformedRecord
+}
+
+fn backend_error(error: impl std::fmt::Display) -> OAuthProviderAliasMigrationError {
+    tracing::error!(%error, "product-auth migration backend operation failed");
+    OAuthProviderAliasMigrationError::Backend
+}
+
 /// Fold every durable 1.0.0-rc.1 Slack OAuth account and flow forward.
 ///
 /// Exact source entries are copied beside the live record with
@@ -78,8 +92,8 @@ where
     F: RootFilesystem + 'static,
 {
     let candidates = discover_candidates(root.as_ref()).await?;
-    let current_provider = AuthProviderId::new(CURRENT_SLACK_PROVIDER_ID)
-        .map_err(|_| OAuthProviderAliasMigrationError::MalformedRecord)?;
+    let current_provider =
+        AuthProviderId::new(CURRENT_SLACK_PROVIDER_ID).map_err(malformed_record)?;
     let mut report = OAuthProviderAliasMigrationReport {
         examined_rows: candidates.examined_rows,
         ..OAuthProviderAliasMigrationReport::default()
@@ -88,8 +102,17 @@ where
     for row in candidates.rows {
         match classify_path(row.path.as_str()) {
             Some(AuthRecordKind::Account) => {
-                let mut account: CredentialAccount = serde_json::from_slice(&row.entry.body)
-                    .map_err(|_| OAuthProviderAliasMigrationError::MalformedRecord)?;
+                match provider_candidate(&row.entry.body)? {
+                    ProviderCandidate::Legacy => {}
+                    ProviderCandidate::Current => {
+                        report.account_rows_already_current =
+                            report.account_rows_already_current.saturating_add(1);
+                        continue;
+                    }
+                    ProviderCandidate::Other => continue,
+                }
+                let mut account: CredentialAccount =
+                    serde_json::from_slice(&row.entry.body).map_err(malformed_record)?;
                 verify_account_path(scoped.as_ref(), &row, &account)?;
                 if account.provider.as_str() == CURRENT_SLACK_PROVIDER_ID {
                     report.account_rows_already_current =
@@ -105,8 +128,17 @@ where
                 report.account_rows_migrated = report.account_rows_migrated.saturating_add(1);
             }
             Some(AuthRecordKind::Flow) => {
-                let mut flow: AuthFlowRecord = serde_json::from_slice(&row.entry.body)
-                    .map_err(|_| OAuthProviderAliasMigrationError::MalformedRecord)?;
+                match provider_candidate(&row.entry.body)? {
+                    ProviderCandidate::Legacy => {}
+                    ProviderCandidate::Current => {
+                        report.flow_rows_already_current =
+                            report.flow_rows_already_current.saturating_add(1);
+                        continue;
+                    }
+                    ProviderCandidate::Other => continue,
+                }
+                let mut flow: AuthFlowRecord =
+                    serde_json::from_slice(&row.entry.body).map_err(malformed_record)?;
                 verify_flow_path(scoped.as_ref(), &row, &flow)?;
                 if flow.provider.as_str() == CURRENT_SLACK_PROVIDER_ID {
                     report.flow_rows_already_current =
@@ -146,34 +178,85 @@ async fn discover_candidates<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    let tenants =
-        VirtualPath::new(TENANTS_ROOT).map_err(|_| OAuthProviderAliasMigrationError::Backend)?;
-    let mut offset = 0u64;
+    let tenants = VirtualPath::new(TENANTS_ROOT).map_err(backend_error)?;
     let mut examined_rows = 0usize;
     let mut rows = Vec::new();
-    loop {
-        let page = root
-            .query(&tenants, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
-            .await
-            .map_err(map_filesystem_error)?;
-        if page.is_empty() {
-            break;
+    for tenant in bounded_directories(root, &tenants, MAX_MIGRATION_TENANTS).await? {
+        let users = VirtualPath::new(format!("/tenants/{tenant}/users")).map_err(backend_error)?;
+        for user in bounded_directories(root, &users, MAX_MIGRATION_USERS_PER_TENANT).await? {
+            let auth_root = VirtualPath::new(format!(
+                "/tenants/{tenant}/users/{user}/secrets/product-auth"
+            ))
+            .map_err(backend_error)?;
+            let mut offset = 0u64;
+            loop {
+                let page = root
+                    .query(&auth_root, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
+                    .await
+                    .map_err(map_filesystem_error)?;
+                if page.is_empty() {
+                    break;
+                }
+                let received = page.len();
+                examined_rows = examined_rows.saturating_add(received);
+                for row in page {
+                    if classify_path(row.path.as_str()).is_some() {
+                        if rows.len() >= MAX_MIGRATION_CANDIDATES {
+                            return Err(OAuthProviderAliasMigrationError::Backend);
+                        }
+                        rows.push(row);
+                    }
+                }
+                if received < Page::MAX_LIMIT as usize {
+                    break;
+                }
+                offset = offset.saturating_add(received as u64);
+            }
         }
-        let received = page.len();
-        examined_rows = examined_rows.saturating_add(received);
-        rows.extend(
-            page.into_iter()
-                .filter(|row| classify_path(row.path.as_str()).is_some()),
-        );
-        if received < Page::MAX_LIMIT as usize {
-            break;
-        }
-        offset = offset.saturating_add(received as u64);
     }
     Ok(MigrationCandidates {
         examined_rows,
         rows,
     })
+}
+
+async fn bounded_directories<F>(
+    root: &F,
+    path: &VirtualPath,
+    max_entries: usize,
+) -> Result<Vec<String>, OAuthProviderAliasMigrationError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let entries = root
+        .list_dir_bounded(path, max_entries.saturating_add(1))
+        .await
+        .map_err(map_filesystem_error)?;
+    if entries.len() > max_entries {
+        return Err(OAuthProviderAliasMigrationError::Backend);
+    }
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry.file_type == FileType::Directory)
+        .map(|entry| entry.name)
+        .collect())
+}
+
+enum ProviderCandidate {
+    Legacy,
+    Current,
+    Other,
+}
+
+fn provider_candidate(body: &[u8]) -> Result<ProviderCandidate, OAuthProviderAliasMigrationError> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(malformed_record)?;
+    Ok(
+        match value.get("provider").and_then(serde_json::Value::as_str) {
+            Some(LEGACY_SLACK_PROVIDER_ID) => ProviderCandidate::Legacy,
+            Some(CURRENT_SLACK_PROVIDER_ID) => ProviderCandidate::Current,
+            _ => ProviderCandidate::Other,
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -206,11 +289,10 @@ fn verify_account_path<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    let relative = account_path(&account.scope, account.id)
-        .map_err(|_| OAuthProviderAliasMigrationError::MalformedRecord)?;
+    let relative = account_path(&account.scope, account.id).map_err(malformed_record)?;
     let expected = scoped
         .resolve(&account.scope.resource, &relative)
-        .map_err(|_| OAuthProviderAliasMigrationError::Backend)?;
+        .map_err(backend_error)?;
     if expected != row.path {
         return Err(OAuthProviderAliasMigrationError::ScopePathMismatch);
     }
@@ -225,11 +307,10 @@ fn verify_flow_path<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    let relative = flow_path(&flow.scope, flow.id)
-        .map_err(|_| OAuthProviderAliasMigrationError::MalformedRecord)?;
+    let relative = flow_path(&flow.scope, flow.id).map_err(malformed_record)?;
     let expected = scoped
         .resolve(&flow.scope.resource, &relative)
-        .map_err(|_| OAuthProviderAliasMigrationError::Backend)?;
+        .map_err(backend_error)?;
     if expected != row.path {
         return Err(OAuthProviderAliasMigrationError::ScopePathMismatch);
     }
@@ -255,8 +336,7 @@ where
         }
     }
 
-    let body = serde_json::to_vec(replacement)
-        .map_err(|_| OAuthProviderAliasMigrationError::MalformedRecord)?;
+    let body = serde_json::to_vec(replacement).map_err(malformed_record)?;
     let mut replacement_entry = source.entry.clone();
     replacement_entry.body = body;
     root.put(
@@ -267,7 +347,7 @@ where
     .await
     .map_err(|error| match error {
         FilesystemError::VersionMismatch { .. } => OAuthProviderAliasMigrationError::WriteConflict,
-        _ => OAuthProviderAliasMigrationError::Backend,
+        error => backend_error(error),
     })?;
     Ok(())
 }
@@ -308,20 +388,19 @@ where
                 }
                 Ok(BackupDisposition::Reused)
             }
-            Err(_) => Err(OAuthProviderAliasMigrationError::Backend),
+            Err(error) => Err(backend_error(error)),
         },
     }
 }
 
 fn backup_path(source: &VirtualPath) -> Result<VirtualPath, OAuthProviderAliasMigrationError> {
-    VirtualPath::new(format!("{}{BACKUP_SUFFIX}", source.as_str()))
-        .map_err(|_| OAuthProviderAliasMigrationError::Backend)
+    VirtualPath::new(format!("{}{BACKUP_SUFFIX}", source.as_str())).map_err(backend_error)
 }
 
 fn map_filesystem_error(error: FilesystemError) -> OAuthProviderAliasMigrationError {
     match error {
         FilesystemError::VersionMismatch { .. } => OAuthProviderAliasMigrationError::WriteConflict,
-        _ => OAuthProviderAliasMigrationError::Backend,
+        error => backend_error(error),
     }
 }
 
@@ -686,7 +765,7 @@ mod tests {
         ));
         for index in 0..Page::MAX_LIMIT {
             let path = VirtualPath::new(format!(
-                "/tenants/0000/users/fixture/unrelated/{index:04}.bin"
+                "/tenants/acme/users/alice/secrets/product-auth/aaa-unrelated/{index:04}.bin"
             ))
             .expect("unrelated path");
             backend

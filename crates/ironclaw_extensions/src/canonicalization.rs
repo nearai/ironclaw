@@ -177,4 +177,29 @@ mod tests {
             ExtensionInstallationError::ConflictingInstallationIncarnation { .. }
         ));
     }
+
+    #[test]
+    fn canonicalization_never_widens_activation() {
+        let enabled = pending();
+        let disabled = enabled
+            .clone()
+            .with_activation_state(crate::ExtensionActivationState::Disabled);
+        let installed = enabled
+            .clone()
+            .with_activation_state(crate::ExtensionActivationState::Installed);
+
+        let disabled_result = canonicalize_installation_rows(vec![enabled.clone(), disabled])
+            .expect("canonicalize disabled duplicate");
+        assert_eq!(
+            disabled_result[0].persisted_activation_state(),
+            crate::ExtensionActivationState::Disabled
+        );
+
+        let installed_result = canonicalize_installation_rows(vec![enabled, installed])
+            .expect("canonicalize installed duplicate");
+        assert_eq!(
+            installed_result[0].persisted_activation_state(),
+            crate::ExtensionActivationState::Installed
+        );
+    }
 }

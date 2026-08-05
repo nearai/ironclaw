@@ -98,15 +98,10 @@ where
         let mut report = LegacyAppendMigrationReport::default();
 
         for thread_id in thread_ids {
-            if self
+            let thread_present = self
                 .read_thread_versioned(scope, &thread_id)
                 .await?
-                .is_none()
-            {
-                return Err(SessionThreadError::Backend(
-                    "legacy append log belongs to an unknown thread".to_string(),
-                ));
-            }
+                .is_some();
             let append_path = legacy_message_append_log_path(scope, &thread_id)?;
             let mut after = SeqNo::ZERO;
             loop {
@@ -133,6 +128,11 @@ where
                 };
                 if events.is_empty() {
                     break;
+                }
+                if !thread_present {
+                    return Err(SessionThreadError::Backend(
+                        "legacy append log belongs to an unknown thread".to_string(),
+                    ));
                 }
                 let received = events.len();
                 for event in events {

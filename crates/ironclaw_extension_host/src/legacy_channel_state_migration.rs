@@ -17,7 +17,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionInstallationStorePort};
-use ironclaw_filesystem::{FilesystemError, Filter, Page, RootFilesystem, VersionedEntry};
+use ironclaw_filesystem::{
+    FileType, FilesystemError, Filter, Page, RootFilesystem, VersionedEntry,
+};
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
@@ -44,6 +46,8 @@ const TELEGRAM: &str = "telegram";
 const SLACK_GROUP: &str = "extension.slack";
 const TELEGRAM_GROUP: &str = "extension.telegram";
 const MANAGED_SLACK_SUBJECT_PREFIX: &str = "user:slack-channel:";
+const MAX_RC1_CHANNEL_TENANTS: usize = 100_000;
+const MAX_RC1_CHANNEL_ROWS_PER_ROOT: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rc1ChannelRootMigrationSpec {
@@ -85,6 +89,7 @@ pub struct Rc1ChannelStateMigrationReport {
     pub identities: usize,
     pub route_values: usize,
     pub dm_targets: usize,
+    pub unbound_dm_targets_skipped: usize,
     pub oauth_channel_active_connections_superseded: usize,
     pub oauth_channel_stale_connections_expired: usize,
     pub oauth_channel_disconnected_connections_superseded: usize,
@@ -114,6 +119,9 @@ impl Rc1ChannelStateMigrationReport {
         self.identities = self.identities.saturating_add(other.identities);
         self.route_values = self.route_values.saturating_add(other.route_values);
         self.dm_targets = self.dm_targets.saturating_add(other.dm_targets);
+        self.unbound_dm_targets_skipped = self
+            .unbound_dm_targets_skipped
+            .saturating_add(other.unbound_dm_targets_skipped);
         self.oauth_channel_active_connections_superseded = self
             .oauth_channel_active_connections_superseded
             .saturating_add(other.oauth_channel_active_connections_superseded);
@@ -155,30 +163,30 @@ pub struct Rc1ChannelMigrationScope {
 pub async fn discover_rc1_channel_migration_scopes(
     filesystem: Arc<dyn RootFilesystem>,
 ) -> Result<Vec<Rc1ChannelMigrationScope>, Rc1ChannelStateMigrationError> {
-    let rows = query_all(&filesystem, "/tenants").await?;
-    let mut tenants = BTreeSet::new();
-    for row in &rows {
-        let path = row.path.as_str();
-        if !is_rc1_channel_state_path(path) {
+    let tenants_root = VirtualPath::new("/tenants").map_err(log_malformed)?;
+    let tenant_entries = filesystem
+        .list_dir_bounded(&tenants_root, MAX_RC1_CHANNEL_TENANTS.saturating_add(1))
+        .await
+        .map_err(log_unavailable)?;
+    if tenant_entries.len() > MAX_RC1_CHANNEL_TENANTS {
+        return Err(Rc1ChannelStateMigrationError::Unavailable);
+    }
+    let mut scopes = Vec::new();
+    for tenant_entry in tenant_entries {
+        if tenant_entry.file_type != FileType::Directory || tenant_entry.name == "__system__" {
             continue;
         }
-        let Some(tenant) = path
-            .strip_prefix("/tenants/")
-            .and_then(|rest| rest.split('/').next())
-        else {
-            return Err(Rc1ChannelStateMigrationError::Malformed);
-        };
-        if tenant.is_empty() || tenant == "__system__" {
-            return Err(Rc1ChannelStateMigrationError::Malformed);
-        }
-        tenants.insert(tenant.to_string());
-    }
-
-    let mut scopes = Vec::with_capacity(tenants.len());
-    for tenant_segment in tenants {
-        let tenant =
-            TenantId::new(&tenant_segment).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+        let tenant_segment = tenant_entry.name;
         let shared = format!("/tenants/{tenant_segment}/shared");
+        let mut rows = query_all(&filesystem, &shared).await?;
+        if !rows
+            .iter()
+            .any(|row| is_rc1_channel_state_path(row.path.as_str()))
+        {
+            continue;
+        }
+        rows.extend(query_all(&filesystem, &format!("/tenants/{tenant_segment}/users")).await?);
+        let tenant = TenantId::new(&tenant_segment).map_err(log_malformed)?;
         let slack_setup = find_row(&rows, &format!("{shared}/slack-setup/installation.json"))
             .map(parse::<Rc1SlackSetup>)
             .transpose()?;
@@ -333,7 +341,7 @@ fn secret_scope_from_path(
     let user_id = if parts[0] == "__system__" {
         UserId::from_trusted(SYSTEM_RESERVED_ID.to_string())
     } else {
-        UserId::new(parts[0]).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?
+        UserId::new(parts[0]).map_err(log_malformed)?
     };
     let mut cursor = 2usize;
     let mut agent_id = None;
@@ -342,16 +350,14 @@ fn secret_scope_from_path(
         let value = parts
             .get(cursor.saturating_add(1))
             .ok_or(Rc1ChannelStateMigrationError::Malformed)?;
-        agent_id =
-            Some(AgentId::new(*value).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?);
+        agent_id = Some(AgentId::new(*value).map_err(log_malformed)?);
         cursor = cursor.saturating_add(2);
     }
     if parts.get(cursor).copied() == Some("projects") {
         let value = parts
             .get(cursor.saturating_add(1))
             .ok_or(Rc1ChannelStateMigrationError::Malformed)?;
-        project_id =
-            Some(ProjectId::new(*value).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?);
+        project_id = Some(ProjectId::new(*value).map_err(log_malformed)?);
         cursor = cursor.saturating_add(2);
     }
     if parts.get(cursor).copied() != Some("secrets") || cursor + 2 != parts.len() {
@@ -376,10 +382,27 @@ pub enum Rc1ChannelStateMigrationError {
     Conflict,
     #[error("rc1 channel state migration is unavailable")]
     Unavailable,
+    #[error("rc1 channel route state is too large to import ({records} source records)")]
+    SourceTooLarge { records: usize },
     #[error("rc1 channel state requires an installed target extension")]
     MissingInstallation,
     #[error("rc1 channel setup was interrupted and requires operator recovery")]
     InterruptedSetup,
+}
+
+fn log_malformed(error: impl std::fmt::Display) -> Rc1ChannelStateMigrationError {
+    tracing::error!(%error, "rc1 channel migration record validation failed");
+    Rc1ChannelStateMigrationError::Malformed
+}
+
+fn log_unavailable(error: impl std::fmt::Display) -> Rc1ChannelStateMigrationError {
+    tracing::error!(%error, "rc1 channel migration dependency failed");
+    Rc1ChannelStateMigrationError::Unavailable
+}
+
+fn log_conflict(error: impl std::fmt::Display) -> Rc1ChannelStateMigrationError {
+    tracing::error!(%error, "rc1 channel migration authority write conflicted");
+    Rc1ChannelStateMigrationError::Conflict
 }
 
 #[derive(Debug, Deserialize)]
@@ -674,9 +697,11 @@ pub async fn migrate_rc1_channel_state(
     )
     .await?;
     report.identities += telegram_bindings.changed;
-    report.dm_targets +=
+    let (telegram_dm_targets, unbound_dm_targets_skipped) =
         migrate_telegram_dm_targets(inputs, &shared, telegram_active, &telegram_bindings.active)
             .await?;
+    report.dm_targets += telegram_dm_targets;
+    report.unbound_dm_targets_skipped += unbound_dm_targets_skipped;
     if slack_connections.already_complete {
         report.oauth_channel_connections_unchanged = slack_connections.marker.source_rows;
     } else {
@@ -716,12 +741,14 @@ pub async fn migrate_rc1_channel_state(
         unchanged: report
             .oauth_channel_connections_unchanged
             .saturating_add(report.proof_code_pairing_rows_unchanged),
-        skipped: report
-            .oauth_channel_active_connections_superseded
-            .saturating_add(report.oauth_channel_stale_connections_expired)
-            .saturating_add(report.oauth_channel_disconnected_connections_superseded)
-            .saturating_add(report.proof_code_pairing_challenges_expired)
-            .saturating_add(report.proof_code_pending_completions_expired),
+        skipped: report.unbound_dm_targets_skipped.saturating_add(
+            report
+                .oauth_channel_active_connections_superseded
+                .saturating_add(report.oauth_channel_stale_connections_expired)
+                .saturating_add(report.oauth_channel_disconnected_connections_superseded)
+                .saturating_add(report.proof_code_pairing_challenges_expired)
+                .saturating_add(report.proof_code_pending_completions_expired),
+        ),
         conflicting: 0,
         failed: 0,
     });
@@ -735,13 +762,13 @@ async fn target_installation_ids(
         .installation_store
         .list_installations()
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?;
+        .map_err(log_unavailable)?;
     let mut ids = BTreeMap::new();
     for installation in installations {
         let extension = installation.extension_id().as_str();
         if extension == SLACK || extension == TELEGRAM {
             AdapterInstallationId::new(installation.installation_id().as_str())
-                .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+                .map_err(log_malformed)?;
             match ids.get(extension) {
                 Some(existing) if existing != installation.installation_id().as_str() => {
                     return Err(Rc1ChannelStateMigrationError::Conflict);
@@ -839,8 +866,7 @@ async fn import_admin(
     migration_id: &str,
     values: Vec<AdminConfigurationSubmittedValue>,
 ) -> Result<usize, Rc1ChannelStateMigrationError> {
-    let group = AdminConfigurationGroupId::new(group)
-        .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+    let group = AdminConfigurationGroupId::new(group).map_err(log_malformed)?;
     inputs
         .admin_configuration
         .import_legacy_values(&inputs.admin_scope, &group, migration_id, values)
@@ -849,7 +875,7 @@ async fn import_admin(
             crate::AdminConfigurationServiceError::IdempotencyConflict => {
                 Rc1ChannelStateMigrationError::Conflict
             }
-            _ => Rc1ChannelStateMigrationError::Unavailable,
+            error => log_unavailable(error),
         })
 }
 
@@ -858,7 +884,7 @@ fn submitted(
     value: String,
 ) -> Result<AdminConfigurationSubmittedValue, Rc1ChannelStateMigrationError> {
     Ok(AdminConfigurationSubmittedValue {
-        handle: SecretHandle::new(handle).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?,
+        handle: SecretHandle::new(handle).map_err(log_malformed)?,
         value: SecretMaterial::from(value),
     })
 }
@@ -873,12 +899,12 @@ async fn submitted_secret(
         .secret_store
         .lease_once(source_scope, source)
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?;
+        .map_err(log_unavailable)?;
     let material = inputs
         .secret_store
         .consume(source_scope, lease.id)
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?;
+        .map_err(log_unavailable)?;
     submitted(target, material.expose_secret().to_string())
 }
 
@@ -901,7 +927,7 @@ async fn migrate_slack_identities(
         }
         if let Some(epoch) = &record.epoch {
             ironclaw_conversations::ExternalActorBindingEpoch::new(epoch.clone())
-                .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+                .map_err(log_malformed)?;
         }
         if record.disconnected_at.is_some() {
             return Err(Rc1ChannelStateMigrationError::Malformed);
@@ -927,6 +953,7 @@ async fn migrate_slack_routes(
         &format!("{shared}/slack-channel-routes"),
     )
     .await?;
+    let route_count = rows.len();
     let mut allowed = Vec::new();
     let mut explicit = BTreeMap::new();
     for row in rows {
@@ -959,18 +986,22 @@ async fn migrate_slack_routes(
     allowed.dedup();
     let mut values = Vec::new();
     if !allowed.is_empty() {
-        values.push(submitted(
-            "slack_allowed_channels",
-            serde_json::to_string(&allowed)
-                .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?,
-        )?);
+        let allowed = serde_json::to_string(&allowed).map_err(log_malformed)?;
+        if allowed.len() > crate::admin_configuration_service::MAX_VALUE_BYTES {
+            return Err(Rc1ChannelStateMigrationError::SourceTooLarge {
+                records: route_count,
+            });
+        }
+        values.push(submitted("slack_allowed_channels", allowed)?);
     }
     if !explicit.is_empty() {
-        values.push(submitted(
-            "slack_subject_routes",
-            serde_json::to_string(&explicit)
-                .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?,
-        )?);
+        let explicit = serde_json::to_string(&explicit).map_err(log_malformed)?;
+        if explicit.len() > crate::admin_configuration_service::MAX_VALUE_BYTES {
+            return Err(Rc1ChannelStateMigrationError::SourceTooLarge {
+                records: route_count,
+            });
+        }
+        values.push(submitted("slack_subject_routes", explicit)?);
     }
     if values.is_empty() {
         return Ok(0);
@@ -1003,8 +1034,7 @@ async fn migrate_slack_dm_targets(
         if target.installation_id != setup.installation_id || target.team_id != setup.team_id {
             return Err(Rc1ChannelStateMigrationError::Conflict);
         }
-        let user =
-            UserId::new(target.user_id).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+        let user = UserId::new(target.user_id).map_err(log_malformed)?;
         let payload = dm_target_payload(Some(&target.team_id), &target.dm_channel_id);
         changed += upsert_dm_target(inputs, SLACK, &user, target.slack_user_id, payload).await?;
     }
@@ -1036,7 +1066,7 @@ async fn migrate_telegram_identities(
             continue;
         }
         ironclaw_conversations::ExternalActorBindingEpoch::new(record.epoch.clone())
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+            .map_err(log_malformed)?;
         let provider_user_id = rewrite_installation_prefix(
             &record.provider_user_id,
             old_installation.as_deref(),
@@ -1053,10 +1083,11 @@ async fn migrate_telegram_dm_targets(
     shared: &str,
     setup: Option<&Rc1TelegramSetupActive>,
     bindings: &[Rc1TelegramBinding],
-) -> Result<usize, Rc1ChannelStateMigrationError> {
+) -> Result<(usize, usize), Rc1ChannelStateMigrationError> {
     let rows = query_all(&inputs.filesystem, &format!("{shared}/telegram-dm-targets")).await?;
     let old_installation = setup.map(|setup| format!("tg-bot-{}", setup.bot_id));
     let mut changed = 0;
+    let mut skipped = 0usize;
     for row in rows {
         let target: Rc1TelegramDmTarget = parse(&row)?;
         let candidates = bindings
@@ -1070,19 +1101,24 @@ async fn migrate_telegram_dm_targets(
                     .then_some(actor)
             })
             .collect::<Vec<_>>();
-        let [actor] = candidates.as_slice() else {
-            return Err(Rc1ChannelStateMigrationError::Malformed);
+        let actor = match candidates.as_slice() {
+            [actor] => *actor,
+            [] => {
+                skipped = skipped.saturating_add(1);
+                continue;
+            }
+            _ => return Err(Rc1ChannelStateMigrationError::Conflict),
         };
         changed += upsert_dm_target(
             inputs,
             TELEGRAM,
             &target.user_id,
-            (*actor).to_string(),
+            actor.to_string(),
             dm_target_payload(None, &target.chat_id.to_string()),
         )
         .await?;
     }
-    Ok(changed)
+    Ok((changed, skipped))
 }
 
 async fn bind_identity(
@@ -1091,29 +1127,28 @@ async fn bind_identity(
     provider_user_id: String,
     user: &str,
 ) -> Result<usize, Rc1ChannelStateMigrationError> {
-    let user_id = UserId::new(user).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+    let user_id = UserId::new(user).map_err(log_malformed)?;
     match inputs
         .identity_store
         .resolve_user_identity(provider, &provider_user_id)
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?
+        .map_err(log_unavailable)?
     {
         Some(current) if current == user_id => return Ok(0),
         Some(_) => return Err(Rc1ChannelStateMigrationError::Conflict),
         None => {}
     }
     let binding = RebornUserIdentityBinding {
-        provider: RebornIdentityProviderId::new(provider)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?,
+        provider: RebornIdentityProviderId::new(provider).map_err(log_malformed)?,
         provider_user_id: RebornIdentityProviderUserId::new(provider_user_id)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?,
+            .map_err(log_malformed)?,
         user_id,
     };
     inputs
         .identity_store
         .bind_user_identity(binding)
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Conflict)?;
+        .map_err(log_conflict)?;
     Ok(1)
 }
 
@@ -1128,7 +1163,7 @@ async fn upsert_dm_target(
         .dm_targets
         .load(extension, user)
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?
+        .map_err(log_unavailable)?
     {
         Some(existing) if dm_target_matches(&existing, extension, user, &actor, &target) => {
             return Ok(0);
@@ -1140,7 +1175,7 @@ async fn upsert_dm_target(
         .dm_targets
         .upsert(extension, user, actor, target)
         .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?;
+        .map_err(log_unavailable)?;
     Ok(1)
 }
 
@@ -1217,10 +1252,8 @@ async fn inspect_slack_connection_disposition(
         if connection.tenant_id != admin_scope.tenant_id.as_str() {
             return Err(Rc1ChannelStateMigrationError::Malformed);
         }
-        let user = UserId::new(&connection.user_id)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
-        AdapterInstallationId::new(&connection.installation_id)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+        let user = UserId::new(&connection.user_id).map_err(log_malformed)?;
+        AdapterInstallationId::new(&connection.installation_id).map_err(log_malformed)?;
         let expected_suffix = format!("/{}/{}.json", connection.installation_id, user.as_str());
         if !row.path.as_str().ends_with(&expected_suffix) {
             return Err(Rc1ChannelStateMigrationError::Malformed);
@@ -1281,8 +1314,7 @@ async fn inspect_telegram_pairing_disposition(
         if record.tenant_id != admin_scope.tenant_id {
             return Err(Rc1ChannelStateMigrationError::Malformed);
         }
-        AdapterInstallationId::new(&record.installation_id)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+        AdapterInstallationId::new(&record.installation_id).map_err(log_malformed)?;
         if record.consumed_at.is_none() {
             challenges += 1;
         }
@@ -1299,8 +1331,7 @@ async fn inspect_telegram_pairing_disposition(
     .await?;
     for row in &pending_completions {
         let completion: Rc1TelegramPairingCompletion = parse(row)?;
-        AdapterInstallationId::new(&completion.installation_id)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+        AdapterInstallationId::new(&completion.installation_id).map_err(log_malformed)?;
         if !completion.completed {
             completions += 1;
         }
@@ -1346,16 +1377,11 @@ async fn disposition_marker_matches<T>(
 where
     T: for<'de> Deserialize<'de> + PartialEq,
 {
-    let path = VirtualPath::new(path).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
-    let Some(entry) = filesystem
-        .get(&path)
-        .await
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?
-    else {
+    let path = VirtualPath::new(path).map_err(log_malformed)?;
+    let Some(entry) = filesystem.get(&path).await.map_err(log_unavailable)? else {
         return Ok(false);
     };
-    let actual = serde_json::from_slice::<T>(&entry.entry.body)
-        .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+    let actual = serde_json::from_slice::<T>(&entry.entry.body).map_err(log_malformed)?;
     if &actual != expected {
         return Err(Rc1ChannelStateMigrationError::Conflict);
     }
@@ -1374,13 +1400,11 @@ where
     if already_complete {
         return Ok(());
     }
-    let path = VirtualPath::new(path).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+    let path = VirtualPath::new(path).map_err(log_malformed)?;
     let kind = ironclaw_filesystem::RecordKind::new("rc1_channel_state_disposition")
-        .map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
-    let value =
-        serde_json::to_value(marker).map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?;
-    let entry = ironclaw_filesystem::Entry::record(kind, &value)
-        .map_err(|_| Rc1ChannelStateMigrationError::Unavailable)?;
+        .map_err(log_malformed)?;
+    let value = serde_json::to_value(marker).map_err(log_unavailable)?;
+    let entry = ironclaw_filesystem::Entry::record(kind, &value).map_err(log_unavailable)?;
     match filesystem
         .put(&path, entry, ironclaw_filesystem::CasExpectation::Absent)
         .await
@@ -1393,7 +1417,7 @@ where
                 Err(Rc1ChannelStateMigrationError::Conflict)
             }
         }
-        Err(_) => Err(Rc1ChannelStateMigrationError::Unavailable),
+        Err(error) => Err(log_unavailable(error)),
     }
 }
 
@@ -1421,13 +1445,13 @@ async fn read_optional<T: for<'de> Deserialize<'de>>(
     inputs: &Rc1ChannelStateMigrationInputs,
     path: &str,
 ) -> Result<Option<T>, Rc1ChannelStateMigrationError> {
-    let path = VirtualPath::new(path).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+    let path = VirtualPath::new(path).map_err(log_malformed)?;
     match inputs.filesystem.get(&path).await {
         Ok(Some(entry)) => serde_json::from_slice(&entry.entry.body)
             .map(Some)
-            .map_err(|_| Rc1ChannelStateMigrationError::Malformed),
+            .map_err(log_malformed),
         Ok(None) | Err(FilesystemError::NotFound { .. }) => Ok(None),
-        Err(_) => Err(Rc1ChannelStateMigrationError::Unavailable),
+        Err(error) => Err(log_unavailable(error)),
     }
 }
 
@@ -1435,18 +1459,22 @@ async fn query_all(
     filesystem: &Arc<dyn RootFilesystem>,
     prefix: &str,
 ) -> Result<Vec<VersionedEntry>, Rc1ChannelStateMigrationError> {
-    let prefix = VirtualPath::new(prefix).map_err(|_| Rc1ChannelStateMigrationError::Malformed)?;
+    let prefix = VirtualPath::new(prefix).map_err(log_malformed)?;
     let mut rows = Vec::new();
     let mut offset = 0;
     loop {
-        let page = filesystem
+        let page = match filesystem
             .query(&prefix, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
             .await
-            .map_err(|error| match error {
-                FilesystemError::NotFound { .. } => Rc1ChannelStateMigrationError::Unavailable,
-                _ => Rc1ChannelStateMigrationError::Unavailable,
-            })?;
+        {
+            Ok(page) => page,
+            Err(FilesystemError::NotFound { .. }) => break,
+            Err(error) => return Err(log_unavailable(error)),
+        };
         let count = page.len();
+        if rows.len().saturating_add(count) > MAX_RC1_CHANNEL_ROWS_PER_ROOT {
+            return Err(Rc1ChannelStateMigrationError::Unavailable);
+        }
         rows.extend(page);
         if count < Page::MAX_LIMIT as usize {
             break;
@@ -1459,7 +1487,7 @@ async fn query_all(
 fn parse<T: for<'de> Deserialize<'de>>(
     row: &VersionedEntry,
 ) -> Result<T, Rc1ChannelStateMigrationError> {
-    serde_json::from_slice(&row.entry.body).map_err(|_| Rc1ChannelStateMigrationError::Malformed)
+    serde_json::from_slice(&row.entry.body).map_err(log_malformed)
 }
 
 #[cfg(test)]
@@ -2058,6 +2086,13 @@ service = "telegram.fixture/v1"
                 }),
             ),
             (
+                "/tenants/tenant-a/shared/telegram-dm-targets/stale-operator.json",
+                serde_json::json!({
+                    "user_id": "stale-operator",
+                    "chat_id": 54321
+                }),
+            ),
+            (
                 "/tenants/tenant-a/shared/telegram-pairing/codes/ABCDEFGH.json",
                 serde_json::json!({
                     "code": "ABCDEFGH",
@@ -2122,6 +2157,7 @@ service = "telegram.fixture/v1"
         assert_eq!(first.configuration_values, 4);
         assert_eq!(first.identities, 1);
         assert_eq!(first.dm_targets, 1);
+        assert_eq!(first.unbound_dm_targets_skipped, 1);
         assert_eq!(first.proof_code_pairing_challenges_expired, 1);
         assert_eq!(first.proof_code_pending_completions_expired, 1);
 

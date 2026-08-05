@@ -262,3 +262,47 @@ async fn malformed_or_duplicate_rc1_authority_fails_without_creating_target() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn duplicate_json_object_key_fails_before_serde_can_collapse_it() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let source = path("/tenants/tenant-a/shared/telegram-conversations-duplicate-json");
+    let target =
+        path("/tenants/tenant-a/shared/channel-extensions/telegram/conversations-duplicate-json");
+    seed_binding(
+        Arc::clone(&backend),
+        &source,
+        "source-user",
+        "source-chat",
+        "source-event",
+    )
+    .await;
+    let source_path = state_path(&source);
+    let original = backend
+        .get(&source_path)
+        .await
+        .expect("source read")
+        .expect("source state");
+    let text = String::from_utf8(original.entry.body).expect("source JSON is UTF-8");
+    let duplicate = text.replacen('{', "{\"revision\":0,", 1);
+    backend
+        .put(
+            &source_path,
+            Entry::bytes(duplicate.into_bytes()),
+            CasExpectation::Version(original.version),
+        )
+        .await
+        .expect("write duplicate-key fixture");
+
+    let error = migrate_conversation_state_root(backend.as_ref(), &source, &target)
+        .await
+        .expect_err("duplicate JSON keys must fail before map materialization");
+    assert_eq!(error, ConversationStateMigrationError::MalformedSource);
+    assert!(
+        backend
+            .get(&state_path(&target))
+            .await
+            .expect("target probe")
+            .is_none()
+    );
+}

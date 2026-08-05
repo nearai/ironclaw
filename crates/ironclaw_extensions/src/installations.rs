@@ -636,10 +636,7 @@ fn default_enabled_activation_state() -> ExtensionActivationState {
 pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
-    #[serde(
-        default = "default_enabled_activation_state",
-        skip_serializing_if = "ExtensionActivationState::is_enabled"
-    )]
+    #[serde(skip_serializing_if = "ExtensionActivationState::is_enabled")]
     activation_state: ExtensionActivationState,
     manifest_ref: ExtensionManifestRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1432,6 +1429,10 @@ impl ExtensionInstallationStore {
         store.ensure_indexes().await?;
         store.ensure_v2_indexes().await?;
         let mut store = store;
+        // An interrupted import can leave an otherwise-live v2 record leased.
+        // Repair it before snapshot conflict checks, which intentionally treat
+        // invisible records as divergent.
+        store.repair_interrupted_v2_leases().await?;
         store.rc1_snapshot_report = store.bootstrap_from_rc1_snapshot().await?;
         store.migrate_legacy_manifest_rows().await?;
         store.bootstrap_v2_from_compatibility_rows().await?;
@@ -6016,6 +6017,65 @@ mod tests {
             )
             .await
             .expect("retry checkpoint");
+    }
+
+    #[tokio::test]
+    async fn reopen_repairs_orphaned_v2_lease_before_importing_unmarked_rc1_snapshot() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root =
+            VirtualPath::new("/system/extensions/.installations/rc1-lease-recovery").expect("root");
+        let store = ExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("store");
+        let installed = installation("fixture", Some("hash-one"));
+        let installation_id = installed.installation_id().clone();
+        let manifest = manifest_record("fixture", Some("hash-one"));
+        store
+            .upsert_manifest_and_installation(manifest.clone(), installed.clone())
+            .await
+            .expect("seed normalized and compatibility state");
+        store
+            .take_v2_update_lease(&installation_id)
+            .await
+            .expect("simulate a crash after taking the v2 lease");
+
+        let snapshot_path = child_path(&root, "state.json").expect("snapshot path");
+        let snapshot = serde_json::json!({
+            "manifests": [WireManifestRecord::from(&manifest)],
+            "installations": [installed],
+        });
+        backend
+            .put(
+                &snapshot_path,
+                Entry::bytes(serde_json::to_vec(&snapshot).expect("snapshot bytes")),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("write unmarked rc1 snapshot");
+        drop(store);
+
+        let reopened = ExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("startup must repair the lease before snapshot conflict checks");
+        assert_eq!(
+            reopened
+                .get_installation(&installation_id)
+                .await
+                .expect("read recovered installation"),
+            Some(installed),
+            "the interrupted migration must not hide or lose the rc1 installation"
+        );
+        assert_eq!(reopened.rc1_snapshot_migration_report().sources_migrated, 1);
     }
 
     #[tokio::test]

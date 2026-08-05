@@ -709,31 +709,20 @@ pub(super) async fn build_backend_production(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension installation state could not be loaded: {error}"),
     })?;
-    let hosted_rc1_snapshots = ironclaw_release_migration::discover_rc1_hosted_extension_snapshots(
-        extension_filesystem.as_ref(),
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("hosted rc1 extension snapshots could not be discovered: {error}"),
-    })?;
-    for snapshot in hosted_rc1_snapshots {
-        extension_installation_store
-            .import_rc1_snapshot_at(&snapshot)
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("hosted rc1 extension snapshot could not be imported: {error}"),
-            })?;
-    }
     let extension_installation_migration =
-        extension_installation_store.rc1_snapshot_migration_report();
-    let extension_installation_migration =
-        ironclaw_release_migration::ExtensionInstallationMigrationReport {
-            sources_migrated: extension_installation_migration.sources_migrated,
-            sources_unchanged: extension_installation_migration.sources_unchanged,
-            manifests_migrated: extension_installation_migration.manifests_migrated,
-            manifests_unchanged: extension_installation_migration.manifests_unchanged,
-            installations_migrated: extension_installation_migration.installations_migrated,
-            installations_unchanged: extension_installation_migration.installations_unchanged,
+        match ironclaw_release_migration::migrate_rc1_hosted_extension_snapshots(
+            extension_filesystem.as_ref(),
+            &mut extension_installation_store,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                let _ = release_pair_lease.fail().await;
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("hosted rc1 extension state could not be restored: {error}"),
+                });
+            }
         };
     let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> =
         Arc::new(extension_installation_store);

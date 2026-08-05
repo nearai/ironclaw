@@ -370,6 +370,9 @@ where
             return Ok(());
         }
         let import_legacy = self.legacy_process_journal_present().await?;
+        if import_legacy {
+            validate_deployed_legacy_dispositions(self.filesystem.as_ref()).await?;
+        }
         self.initialize_materialized(import_legacy).await?;
         self.materialized_ready.store(true, Ordering::Release);
         Ok(())

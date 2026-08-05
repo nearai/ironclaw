@@ -4817,6 +4817,7 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_conversations",
  "ironclaw_extension_host",
+ "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_processes",

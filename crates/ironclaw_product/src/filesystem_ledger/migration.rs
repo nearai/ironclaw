@@ -8,13 +8,33 @@ use thiserror::Error;
 
 use crate::ProductInboundAction;
 
-use super::entry_for_action;
+use super::{entry_for_action, path::action_path_suffix};
 
 const LEGACY_ACTION_KIND: &str = "product_workflow_action";
 const CURRENT_ACTION_KIND: &str = "product_surface_action";
 const LEGACY_PRUNE_LEASE_KIND: &str = "product_workflow_prune_lease";
 const CURRENT_PRUNE_LEASE_KIND: &str = "product_surface_prune_lease";
 const MIGRATION_CAS_RETRIES: usize = 5;
+
+fn log_malformed_source(error: impl std::fmt::Display) -> IdempotencyLedgerMigrationError {
+    tracing::error!(%error, "idempotency ledger migration source decode failed");
+    IdempotencyLedgerMigrationError::MalformedSource
+}
+
+fn log_malformed_target(error: impl std::fmt::Display) -> IdempotencyLedgerMigrationError {
+    tracing::error!(%error, "idempotency ledger migration target decode failed");
+    IdempotencyLedgerMigrationError::MalformedTarget
+}
+
+fn log_invalid_path(error: impl std::fmt::Display) -> IdempotencyLedgerMigrationError {
+    tracing::error!(%error, "idempotency ledger migration path construction failed");
+    IdempotencyLedgerMigrationError::InvalidPath
+}
+
+fn log_storage(error: impl std::fmt::Display) -> IdempotencyLedgerMigrationError {
+    tracing::error!(%error, "idempotency ledger migration storage operation failed");
+    IdempotencyLedgerMigrationError::Storage
+}
 
 /// Redacted aggregate evidence for one idempotency-ledger root migration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -93,26 +113,22 @@ where
         {
             return Err(IdempotencyLedgerMigrationError::MalformedSource);
         }
-        let action: ProductInboundAction = source
-            .entry
-            .parse_json()
-            .map_err(|_| IdempotencyLedgerMigrationError::MalformedSource)?;
-        if !source.path.as_str().ends_with(&action_path_suffix(&action)) {
+        let action: ProductInboundAction =
+            source.entry.parse_json().map_err(log_malformed_source)?;
+        if !source
+            .path
+            .as_str()
+            .ends_with(&action_path_suffix(&action.fingerprint))
+        {
             return Err(IdempotencyLedgerMigrationError::MalformedSource);
         }
-        let target_path = VirtualPath::new(format!("{target_prefix}{relative}"))
-            .map_err(|_| IdempotencyLedgerMigrationError::InvalidPath)?;
-        let desired = entry_for_action(&action)
-            .map_err(|_| IdempotencyLedgerMigrationError::MalformedSource)?;
-        let target = filesystem
-            .get(&target_path)
-            .await
-            .map_err(|_| IdempotencyLedgerMigrationError::Storage)?;
+        let target_path =
+            VirtualPath::new(format!("{target_prefix}{relative}")).map_err(log_invalid_path)?;
+        let desired = entry_for_action(&action).map_err(log_malformed_source)?;
+        let target = filesystem.get(&target_path).await.map_err(log_storage)?;
         if let Some(existing) = &target {
-            let existing_action: ProductInboundAction = existing
-                .entry
-                .parse_json()
-                .map_err(|_| IdempotencyLedgerMigrationError::MalformedTarget)?;
+            let existing_action: ProductInboundAction =
+                existing.entry.parse_json().map_err(log_malformed_target)?;
             if existing_action != action {
                 return Err(IdempotencyLedgerMigrationError::Conflict);
             }
@@ -144,7 +160,7 @@ where
         let source = filesystem
             .get(&plan.source.path)
             .await
-            .map_err(|_| IdempotencyLedgerMigrationError::Storage)?
+            .map_err(log_storage)?
             .ok_or(IdempotencyLedgerMigrationError::SourceChanged)?;
         if source.version != plan.source.version || source.entry != plan.source.entry {
             return Err(IdempotencyLedgerMigrationError::SourceChanged);
@@ -152,12 +168,10 @@ where
         let target = filesystem
             .get(&plan.target_path)
             .await
-            .map_err(|_| IdempotencyLedgerMigrationError::Storage)?
+            .map_err(log_storage)?
             .ok_or(IdempotencyLedgerMigrationError::Storage)?;
-        let target_action: ProductInboundAction = target
-            .entry
-            .parse_json()
-            .map_err(|_| IdempotencyLedgerMigrationError::MalformedTarget)?;
+        let target_action: ProductInboundAction =
+            target.entry.parse_json().map_err(log_malformed_target)?;
         if target_action != plan.action || target.entry != plan.desired {
             return Err(IdempotencyLedgerMigrationError::Storage);
         }
@@ -178,7 +192,7 @@ where
         let page = filesystem
             .query(root, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
             .await
-            .map_err(|_| IdempotencyLedgerMigrationError::Storage)?;
+            .map_err(log_storage)?;
         let received = page.len();
         rows.extend(page);
         if received < Page::MAX_LIMIT as usize {
@@ -209,12 +223,10 @@ where
                 current = filesystem
                     .get(&plan.target_path)
                     .await
-                    .map_err(|_| IdempotencyLedgerMigrationError::Storage)?;
+                    .map_err(log_storage)?;
                 if let Some(existing) = &current {
-                    let action: ProductInboundAction = existing
-                        .entry
-                        .parse_json()
-                        .map_err(|_| IdempotencyLedgerMigrationError::MalformedTarget)?;
+                    let action: ProductInboundAction =
+                        existing.entry.parse_json().map_err(log_malformed_target)?;
                     if action != plan.action {
                         return Err(IdempotencyLedgerMigrationError::Conflict);
                     }
@@ -223,7 +235,7 @@ where
                     }
                 }
             }
-            Err(_) => return Err(IdempotencyLedgerMigrationError::Storage),
+            Err(error) => return Err(log_storage(error)),
         }
     }
     Err(IdempotencyLedgerMigrationError::Contention)
@@ -249,27 +261,4 @@ fn is_prune_lease(relative: &str, entry: &Entry) -> bool {
             entry.kind.as_ref().map(|kind| kind.as_str()),
             Some(LEGACY_PRUNE_LEASE_KIND | CURRENT_PRUNE_LEASE_KIND)
         )
-}
-
-fn action_path_suffix(action: &ProductInboundAction) -> String {
-    let fingerprint = &action.fingerprint;
-    format!(
-        "/{}/{}/{}/{}/{}/{}.json",
-        hex_component(fingerprint.adapter_id.as_str()),
-        hex_component(fingerprint.installation_id.as_str()),
-        hex_component(fingerprint.external_actor_ref.kind()),
-        hex_component(fingerprint.external_actor_ref.id()),
-        hex_component(fingerprint.source_binding_key.as_str()),
-        hex_component(fingerprint.external_event_id.as_str())
-    )
-}
-
-fn hex_component(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }

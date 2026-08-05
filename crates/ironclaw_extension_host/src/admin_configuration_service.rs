@@ -21,7 +21,7 @@ use crate::{
     AdminConfigurationStoreError, AdminConfigurationValueRef, FilesystemAdminConfigurationStore,
 };
 
-const MAX_VALUE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_TOTAL_VALUE_BYTES: usize = 256 * 1024;
 
 /// One value submitted by an authenticated administrator.
@@ -550,31 +550,7 @@ fn validate_submitted(
     previous: Option<&AdminConfigurationRecord>,
     submitted: Vec<AdminConfigurationSubmittedValue>,
 ) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
-    let declared = descriptor
-        .fields
-        .iter()
-        .map(|field| &field.handle)
-        .collect::<BTreeSet<_>>();
-    let mut validated = BTreeMap::new();
-    let mut total_bytes = 0usize;
-    for value in submitted {
-        if !declared.contains(&value.handle) {
-            return Err(AdminConfigurationServiceError::UnknownField);
-        }
-        let value_bytes = value.value.expose_secret().len();
-        if value_bytes > MAX_VALUE_BYTES {
-            return Err(AdminConfigurationServiceError::ValueTooLarge);
-        }
-        total_bytes = total_bytes
-            .checked_add(value_bytes)
-            .ok_or(AdminConfigurationServiceError::ValueTooLarge)?;
-        if total_bytes > MAX_TOTAL_VALUE_BYTES {
-            return Err(AdminConfigurationServiceError::ValueTooLarge);
-        }
-        if validated.insert(value.handle, value.value).is_some() {
-            return Err(AdminConfigurationServiceError::DuplicateField);
-        }
-    }
+    let validated = validate_declared_submitted(descriptor, submitted)?;
     for field in &descriptor.fields {
         if !field.required {
             continue;
@@ -595,7 +571,7 @@ fn validate_submitted(
     Ok(validated)
 }
 
-fn validate_legacy_submitted(
+fn validate_declared_submitted(
     descriptor: &ExtensionAdminConfigurationDescriptor,
     submitted: Vec<AdminConfigurationSubmittedValue>,
 ) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
@@ -625,6 +601,13 @@ fn validate_legacy_submitted(
         }
     }
     Ok(validated)
+}
+
+fn validate_legacy_submitted(
+    descriptor: &ExtensionAdminConfigurationDescriptor,
+    submitted: Vec<AdminConfigurationSubmittedValue>,
+) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
+    validate_declared_submitted(descriptor, submitted)
 }
 
 fn request_digest(

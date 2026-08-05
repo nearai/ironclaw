@@ -5,13 +5,18 @@
 //! extension-keyed root instead. This module owns the persisted conversation
 //! grammar and therefore owns the collision-aware merge between those roots.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::Hash;
 
 use ironclaw_filesystem::{CasExpectation, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId},
     path::VirtualPath,
+};
+use serde::{
+    Deserialize, Deserializer,
+    de::{MapAccess, SeqAccess, Visitor},
 };
 use thiserror::Error;
 
@@ -93,9 +98,8 @@ where
     else {
         return Ok(ConversationStateMigrationReport::default());
     };
-    let source_stored = parse_and_validate(&source_entry.entry.body, StateSide::Source)?;
-    let source_revision = source_stored.revision;
-    let source_state = source_stored.into_state();
+    let (source_revision, source_state) =
+        parse_and_validate(&source_entry.entry.body, StateSide::Source)?;
     let source_items = item_count(&source_state);
     let referenced_threads = canonical_thread_references(&source_state);
 
@@ -106,10 +110,7 @@ where
             .map_err(|_| ConversationStateMigrationError::Storage)?;
         let target_present = target_entry.is_some();
         let (target_revision, mut merged) = match &target_entry {
-            Some(entry) => {
-                let stored = parse_and_validate(&entry.entry.body, StateSide::Target)?;
-                (stored.revision, stored.into_state())
-            }
+            Some(entry) => parse_and_validate(&entry.entry.body, StateSide::Target)?,
             None => (0, InMemoryState::default()),
         };
         let (inserted_items, unchanged_items) = merge_state(&mut merged, &source_state)?;
@@ -150,8 +151,7 @@ where
                     .await
                     .map_err(|_| ConversationStateMigrationError::Storage)?
                     .ok_or(ConversationStateMigrationError::Storage)?;
-                let verified =
-                    parse_and_validate(&written.entry.body, StateSide::Target)?.into_state();
+                let (_, verified) = parse_and_validate(&written.entry.body, StateSide::Target)?;
                 if verified != merged {
                     return Err(ConversationStateMigrationError::Storage);
                 }
@@ -219,7 +219,10 @@ fn malformed(side: StateSide) -> ConversationStateMigrationError {
 fn parse_and_validate(
     body: &[u8],
     side: StateSide,
-) -> Result<StoredConversationState, ConversationStateMigrationError> {
+) -> Result<(i64, InMemoryState), ConversationStateMigrationError> {
+    let mut duplicate_check = serde_json::Deserializer::from_slice(body);
+    DuplicateCheckedJson::deserialize(&mut duplicate_check).map_err(|_| malformed(side))?;
+    duplicate_check.end().map_err(|_| malformed(side))?;
     let stored: StoredConversationState =
         serde_json::from_slice(body).map_err(|_| malformed(side))?;
     if stored.revision < 0 {
@@ -228,10 +231,91 @@ fn parse_and_validate(
     stored
         .validate_unique_keys()
         .map_err(|()| malformed(side))?;
-    if !state_is_internally_consistent(&stored.clone().into_state()) {
+    let revision = stored.revision;
+    let state = stored.into_state();
+    if !state_is_internally_consistent(&state) {
         return Err(malformed(side));
     }
-    Ok(stored)
+    Ok((revision, state))
+}
+
+/// JSON object keys must remain unique before serde materializes them into a
+/// map. Otherwise a duplicated authority key silently becomes last-write-wins
+/// before the typed migration can validate it.
+struct DuplicateCheckedJson;
+
+impl<'de> Deserialize<'de> for DuplicateCheckedJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateCheckedJsonVisitor)?;
+        Ok(Self)
+    }
+}
+
+struct DuplicateCheckedJsonVisitor;
+
+impl<'de> Visitor<'de> for DuplicateCheckedJsonVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<DuplicateCheckedJson>()?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(serde::de::Error::custom("duplicate JSON object key"));
+            }
+            map.next_value::<DuplicateCheckedJson>()?;
+        }
+        Ok(())
+    }
 }
 
 fn state_is_internally_consistent(state: &InMemoryState) -> bool {
@@ -275,21 +359,8 @@ fn state_is_internally_consistent(state: &InMemoryState) -> bool {
             return false;
         }
     }
-    state
-        .source_bindings
-        .values()
-        .all(|source| state.bindings.values().any(|binding| binding == source))
-        && state.reply_targets.values().all(|reply| {
-            state.bindings.values().any(|binding| {
-                binding.tenant_id == reply.tenant_id
-                    && binding.adapter_kind == reply.adapter_kind
-                    && binding.adapter_installation_id == reply.adapter_installation_id
-                    && binding.thread_id == reply.thread_id
-                    && binding.source_binding_ref == reply.source_binding_ref
-                    && binding.reply_target_binding_ref == reply.reply_target_binding_ref
-                    && binding.route_access == reply.route_access
-            })
-        })
+    state.source_bindings.len() == state.bindings.len()
+        && state.reply_targets.len() == state.bindings.len()
 }
 
 fn merge_state(

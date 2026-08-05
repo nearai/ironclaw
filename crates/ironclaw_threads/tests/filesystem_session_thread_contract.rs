@@ -36,12 +36,12 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
-    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
-    ThreadHistoryRequest, ThreadMessageId, ThreadScope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, migrate_all_thread_scopes,
+    LegacyAppendMigrationReport, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest, migrate_all_thread_scopes,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -3206,6 +3206,35 @@ async fn filesystem_upgrade_rejects_malformed_rc1_append_without_v2_marker() {
             .is_none(),
         "a failed migration must not write the v2 completion marker"
     );
+}
+
+#[tokio::test]
+async fn filesystem_upgrade_skips_thread_directory_without_header_or_append_log() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rc1-empty-dir", "alice");
+    let scope = scope("rc1-empty-dir");
+    let thread_id = ThreadId::new("thread-rc1-empty-dir").unwrap();
+    let placeholder = ScopedPath::new(format!(
+        "{}/migration-placeholder",
+        thread_root_path_for_test(&scope, thread_id.as_str()).as_str()
+    ))
+    .unwrap();
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &placeholder,
+            Entry::bytes(Vec::new()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let report = service
+        .migrate_legacy_append_logs_for_scope(&scope)
+        .await
+        .expect("a directory with neither thread.json nor append state is not a lost thread");
+    assert_eq!(report, LegacyAppendMigrationReport::default());
 }
 
 #[tokio::test]
