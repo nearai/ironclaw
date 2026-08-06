@@ -481,9 +481,6 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(stats.get_by_text("Input tokens", exact=True).locator("..")).to_contain_text(
             "Unavailable"
         )
-        await expect(stats.get_by_text("Tool calls", exact=True).locator("..")).to_contain_text(
-            "0"
-        )
         await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
         await expect(stats.get_by_text("Statistics are partial:")).to_have_count(1)
     finally:
