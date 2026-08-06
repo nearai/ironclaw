@@ -624,7 +624,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // constants, and the test-support conformance module. Declarations
         // only; executable validation stays in ironclaw_host_runtime. Rationale
         // reviewed in the PR body's architecture-audit section.
-        ("ironclaw_host_api", 18_570),
+        // Raised 18_570 -> 18_578 by #7214: the user-sandbox backend rename
+        // preserves the legacy `tenant_sandbox` wire value and pins canonical
+        // reserialization. The growth is contract vocabulary and its serde
+        // compatibility proof; execution remains in the sandbox runtime lane.
+        ("ironclaw_host_api", 18_578),
         ("ironclaw_loop_contracts", 14_479),
         ("ironclaw_product_contracts", 14_471),
         ("ironclaw_prompt_envelope", 832),
