@@ -18,7 +18,11 @@ impl RebornCliContext {
             "all_proxy",
         ]
         .into_iter()
-        .any(|name| std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false));
+        .any(|name| {
+            std::env::var_os(name)
+                .map(|value| !value.as_os_str().is_empty())
+                .unwrap_or(false)
+        });
         Ok(Self {
             boot_config: RebornBootConfig::resolve_from_env()?,
             ambient_proxy_present,

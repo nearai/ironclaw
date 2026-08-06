@@ -377,6 +377,43 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn doctor_treats_non_utf8_proxy_value_as_present() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _cleared_proxy_env = cleared_ambient_proxy_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::runtime::test_env::EnvGuard::set(
+            "HOME",
+            temp.path().to_str().expect("temporary HOME must be UTF-8"),
+        );
+        let reborn_home = temp.path().join("reborn-home");
+        let _reborn_home = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_HOME",
+            reborn_home
+                .to_str()
+                .expect("temporary Reborn home must be UTF-8"),
+        );
+
+        // A non-empty, non-UTF-8 value is a real ambient proxy setting and
+        // must be treated as present, not silently coerced to "absent" the
+        // way an `Err(_)` from `std::env::var` would be.
+        let invalid = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let _http_proxy = crate::runtime::test_env::EnvGuard::set_os("HTTP_PROXY", &invalid);
+
+        let context =
+            RebornCliContext::resolve_from_env().expect("non-UTF-8 proxy context must resolve");
+        let dto = build_doctor_dto(&context);
+        assert!(
+            dto.checks
+                .iter()
+                .any(|check| check.name == HOST_MEDIATED_PROXY_CHECK),
+            "a non-UTF-8 but non-empty proxy variable must still be reported as present"
+        );
+    }
+
     #[test]
     fn doctor_config_file_absent_is_skip() {
         let check = check_config_file(std::path::Path::new("/nonexistent/config.toml"));
