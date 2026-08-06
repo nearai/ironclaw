@@ -64,6 +64,10 @@ IGNORED_PREFIXES = (
     "openwiki/",
     ".claude/",
     ".github/ISSUE_TEMPLATE/",
+    # `ISSUE_TEMPLATE/`'s exact sibling: a GitHub UI template that changes no
+    # crate, test, or runtime surface (`classify-test-scope.sh` already pairs
+    # the two in its docs-only arm). The rest of `.github/` stays undecided.
+    ".github/pull_request_template.md",
     # Agent bootstrap data only. The compressed graph and its attributes do
     # not change an Ironclaw crate, test, or runtime surface. (#7215 commits
     # the artifact; ported from main's planner at the #7152 refresh.)
@@ -131,6 +135,11 @@ QA_HARNESS_PREFIXES = (
     # every downstream Reborn lane. Same class as the `.claude/` gap this row
     # already records.
     "scripts/reborn_qa_matrix/",
+    # The live Telegram release smoke harness (`run_smoke.py` + config +
+    # README): run by hand against a real bot, referenced by no workflow, never
+    # by a `Tests (Reborn)` lane. Unclassified until 2026-08-06, when PR
+    # #7264's stale-command fix in its README hit the fail-closed arm.
+    "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # Asset trees that live outside every crate root but are compiled *into* a
@@ -266,6 +275,10 @@ PR_STATIC_CONTROL_PATHS = {
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,
     #     driven by its own lane rather than by a crate/integration selection.
     "scripts/test-mutation-audit.sh",
+    #   * `mutation-audit.sh` is the audit those guardrails self-test, run by
+    #     the same dedicated lane (`nightly-deep-ci.yml`'s mutation-frontier
+    #     job) and by hand; no Reborn PR lane invokes it.
+    "scripts/mutation-audit.sh",
     #   * the rest of the repo-root metadata class, classified 2026-08-04 as a
     #     class rather than one file per red run. Every entry above this block
     #     was added the other way — a rename-shaped diff touches root files no
