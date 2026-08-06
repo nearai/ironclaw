@@ -21,7 +21,7 @@
 ### Task 1: Pin the exact lookup contract red
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/available_extensions.rs`
 - Modify: `crates/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs`
 - Modify: `scripts/reborn_webui_v2_live_qa/test_run_live_qa.py`
 - Modify: `tests/reborn_qa_recorded_behavior.rs`
@@ -60,7 +60,7 @@ Add a hermetic recorded-QA contract whose synthetic trace pins `slack.get_conver
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta slack_send_message_description_states_host_owned_final_reply_delivery
+cargo test -p ironclaw_composition --features slack-v2-host-beta slack_send_message_description_states_host_owned_final_reply_delivery
 cargo test -p ironclaw_host_runtime --test github_wasm_runtime_contract slack_get_conversation_info_resolves_exact_dm_counterpart
 python3 -m unittest scripts.reborn_webui_v2_live_qa.test_run_live_qa.RebornWebUiV2LiveQaRunnerTests.test_blocking_qa_10_cases_declare_intended_slack_capability
 ```
@@ -79,7 +79,7 @@ Expected: all three fail because the capability and QA requirement do not exist 
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/wasm-src/src/types.rs`
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/wasm-src/src/api.rs`
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/wasm-src/src/lib.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/available_extensions.rs`
 
 **Interfaces:**
 - Consumes: Slack Web API `GET conversations.info?channel=<id>` and the existing `Conversation` response type/name-enrichment helper.
@@ -172,7 +172,7 @@ Run:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw_first_party_extensions
-cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta slack_
+cargo test -p ironclaw_composition --features slack-v2-host-beta slack_
 cargo test -p ironclaw_host_runtime --test github_wasm_runtime_contract slack_
 python3 -m unittest scripts.reborn_webui_v2_live_qa.test_run_live_qa
 bash scripts/ci/check-reborn-qa-fixtures.sh

@@ -22,12 +22,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_assistant::RebornOutboundDeliveryTargetId;
 use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
     GOOGLE_GMAIL_READONLY_SCOPE, NewCredentialAccount, ProviderScope,
 };
+use ironclaw_composition::{
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
+    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
+};
+use ironclaw_config::{RebornConfigFile, RebornHome};
 use ironclaw_extension_support::GoogleCredentialResolver;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
@@ -50,13 +57,6 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
-use ironclaw_product::RebornOutboundDeliveryTargetId;
-use ironclaw_reborn_composition::{
-    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
-    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
-};
-use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus};
 use secrecy::{ExposeSecret, SecretString};
@@ -89,7 +89,7 @@ pub fn qa_trace_tenant_id() -> &'static str {
 }
 
 /// The model profile id the composed Reborn runtime routes turns through;
-/// must match `wrap_swappable_gateway` in `ironclaw_reborn_composition`.
+/// must match `wrap_swappable_gateway` in `ironclaw_composition`.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
 struct LiveCredentialSeed {
@@ -815,7 +815,7 @@ impl RebornQaCredentialSource {
         }
     }
 
-    async fn build_services(&self) -> ironclaw_reborn_composition::RebornRuntime {
+    async fn build_services(&self) -> ironclaw_composition::RebornRuntime {
         let input = local_runtime_build_input_with_options(
             RebornCompositionProfile::Standalone,
             &self.user,

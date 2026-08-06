@@ -25,7 +25,7 @@
 - `crates/ironclaw_host_api/src/product_adapter/inbound.rs`
   owns the new channel-neutral classification contract and command variant.
 - `crates/ironclaw_host_api/src/product_adapter/mod.rs` and
-  `crates/ironclaw_product/src/lib.rs` re-export the shared classifier through
+  `crates/ironclaw_assistant/src/lib.rs` re-export the shared classifier through
   the existing public product-adapter surfaces.
 - `crates/ironclaw_extension_host/src/extension_ingress.rs` invokes shared
   classification for every normalized channel message.
@@ -35,9 +35,9 @@
   auth and approval routing without manually injected behavior.
 - `crates/ironclaw_telegram_v2_adapter/src/payload.rs` canonicalizes Telegram's
   bot-qualified command entities before generic classification.
-- `crates/ironclaw_reborn_composition/src/input.rs`,
-  `crates/ironclaw_reborn_composition/src/runtime.rs`,
-  `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`, and their
+- `crates/ironclaw_composition/src/input.rs`,
+  `crates/ironclaw_composition/src/runtime.rs`,
+  `crates/ironclaw_cli/src/runtime/native_extensions.rs`, and their
   callers remove the obsolete optional classifier plumbing.
 - `tests/integration/support/harness/profiles/extension.rs`,
   `tests/integration/extension_ingress.rs`, and
@@ -49,7 +49,7 @@
 **Files:**
 - Modify: `crates/ironclaw_host_api/src/product_adapter/inbound.rs`
 - Modify: `crates/ironclaw_host_api/src/product_adapter/mod.rs`
-- Modify: `crates/ironclaw_product/src/lib.rs`
+- Modify: `crates/ironclaw_assistant/src/lib.rs`
 
 **Interfaces:**
 - Consumes:
@@ -204,7 +204,7 @@ pub fn classify_channel_inbound_text(
 ```
 
 Re-export `classify_channel_inbound_text` from
-`ironclaw_host_api::product_adapter` and `ironclaw_product`.
+`ironclaw_host_api::product_adapter` and `ironclaw_assistant`.
 
 - [ ] **Step 4: Run the focused host-API tests**
 
@@ -222,7 +222,7 @@ Expected: all focused tests pass.
 ```bash
 git add crates/ironclaw_host_api/src/product_adapter/inbound.rs \
   crates/ironclaw_host_api/src/product_adapter/mod.rs \
-  crates/ironclaw_product/src/lib.rs
+  crates/ironclaw_assistant/src/lib.rs
 git commit -m "feat(channels): classify shared inbound commands"
 ```
 
@@ -390,11 +390,11 @@ git commit -m "fix(channels): classify interactions in generic ingress"
 - Modify: `crates/ironclaw_extension_host/src/extension_ingress.rs`
 - Modify: `crates/ironclaw_extension_host/src/channel_host.rs`
 - Modify: `crates/ironclaw_extension_host/src/channel_pairing/tests.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/input.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/runtime.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/runtime/tests/core.rs`
-- Modify: `crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs`
-- Modify: `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+- Modify: `crates/ironclaw_composition/src/input.rs`
+- Modify: `crates/ironclaw_composition/src/runtime.rs`
+- Modify: `crates/ironclaw_composition/src/runtime/tests/core.rs`
+- Modify: `crates/ironclaw_composition/tests/trigger_poller_e2e.rs`
+- Modify: `crates/ironclaw_cli/src/runtime/native_extensions.rs`
 - Modify: `tests/integration/support/harness/profiles/extension.rs`
 - Modify: `tests/integration/extension_ingress.rs`
 - Modify: `tests/integration/extension_delivery.rs`
@@ -464,9 +464,9 @@ Change `ChannelExtensionBinding` to:
 #[derive(Clone)]
 pub struct ChannelExtensionBinding {
     pub extension_id: String,
-    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
+    pub adapter: std::sync::Arc<dyn ironclaw_assistant::ChannelAdapter>,
     pub preference_target_codec:
-        Option<std::sync::Arc<dyn ironclaw_product::PreferenceTargetCodec>>,
+        Option<std::sync::Arc<dyn ironclaw_assistant::PreferenceTargetCodec>>,
 }
 ```
 
@@ -502,7 +502,7 @@ Run:
 ```bash
 cargo test -p ironclaw_extension_host \
   generic_sink_classifies_gate_replies_commands_and_plain_text -- --nocapture
-cargo test -p ironclaw_reborn_composition \
+cargo test -p ironclaw_composition \
   persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider \
   -- --nocapture
 cargo test -p ironclaw \
@@ -519,11 +519,11 @@ Expected: all focused tests pass and both integration targets compile.
 git add crates/ironclaw_extension_host/src/extension_ingress.rs \
   crates/ironclaw_extension_host/src/channel_host.rs \
   crates/ironclaw_extension_host/src/channel_pairing/tests.rs \
-  crates/ironclaw_reborn_composition/src/input.rs \
-  crates/ironclaw_reborn_composition/src/runtime.rs \
-  crates/ironclaw_reborn_composition/src/runtime/tests/core.rs \
-  crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs \
-  crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs \
+  crates/ironclaw_composition/src/input.rs \
+  crates/ironclaw_composition/src/runtime.rs \
+  crates/ironclaw_composition/src/runtime/tests/core.rs \
+  crates/ironclaw_composition/tests/trigger_poller_e2e.rs \
+  crates/ironclaw_cli/src/runtime/native_extensions.rs \
   tests/integration/support/harness/profiles/extension.rs \
   tests/integration/extension_ingress.rs \
   tests/integration/extension_delivery.rs
@@ -708,7 +708,7 @@ cargo test -p ironclaw_host_api
 cargo test -p ironclaw_extension_host
 cargo test -p ironclaw_telegram_v2_adapter
 cargo test -p ironclaw_telegram_extension
-cargo test -p ironclaw_reborn_composition
+cargo test -p ironclaw_composition
 cargo test -p ironclaw bundled_channel_bindings_carry_their_production_extras
 ```
 
@@ -719,7 +719,7 @@ Expected: all commands pass.
 Run:
 
 ```bash
-cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
+cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold
 cargo test --test extension_ingress
 cargo test --test extension_delivery
 ```
@@ -735,7 +735,7 @@ cargo clippy -p ironclaw_host_api --all-targets -- -D warnings
 cargo clippy -p ironclaw_extension_host --all-targets -- -D warnings
 cargo clippy -p ironclaw_telegram_v2_adapter --all-targets -- -D warnings
 cargo clippy -p ironclaw_telegram_extension --all-targets -- -D warnings
-cargo clippy -p ironclaw_reborn_composition --all-targets -- -D warnings
+cargo clippy -p ironclaw_composition --all-targets -- -D warnings
 cargo clippy -p ironclaw --all-targets -- -D warnings
 ```
 
@@ -766,17 +766,17 @@ If formatting changed tracked files, stage only those scoped files and commit:
 ```bash
 git add crates/ironclaw_host_api/src/product_adapter/inbound.rs \
   crates/ironclaw_host_api/src/product_adapter/mod.rs \
-  crates/ironclaw_product/src/lib.rs \
+  crates/ironclaw_assistant/src/lib.rs \
   crates/ironclaw_extension_host/src/extension_ingress.rs \
   crates/ironclaw_extension_host/src/channel_host.rs \
   crates/ironclaw_extension_host/src/channel_host/e2e_tests.rs \
   crates/ironclaw_extension_host/src/channel_pairing/tests.rs \
   crates/ironclaw_telegram_v2_adapter/src/payload.rs \
-  crates/ironclaw_reborn_composition/src/input.rs \
-  crates/ironclaw_reborn_composition/src/runtime.rs \
-  crates/ironclaw_reborn_composition/src/runtime/tests/core.rs \
-  crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs \
-  crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs \
+  crates/ironclaw_composition/src/input.rs \
+  crates/ironclaw_composition/src/runtime.rs \
+  crates/ironclaw_composition/src/runtime/tests/core.rs \
+  crates/ironclaw_composition/tests/trigger_poller_e2e.rs \
+  crates/ironclaw_cli/src/runtime/native_extensions.rs \
   tests/integration/support/harness/profiles/extension.rs \
   tests/integration/extension_ingress.rs \
   tests/integration/extension_delivery.rs

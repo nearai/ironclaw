@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging list_members output",
+  "type": "object",
+  "required": ["members"],
+  "properties": {
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["user_ref"],
+        "properties": {
+          "user_ref": { "type": "string", "minLength": 1 },
+          "display_name": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "next_cursor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque pagination cursor; pass as cursor on the next call to continue."
+    },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

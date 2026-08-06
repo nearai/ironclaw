@@ -76,7 +76,7 @@ IronClaw 工具是实现了 WIT 接口的 WASM 组件。宿主提供 HTTP、日�
 ```rust src/lib.rs
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../crates/ironclaw_wasm/wit/tool.wit",
+    path: "../../crates/lanes/ironclaw_wasm/wit/tool.wit",
 });
 
 use serde::{Deserialize, Serialize};

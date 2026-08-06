@@ -93,7 +93,7 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 | `ironclaw_common` | Shared utilities, types, and enums (Attachment, Event, Identity, etc.) |
 | `ironclaw_prompt_envelope` | Prompt composition, template system, and injection safety |
 | `ironclaw_runtime_policy` | Policy types, profile definitions, and validation |
-| `ironclaw_architecture` | Architecture boundary tests and dependency checks |
+| `ironclaw_architecture_tests` | Architecture boundary tests and dependency checks |
 
 ### 2. Authority & Gates (9 crates)
 **Purpose:** Policy enforcement, security, and approval gates.
@@ -122,7 +122,7 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 | `ironclaw_wasm_limiter` | Resource limits, memory bounds, timeout enforcement |
 | `ironclaw_mcp` | Model Context Protocol server discovery and tunneling |
 | `ironclaw_scripts` | Script execution, inline coding (Python, Bash, etc.) |
-| `ironclaw_extensions` | Extension lifecycle, manifest discovery, activation |
+| `ironclaw_extension_registry` | Extension lifecycle, manifest discovery, activation |
 | `ironclaw_host_runtime` | Host-side effect execution (shell, HTTP, etc.) |
 | `ironclaw_processes` | Process sandbox, stdio capture, subprocess management |
 | `ironclaw_first_party_extensions` | Built-in tools (GitHub, Google Drive, etc.) |
@@ -132,10 +132,10 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 
 | Crate | Purpose |
 |-------|---------|
-| `ironclaw_events` | Immutable event log, JSONL backend, in-memory store |
+| `ironclaw_event_log` | Immutable event log, JSONL backend, in-memory store |
 | `ironclaw_event_projections` | Snapshot computation, pending gate projection, state cache |
 | `ironclaw_event_streams` | Event subscription, filtering, redaction for delivery |
-| `ironclaw_reborn_event_store` | Event storage abstraction (PostgreSQL/libSQL adapters) |
+| `ironclaw_event_store` | Event storage abstraction (PostgreSQL/libSQL adapters) |
 | `ironclaw_run_state` | Checkpoint storage, recovery state, progress tracking |
 | `ironclaw_threads` | Thread (conversation) lifecycle and metadata |
 | `ironclaw_conversations` | Conversation store, trusted inbound, state machine |
@@ -155,12 +155,12 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 | `ironclaw_embeddings` | Embedding provider abstraction (OpenAI, Bedrock, Ollama, etc.) |
 | `ironclaw_engine` | (v1) Legacy orchestration; in maintenance mode |
 | `ironclaw_reborn` | Reborn runtime kernel and composition |
-| `ironclaw_reborn_cli` | Primary CLI/WebUI binary entrypoint |
-| `ironclaw_reborn_config` | Config.toml parsing, defaults, resolution |
-| `ironclaw_reborn_composition` | Dependency injection, app builder, service wiring |
-| `ironclaw_reborn_identity` | User/owner identity, session management |
-| `ironclaw_reborn_traces` | Trace recording, replay, structured spans |
-| `ironclaw_reborn_openai_compat` | OpenAI-compatible API surface (chat completions, embeddings) |
+| `ironclaw_cli` | Primary CLI/WebUI binary entrypoint |
+| `ironclaw_config` | Config.toml parsing, defaults, resolution |
+| `ironclaw_composition` | Dependency injection, app builder, service wiring |
+| `ironclaw_identity` | User/owner identity, session management |
+| `ironclaw_trace_commons` | Trace recording, replay, structured spans |
+| `ironclaw_openai_compat` | OpenAI-compatible API surface (chat completions, embeddings) |
 | `ironclaw_reborn_openai_compat_storage` | PostgreSQL/libSQL adapters for OpenAI API |
 | `ironclaw_reborn_webui_ingress` | WebUI HTTP routing, session cookies, CORS |
 | `ironclaw_gateway` | (v1) HTTP gateway; mostly ported to Reborn |
@@ -183,7 +183,7 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 | `ironclaw_hooks_postgres` | PostgreSQL event hook implementation |
 | `ironclaw_hooks_libsql` | libSQL (Turso) event hook implementation |
 | `ironclaw_hooks_parity` | Feature parity testing across backends |
-| `ironclaw_reborn_event_store` | (Dual-backend) Event store abstraction |
+| `ironclaw_event_store` | (Dual-backend) Event store abstraction |
 | `ironclaw_run_state` | (Dual-backend) Run state persistence |
 | `ironclaw_threads` | (Dual-backend) Thread storage |
 | `ironclaw_conversations` | (Dual-backend) Conversation store |
@@ -235,21 +235,21 @@ Surfaces (WebUI, channels, API)
 
 ```
 Is the feature runtime/execution/agent-related?
-├─ YES: Goes in crates/ironclaw_reborn* or crates/ironclaw_product*
+├─ YES: Goes in crates/ironclaw_reborn* or crates/ironclaw_assistant*
 │  ├─ Agent executor behavior? → ironclaw_agent_loop or ironclaw_executor
-│  ├─ Config/composition? → ironclaw_reborn_config or ironclaw_reborn_composition
+│  ├─ Config/composition? → ironclaw_config or ironclaw_composition
 │  ├─ WebUI/API? → ironclaw_reborn_webui_ingress or ironclaw_gateway
 │  ├─ Workflows/missions? → ironclaw_product_workflow
 │  └─ New channel (Slack, Discord)? → ironclaw_*_adapter
 │
 └─ NO: Is it a tool, sandbox, or capability?
-   ├─ YES: Goes in ironclaw_capabilities, ironclaw_extensions, ironclaw_wasm, etc.
+   ├─ YES: Goes in ironclaw_capabilities, ironclaw_extension_registry, ironclaw_wasm, etc.
    │
    └─ NO: Is it a gate (safety, approval, secrets)?
       ├─ YES: Goes in ironclaw_safety, ironclaw_approvals, ironclaw_secrets, etc.
       │
       └─ NO: Is it a substrate (events, storage, filesystem)?
-         ├─ YES: Goes in ironclaw_events, ironclaw_filesystem, etc.
+         ├─ YES: Goes in ironclaw_event_log, ironclaw_filesystem, etc.
          │
          └─ LEGACY v1: Very rarely touch src/. Only maintain existing v1 behavior.
 ```
@@ -262,7 +262,7 @@ Is the feature runtime/execution/agent-related?
 | "Require approval for file writes" | `ironclaw_approvals`, `ironclaw_safety` | Gate logic, policy enforcement |
 | "Support Slack threads" | `ironclaw_slack_extension`, `ironclaw_threads` | Channel adapter, thread metadata |
 | "Encrypt user files" | `ironclaw_secrets`, `ironclaw_filesystem` | Encryption logic, file storage |
-| "Add cost tracking" | `ironclaw_resources`, `ironclaw_events` | Quota system, event projection |
+| "Add cost tracking" | `ironclaw_resources`, `ironclaw_event_log` | Quota system, event projection |
 
 ## Architecture Patterns
 
@@ -285,7 +285,7 @@ let db = if postgres_enabled {
 executor.run(db).await
 ```
 
-**Where to extend:** Add new implementations to the registry in `ironclaw_reborn_composition`.
+**Where to extend:** Add new implementations to the registry in `ironclaw_composition`.
 
 ### Pattern 2: Host Ports (Effect Requests)
 
@@ -319,7 +319,7 @@ User Action → Event(s) → Event Store
                         (Loop queries snapshots, not full log)
 ```
 
-**Where to extend:** Add event types to `ironclaw_events`, projection logic to `ironclaw_event_projections`.
+**Where to extend:** Add event types to `ironclaw_event_log`, projection logic to `ironclaw_event_projections`.
 
 ### Pattern 4: Kernel-Userland Boundary
 

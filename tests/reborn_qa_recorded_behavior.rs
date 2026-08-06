@@ -85,8 +85,8 @@ use std::{
 };
 
 use chrono::Utc;
+use ironclaw_composition::{AssistantReply, RebornRuntime};
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
-use ironclaw_reborn_composition::{AssistantReply, RebornRuntime};
 use ironclaw_triggers::{TriggerRunStatus, TriggerState};
 use ironclaw_turns::{GetRunStateRequest, TurnScope};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
@@ -182,6 +182,99 @@ fn load_live_canary_manifest() -> LiveCanaryManifest {
         .unwrap_or_else(|error| panic!("read live-canary manifest {}: {error}", path.display()));
     serde_json::from_str(&contents)
         .unwrap_or_else(|error| panic!("parse live-canary manifest {}: {error}", path.display()))
+}
+
+/// Every `live_canary/quarantined_*/` subdirectory is one quarantine group: a
+/// directory of unmodified traces plus the specific recorded-call condition
+/// that justifies removing that case from active dispatch. The inventory is
+/// discovered from disk so a newly added `quarantined_*` directory cannot be
+/// invisible to the manifest-coverage check; it must also gain a matching arm
+/// in `recorded_calls_justify_quarantine` or the contract fails loudly.
+fn quarantine_group_names(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(root)
+        .unwrap_or_else(|error| {
+            panic!(
+                "read live-canary fixture directory {}: {error}",
+                root.display()
+            )
+        })
+        .map(|entry| entry.expect("read live-canary fixture entry").path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            name.starts_with("quarantined_").then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// File stems (case IDs) of every `.json` trace directly inside `group_dir`.
+fn quarantine_group_cases(group_dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(group_dir)
+        .unwrap_or_else(|error| {
+            panic!(
+                "read quarantined live-canary fixture directory {}: {error}",
+                group_dir.display()
+            )
+        })
+        .map(|entry| entry.expect("read quarantined fixture entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| path.file_stem()?.to_str().map(ToString::to_string))
+        .collect()
+}
+
+/// The recorded-call condition that justifies each quarantine group's cause.
+fn recorded_calls_justify_quarantine(group_name: &str, calls: &[(String, String)]) -> bool {
+    match group_name {
+        "quarantined_retired_activation" => calls
+            .iter()
+            .any(|(name, _)| name == "builtin.extension_activate"),
+        "quarantined_stale_slack_canonicalization" => {
+            // Same retired-field markers the standardized messaging framework
+            // canonicalized away (`channel`, `thread_ts`, `user_id`, `types`,
+            // `count`, `sort`); `arguments` is the JSON-serialized call
+            // arguments produced by `normalized_argument_text`.
+            const RETIRED_ARGUMENT_KEYS: [&str; 6] =
+                ["channel", "thread_ts", "user_id", "types", "count", "sort"];
+            calls.iter().any(|(name, arguments)| {
+                if !name.starts_with("slack.") {
+                    return false;
+                }
+                serde_json::from_str::<serde_json::Value>(arguments)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .is_some_and(|object| {
+                        RETIRED_ARGUMENT_KEYS
+                            .iter()
+                            .any(|key| object.contains_key(*key))
+                    })
+            })
+        }
+        other => panic!("no quarantine justification defined for group {other}"),
+    }
+}
+
+#[test]
+fn stale_slack_quarantine_matches_argument_keys_not_values() {
+    let canonical = vec![(
+        "slack.list_conversations".to_string(),
+        r#"{"kinds":["channel"]}"#.to_string(),
+    )];
+    assert!(!recorded_calls_justify_quarantine(
+        "quarantined_stale_slack_canonicalization",
+        &canonical
+    ));
+
+    let retired = vec![(
+        "slack.get_conversation_history".to_string(),
+        r#"{"channel":"C1"}"#.to_string(),
+    )];
+    assert!(recorded_calls_justify_quarantine(
+        "quarantined_stale_slack_canonicalization",
+        &retired
+    ));
 }
 
 // --- Tier 1: recorders (live API, manual) ----------------------------------
@@ -787,37 +880,32 @@ fn contract_live_canary_harvested_traces_cover_active_and_quarantined_model_case
         );
     }
 
-    let quarantine_dir = fixture_dir.join("quarantined_retired_activation");
-    let actual_quarantined_cases = std::fs::read_dir(&quarantine_dir)
-        .expect("read quarantined live-canary fixture directory")
-        .map(|entry| entry.expect("read quarantined fixture entry").path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .filter_map(|path| path.file_stem()?.to_str().map(ToString::to_string))
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut actual_quarantined_cases = std::collections::BTreeSet::new();
+    for group_name in quarantine_group_names(&fixture_dir) {
+        let cases = quarantine_group_cases(&fixture_dir.join(&group_name));
+        assert!(
+            actual_quarantined_cases.is_disjoint(&cases),
+            "{group_name} contains a case already claimed by another quarantine group"
+        );
+        for case in &cases {
+            assert!(
+                !qa_fixture_path(&format!("live_canary/{case}")).exists(),
+                "{case} is quarantined and must not remain in the active fixture directory"
+            );
+            let trace = load_qa_trace(&format!("live_canary/{group_name}/{case}"));
+            let calls = recorded_tool_calls(&trace);
+            assert!(
+                recorded_calls_justify_quarantine(&group_name, &calls),
+                "{case} in {group_name} must contain the call that justifies its quarantine"
+            );
+        }
+        actual_quarantined_cases.extend(cases);
+    }
     assert_eq!(
         actual_quarantined_cases, quarantined,
-        "quarantined fixture files must exactly match the promoted manifest"
+        "quarantined fixture files (across every quarantined_*/ group directory) must \
+         exactly match the promoted manifest"
     );
-
-    for case in quarantined {
-        assert!(
-            !qa_fixture_path(&format!("live_canary/{case}")).exists(),
-            "{case} is quarantined and must not remain in the active fixture directory"
-        );
-        let trace = load_qa_trace(&format!(
-            "live_canary/quarantined_retired_activation/{case}"
-        ));
-        let calls = recorded_tool_calls(&trace);
-        assert!(
-            calls
-                .iter()
-                .any(|(name, _)| name == "builtin.extension_activate"),
-            "{case} must contain the retired call that justifies its quarantine"
-        );
-    }
 }
 
 // --- Tier 3: runtime replay (hermetic) ---------------------------------------

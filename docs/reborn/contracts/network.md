@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-26
 **Status:** V1 policy + HTTP egress slice
-**Crate:** `crates/ironclaw_network`
+**Crate:** `crates/substrates/ironclaw_network`
 **Depends on:** `docs/reborn/contracts/host-api.md`
 
 ---
