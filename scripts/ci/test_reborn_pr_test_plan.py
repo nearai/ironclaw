@@ -763,20 +763,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
         (rather than the `alpha`/`beta`/`gamma` fixture) since
         `_wasm_wit_prefix` resolves the crate through the live repo tree.
         """
+        wasm_directory = planner.crate_directory("ironclaw_wasm", ROOT)
         wasm_metadata = metadata()
         wasm_metadata["workspace_members"].append("wasm")
         wasm_metadata["packages"].append(
             {
                 "id": "wasm",
                 "name": "ironclaw_wasm",
-                "manifest_path": str(ROOT / "crates/ironclaw_wasm/Cargo.toml"),
+                "manifest_path": str(ROOT / wasm_directory / "Cargo.toml"),
             }
         )
         wasm_metadata["resolve"]["nodes"].append({"id": "wasm", "deps": []})
 
         plan = planner.build_plan(
             event="pull_request",
-            changed_paths=["crates/ironclaw_wasm/witless/notes.txt"],
+            changed_paths=[f"{wasm_directory}/witless/notes.txt"],
             metadata=wasm_metadata,
             canonical_packages=self.canonical + ["ironclaw_wasm"],
         )
