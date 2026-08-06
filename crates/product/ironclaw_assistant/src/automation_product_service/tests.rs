@@ -11,17 +11,18 @@ use crate::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductService, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductListThreadsRequest, ProductSurfaceFailure, RebornAutomationHoldReason,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornListThreadsResponse, RebornServices,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    ProductSurfaceFailure, RebornAutomationHoldReason, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornListThreadsResponse, RebornServices, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, THREADS_VIEW, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
 };
+use ironclaw_product_contracts::inbound_requests::ProductListThreadsRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };

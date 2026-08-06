@@ -39,8 +39,8 @@ use ironclaw_assistant::{
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -78,6 +78,7 @@ use ironclaw_product_contracts::admin_users::{
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::inbound::{
     AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,

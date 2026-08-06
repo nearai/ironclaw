@@ -14,7 +14,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_assistant::{ApprovalDecision, ProductInboundAck};
+use ironclaw_product_contracts::inbound::{ApprovalDecision, ProductInboundAck};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 

@@ -14,24 +14,27 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_assistant::{
-    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
-    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
-    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
-    VerifiedInbound,
-};
-use ironclaw_assistant::{
     DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_assistant::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
 };
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart,
+    PartDeliveryOutcome, ProductTriggerReason, VerifiedInbound,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId,
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
@@ -51,6 +54,11 @@ use ironclaw_outbound::{
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
+};
+use ironclaw_product_contracts::inbound::{
+    InboundCommandPayload, ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_contracts::prompt_source::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource,
@@ -407,7 +415,7 @@ impl ProjectFilesystemReader for ScriptedProjectFilesystemReader {
 }
 
 struct StaticBindingService {
-    binding: ironclaw_assistant::ResolvedBinding,
+    binding: ironclaw_product_contracts::binding::ResolvedBinding,
     fail: bool,
 }
 
@@ -415,9 +423,9 @@ struct StaticBindingService {
 impl ironclaw_product_contracts::binding::ProductBindingResolver for StaticBindingService {
     async fn resolve_binding(
         &self,
-        _request: ironclaw_assistant::ResolveBindingRequest,
+        _request: ironclaw_product_contracts::binding::ResolveBindingRequest,
     ) -> Result<
-        ironclaw_assistant::ResolvedBinding,
+        ironclaw_product_contracts::binding::ResolvedBinding,
         ironclaw_product_contracts::error::ProductOperationFailure,
     > {
         if self.fail {
@@ -432,9 +440,9 @@ impl ironclaw_product_contracts::binding::ProductBindingResolver for StaticBindi
 
     async fn lookup_binding(
         &self,
-        _request: ironclaw_assistant::ResolveBindingRequest,
+        _request: ironclaw_product_contracts::binding::ResolveBindingRequest,
     ) -> Result<
-        ironclaw_assistant::ResolvedBinding,
+        ironclaw_product_contracts::binding::ResolvedBinding,
         ironclaw_product_contracts::error::ProductOperationFailure,
     > {
         if self.fail {
@@ -528,8 +536,8 @@ fn agent() -> AgentId {
     AgentId::new("agent-a").expect("agent")
 }
 
-fn binding() -> ironclaw_assistant::ResolvedBinding {
-    ironclaw_assistant::ResolvedBinding {
+fn binding() -> ironclaw_product_contracts::binding::ResolvedBinding {
+    ironclaw_product_contracts::binding::ResolvedBinding {
         tenant_id: tenant(),
         actor_user_id: user(),
         subject_user_id: Some(user()),
@@ -1104,9 +1112,9 @@ async fn observer_skips_resolution_ack_after_final_reply_was_delivered() {
     // `Completed` and re-posted the final reply.
     let approve_envelope = envelope(
         ProductInboundPayload::ApprovalResolution(
-            ironclaw_assistant::ApprovalResolutionPayload::new(
+            ironclaw_product_contracts::inbound::ApprovalResolutionPayload::new(
                 "gate-1",
-                ironclaw_assistant::ApprovalDecision::ApproveOnce,
+                ironclaw_product_contracts::inbound::ApprovalDecision::ApproveOnce,
             )
             .expect("payload"),
         ),

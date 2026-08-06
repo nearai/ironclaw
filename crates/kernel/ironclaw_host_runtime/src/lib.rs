@@ -60,6 +60,7 @@ mod process_output;
 mod process_port;
 mod production;
 mod services;
+mod standard_op_output;
 mod surface;
 mod user_profile_source;
 mod wasm_credentials;
@@ -452,6 +453,17 @@ pub struct RuntimeCapabilityFailure {
     /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
     /// fences it before it reaches the model.
     model_visible_cause: Option<String>,
+    /// Whether the failed capability is bound to a standard messaging WRITE
+    /// op (`descriptor.standard_op.map(|op| op.is_write()) == Some(true)`).
+    /// Read only by [`RuntimeCapabilityFailure::disposition`]'s retry
+    /// carve-out (pre-merge amendment W1): retrying a write blind risks a
+    /// duplicate side effect the model cannot see or undo (e.g. a message
+    /// sent twice), so a write's retryable-kind failure must never resolve to
+    /// `RetrySameCall` — the model decides whether to retry a write, not the
+    /// host. Deliberately excluded from `Debug`/`PartialEq`, mirroring
+    /// `model_visible_cause`: a construction-time policy input, not part of
+    /// the failure's public identity.
+    is_standard_write: bool,
 }
 
 impl fmt::Debug for RuntimeCapabilityFailure {
@@ -618,11 +630,20 @@ impl RuntimeCapabilityFailure {
             message,
             detail: None,
             model_visible_cause: None,
+            is_standard_write: false,
         }
     }
 
     pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
         self.detail = Some(detail);
+        self
+    }
+
+    /// Marks this failure as originating from a capability bound to a
+    /// standard messaging write op. See the field doc for why this changes
+    /// [`Self::disposition`]'s outcome.
+    pub fn with_is_standard_write(mut self, is_standard_write: bool) -> Self {
+        self.is_standard_write = is_standard_write;
         self
     }
 
@@ -650,7 +671,7 @@ impl RuntimeCapabilityFailure {
     }
 
     pub fn disposition(&self) -> CapabilityFailureDisposition {
-        capability_failure_disposition(self.kind)
+        capability_failure_disposition(self.kind, self.is_standard_write)
     }
 }
 
@@ -684,7 +705,24 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 /// than burning retry budget. Security
 /// isolation failures must use a separate quarantine path instead of this
 /// generic failure disposition.
-pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDisposition {
+///
+/// `is_standard_write` carves out one exception to the retryable-kind rule
+/// (pre-merge amendment W1): a capability bound to a standard messaging write
+/// op (`StandardMessagingOp::is_write() == true`) must never receive
+/// `RetrySameCall`, however transient/backend/network the failure kind looks.
+/// A same-call retry after a write dispatch of unknown outcome risks a
+/// duplicate side effect the model cannot see or undo (e.g. a message sent
+/// twice) — the model decides whether to retry a write, not the host. Read
+/// ops and bespoke tools (`is_standard_write == false`) keep today's
+/// retry-by-kind behavior unchanged.
+pub fn capability_failure_disposition(
+    kind: FailureKind,
+    is_standard_write: bool,
+) -> CapabilityFailureDisposition {
+    if is_standard_write && matches!(kind.fate(), FailureFate::Retry) {
+        return CapabilityFailureDisposition::ModelVisibleToolError;
+    }
+
     match kind.fate() {
         FailureFate::Retry => CapabilityFailureDisposition::RetrySameCall,
         FailureFate::ModelVisible | FailureFate::Park | FailureFate::Terminal => {

@@ -689,6 +689,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 effects,
                 default_permission: PermissionMode::Allow,
                 visibility: CapabilityVisibility::Model,
+                standard_op: None,
                 input_schema_ref: CapabilityProfileSchemaRef::new(
                     "schemas/host/status.input.v1.json",
                 )

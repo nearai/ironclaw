@@ -54,29 +54,107 @@ const DRIVER_LINKED_CRATES: &[&str] = &[
     "ironclaw_stress",
 ];
 
+/// The other three drivers §11.2.6's clause (b) names, each seeded at its
+/// **measured** set and ratcheting down only — same discipline as
+/// `DRIVER_LINKED_CRATES` above, which had covered `deadpool-postgres` alone.
+///
+/// ✎ **Added 2026-08-05 (CHECKLIST WS10, §11.2.6 clause (b)).** The clause reads
+/// *"no crate may hold a normal dep on `libsql`/`deadpool`/`deadpool-postgres`/
+/// `tokio-postgres` outside …"*, and only the third of the four was gated — so
+/// three of the four driver cones could spread with nothing to notice, which is
+/// precisely the "spread invisibly" failure the clause exists to stop. The
+/// `libsql` set is the interesting one: it is **nine** crates, and it is the
+/// number §11.2.6's own target sentence is written against
+/// (`{libsql_runtime, filesystem, event_store, composition}` plus shrink-only
+/// `{triggers, hooks}` — so `auth`/`host_runtime`/`turn_runner`/`stress` are the
+/// named residue, and `turn_runner` holding a database driver is the entry most
+/// worth an owner's attention).
+///
+/// Seeded, not aspirational: every entry is measured on this tree through
+/// `cargo metadata`, and the equality below fails in **both** directions, so a
+/// crate that stops linking a driver must leave the list in the same PR
+/// (#7147's lesson — a ceiling above the live set is an unclaimed budget).
+const ADDITIONAL_DRIVER_ALLOWLISTS: &[(&str, &[&str])] = &[
+    (
+        "libsql",
+        &[
+            // §11.2.6's chartered four.
+            "ironclaw_composition",
+            "ironclaw_event_store",
+            "ironclaw_filesystem",
+            "ironclaw_libsql_runtime",
+            // ADR 0004 / ADR 0003, as above — shrink-only by the clause's own
+            // wording.
+            "ironclaw_hooks",
+            "ironclaw_triggers",
+            // Measured residue the clause names explicitly as "today also
+            // includes". Each is a standing §11.2.6 target, not a charter.
+            "ironclaw_host_runtime",
+            "ironclaw_turn_runner",
+            "ironclaw_stress",
+        ],
+    ),
+    (
+        "deadpool",
+        &[
+            // The pool type itself — only the two crates that build pools.
+            "ironclaw_filesystem",
+            "ironclaw_libsql_runtime",
+        ],
+    ),
+    (
+        "tokio-postgres",
+        &[
+            "ironclaw_event_store",
+            "ironclaw_filesystem",
+            "ironclaw_hooks",
+            "ironclaw_triggers",
+            "ironclaw_stress",
+        ],
+    ),
+];
+
 #[test]
 fn only_chartered_crates_link_the_postgres_driver() {
-    let actual = normal_dependents_of("deadpool-postgres");
-    let allowed: BTreeSet<String> = DRIVER_LINKED_CRATES
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
+    assert_driver_allowlist("deadpool-postgres", DRIVER_LINKED_CRATES);
+}
+
+/// §11.2.6 clause (b) for the three drivers the postgres gate above does not
+/// cover. One test rather than three so a reader cannot fix one driver and
+/// leave the others reported nowhere.
+#[test]
+fn only_chartered_crates_link_the_other_persistence_drivers() {
+    for (driver, allowed) in ADDITIONAL_DRIVER_ALLOWLISTS {
+        assert_driver_allowlist(driver, allowed);
+    }
+}
+
+/// Exact-match, both directions. Growth is new driver spread; shrinkage left
+/// unrecorded is untracked slack that silently permits a re-add.
+fn assert_driver_allowlist(driver: &str, allowed: &[&str]) {
+    let actual = normal_dependents_of(driver);
+    assert!(
+        !actual.is_empty(),
+        "no workspace crate holds a normal `{driver}` dependency — either the driver left the \
+         tree (delete its allowlist in this PR) or the metadata query broke, in which case this \
+         gate would pass having measured nothing"
+    );
+    let allowed: BTreeSet<String> = allowed.iter().map(|name| (*name).to_string()).collect();
 
     let added: Vec<_> = actual.difference(&allowed).cloned().collect();
     assert!(
         added.is_empty(),
-        "these crates gained a normal `deadpool-postgres` dependency without being \
-         chartered for a database driver (PROPOSAL §11.2.6): {added:?}. If that is \
-         intended, add them to DRIVER_LINKED_CRATES with the reason — this list is \
-         shrink-only on purpose."
+        "these crates gained a normal `{driver}` dependency without being chartered for a \
+         database driver (PROPOSAL §11.2.6): {added:?}. If that is intended, add them to the \
+         allowlist with the reason — these lists are shrink-only on purpose."
     );
 
     let removed: Vec<_> = allowed.difference(&actual).cloned().collect();
     assert!(
         removed.is_empty(),
-        "these crates no longer link `deadpool-postgres`: {removed:?}. That is good \
-         news — drop them from DRIVER_LINKED_CRATES so the list keeps ratcheting down \
-         instead of quietly permitting a re-add."
+        "these crates no longer link `{driver}`: {removed:?}. That is good news — drop them \
+         from the allowlist so the list keeps ratcheting down instead of quietly permitting a \
+         re-add."
     );
 }
 

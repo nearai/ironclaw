@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_assistant::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError,
     OpenAiCompatModelCatalog, OpenAiCompatModelEntry, OpenAiCompatRouterState,

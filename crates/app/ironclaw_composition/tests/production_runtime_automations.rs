@@ -15,9 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_assistant::{
-    AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
-};
+use ironclaw_assistant::{AUTOMATIONS_VIEW, RebornListAutomationsResponse};
 use ironclaw_composition::{
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
@@ -33,6 +31,7 @@ use ironclaw_host_api::{
     },
 };
 use ironclaw_host_runtime::UserSandboxProcessPort;
+use ironclaw_product_contracts::inbound_requests::ProductListAutomationsRequest;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_product_contracts::views::RebornViewPage;
 

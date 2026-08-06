@@ -5,15 +5,14 @@ use std::{
 };
 
 use crate::is_approval_gate_ref;
-use crate::{
-    ApprovalPromptContextView, AuthPromptContextView, GatePromptView, ProductAdapterError,
-    ProductGateKind, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductSurfaceRejectionKind, RedactedString,
-};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_approvals::ApprovalRequestStorePort;
+use ironclaw_extension_contracts::auth_prompt::AuthPromptContextView;
 use ironclaw_host_api::ids::{InvocationId, UserId};
+use ironclaw_host_api::product_adapter::{
+    ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
+};
 use ironclaw_host_api::turn::{
     ModelInvalidOutputDetailReason, SanitizedFailure, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
@@ -24,6 +23,10 @@ use ironclaw_loop_contracts::{
 use ironclaw_product_contracts::approval_prompt::{
     approval_prompt_context_for_request, approval_prompt_lookup_scope,
     approval_request_id_from_gate_ref,
+};
+use ironclaw_product_contracts::outbound::{
+    ApprovalPromptContextView, GatePromptView, ProductGateKind, ProductOutboundPayload,
+    ProductProjectionItem, ProductProjectionState,
 };
 use ironclaw_turns::{
     GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,

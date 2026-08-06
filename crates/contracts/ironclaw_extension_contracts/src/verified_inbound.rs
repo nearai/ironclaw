@@ -33,13 +33,22 @@
 //! consumer's opt-in compiled the family open workspace-wide. See
 //! `crates/ironclaw_host_api/src/product_adapter/auth.rs` for the measurement.
 //!
+//! ✎ **WS8, 2026-08-05:** the family is two functions, not four. The
+//! `_for_tenant` variants of both recipes had zero callers in any build and
+//! were deleted as dead mint surface; the ingress router mints unscoped
+//! evidence and resolves tenancy from the installation afterwards. Tenant
+//! threading through a grant-gated mint stays pinned by the surviving
+//! `mark_bearer_token_verified_for_tenant` and by
+//! `ProtocolAuthEvidence::seal_verified_inbound`'s own `Some(tenant)` path in
+//! `ironclaw_host_api/tests/protocol_auth_evidence_seal.rs`. Reviving a
+//! tenant-scoped channel mint means adding it back **with** its caller.
+//!
 //! Tests that need verified evidence use
 //! [`ProtocolAuthEvidence::test_verified`] (the `test-support` seam), not these
 //! functions: a test standing in for the host is exactly the case
 //! `test_verified` exists for, and it keeps adapter crates out of the grant
 //! path entirely.
 
-use ironclaw_host_api::ids::TenantId;
 use ironclaw_host_api::product_adapter::auth::{
     AuthRequirement, ProtocolAuthEvidence, VerifiedInboundGrant,
 };
@@ -65,27 +74,6 @@ pub fn mark_request_signature_verified(
     )
 }
 
-/// Tenant-scoped [`mark_request_signature_verified`], for tenant-scoped product
-/// surfaces. The tenant is host-resolved from the installation, never read from
-/// the request body.
-pub fn mark_request_signature_verified_for_tenant(
-    grant: VerifiedInboundGrant,
-    header_name: impl Into<String>,
-    timestamp_header_name: Option<String>,
-    subject: impl Into<String>,
-    tenant_id: TenantId,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::seal_verified_inbound(
-        grant,
-        AuthRequirement::RequestSignature {
-            header_name: header_name.into(),
-            timestamp_header_name,
-        },
-        subject,
-        Some(tenant_id),
-    )
-}
-
 /// Attest that the shared-secret-header recipe verified this request.
 pub fn mark_shared_secret_header_verified(
     grant: VerifiedInboundGrant,
@@ -99,23 +87,6 @@ pub fn mark_shared_secret_header_verified(
         },
         subject,
         None,
-    )
-}
-
-/// Tenant-scoped [`mark_shared_secret_header_verified`].
-pub fn mark_shared_secret_header_verified_for_tenant(
-    grant: VerifiedInboundGrant,
-    header_name: impl Into<String>,
-    subject: impl Into<String>,
-    tenant_id: TenantId,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::seal_verified_inbound(
-        grant,
-        AuthRequirement::SharedSecretHeader {
-            header_name: header_name.into(),
-        },
-        subject,
-        Some(tenant_id),
     )
 }
 

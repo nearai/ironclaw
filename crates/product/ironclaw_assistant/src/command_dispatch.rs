@@ -4,9 +4,9 @@
 //! authority-bearing workflow context and the service boundary that decides
 //! whether a command may execute from that context.
 
-use crate::{ProductRejection, ProductRejectionKind};
 use async_trait::async_trait;
 use ironclaw_product_contracts::command::ProductCommandContext;
+use ironclaw_product_contracts::inbound::{ProductRejection, ProductRejectionKind};
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use serde::{Deserialize, Serialize};
 

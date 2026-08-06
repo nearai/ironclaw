@@ -1574,12 +1574,37 @@ fn capability_profile_schema_refs_are_relative_repository_paths() {
         "schemas/memory/with:colon.json",
         "c:/win/schema.json",
         "schemas/memory/contains space.json",
+        // The host-owned namespace is never accepted from the generic string
+        // constructor, including otherwise valid canonical refs.
+        "standard:messaging/send_message.input.v1",
+        "standard:messaging/edit_message.output.v1",
+        "evil:messaging/x.json",
+        "standard:",
+        "standard:messaging/../../x",
+        "standard:messaging/a:b.json",
+        "standard:messaging/",
     ] {
         assert!(
             CapabilityProfileSchemaRef::new(invalid).is_err(),
             "{invalid:?} should be rejected"
         );
     }
+
+    assert_eq!(
+        CapabilityProfileSchemaRef::standard_messaging_input(
+            ironclaw_host_api::messaging::StandardMessagingOp::SendMessage,
+        )
+        .expect("typed standard input ref")
+        .as_str(),
+        "standard:messaging/send_message.input.v1"
+    );
+    assert!(
+        CapabilityProfileSchemaRef::standard_messaging_output(
+            ironclaw_host_api::messaging::StandardMessagingOp::ForwardMessage,
+        )
+        .is_err(),
+        "reserved operations have no constructible canonical schema ref"
+    );
 }
 
 fn sample_context_with_agent(agent: Option<&str>) -> ExecutionContext {

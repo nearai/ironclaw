@@ -25,10 +25,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_assistant::{
-    DefaultProductSurface, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
-};
-use ironclaw_assistant::{ProductInboundAck, ProductTriggerReason};
+use ironclaw_assistant::DefaultProductSurface;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
@@ -50,6 +48,10 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::{
@@ -1012,7 +1014,10 @@ impl RebornIntegrationHarness {
     fn build_user_envelope(
         &self,
         text: &str,
-    ) -> HarnessResult<(String, ironclaw_assistant::ProductInboundEnvelope)> {
+    ) -> HarnessResult<(
+        String,
+        ironclaw_product_contracts::inbound::ProductInboundEnvelope,
+    )> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
@@ -1181,7 +1186,7 @@ impl RebornIntegrationHarness {
     pub async fn submit_approval_resolution(
         &self,
         gate_ref: &TurnGateRef,
-        decision: ironclaw_assistant::ApprovalDecision,
+        decision: ironclaw_product_contracts::inbound::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_approval_resolution_envelope(
@@ -1201,7 +1206,7 @@ impl RebornIntegrationHarness {
     pub async fn submit_auth_resolution(
         &self,
         gate_ref: &TurnGateRef,
-        result: ironclaw_assistant::AuthResolutionResult,
+        result: ironclaw_product_contracts::inbound::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_auth_resolution_envelope(
@@ -2466,7 +2471,7 @@ pub(crate) fn apply_hermetic_env() {
 /// Assemble a `ResolveBindingRequest` from a verified inbound envelope. This
 /// harness only submits DirectChat turns, so the route kind is `Direct`.
 pub(crate) fn binding_request(
-    envelope: &ironclaw_assistant::ProductInboundEnvelope,
+    envelope: &ironclaw_product_contracts::inbound::ProductInboundEnvelope,
 ) -> ResolveBindingRequest {
     ResolveBindingRequest {
         adapter_id: envelope.adapter_id().clone(),

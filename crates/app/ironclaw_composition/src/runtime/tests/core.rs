@@ -322,7 +322,7 @@ async fn runtime_with_ironhub_shared_key_builds_link_service_and_public_register
 fn standalone_selector_config_propagates_regex_activation_disabled() {
     let cfg = super::skill_activation_selector_config(
         false,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
     );
     assert!(
         !cfg.regex_activation_enabled,
@@ -334,7 +334,7 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
     // break auto-reuse, so lock it here.
     assert!(matches!(
         cfg.selection_mode,
-        ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria
     ));
 }
 
@@ -342,7 +342,7 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
 fn standalone_selector_config_propagates_regex_activation_enabled() {
     let cfg = super::skill_activation_selector_config(
         true,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
     );
     assert!(
         cfg.regex_activation_enabled,
@@ -354,7 +354,7 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
 fn standalone_selector_config_uses_large_skill_context_budget() {
     let cfg = super::skill_activation_selector_config(
         true,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -370,8 +370,8 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
 #[test]
 fn standalone_selector_config_propagates_injection_mode() {
     for mode in [
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Full,
     ] {
         let cfg = super::skill_activation_selector_config(true, mode);
         assert_eq!(cfg.injection_mode, mode);
@@ -380,7 +380,7 @@ fn standalone_selector_config_propagates_injection_mode() {
 
 #[test]
 fn skill_injection_mode_parses_listing_full_and_defaults() {
-    use ironclaw_first_party_extension_ports::SkillInjectionMode;
+    use ironclaw_loop_host::SkillInjectionMode;
     for (value, expected) in [
         ("", SkillInjectionMode::Listing),
         ("listing", SkillInjectionMode::Listing),
@@ -577,14 +577,11 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
 
 use ironclaw_assistant::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleReadinessBlocker, ProductCreateThreadRequest, ProductListAutomationsRequest,
-    ProductResolveGateRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
-    ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
-    RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    SUBMIT_TURN_COMMAND, approval_gate_ref,
+    LifecycleReadinessBlocker, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
+    RebornSetupExtensionResponse, RebornSkillListResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
-use ironclaw_assistant::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
@@ -616,6 +613,11 @@ use ironclaw_loop_host::{
     HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
     SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
 };
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };

@@ -43,7 +43,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             provider: package.id.clone(),
             runtime: RuntimeKind::Mcp,
             trust_ceiling: manifest.descriptor_trust_default,
-            description: capability.description.clone(),
+            description: crate::composed_capability_description(capability),
             parameters_schema: tool.input_schema.clone(),
             effects: capability.effects.clone(),
             default_permission: capability.default_permission,
@@ -52,6 +52,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             max_egress_bytes: capability.max_egress_bytes,
             resource_profile: capability.resource_profile.clone(),
             origin_gate_matrix: capability.origin_gate_matrix.clone(),
+            standard_op: capability.standard_op,
         })
         .collect();
 
@@ -205,6 +206,10 @@ fn discovered_capability_manifest(
         effects,
         default_permission: PermissionMode::Ask,
         visibility: CapabilityVisibility::Model,
+        // Discovered MCP tools are never a `standard_op` binding — that is
+        // static `[[tools]]` vocabulary validated at manifest parse time;
+        // live discovery has no manifest entry to bind.
+        standard_op: None,
         input_schema_ref,
         output_schema_ref: Some(output_schema_ref),
         prompt_doc_ref: None,

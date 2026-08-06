@@ -510,6 +510,7 @@ fn descriptors_from_dynamic_schemas(
                 max_egress_bytes: capability.max_egress_bytes,
                 resource_profile: capability.resource_profile.clone(),
                 origin_gate_matrix: capability.origin_gate_matrix.clone(),
+                standard_op: capability.standard_op,
             })
         })
         .collect()
@@ -542,6 +543,7 @@ fn placeholder_descriptors_from_manifest(
                 max_egress_bytes: capability.max_egress_bytes,
                 resource_profile: capability.resource_profile.clone(),
                 origin_gate_matrix: capability.origin_gate_matrix.clone(),
+                standard_op: capability.standard_op,
             },
         )
         .collect()
