@@ -154,7 +154,13 @@ impl NodeTraceSubmissionStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionReceipt {
-    #[serde(default = "default_submission_status")]
+    /// The server's explicit statement of what happened to the submission
+    /// (e.g. `"accepted"`). Deliberately NOT serde-defaulted: this field is
+    /// the acknowledgement, and callers persist it unconditionally as
+    /// `server_status` truth — a defaulted value here fabricated a
+    /// `"submitted"` receipt from a proxy's `200 {}`, the #7144 failure class
+    /// through the wire type. A 2xx body without it must fail the receipt
+    /// parse, never count as submitted.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_points_pending: Option<f32>,
@@ -406,10 +412,6 @@ pub enum TraceQueueEligibility {
         kind: TraceQueueHoldKind,
         reason: String,
     },
-}
-
-pub(crate) fn default_submission_status() -> String {
-    "submitted".to_string()
 }
 
 pub(crate) fn is_zero_f32(value: &f32) -> bool {
