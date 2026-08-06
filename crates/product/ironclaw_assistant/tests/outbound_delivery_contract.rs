@@ -308,6 +308,36 @@ struct ClaimOrderedRecovery {
     is_owner: bool,
 }
 
+impl Default for RecoveryTestStore {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(
+                ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
+            ),
+            pause_after_snapshot: None,
+            fail_recovery_for: None,
+            claim_ordered_recovery: None,
+            fail_prepared_existing: None,
+            settlement_failure: None,
+            fail_terminal_write: false,
+            authoritative_attempts: Mutex::new(HashMap::new()),
+            list_calls: AtomicU8::new(0),
+        }
+    }
+}
+
+impl RecoveryTestStore {
+    /// Baseline fixture over a caller-supplied store, with every optional
+    /// knob/flag/counter at its default. Callers override only the fields
+    /// their scenario needs via struct-update syntax.
+    fn new(inner: Arc<OutboundStateStore<InMemoryBackend>>) -> Self {
+        Self {
+            inner,
+            ..Default::default()
+        }
+    }
+}
+
 #[async_trait]
 impl OutboundStateStorePort for RecoveryTestStore {
     async fn put_run_delivery_cleanup(
@@ -1012,15 +1042,8 @@ fn coordinator_with_existing_preflight_settlement(
     channel_unavailable: bool,
 ) -> (Arc<RecoveryTestStore>, DeliveryCoordinator) {
     let decorated = Arc::new(RecoveryTestStore {
-        inner: Arc::clone(store),
-        pause_after_snapshot: None,
-        fail_recovery_for: None,
-        claim_ordered_recovery: None,
         fail_prepared_existing: Some((status, failure_kind)),
-        settlement_failure: None,
-        fail_terminal_write: false,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(Arc::clone(store))
     });
     let coordinator = DeliveryCoordinator::new(
         Arc::clone(&decorated) as Arc<dyn OutboundStateStorePort>,
@@ -1044,15 +1067,8 @@ fn coordinator_with_settlement_failure(
     channel_unavailable: bool,
 ) -> (Arc<RecoveryTestStore>, DeliveryCoordinator) {
     let decorated = Arc::new(RecoveryTestStore {
-        inner: Arc::clone(store),
-        pause_after_snapshot: None,
-        fail_recovery_for: None,
-        claim_ordered_recovery: None,
-        fail_prepared_existing: None,
         settlement_failure: Some(timing),
-        fail_terminal_write: false,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(Arc::clone(store))
     });
     let coordinator = DeliveryCoordinator::new(
         Arc::clone(&decorated) as Arc<dyn OutboundStateStorePort>,
@@ -1341,15 +1357,8 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         })],
     ));
     let decorated = Arc::new(RecoveryTestStore {
-        inner: Arc::clone(&store),
-        pause_after_snapshot: None,
-        fail_recovery_for: None,
-        claim_ordered_recovery: None,
-        fail_prepared_existing: None,
-        settlement_failure: None,
         fail_terminal_write: true,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(Arc::clone(&store))
     });
     let policy = OutboundPolicyService::new(decorated.as_ref(), &ACCESS_POLICY, &validator);
     let coordinator = coordinator_over_port(
@@ -1882,34 +1891,20 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
     let recovery_snapshots = Arc::new(Barrier::new(2));
     let owner_claimed = Arc::new(tokio::sync::Semaphore::new(0));
     let first_store = Arc::new(RecoveryTestStore {
-        inner: first_store,
-        pause_after_snapshot: None,
-        fail_recovery_for: None,
         claim_ordered_recovery: Some(ClaimOrderedRecovery {
             snapshots_listed: Arc::clone(&recovery_snapshots),
             owner_claimed: Arc::clone(&owner_claimed),
             is_owner: true,
         }),
-        fail_prepared_existing: None,
-        settlement_failure: None,
-        fail_terminal_write: false,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(first_store)
     });
     let second_store = Arc::new(RecoveryTestStore {
-        inner: second_store,
-        pause_after_snapshot: None,
-        fail_recovery_for: None,
         claim_ordered_recovery: Some(ClaimOrderedRecovery {
             snapshots_listed: recovery_snapshots,
             owner_claimed,
             is_owner: false,
         }),
-        fail_prepared_existing: None,
-        settlement_failure: None,
-        fail_terminal_write: false,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(second_store)
     });
     let first_coordinator = coordinator_over_port(
         Arc::clone(&first_store) as Arc<dyn OutboundStateStorePort>,
@@ -3353,15 +3348,8 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
         Vec::new(),
     ));
     let recovery_store = Arc::new(RecoveryTestStore {
-        inner: Arc::clone(&store),
-        pause_after_snapshot: None,
         fail_recovery_for: Some(seeded[1].delivery_id),
-        claim_ordered_recovery: None,
-        fail_prepared_existing: None,
-        settlement_failure: None,
-        fail_terminal_write: false,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(Arc::clone(&store))
     });
     let coordinator = DeliveryCoordinator::new(
         recovery_store as Arc<dyn OutboundStateStorePort>,
@@ -3422,15 +3410,8 @@ async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
     let snapshot_listed = Arc::new(Barrier::new(2));
     let resume_recovery = Arc::new(Barrier::new(2));
     let pausing_store = Arc::new(RecoveryTestStore {
-        inner: Arc::clone(&store),
         pause_after_snapshot: Some((Arc::clone(&snapshot_listed), Arc::clone(&resume_recovery))),
-        fail_recovery_for: None,
-        claim_ordered_recovery: None,
-        fail_prepared_existing: None,
-        settlement_failure: None,
-        fail_terminal_write: false,
-        authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicU8::new(0),
+        ..RecoveryTestStore::new(Arc::clone(&store))
     });
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
