@@ -5,6 +5,9 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, test, vi } from "vitest";
 
+import "../../../i18n/en";
+import "../../../i18n/zh-CN";
+import { I18nProvider } from "../../../lib/i18n";
 import { INSPECTOR_HEALTH } from "./inspector-state";
 import { InspectorPanel } from "./inspector-panel";
 
@@ -16,6 +19,9 @@ const inspectorState = vi.hoisted(() => ({
   health: "connected",
   error: null as string | null,
   lastCursor: null as string | null,
+  reconnectCount: 0,
+  receivedUpdateCount: 0,
+  lastUpdateAt: null as string | null,
 }));
 
 vi.mock("./useInspector", () => ({
@@ -45,6 +51,10 @@ beforeEach(() => {
   inspectorState.health = INSPECTOR_HEALTH.CONNECTED;
   inspectorState.error = null;
   inspectorState.lastCursor = null;
+  inspectorState.reconnectCount = 0;
+  inspectorState.receivedUpdateCount = 0;
+  inspectorState.lastUpdateAt = null;
+  localStorage.clear();
   sessionStorage.clear();
   setViewport(1440);
   root = createRoot(document.body.appendChild(document.createElement("div")));
@@ -97,6 +107,9 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
   inspectorState.snapshot = {
     stats: {
       total_model_calls: 3,
+      total_tool_calls: 5,
+      successful_tool_calls: 4,
+      failed_tool_calls: 1,
       calls_per_model: [
         {
           model: { content: "provider-model", original_bytes: 14, truncated: false },
@@ -125,8 +138,42 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
   assert.match(stats.textContent || "", /450 ms/);
   assert.match(stats.textContent || "", /Unavailable/);
   assert.match(stats.textContent || "", /provider-model3/);
-  assert.doesNotMatch(stats.textContent || "", /Tool calls|Tool outcomes/);
+  assert.match(stats.textContent || "", /Tool calls5/);
+  assert.match(stats.textContent || "", /Successful tool calls4/);
+  assert.match(stats.textContent || "", /Failed tool calls1/);
   assert.match(stats.textContent || "", /metric samples were unavailable/);
+});
+
+test("stats expose unavailable tool totals and browser-observed stream health", async () => {
+  inspectorState.snapshot = {
+    stats: {
+      total_model_calls: 0,
+      calls_per_model: [],
+      calls_per_model_truncated: false,
+      input_tokens: { known_total: 0, unavailable_samples: 0 },
+      output_tokens: { known_total: 0, unavailable_samples: 0 },
+      cache_read_input_tokens: { known_total: 0, unavailable_samples: 0 },
+      cache_creation_input_tokens: { known_total: 0, unavailable_samples: 0 },
+      total_latency_ms: { known_total: 0, unavailable_samples: 0 },
+    },
+  };
+  inspectorState.health = INSPECTOR_HEALTH.RECONNECTING;
+  inspectorState.reconnectCount = 2;
+  inspectorState.receivedUpdateCount = 7;
+  inspectorState.lastUpdateAt = "2026-08-06T10:30:00.000Z";
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-stats']")?.click(),
+  );
+
+  const stats = document.querySelector("[data-testid='inspector-stats-content']");
+  assert.ok(stats);
+  assert.match(stats.textContent || "", /Tool callsUnavailable/);
+  assert.match(stats.textContent || "", /Reconnects2/);
+  assert.match(stats.textContent || "", /Diagnostic updates7/);
+  assert.match(stats.textContent || "", /Reconnecting/);
+  assert.doesNotMatch(stats.textContent || "", /Tool calls0/);
 });
 
 test("activity tab renders ordered correlations and navigates retained turns", async () => {
@@ -163,6 +210,27 @@ test("activity tab renders ordered correlations and navigates retained turns", a
     document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.click(),
   );
   assert.equal(inspectorCalls.at(-1)?.runId, "run-a");
+  assert.ok(document.querySelector<HTMLButtonElement>("[aria-label='Latest turn']"));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-label='Latest turn']")?.click(),
+  );
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-b");
+});
+
+test("inspector chrome follows the active locale", async () => {
+  localStorage.setItem("ironclaw_language", "zh-CN");
+  await act(async () => root?.render(
+    <I18nProvider>
+      <InspectorPanel threadId="thread-a" runId="run-a" />
+    </I18nProvider>,
+  ));
+
+  assert.equal(document.querySelector("[data-testid='inspector-health']")?.textContent, "实时");
+  assert.equal(
+    document.querySelector("[data-testid='inspector-close']")?.getAttribute("aria-label"),
+    "关闭检查器",
+  );
+  assert.match(document.querySelector("[data-testid='inspector-panel']")?.textContent || "", /提示词/);
 });
 
 test("tool activity loads bounded verbose details from the dedicated endpoint", async () => {

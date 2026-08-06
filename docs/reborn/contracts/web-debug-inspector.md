@@ -73,8 +73,14 @@ activity remains pending until its correlated terminal event arrives.
 
 Turn navigation is session-local. The browser retains at most 32 observed run
 ids per thread in `sessionStorage`, selects the active/latest run by default,
-and lets the operator move to the previous or next observed turn. It does not
-create a durable run index.
+and lets the operator move to the previous, next, or latest observed turn. It
+does not create a durable run index.
+
+The Stats view also reports browser-observed stream state, reconnect attempts,
+accepted diagnostic-update count, and the last accepted update time. These
+values are tab-session diagnostics, not server accounting. They are bounded in
+`sessionStorage`, retain cursors for at most 32 observed runs, and reject
+duplicate or backwards cursors when a run is revisited or the page reloads.
 
 ## Failure behavior
 

@@ -10,6 +10,13 @@ import {
   shouldAcceptInspectorCursor,
   type InspectorHealth,
 } from "./inspector-state";
+import {
+  readInspectorStreamCursor,
+  readInspectorStreamMetrics,
+  recordInspectorDiagnosticUpdate,
+  recordInspectorReconnect,
+  rememberInspectorStreamCursor,
+} from "./inspector-stream-session";
 
 const MAX_RETRY_INTERVAL_MS = 30_000;
 const MAX_RETAINED_UPDATES = 1_024;
@@ -96,6 +103,9 @@ interface InspectorState {
   health: InspectorHealth;
   error: string | null;
   lastCursor: string | null;
+  reconnectCount: number;
+  receivedUpdateCount: number;
+  lastUpdateAt: string | null;
 }
 
 function safeJson(value: string): Record<string, unknown> | null {
@@ -126,11 +136,13 @@ export function useInspector({
   const [health, setHealth] = React.useState<InspectorHealth>(INSPECTOR_HEALTH.IDLE);
   const [error, setError] = React.useState<string | null>(null);
   const [snapshotGeneration, setSnapshotGeneration] = React.useState(0);
+  const [streamMetrics, setStreamMetrics] = React.useState(readInspectorStreamMetrics);
   const lastCursorRef = React.useRef<string | null>(null);
   const transportSequenceRef = React.useRef(0);
 
   React.useEffect(() => {
-    lastCursorRef.current = null;
+    const scope = threadId && runId ? `${threadId}/${runId}` : "";
+    lastCursorRef.current = scope ? readInspectorStreamCursor(scope) : null;
     setSnapshot(null);
     setUpdates([]);
     setError(null);
@@ -183,8 +195,8 @@ export function useInspector({
         const nextHealth = healthForInspectorStatus(errorStatus(cause));
         setHealth(nextHealth);
         setError(nextHealth === INSPECTOR_HEALTH.FORBIDDEN
-          ? "This session is not authorized to inspect diagnostics."
-          : "Diagnostics are currently unavailable.");
+          ? "inspector.error.forbidden"
+          : "inspector.error.unavailable");
       });
     return () => controller.abort();
   }, [enabled, threadId, runId, snapshotGeneration]);
@@ -194,8 +206,10 @@ export function useInspector({
 
     let disposed = false;
     let connectedOnce = false;
+    let requestedOnce = false;
     let transportDisconnected = false;
     let controller: ReturnType<EventSourcePlus["listen"]> | null = null;
+    const streamScope = `${threadId}/${runId}`;
     const request = inspectorEventStreamRequest({ threadId, runId });
     const stream = new EventSourcePlus(request.url, {
       credentials: "same-origin",
@@ -212,9 +226,6 @@ export function useInspector({
 
     function appendTransportActivity(kind: "stream_disconnected" | "stream_resumed"): void {
       transportSequenceRef.current += 1;
-      const summary = kind === "stream_disconnected"
-        ? "Diagnostics stream disconnected"
-        : "Diagnostics stream resumed";
       setUpdates((current) => [...current, {
         local_id: `transport-${transportSequenceRef.current}`,
         update: {
@@ -225,11 +236,7 @@ export function useInspector({
             iteration: null,
             activity_id: null,
             model_call_id: null,
-            summary: {
-              content: summary,
-              original_bytes: summary.length,
-              truncated: false,
-            },
+            summary: null,
           },
         },
       }].slice(-MAX_RETAINED_UPDATES));
@@ -248,6 +255,8 @@ export function useInspector({
         onRequest({ options }) {
           if (!disposed) {
             const connection = nextConnectionState();
+            if (requestedOnce) setStreamMetrics(recordInspectorReconnect());
+            requestedOnce = true;
             options.query = {
               ...options.query,
               connection_id: connection.connectionId,
@@ -278,9 +287,9 @@ export function useInspector({
           if (disposed) return;
           const nextHealth = healthForInspectorStatus(response.status);
           if (nextHealth === INSPECTOR_HEALTH.FORBIDDEN) {
-            terminal(nextHealth, "This session is not authorized to inspect diagnostics.");
+            terminal(nextHealth, "inspector.error.forbidden");
           } else if (nextHealth === INSPECTOR_HEALTH.UNAVAILABLE) {
-            terminal(nextHealth, "Diagnostics are not available on this deployment.");
+            terminal(nextHealth, "inspector.error.notDeployed");
           } else {
             setHealth(nextHealth);
           }
@@ -303,20 +312,30 @@ export function useInspector({
               : INSPECTOR_HEALTH.RECONNECTING;
             setHealth(nextHealth);
             if (payload.retryable === false) {
-              terminal(nextHealth, "The diagnostics stream was closed.");
+              terminal(nextHealth, "inspector.error.streamClosed");
             }
             return;
           }
           const cursor = message.id || null;
           if (message.event === "diagnostic_rebase") {
-            if (cursor) lastCursorRef.current = cursor;
+            if (cursor) {
+              lastCursorRef.current = cursor;
+              rememberInspectorStreamCursor(streamScope, cursor);
+            }
             setUpdates([]);
             setSnapshotGeneration((generation) => generation + 1);
             return;
           }
           if (message.event !== "diagnostic_update") return;
           if (!shouldAcceptInspectorCursor(lastCursorRef.current, cursor)) return;
+          const observation = recordInspectorDiagnosticUpdate(
+            streamScope,
+            cursor,
+            new Date().toISOString(),
+          );
+          if (!observation.accepted) return;
           lastCursorRef.current = cursor;
+          setStreamMetrics(observation.metrics);
           setUpdates((current) => [...current, payload as DiagnosticUpdate].slice(-MAX_RETAINED_UPDATES));
           const update = payload.update as { type?: unknown } | undefined;
           if (
@@ -359,5 +378,6 @@ export function useInspector({
     health,
     error,
     lastCursor: lastCursorRef.current,
+    ...streamMetrics,
   };
 }

@@ -16,6 +16,13 @@ import {
   shouldAcceptInspectorCursor,
   writeInspectorPreferences,
 } from "./inspector-state";
+import {
+  INSPECTOR_STREAM_SESSION_KEY,
+  readInspectorStreamCursor,
+  readInspectorStreamMetrics,
+  recordInspectorDiagnosticUpdate,
+  recordInspectorReconnect,
+} from "./inspector-stream-session";
 
 function storage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -189,4 +196,52 @@ test("run navigation history is thread-scoped, deduplicated, and bounded", () =>
   const saved = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY]);
   assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
   assert.deepEqual(saved["thread-b"], ["run-b"]);
+});
+
+test("stream metrics persist in the browser session without duplicate update counts", () => {
+  const memory = storage();
+  assert.deepEqual(readInspectorStreamMetrics(memory), {
+    reconnectCount: 0,
+    receivedUpdateCount: 0,
+    lastUpdateAt: null,
+  });
+
+  assert.deepEqual(recordInspectorReconnect(memory), {
+    reconnectCount: 1,
+    receivedUpdateCount: 0,
+    lastUpdateAt: null,
+  });
+  const first = recordInspectorDiagnosticUpdate(
+    "thread-a/run-a",
+    "stream-a:1",
+    "2026-08-06T10:00:00.000Z",
+    memory,
+  );
+  assert.equal(first.accepted, true);
+  assert.equal(first.metrics.receivedUpdateCount, 1);
+
+  const duplicate = recordInspectorDiagnosticUpdate(
+    "thread-a/run-a",
+    "stream-a:1",
+    "2026-08-06T10:01:00.000Z",
+    memory,
+  );
+  assert.equal(duplicate.accepted, false);
+  assert.equal(duplicate.metrics.receivedUpdateCount, 1);
+  assert.equal(duplicate.metrics.lastUpdateAt, "2026-08-06T10:00:00.000Z");
+  assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:1");
+  assert.ok(memory.dump()[INSPECTOR_STREAM_SESSION_KEY]);
+
+  for (let index = 0; index < 40; index += 1) {
+    recordInspectorDiagnosticUpdate(
+      `thread-${index}/run-${index}`,
+      `stream-${index}:1`,
+      "2026-08-06T10:02:00.000Z",
+      memory,
+    );
+  }
+  const bounded = JSON.parse(memory.dump()[INSPECTOR_STREAM_SESSION_KEY]);
+  assert.equal(bounded.scopeOrder.length, 32);
+  assert.equal(Object.keys(bounded.cursors).length, 32);
+  assert.equal(bounded.scopeOrder[0], "thread-8/run-8");
 });

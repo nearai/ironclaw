@@ -1,5 +1,6 @@
 import React from "react";
 
+import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
 import { fetchInspectorTool } from "./inspector-api";
 import {
@@ -15,16 +16,17 @@ import {
   type InspectorTab,
 } from "./inspector-state";
 import { useInspector } from "./useInspector";
+import "./inspector-translations";
 
-const HEALTH_LABELS = {
-  [INSPECTOR_HEALTH.IDLE]: "Idle",
-  [INSPECTOR_HEALTH.LOADING]: "Loading",
-  [INSPECTOR_HEALTH.CONNECTING]: "Connecting",
-  [INSPECTOR_HEALTH.CONNECTED]: "Live",
-  [INSPECTOR_HEALTH.RECONNECTING]: "Reconnecting",
-  [INSPECTOR_HEALTH.DISCONNECTED]: "Disconnected",
-  [INSPECTOR_HEALTH.FORBIDDEN]: "Forbidden",
-  [INSPECTOR_HEALTH.UNAVAILABLE]: "Unavailable",
+const HEALTH_LABEL_KEYS = {
+  [INSPECTOR_HEALTH.IDLE]: "inspector.health.idle",
+  [INSPECTOR_HEALTH.LOADING]: "inspector.health.loading",
+  [INSPECTOR_HEALTH.CONNECTING]: "inspector.health.connecting",
+  [INSPECTOR_HEALTH.CONNECTED]: "inspector.health.connected",
+  [INSPECTOR_HEALTH.RECONNECTING]: "inspector.health.reconnecting",
+  [INSPECTOR_HEALTH.DISCONNECTED]: "inspector.health.disconnected",
+  [INSPECTOR_HEALTH.FORBIDDEN]: "inspector.health.forbidden",
+  [INSPECTOR_HEALTH.UNAVAILABLE]: "inspector.health.unavailable",
 };
 
 function useViewportMode(): "mobile" | "overlay" | "sidebar" {
@@ -81,8 +83,8 @@ interface PromptDiagnostic {
   context_limit: number | null;
 }
 
-function formatNumber(value: number | null | undefined): string {
-  return typeof value === "number" ? value.toLocaleString() : "Unavailable";
+function formatNumber(value: number | null | undefined, unavailable: string): string {
+  return typeof value === "number" ? value.toLocaleString() : unavailable;
 }
 
 function PromptShell({
@@ -92,28 +94,29 @@ function PromptShell({
   snapshot: Record<string, unknown> | null;
   health: string;
 }) {
+  const t = useT();
   const prompt = snapshot?.prompt as PromptDiagnostic | null | undefined;
   if (!prompt) {
     if (health === INSPECTOR_HEALTH.LOADING || health === INSPECTOR_HEALTH.CONNECTING) {
       return (
         <EmptyTab
-          title="Loading prompt diagnostics"
-          description="The inspector is loading the latest bounded prompt snapshot."
+          title={t("inspector.prompt.loadingTitle")}
+          description={t("inspector.prompt.loadingDescription")}
         />
       );
     }
     if (health === INSPECTOR_HEALTH.FORBIDDEN || health === INSPECTOR_HEALTH.UNAVAILABLE) {
       return (
         <EmptyTab
-          title="Prompt diagnostics unavailable"
-          description="This session cannot access prompt diagnostics. Chat remains available."
+          title={t("inspector.prompt.unavailableTitle")}
+          description={t("inspector.prompt.unavailableDescription")}
         />
       );
     }
     return (
       <EmptyTab
-        title="No prompt captured"
-        description="Prompt components will appear here when diagnostics are available for this run."
+        title={t("inspector.prompt.emptyTitle")}
+        description={t("inspector.prompt.emptyDescription")}
       />
     );
   }
@@ -128,22 +131,22 @@ function PromptShell({
     <div className="space-y-4 p-4" data-testid="inspector-prompt-content">
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-          <p className="text-xs text-[var(--v2-text-muted)]">Estimated prompt tokens</p>
+          <p className="text-xs text-[var(--v2-text-muted)]">{t("inspector.prompt.estimatedTokens")}</p>
           <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">
-            {formatNumber(prompt.total_estimated_tokens)}
+            {formatNumber(prompt.total_estimated_tokens, t("inspector.unavailable"))}
           </p>
         </div>
         <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-          <p className="text-xs text-[var(--v2-text-muted)]">Context limit</p>
+          <p className="text-xs text-[var(--v2-text-muted)]">{t("inspector.prompt.contextLimit")}</p>
           <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">
-            {formatNumber(prompt.context_limit)}
+            {formatNumber(prompt.context_limit, t("inspector.unavailable"))}
           </p>
         </div>
       </div>
       {contextPercent != null && (
         <div>
           <div className="mb-1 flex justify-between text-[11px] text-[var(--v2-text-muted)]">
-            <span>Estimated context usage</span>
+            <span>{t("inspector.prompt.contextUsage")}</span>
             <span>{contextPercent.toFixed(1)}%</span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-[var(--v2-surface-soft)]">
@@ -155,16 +158,16 @@ function PromptShell({
         </div>
       )}
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-        <div><dt className="text-[var(--v2-text-faint)]">Effective model</dt><dd>{prompt.effective_model?.content || "Unavailable"}</dd></div>
-        <div><dt className="text-[var(--v2-text-faint)]">Requested model</dt><dd>{prompt.requested_model?.content || "Default"}</dd></div>
-        <div><dt className="text-[var(--v2-text-faint)]">Messages</dt><dd>{prompt.message_count}</dd></div>
-        <div><dt className="text-[var(--v2-text-faint)]">Identity messages</dt><dd>{prompt.identity_message_count}</dd></div>
-        <div><dt className="text-[var(--v2-text-faint)]">Instruction snippets</dt><dd>{prompt.instruction_snippet_count}</dd></div>
-        <div><dt className="text-[var(--v2-text-faint)]">Capabilities</dt><dd>{prompt.capability_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.effectiveModel")}</dt><dd>{prompt.effective_model?.content || t("inspector.unavailable")}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.requestedModel")}</dt><dd>{prompt.requested_model?.content || t("inspector.default")}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.messages")}</dt><dd>{prompt.message_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.identityMessages")}</dt><dd>{prompt.identity_message_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.instructionSnippets")}</dt><dd>{prompt.instruction_snippet_count}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.capabilities")}</dt><dd>{prompt.capability_count}</dd></div>
       </dl>
       {prompt.active_skills.length > 0 && (
         <div>
-          <p className="text-xs text-[var(--v2-text-faint)]">Active skills</p>
+          <p className="text-xs text-[var(--v2-text-faint)]">{t("inspector.prompt.activeSkills")}</p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {prompt.active_skills.map((skill, index) => (
               <span key={`${skill.content}-${index}`} className="rounded-full bg-[var(--v2-surface-soft)] px-2 py-1 text-[11px]">
@@ -176,7 +179,7 @@ function PromptShell({
       )}
       {anyTruncated && (
         <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
-          Some prompt content was safely truncated before display.
+          {t("inspector.prompt.truncatedNotice")}
         </p>
       )}
       <div className="space-y-2">
@@ -185,8 +188,10 @@ function PromptShell({
             <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-[var(--v2-text-strong)]">
               <span>{component.label.content}</span>
               <span className="ml-2 font-normal text-[var(--v2-text-faint)]">
-                {component.kind} · {formatNumber(component.estimated_tokens)} tokens
-                {component.content.truncated ? " · truncated" : ""}
+                {component.kind} · {t("inspector.prompt.tokenCount", {
+                  count: formatNumber(component.estimated_tokens, t("inspector.unavailable")),
+                })}
+                {component.content.truncated ? ` · ${t("inspector.truncated")}` : ""}
               </span>
             </summary>
             <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-[var(--v2-panel-border)] p-3 text-[11px] leading-5 text-[var(--v2-text-muted)]">
@@ -196,10 +201,10 @@ function PromptShell({
         ))}
       </div>
       <details className="rounded-xl border border-[var(--v2-panel-border)]">
-        <summary className="cursor-pointer px-3 py-2 text-xs font-medium">Full reconstructed prompt</summary>
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium">{t("inspector.prompt.fullReconstruction")}</summary>
         <div className="border-t border-[var(--v2-panel-border)] p-3">
           <p className="mb-3 text-[11px] leading-5 text-[var(--v2-text-faint)]">
-            Reconstructed content reflects the latest host prompt boundary and may differ from a specific historical model call.
+            {t("inspector.prompt.reconstructionNotice")}
           </p>
           <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--v2-text-muted)]">
             {prompt.reconstructed_prompt.content}
@@ -225,6 +230,7 @@ function ActivityShell({
   onSelectRun: (runId: string) => void;
   threadId: string | null;
 }) {
+  const t = useT();
   const activity = reduceInspectorActivity(snapshot, updates);
   const selectedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
   const previousRun = selectedIndex > 0 ? runHistory[selectedIndex - 1] : null;
@@ -242,8 +248,8 @@ function ActivityShell({
           onSelectRun={onSelectRun}
         />
         <EmptyTab
-          title="No activity yet"
-          description="Ordered model and tool activity will appear here as the run progresses."
+          title={t("inspector.activity.emptyTitle")}
+          description={t("inspector.activity.emptyDescription")}
         />
       </div>
     );
@@ -257,7 +263,7 @@ function ActivityShell({
         nextRun={nextRun}
         onSelectRun={onSelectRun}
       />
-      <ol className="space-y-2" aria-label="Run activity timeline">
+      <ol className="space-y-2" aria-label={t("inspector.activity.timelineLabel")}>
         {activity.map((entry) => (
           <ActivityEntry
             key={entry.key}
@@ -284,47 +290,66 @@ function TurnNavigation({
   nextRun: string | null;
   onSelectRun: (runId: string) => void;
 }) {
+  const t = useT();
+  const latestRun = selectedIndex >= 0 && selectedIndex < runHistory.length - 1
+    ? runHistory.at(-1) || null
+    : null;
   return (
     <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
       <button
         type="button"
-        aria-label="Previous turn"
+        aria-label={t("inspector.navigation.previousLabel")}
         disabled={!previousRun}
         onClick={() => previousRun && onSelectRun(previousRun)}
         className="rounded px-2 py-1 text-xs disabled:opacity-40"
       >
-        ← Previous
+        ← {t("inspector.navigation.previous")}
       </button>
       <p className="text-center text-xs text-[var(--v2-text-muted)]">
-        Turn {selectedIndex >= 0 ? selectedIndex + 1 : 0} of {runHistory.length}
+        {t("inspector.navigation.position", {
+          current: selectedIndex >= 0 ? selectedIndex + 1 : 0,
+          total: runHistory.length,
+        })}
       </p>
-      <button
-        type="button"
-        aria-label="Next turn"
-        disabled={!nextRun}
-        onClick={() => nextRun && onSelectRun(nextRun)}
-        className="rounded px-2 py-1 text-xs disabled:opacity-40"
-      >
-        Next →
-      </button>
+      <div className="flex items-center gap-1">
+        {latestRun && (
+          <button
+            type="button"
+            aria-label={t("inspector.navigation.latestLabel")}
+            onClick={() => onSelectRun(latestRun)}
+            className="rounded px-2 py-1 text-xs font-medium text-[var(--v2-accent-text)]"
+          >
+            {t("inspector.navigation.latest")}
+          </button>
+        )}
+        <button
+          type="button"
+          aria-label={t("inspector.navigation.nextLabel")}
+          disabled={!nextRun}
+          onClick={() => nextRun && onSelectRun(nextRun)}
+          className="rounded px-2 py-1 text-xs disabled:opacity-40"
+        >
+          {t("inspector.navigation.next")} →
+        </button>
+      </div>
     </div>
   );
 }
 
-const ACTIVITY_LABELS: Record<string, string> = {
-  turn_started: "Turn started",
-  prompt_prepared: "Prompt prepared",
-  model_call_started: "Model call started",
-  model_call_completed: "Model call completed",
-  model_call_failed: "Model call failed",
-  progress: "Progress",
-  tool_started: "Tool started",
-  tool_completed: "Tool completed",
-  tool_failed: "Tool failed",
-  gate_blocked: "Gate blocked",
-  final_response_completed: "Final response completed",
-  stream_disconnected: "Stream disconnected",
-  stream_resumed: "Stream resumed",
+const ACTIVITY_LABEL_KEYS: Record<string, string> = {
+  turn_started: "inspector.activity.turnStarted",
+  prompt_prepared: "inspector.activity.promptPrepared",
+  model_call_started: "inspector.activity.modelCallStarted",
+  model_call_completed: "inspector.activity.modelCallCompleted",
+  model_call_failed: "inspector.activity.modelCallFailed",
+  progress: "inspector.activity.progress",
+  tool_started: "inspector.activity.toolStarted",
+  tool_completed: "inspector.activity.toolCompleted",
+  tool_failed: "inspector.activity.toolFailed",
+  gate_blocked: "inspector.activity.gateBlocked",
+  final_response_completed: "inspector.activity.finalResponseCompleted",
+  stream_disconnected: "inspector.activity.streamDisconnected",
+  stream_resumed: "inspector.activity.streamResumed",
 };
 
 function shortId(value: string | null): string | null {
@@ -356,6 +381,7 @@ function ToolDetailDisclosure({
   runId: string;
   activityId: string;
 }) {
+  const t = useT();
   const [open, setOpen] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [tool, setTool] = React.useState<ToolDetail | null>(null);
@@ -383,21 +409,21 @@ function ToolDetailDisclosure({
         onClick={load}
         className="text-xs font-medium text-[var(--v2-accent-text)]"
       >
-        {open ? "Hide details" : "Show details"}
+        {open ? t("inspector.tool.hideDetails") : t("inspector.tool.showDetails")}
       </button>
       {open && (
         <div className="mt-3 space-y-3 text-xs" data-testid={`inspector-tool-detail-${activityId}`}>
-          {loading && <p role="status">Loading tool details…</p>}
-          {unavailable && <p role="status">Tool details are unavailable or no longer retained.</p>}
+          {loading && <p role="status">{t("inspector.tool.loadingDetails")}</p>}
+          {unavailable && <p role="status">{t("inspector.tool.unavailableDetails")}</p>}
           {tool && (
             <>
-              <p><span className="font-medium">Capability:</span> {tool.capability_name.content}</p>
-              <p><span className="font-medium">Status:</span> {tool.status}</p>
-              <ToolDetailBlock label="Arguments" value={tool.arguments} />
-              <ToolDetailBlock label="Output" value={tool.result} />
-              {tool.output_bytes != null && <p>Output size: {tool.output_bytes.toLocaleString()} bytes</p>}
-              <ToolDetailBlock label="Failure category" value={tool.failure_category} />
-              <ToolDetailBlock label="Failure" value={tool.failure_summary} />
+              <p><span className="font-medium">{t("inspector.tool.capability")}:</span> {tool.capability_name.content}</p>
+              <p><span className="font-medium">{t("inspector.tool.status")}:</span> {tool.status}</p>
+              <ToolDetailBlock label={t("inspector.tool.arguments")} value={tool.arguments} />
+              <ToolDetailBlock label={t("inspector.tool.output")} value={tool.result} />
+              {tool.output_bytes != null && <p>{t("inspector.tool.outputSize", { count: tool.output_bytes.toLocaleString() })}</p>}
+              <ToolDetailBlock label={t("inspector.tool.failureCategory")} value={tool.failure_category} />
+              <ToolDetailBlock label={t("inspector.tool.failure")} value={tool.failure_summary} />
             </>
           )}
         </div>
@@ -407,11 +433,12 @@ function ToolDetailDisclosure({
 }
 
 function ToolDetailBlock({ label, value }: { label: string; value: ToolDetailText | null }) {
+  const t = useT();
   if (!value) return null;
   return (
     <div>
       <p className="mb-1 font-medium">
-        {label}{value.truncated ? ` · truncated from ${value.original_bytes.toLocaleString()} bytes` : ""}
+        {label}{value.truncated ? ` · ${t("inspector.tool.truncatedFrom", { count: value.original_bytes.toLocaleString() })}` : ""}
       </p>
       <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--v2-surface-soft)] p-3 text-[11px]">
         {value.content}
@@ -429,6 +456,7 @@ function ActivityEntry({
   threadId: string | null;
   runId: string | null;
 }) {
+  const t = useT();
   const failed = entry.kind.endsWith("_failed") || entry.kind === "gate_blocked";
   const correlation = shortId(entry.activity_id || entry.model_call_id);
   const timestamp = new Date(entry.occurred_at);
@@ -437,7 +465,9 @@ function ActivityEntry({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs font-medium text-[var(--v2-text-strong)]">
-            {ACTIVITY_LABELS[entry.kind] || entry.kind.replaceAll("_", " ")}
+            {ACTIVITY_LABEL_KEYS[entry.kind]
+              ? t(ACTIVITY_LABEL_KEYS[entry.kind])
+              : entry.kind.replaceAll("_", " ")}
           </p>
           {entry.summary?.content && (
             <p className="mt-1 break-words text-xs text-[var(--v2-text-muted)]">
@@ -453,12 +483,16 @@ function ActivityEntry({
               ? "bg-[var(--v2-surface-soft)] text-[var(--v2-warning-text)]"
               : "bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]",
         )}>
-          {failed ? "Failed" : entry.pending ? "Pending" : "Recorded"}
+          {failed
+            ? t("inspector.activity.failed")
+            : entry.pending
+              ? t("inspector.activity.pending")
+              : t("inspector.activity.recorded")}
         </span>
       </div>
       <p className="mt-2 font-mono text-[10px] text-[var(--v2-text-faint)]">
         {Number.isNaN(timestamp.getTime()) ? entry.occurred_at : timestamp.toLocaleTimeString()}
-        {entry.iteration != null ? ` · iteration ${entry.iteration}` : ""}
+        {entry.iteration != null ? ` · ${t("inspector.activity.iteration", { count: entry.iteration })}` : ""}
         {correlation ? ` · ${correlation}` : ""}
       </p>
       {entry.kind.startsWith("tool_") && entry.activity_id && threadId && runId && (
@@ -479,6 +513,9 @@ interface DiagnosticMetricTotal {
 
 interface SessionDiagnosticStats {
   total_model_calls: number;
+  total_tool_calls?: number;
+  successful_tool_calls?: number;
+  failed_tool_calls?: number;
   calls_per_model: Array<{ model: BoundedDiagnosticText; calls: number }>;
   calls_per_model_truncated: boolean;
   input_tokens: DiagnosticMetricTotal;
@@ -491,9 +528,10 @@ interface SessionDiagnosticStats {
 function metricValue(
   metric: DiagnosticMetricTotal,
   sampleCount: number,
+  unavailable: string,
   suffix = "",
 ): string {
-  if (sampleCount > 0 && metric.unavailable_samples >= sampleCount) return "Unavailable";
+  if (sampleCount > 0 && metric.unavailable_samples >= sampleCount) return unavailable;
   return `${metric.known_total.toLocaleString()}${suffix}`;
 }
 
@@ -506,14 +544,63 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) {
+function countValue(value: number | undefined, unavailable: string): string {
+  return typeof value === "number" ? value.toLocaleString() : unavailable;
+}
+
+function StreamHealth({
+  health,
+  reconnectCount,
+  receivedUpdateCount,
+  lastUpdateAt,
+}: {
+  health: keyof typeof HEALTH_LABEL_KEYS;
+  reconnectCount: number;
+  receivedUpdateCount: number;
+  lastUpdateAt: string | null;
+}) {
+  const t = useT();
+  const observed = lastUpdateAt ? new Date(lastUpdateAt) : null;
+  const lastUpdate = observed && !Number.isNaN(observed.getTime())
+    ? observed.toLocaleTimeString()
+    : t("inspector.stream.noUpdates");
+  return (
+    <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs" data-testid="inspector-stream-health">
+      <p className="font-medium text-[var(--v2-text-strong)]">{t("inspector.stream.title")}</p>
+      <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2">
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.stream.state")}</dt><dd data-testid="inspector-stream-state">{t(HEALTH_LABEL_KEYS[health])}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.stream.reconnects")}</dt><dd data-testid="inspector-stream-reconnects">{reconnectCount.toLocaleString()}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.stream.updates")}</dt><dd data-testid="inspector-stream-updates">{receivedUpdateCount.toLocaleString()}</dd></div>
+        <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.stream.lastUpdate")}</dt><dd data-testid="inspector-stream-last-update">{lastUpdate}</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+function StatsShell({
+  snapshot,
+  health,
+  reconnectCount,
+  receivedUpdateCount,
+  lastUpdateAt,
+}: {
+  snapshot: Record<string, unknown> | null;
+  health: keyof typeof HEALTH_LABEL_KEYS;
+  reconnectCount: number;
+  receivedUpdateCount: number;
+  lastUpdateAt: string | null;
+}) {
+  const t = useT();
   const stats = snapshot?.stats as SessionDiagnosticStats | undefined;
   if (!stats) {
     return (
-      <EmptyTab
-        title="No statistics yet"
-        description="Session totals will appear after the run records model activity."
-      />
+      <div className="space-y-4 p-4" data-testid="inspector-stats-content">
+        <StreamHealth {...{ health, reconnectCount, receivedUpdateCount, lastUpdateAt }} />
+        <EmptyTab
+          title={t("inspector.stats.emptyTitle")}
+          description={t("inspector.stats.emptyDescription")}
+        />
+      </div>
     );
   }
   const knownLatencySamples = Math.max(
@@ -522,7 +609,7 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
   );
   const averageLatency = knownLatencySamples > 0
     ? `${Math.round(stats.total_latency_ms.known_total / knownLatencySamples).toLocaleString()} ms`
-    : "Unavailable";
+    : t("inspector.unavailable");
   const partialMetricCount = [
     stats.input_tokens,
     stats.output_tokens,
@@ -533,18 +620,22 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
   return (
     <div className="space-y-4 p-4" data-testid="inspector-stats-content">
       <div className="grid grid-cols-2 gap-3">
-        <MetricCard label="Model calls" value={stats.total_model_calls.toLocaleString()} />
-        <MetricCard label="Average latency" value={averageLatency} />
-        <MetricCard label="Input tokens" value={metricValue(stats.input_tokens, stats.total_model_calls)} />
-        <MetricCard label="Output tokens" value={metricValue(stats.output_tokens, stats.total_model_calls)} />
-        <MetricCard label="Cache-read tokens" value={metricValue(stats.cache_read_input_tokens, stats.total_model_calls)} />
-        <MetricCard label="Cache-created tokens" value={metricValue(stats.cache_creation_input_tokens, stats.total_model_calls)} />
-        <MetricCard label="Total latency" value={metricValue(stats.total_latency_ms, stats.total_model_calls, " ms")} />
+        <MetricCard label={t("inspector.stats.modelCalls")} value={stats.total_model_calls.toLocaleString()} />
+        <MetricCard label={t("inspector.stats.toolCalls")} value={countValue(stats.total_tool_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.successfulToolCalls")} value={countValue(stats.successful_tool_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.failedToolCalls")} value={countValue(stats.failed_tool_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.averageLatency")} value={averageLatency} />
+        <MetricCard label={t("inspector.stats.inputTokens")} value={metricValue(stats.input_tokens, stats.total_model_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.outputTokens")} value={metricValue(stats.output_tokens, stats.total_model_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.cacheReadTokens")} value={metricValue(stats.cache_read_input_tokens, stats.total_model_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.cacheCreatedTokens")} value={metricValue(stats.cache_creation_input_tokens, stats.total_model_calls, t("inspector.unavailable"))} />
+        <MetricCard label={t("inspector.stats.totalLatency")} value={metricValue(stats.total_latency_ms, stats.total_model_calls, t("inspector.unavailable"), " ms")} />
       </div>
+      <StreamHealth {...{ health, reconnectCount, receivedUpdateCount, lastUpdateAt }} />
       <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs">
-        <p className="font-medium text-[var(--v2-text-strong)]">Calls per model</p>
+        <p className="font-medium text-[var(--v2-text-strong)]">{t("inspector.stats.callsPerModel")}</p>
         {stats.calls_per_model.length === 0 ? (
-          <p className="mt-2 text-[var(--v2-text-muted)]">No model breakdown available.</p>
+          <p className="mt-2 text-[var(--v2-text-muted)]">{t("inspector.stats.noModelBreakdown")}</p>
         ) : (
           <dl className="mt-2 space-y-1.5">
             {stats.calls_per_model.map((entry) => (
@@ -558,8 +649,8 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
       </div>
       {(partialMetricCount > 0 || stats.calls_per_model_truncated) && (
         <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
-          Statistics are partial: {partialMetricCount.toLocaleString()} metric samples were unavailable
-          {stats.calls_per_model_truncated ? " and the model breakdown was truncated" : ""}.
+          {t("inspector.stats.partial", { count: partialMetricCount.toLocaleString() })}
+          {stats.calls_per_model_truncated ? ` ${t("inspector.stats.modelBreakdownTruncated")}` : ""}
         </p>
       )}
     </div>
@@ -567,6 +658,7 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
 }
 
 function StatusNotice({ health, error }: { health: string; error: string | null }) {
+  const t = useT();
   if (!error && health !== INSPECTOR_HEALTH.DISCONNECTED) return null;
   return (
     <div
@@ -574,7 +666,7 @@ function StatusNotice({ health, error }: { health: string; error: string | null 
       data-testid="inspector-status-notice"
       className="m-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]"
     >
-      {error || "The diagnostics stream is disconnected. Chat remains available."}
+      {error ? t(error) : t("inspector.error.disconnected")}
     </div>
   );
 }
@@ -586,6 +678,7 @@ function InspectorPanelCore({
   threadId: string | null;
   runId: string | null;
 }) {
+  const t = useT();
   const viewportMode = useViewportMode();
   const [preferences, setPreferences] = React.useState<InspectorPreferences>(() =>
     readInspectorPreferences(),
@@ -622,7 +715,7 @@ function InspectorPanelCore({
         onClick={() => setOpen(true)}
         className="fixed bottom-5 right-5 z-40 hidden rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-4 py-2 text-xs font-semibold text-[var(--v2-text-strong)] shadow-lg sm:block"
       >
-        Open Inspector
+        {t("inspector.open")}
       </button>
     );
   }
@@ -630,7 +723,7 @@ function InspectorPanelCore({
   const snapshot = inspector.snapshot as Record<string, unknown> | null;
   return (
     <aside
-      aria-label="Web Debug Inspector"
+      aria-label={t("inspector.panelLabel")}
       data-testid="inspector-panel"
       data-layout={viewportMode}
       className={cn(
@@ -644,7 +737,7 @@ function InspectorPanelCore({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">
-              Web Debug Inspector
+              {t("inspector.title")}
             </h2>
             <div className="mt-1 flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
               <span
@@ -657,12 +750,12 @@ function InspectorPanelCore({
                       : "bg-[var(--v2-text-faint)]",
                 )}
               />
-              <span data-testid="inspector-health">{HEALTH_LABELS[inspector.health]}</span>
+              <span data-testid="inspector-health">{t(HEALTH_LABEL_KEYS[inspector.health])}</span>
             </div>
           </div>
           <button
             type="button"
-            aria-label="Close inspector"
+            aria-label={t("inspector.closeLabel")}
             data-testid="inspector-close"
             onClick={() => setOpen(false)}
             className="rounded-lg px-2 py-1 text-lg leading-none text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)]"
@@ -673,11 +766,11 @@ function InspectorPanelCore({
         <p className="mt-2 truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
           {threadId && selectedRunId
             ? `${threadId} · ${selectedRunId}`
-            : "Waiting for an active run"}
+            : t("inspector.waitingForRun")}
         </p>
       </header>
 
-      <nav aria-label="Inspector tabs" className="flex border-b border-[var(--v2-panel-border)] px-2">
+      <nav aria-label={t("inspector.tabsLabel")} className="flex border-b border-[var(--v2-panel-border)] px-2">
         {INSPECTOR_TABS.map((tab) => (
           <button
             key={tab}
@@ -693,7 +786,7 @@ function InspectorPanelCore({
                 : "border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
             )}
           >
-            {tab}
+            {t(`inspector.tab.${tab}`)}
           </button>
         ))}
       </nav>
@@ -713,7 +806,15 @@ function InspectorPanelCore({
             threadId={threadId}
           />
         )}
-        {preferences.activeTab === "stats" && <StatsShell snapshot={snapshot} />}
+        {preferences.activeTab === "stats" && (
+          <StatsShell
+            snapshot={snapshot}
+            health={inspector.health}
+            reconnectCount={inspector.reconnectCount}
+            receivedUpdateCount={inspector.receivedUpdateCount}
+            lastUpdateAt={inspector.lastUpdateAt}
+          />
+        )}
       </section>
     </aside>
   );

@@ -60,6 +60,7 @@ function Probe() {
 beforeEach(() => {
   eventStreams.length = 0;
   latestState = null;
+  sessionStorage.clear();
   sessionStorage.setItem("ironclaw_token", "operator-token");
   vi.stubGlobal(
     "fetch",
@@ -117,6 +118,7 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
 
   await act(async () => stream.controller.reconnect());
   assert.equal(stream.requestOptions.query.connection_generation, 2);
+  assert.equal(latestState?.reconnectCount, 1);
 });
 
 test("deduplicates cursors, rebases snapshots, and stops on forbidden", async () => {
@@ -132,6 +134,8 @@ test("deduplicates cursors, rebases snapshots, and stops on forbidden", async ()
   });
   assert.equal(latestState?.updates.length, 2);
   assert.equal(latestState?.lastCursor, `${streamId}:2`);
+  assert.equal(latestState?.receivedUpdateCount, 2);
+  assert.match(latestState?.lastUpdateAt || "", /^\d{4}-\d{2}-\d{2}T/);
 
   await act(async () => {
     stream.message("diagnostic_update", `${streamId}:3`, {
@@ -153,6 +157,7 @@ test("deduplicates cursors, rebases snapshots, and stops on forbidden", async ()
     });
   });
   assert.equal(latestState?.updates.length, 0);
+  assert.equal(latestState?.receivedUpdateCount, 4);
   assert.equal(vi.mocked(fetch).mock.calls.length, 4);
 
   await act(async () => stream.respond(403, "application/json"));
