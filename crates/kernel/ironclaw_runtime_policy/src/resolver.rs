@@ -795,6 +795,23 @@ mod tests {
     }
 
     #[test]
+    fn hosted_profiles_resolve_to_user_sandbox_shell() {
+        for profile in [
+            RuntimeProfile::HostedSafe,
+            RuntimeProfile::HostedDev,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ] {
+            let request = if profile.is_yolo() {
+                req_yolo(DeploymentMode::HostedMultiTenant, profile)
+            } else {
+                req(DeploymentMode::HostedMultiTenant, profile)
+            };
+            let policy = resolve(request).unwrap_or_else(|error| panic!("{profile:?}: {error}"));
+            assert_eq!(policy.process_backend, ProcessBackendKind::UserSandbox);
+        }
+    }
+
+    #[test]
     fn enterprise_family_maps_to_org_dedicated_workspace_and_runner() {
         let policy = resolve(req(
             DeploymentMode::EnterpriseDedicated,

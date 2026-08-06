@@ -96,7 +96,7 @@ async fn workspace_owner_user(_workspace: &Path) -> Result<String, RuntimeProces
     // Docker Desktop's Linux VM cannot consume native Windows ownership IDs.
     // The worker image and documented local setup use this explicit non-root
     // identity instead of inheriting an operator-overridable image default.
-    Ok("1000:1000".to_string())
+    Ok(super::worker_spec::DOCKER_WORKER_USER.to_string())
 }
 
 #[cfg(test)]

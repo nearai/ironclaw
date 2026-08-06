@@ -268,8 +268,10 @@ fn restrict_package_for_process_backend(
         remove_process_port_backed_builtin_capabilities(package)?;
     } else if process_backend == ProcessBackendKind::UserSandbox {
         // The PR1 user sandbox owns its isolated `/workspace` and runs with
-        // Docker `--network none`. These are not host-filesystem or host-network
-        // effects, so do not ask the invocation resolver to bind either service.
+        // direct container networking but no host network service. These are
+        // not host-filesystem or host-network effects, so do not ask the
+        // invocation resolver to bind either service. Brokered network effects
+        // remain a follow-up once shell traffic can traverse ironclaw_network.
         for effect in [
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,

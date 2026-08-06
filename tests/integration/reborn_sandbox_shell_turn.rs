@@ -42,7 +42,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                 ),
                 RebornScriptedReply::tool_call(
                     "builtin.shell",
-                    json!({"command": "cat /workspace/persistence-marker.txt; uid=$(id -u); test \"$uid\" -ne 0; echo NON_ROOT_UID_OK"}),
+                    json!({"command": "cat /workspace/persistence-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK"}),
                 ),
                 RebornScriptedReply::text("ran in the sandbox"),
             ])

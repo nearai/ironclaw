@@ -244,10 +244,43 @@ impl RebornCapabilityBackend {
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::SandboxShellTools => {
+                if !matches!(shell_mode, ShellMode::Inert) {
+                    return Err(
+                        "sandbox shell harness executes real containers and does not support \
+                         shell mode overrides"
+                            .into(),
+                    );
+                }
                 let host_runtime =
                     super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sandbox_shell_rejects_scripted_process_overrides_before_startup() {
+        let result = RebornCapabilityBackend::SandboxShellTools
+            .install(
+                ShellMode::Scripted(ScriptedProcessResult::Timeout),
+                CapabilityScriptingInputs::default(),
+                None,
+            )
+            .await;
+
+        let error = match result {
+            Ok(_) => panic!("sandbox shell accepted an unsupported process override"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("sandbox shell harness executes real containers")
+        );
     }
 }

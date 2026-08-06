@@ -520,6 +520,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
+                self.assertNotEqual(plan["mode"], "none")
                 self.assertTrue(plan["run_sandbox_docker"])
 
     def test_empty_diff_fails_fast(self) -> None:
