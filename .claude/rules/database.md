@@ -11,11 +11,11 @@ New persistence uses the `RootFilesystem` mount catalog. Consumers receive a
 `ScopedFilesystem` and typed domain wrappers; they do not choose backends or
 maintain parallel backend-dispatch traits.
 
-Read `crates/ironclaw_filesystem/CLAUDE.md` and the owning domain contract before
+Read `crates/substrates/ironclaw_filesystem/CLAUDE.md` and the owning domain contract before
 changing storage. Re-verify the core surface with:
 
 ```bash
-rg -n "trait RootFilesystem|struct ScopedFilesystem|fn cas_update" crates/ironclaw_filesystem
+rg -n "trait RootFilesystem|struct ScopedFilesystem|fn cas_update" crates/substrates/ironclaw_filesystem
 ```
 
 ## Ownership

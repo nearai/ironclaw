@@ -132,7 +132,7 @@ def crate_key(crate_directory):
     `tests/integration/coverage-exemptions.toml` is already a directory basename
     (they coincide for flat `crates/ironclaw_*/` crates), so no existing floor
     churns; and package names diverge from directories in ways that would make
-    worse keys (`crates/ironclaw_reborn_cli` declares `name = "ironclaw"`).
+    worse keys (`crates/ironclaw_cli` declares `name = "ironclaw"`).
 
     Basenames are also stable across the family moves still ahead:
     `crates/ironclaw_llm` -> `crates/substrates/ironclaw_llm` keeps the key

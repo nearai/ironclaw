@@ -28,7 +28,7 @@
 //! must NOT include an `action` key:
 //!
 //! ```json
-//! {"query": "from:me project plan", "count": 20}
+//! {"query": "from:me project plan", "limit": 20}
 //! ```
 
 mod api;
@@ -39,7 +39,7 @@ use types::{SlackUserAction, ToolContext};
 // Generate bindings from the WIT interface.
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../ironclaw_wasm/wit/tool.wit",
+    path: "../../../../lanes/ironclaw_wasm/wit/tool.wit",
 });
 
 /// Implementation of the tool interface.
@@ -94,59 +94,48 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let result = match action {
         SlackUserAction::SearchMessages {
             query,
-            count,
-            sort,
-            page,
+            limit,
+            cursor,
         } => {
-            let result = api::search_messages(
-                &query,
-                count,
-                sort.as_ref().map(|sort| sort.as_str()),
-                page,
-            )?;
+            let result = api::search_messages(&query, limit, cursor.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
         SlackUserAction::ListConversations {
-            types,
+            kinds,
             limit,
             cursor,
         } => {
-            let result = api::list_conversations(&types, limit, cursor.as_deref())?;
+            let result = api::list_conversations(kinds.as_deref(), limit, cursor.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackUserAction::GetConversationInfo { channel } => {
-            let result = api::get_conversation_info(&channel)?;
+        SlackUserAction::GetConversationInfo { conversation } => {
+            let result = api::get_conversation_info(&conversation)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
         SlackUserAction::GetConversationHistory {
-            channel,
+            conversation,
             limit,
-            latest,
-            oldest,
+            cursor,
         } => {
-            let result = api::get_conversation_history(
-                &channel,
-                limit,
-                latest.as_deref(),
-                oldest.as_deref(),
-            )?;
+            let result = api::get_conversation_history(&conversation, limit, cursor.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
         SlackUserAction::GetThreadReplies {
-            channel,
-            thread_ts,
+            conversation,
+            thread,
             limit,
+            cursor,
         } => {
-            let result = api::get_thread_replies(&channel, &thread_ts, limit)?;
+            let result = api::get_thread_replies(&conversation, &thread, limit, cursor.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackUserAction::GetUserInfo { user_id } => {
-            let result = api::get_user_info(&user_id)?;
+        SlackUserAction::GetUserInfo { user_ref } => {
+            let result = api::get_user_info(&user_ref)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
@@ -156,11 +145,13 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
         }
 
         SlackUserAction::SendMessage {
-            channel,
+            conversation,
             text,
-            thread_ts,
+            thread,
+            reply_to,
         } => {
-            let result = api::send_message(&channel, &text, thread_ts.as_deref())?;
+            let result =
+                api::send_message(&conversation, &text, thread.as_deref(), reply_to.as_ref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
     };

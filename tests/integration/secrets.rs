@@ -14,13 +14,13 @@ mod support;
 
 use std::sync::Arc;
 
-use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
-use ironclaw_host_api::ids::SecretHandle;
-use ironclaw_reborn_composition::test_support::{
+use ironclaw_composition::test_support::{
     STANDALONE_DB_FILENAME, build_default_database_roots_for_test, build_secret_store_for_test,
     mount_database_roots_for_test,
 };
-use ironclaw_reborn_composition::wrap_scoped;
+use ironclaw_composition::wrap_scoped;
+use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
+use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
 use secrecy::ExposeSecret;
 

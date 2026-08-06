@@ -17,11 +17,11 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
-use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_config::BudgetDefaults;
+use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
 use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
-use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
 use ironclaw_threads::SessionThreadService as _;
 use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState};
