@@ -36,6 +36,9 @@ pub fn sanitize_wasm_diagnostic(message: impl AsRef<str>) -> String {
         redacted
     };
     let stripped = strip_control_characters(normalized);
+    if stripped.len() > WASM_DIAGNOSTIC_MAX_BYTES {
+        return WASM_DIAGNOSTIC_REDACTION_MARKER.to_string();
+    }
     truncate_log_message(stripped)
 }
 
@@ -109,6 +112,24 @@ mod tests {
             sanitize_wasm_diagnostic(oversize),
             WASM_DIAGNOSTIC_REDACTION_MARKER
         );
+    }
+
+    /// Regression test: a detectable secret sitting at the end of an
+    /// otherwise limit-sized input passes the initial raw-byte-limit check,
+    /// but swapping the secret for the (longer) `WASM_DIAGNOSTIC_REDACTION_MARKER`
+    /// pushes the normalized string past `WASM_DIAGNOSTIC_MAX_BYTES`. Before the
+    /// post-strip length check was added, `truncate_log_message` would cut
+    /// straight through the marker text, leaving a mangled fragment instead
+    /// of the complete, stable marker.
+    #[test]
+    fn secret_redaction_growth_past_limit_returns_whole_marker() {
+        let filler = "x".repeat(WASM_DIAGNOSTIC_MAX_BYTES - DETECTABLE_SECRET.len());
+        let at_limit_with_trailing_secret = format!("{filler}{DETECTABLE_SECRET}");
+        assert_eq!(at_limit_with_trailing_secret.len(), WASM_DIAGNOSTIC_MAX_BYTES);
+
+        let sanitized = sanitize_wasm_diagnostic(&at_limit_with_trailing_secret);
+
+        assert_eq!(sanitized, WASM_DIAGNOSTIC_REDACTION_MARKER);
     }
 
     #[test]
