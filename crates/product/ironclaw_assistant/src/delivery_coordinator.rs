@@ -546,16 +546,9 @@ impl DeliveryCoordinator {
                     return Err(CoordinatedDeliveryError::Workflow(error));
                 }
                 let preflight = CoordinatedDeliveryError::Workflow(error);
-                return match self.fail_prepared(&attempt, kind).await {
-                    Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(preflight),
-                    Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
-                        Ok(Self::outcome_for_existing_delivery(*existing, None))
-                    }
-                    Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
-                        preflight: Box::new(preflight),
-                        settlement,
-                    }),
-                };
+                return self
+                    .settle_prepared_failure(&attempt, kind, preflight, None)
+                    .await;
             }
         };
 
@@ -580,19 +573,14 @@ impl DeliveryCoordinator {
                 if !failure_kind.is_permanent_preflight() {
                     return Err(error);
                 }
-                return match self.fail_prepared(&attempt, failure_kind).await {
-                    Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(error),
-                    Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
-                        Ok(Self::outcome_for_existing_delivery(
-                            *existing,
-                            Some(metadata.external_conversation_ref.clone()),
-                        ))
-                    }
-                    Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
-                        preflight: Box::new(error),
-                        settlement,
-                    }),
-                };
+                return self
+                    .settle_prepared_failure(
+                        &attempt,
+                        failure_kind,
+                        error,
+                        Some(metadata.external_conversation_ref.clone()),
+                    )
+                    .await;
             }
         };
 
@@ -654,21 +642,15 @@ impl DeliveryCoordinator {
             let preflight = CoordinatedDeliveryError::ChannelUnavailable {
                 extension_id: extension_id.to_string(),
             };
-            return match self
-                .fail_prepared(attempt, DeliveryFailureKind::Rejected)
+            return self
+                .settle_prepared_failure(
+                    attempt,
+                    DeliveryFailureKind::Rejected,
+                    preflight,
+                    Some(conversation.clone()),
+                )
                 .await
-            {
-                Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(preflight),
-                Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
-                    Ok(ResolvedChannelContextOutcome::ExistingDelivery(Box::new(
-                        Self::outcome_for_existing_delivery(*existing, Some(conversation.clone())),
-                    )))
-                }
-                Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
-                    preflight: Box::new(preflight),
-                    settlement,
-                }),
-            };
+                .map(|outcome| ResolvedChannelContextOutcome::ExistingDelivery(Box::new(outcome)));
         };
 
         // Stored reply context for source-route replies (ING-11).
@@ -875,6 +857,31 @@ impl DeliveryCoordinator {
                 failure_kind,
             })
             .await
+    }
+
+    /// Settle a `Prepared` attempt against a permanent preflight failure
+    /// (target-metadata resolution, workspace materialization, or channel
+    /// resolution). `preflight` is the original error to surface when the
+    /// attempt settles as freshly `Failed`; `conversation` is the resolved
+    /// conversation if the caller had reached that boundary, so an
+    /// already-existing delivery can be reported with it.
+    async fn settle_prepared_failure(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        failure_kind: DeliveryFailureKind,
+        preflight: CoordinatedDeliveryError,
+        conversation: Option<ExternalConversationRef>,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
+        match self.fail_prepared(attempt, failure_kind).await {
+            Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(preflight),
+            Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
+                Ok(Self::outcome_for_existing_delivery(*existing, conversation))
+            }
+            Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
+                preflight: Box::new(preflight),
+                settlement,
+            }),
+        }
     }
 
     fn duplicate_suppressed(
