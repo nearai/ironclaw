@@ -64,7 +64,12 @@ run_entrypoint() {
 
   if [ ! -f "${home}/argv" ]; then
     echo "FAIL[${name}]: entrypoint never reached the ironclaw exec" >&2
-    failures=$((failures + 1))
+    # Every caller invokes this function inside a command substitution, so the
+    # body runs in a subshell and a `failures=$((failures + 1))` here would
+    # mutate a copy the parent never sees (the run stayed green with this
+    # check firing — sabotage-verified). Exit instead: under the parent's
+    # `set -e` the failed substitution aborts the whole script non-zero.
+    exit 1
   fi
   cat "${home}/config.toml"
 }

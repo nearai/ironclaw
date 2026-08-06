@@ -2,7 +2,7 @@
 
 **What this is:** the recommended way to start and keep tackling the restructure — waves, gates, PR-sizing rules, and decision points. It sequences the workstreams defined in [CHECKLIST.md](CHECKLIST.md) (WS0–WS12); the checklist is the *what*, this is the *when and how*. Nothing here is sacred except the four load-bearing ordering constraints, which are marked ⚠.
 
-**Refreshed 2026-07-30.** The plan got simpler: #6691 and #6696 both merged, so Wave 4 starts from a partly-advanced position and **Wave 6 is no longer gated on anyone else's PR** — the only wave with an external dependency no longer has one. What remains of Wave 6 is a single open design question, which is cheap to hold and can be called in parallel with any other wave.
+**Refreshed 2026-07-30 (Wave-6 status updated 2026-08-06).** The plan got simpler: #6691 and #6696 both merged, so Wave 4 starts from a partly-advanced position and **Wave 6 is no longer gated on anyone else's PR** — the only wave with an external dependency no longer has one. What remained of Wave 6 was a single open design question, cheap to hold and callable in parallel with any other wave — since called: resolved 2026-08-05 (PROPOSAL §12.13 D-S, amend-not-shed; the Wave 6 section below is the record), so no wave holds an open design question.
 
 **Operating principles** (learned from the July train, and from what went wrong in it):
 

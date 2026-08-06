@@ -27,6 +27,8 @@ mod index;
 mod libsql;
 mod local;
 mod postgres;
+#[cfg(feature = "test-support")]
+mod postgres_isolation;
 mod record;
 mod root;
 mod scoped;
@@ -50,6 +52,10 @@ pub use index::{
 pub use libsql::LibSqlRootFilesystem;
 pub use local::DiskFilesystem;
 pub use postgres::{PostgresConnectionPool, PostgresRootFilesystem};
+#[cfg(feature = "test-support")]
+pub use postgres_isolation::{
+    IsolatedPostgresDatabase, IsolatedPostgresProvisioner, PostgresUnreachable,
+};
 pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
 };

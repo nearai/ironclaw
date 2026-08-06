@@ -4,6 +4,9 @@ use ironclaw_event_log::{
     EventCursor, EventError, EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind,
 };
 use ironclaw_event_store::{RebornEventStoreConfig, RebornProfile, build_reborn_event_stores};
+use ironclaw_filesystem::{
+    IsolatedPostgresDatabase, IsolatedPostgresProvisioner, PostgresUnreachable,
+};
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     ids::{
@@ -510,171 +513,25 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
 // so the suite ran red as one invocation against the single database named
 // by `IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL` while every test passed
 // alone on a virgin database (WS12 gauntlet report, §P6). Each test
-// therefore provisions a private database on the configured server — the
-// fabric contract's `IsolatedDatabase` pattern
-// (`crates/substrates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`)
-// — which keeps the absolute assertions meaningful, exactly as the
+// therefore provisions a private database on the configured server —
+// `ironclaw_filesystem`'s shared `test-support` provisioner
+// (`postgres_isolation`), which owns the once-per-binary age-gated stale
+// sweep — keeping the absolute assertions meaningful, exactly as the
 // jsonl/libsql twins keep theirs through per-test temp files.
-
-struct IsolatedPostgresDatabase {
-    /// Connection string for the private database, in the same libpq form
-    /// the configured URL used.
-    url: String,
-    admin: tokio_postgres::Client,
-    name: String,
-}
-
-impl IsolatedPostgresDatabase {
-    /// Drop the database on the way out of a passing test.
-    ///
-    /// A courtesy, not a guarantee: a failing assertion unwinds straight
-    /// past it, so a red run can leave its database behind — that is what
-    /// the sweep in `isolated_postgres_database` collects on the next run.
-    /// `FORCE` closes store-pool connections that have not gone away by the
-    /// time the handles drop.
-    async fn cleanup(self) {
-        let Self { admin, name, .. } = self;
-        let _ = admin
-            .execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"), &[])
-            .await;
-    }
-}
-
-/// One stale-database sweep per test binary, ahead of every creation.
-/// Sweeping per provisioning call (as the fabric contract does) can race a
-/// sibling test of the same binary between its `CREATE DATABASE` and first
-/// connection; a single up-front sweep removes that window while still
-/// collecting what failed runs left behind.
-static STALE_SWEEP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-/// Distinguishes the databases of concurrently provisioning tests.
-static NEXT_DATABASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Only sweep databases at least this old. A prefix-only sweep could delete
-/// a concurrent *process*'s freshly created database in the window between
-/// its `CREATE DATABASE` and its first connection (zero backends — nothing
-/// for a no-`FORCE` drop to refuse); the epoch embedded in every name keeps
-/// anything younger than this out of the sweep's SELECT entirely, so that
-/// window is unreachable. Leftovers from crashed runs collect on the first
-/// run after the cutoff.
-const STALE_SWEEP_MIN_AGE_SECS: u64 = 3600;
-
-fn unix_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is after the UNIX epoch")
-        .as_secs()
-}
-
-/// Parses the creation epoch out of `<prefix><epoch>_<pid>_<counter>`.
-/// `None` marks a pre-timestamp legacy name: definitionally past the cutoff,
-/// collected immediately.
-fn isolated_database_epoch(name: &str, prefix: &str) -> Option<u64> {
-    name.strip_prefix(prefix)?
-        .split('_')
-        .next()?
-        .parse::<u64>()
-        .ok()
-}
+//
+// `PostgresUnreachable::Panic`: past a configured URL, every provisioning
+// failure is a broken environment rather than an unconfigured one — this leg
+// has no CI executor, and a silent skip would let the suite pass while
+// testing nothing.
+static POSTGRES: IsolatedPostgresProvisioner = IsolatedPostgresProvisioner::new(
+    "postgres event-store contract",
+    "IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL",
+    "evstore_isolated_",
+    PostgresUnreachable::Panic,
+);
 
 async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
-    let base_url = match std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            eprintln!(
-                "skipping postgres event-store contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
-            );
-            return None;
-        }
-    };
-    // Past a configured URL, every failure below is a broken environment
-    // rather than an unconfigured one, so it panics — this leg has no CI
-    // executor, and a silent skip would let the suite pass while testing
-    // nothing.
-    let admin_config = base_url
-        .parse::<tokio_postgres::Config>()
-        .expect("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL parses as a postgres connection string");
-    let (admin, connection) = admin_config
-        .connect(tokio_postgres::NoTls)
-        .await
-        .expect("connect to the configured postgres server");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    STALE_SWEEP
-        .get_or_init(|| async {
-            // Collect databases previously failed runs unwound past. Age-
-            // gated by the epoch in each name so a concurrent run's fresh
-            // database is never selected — even inside its zero-backend
-            // window between `CREATE DATABASE` and first connection, which
-            // a backend-count check (or the no-`FORCE` drop below) cannot
-            // protect. No `FORCE`: anything old but still held open by a
-            // live run additionally refuses to drop.
-            if let Ok(stale) = admin
-                .query(
-                    "SELECT datname FROM pg_database WHERE datname LIKE 'evstore_isolated_%'",
-                    &[],
-                )
-                .await
-            {
-                let now = unix_epoch_secs();
-                for row in stale {
-                    let name = row.get::<_, String>(0);
-                    let stale_enough = isolated_database_epoch(&name, "evstore_isolated_")
-                        .is_none_or(|epoch| now.saturating_sub(epoch) > STALE_SWEEP_MIN_AGE_SECS);
-                    if !stale_enough {
-                        continue;
-                    }
-                    let _ = admin
-                        .execute(&format!("DROP DATABASE IF EXISTS {name}"), &[])
-                        .await;
-                }
-            }
-        })
-        .await;
-    // Identifiers cannot be bind parameters in DDL. The interpolations are
-    // process-generated (epoch + pid + counter) or come from `pg_database`,
-    // never caller input.
-    let name = format!(
-        "evstore_isolated_{}_{}_{}",
-        unix_epoch_secs(),
-        std::process::id(),
-        NEXT_DATABASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    admin
-        .execute(&format!("CREATE DATABASE {name}"), &[])
-        .await
-        .expect("create the isolated database (the role needs CREATEDB)");
-    Some(IsolatedPostgresDatabase {
-        url: connection_string_with_dbname(&base_url, &name),
-        admin,
-        name,
-    })
-}
-
-/// Rewrites the database name inside a libpq connection string, preserving
-/// every other component. `tokio_postgres::Config` parses both libpq forms
-/// but cannot serialise back, and `build_reborn_event_stores` takes the raw
-/// string, so the rewrite happens at the string level:
-/// - URL form (`postgres://…`): replace the path segment, keep any query.
-/// - Key-value form: append `dbname=…` — `tokio_postgres` applies keys in
-///   order, so the appended one wins.
-fn connection_string_with_dbname(base: &str, dbname: &str) -> String {
-    match base.find("://") {
-        Some(scheme_idx) => {
-            let after_scheme = scheme_idx + "://".len();
-            let (without_query, query) = match base[after_scheme..].find('?') {
-                Some(offset) => base.split_at(after_scheme + offset),
-                None => (base, ""),
-            };
-            let authority_end = without_query[after_scheme..]
-                .find('/')
-                .map(|offset| after_scheme + offset)
-                .unwrap_or(without_query.len());
-            format!("{}/{dbname}{query}", &without_query[..authority_end])
-        }
-        None => format!("{base} dbname={dbname}"),
-    }
+    POSTGRES.provision().await
 }
 
 #[tokio::test]
@@ -693,7 +550,7 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(db.url.clone().into_boxed_str()),
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -751,7 +608,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(db.url.clone().into_boxed_str()),
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -800,7 +657,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(db.url.clone().into_boxed_str()),
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
             tls_options: Default::default(),
         },
     )

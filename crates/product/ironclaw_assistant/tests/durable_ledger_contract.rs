@@ -6,6 +6,9 @@ use chrono::Duration;
 use ironclaw_assistant::RebornFilesystemIdempotencyLedger;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
+use ironclaw_filesystem::{
+    IsolatedPostgresDatabase, IsolatedPostgresProvisioner, PostgresUnreachable,
+};
 
 /// WS5 collapsed the per-backend ledger newtypes onto the generic fabric form.
 /// These aliases keep the suite's two backend lanes named while proving both
@@ -306,9 +309,10 @@ async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
     )
     .await;
 }
-/// A private database for the settled-entry retention tests — the fabric
-/// contract's `IsolatedDatabase` pattern
-/// (`crates/substrates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`).
+/// A private database for the settled-entry retention tests, provisioned by
+/// `ironclaw_filesystem`'s shared `test-support` provisioner
+/// (`postgres_isolation`), which owns the once-per-binary age-gated stale
+/// sweep.
 ///
 /// Unique fingerprint suffixes isolate every other test's rows, but the
 /// settled-entry prune bookkeeping is global to the ledger root: it counts
@@ -319,150 +323,36 @@ async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
 /// isolate that; a private database can (the libsql twins get exactly that
 /// from per-test temp files). The WS12 gauntlet report, §P8, measured the
 /// defect; the two retention tests above are its regression pin.
+///
+/// `PostgresUnreachable::Skip` keeps `postgres_filesystem`'s reachability-
+/// skip semantics; past a reachable server, provisioning failures panic —
+/// this leg has no CI executor, and a silent skip would let the retention
+/// tests pass while testing nothing.
+static POSTGRES: IsolatedPostgresProvisioner = IsolatedPostgresProvisioner::new(
+    "postgres product workflow ledger contract",
+    "IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL",
+    "pwledger_isolated_",
+    PostgresUnreachable::Skip,
+);
+
 struct IsolatedPostgresFilesystem {
     filesystem: Arc<PostgresRootFilesystem>,
-    admin: tokio_postgres::Client,
-    name: String,
+    db: IsolatedPostgresDatabase,
 }
 
 impl IsolatedPostgresFilesystem {
-    /// Drop the database on the way out of a passing test.
-    ///
-    /// A courtesy, not a guarantee: a failing assertion unwinds straight
-    /// past it, so a red run can leave its database behind — that is what
-    /// the sweep in `isolated_postgres_filesystem` collects on the next
-    /// run. `FORCE` closes pool connections that have not gone away by the
-    /// time the handles drop.
+    /// Drop the database on the way out of a passing test — the pool goes
+    /// first so `cleanup`'s `FORCE` has less to close.
     async fn cleanup(self) {
-        let Self {
-            filesystem,
-            admin,
-            name,
-        } = self;
+        let Self { filesystem, db } = self;
         drop(filesystem);
-        let _ = admin
-            .execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"), &[])
-            .await;
+        db.cleanup().await;
     }
 }
 
-/// One stale-database sweep per test binary, ahead of every creation.
-/// Sweeping per provisioning call (as the fabric contract does) can race a
-/// sibling test of the same binary between its `CREATE DATABASE` and first
-/// connection; a single up-front sweep removes that window while still
-/// collecting what failed runs left behind.
-static STALE_SWEEP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-/// Distinguishes the databases of concurrently provisioning tests.
-static NEXT_DATABASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Only sweep databases at least this old. A prefix-only sweep could delete
-/// a concurrent *process*'s freshly created database in the window between
-/// its `CREATE DATABASE` and its first connection (zero backends — nothing
-/// for a no-`FORCE` drop to refuse); the epoch embedded in every name keeps
-/// anything younger than this out of the sweep's SELECT entirely, so that
-/// window is unreachable. Leftovers from crashed runs collect on the first
-/// run after the cutoff.
-const STALE_SWEEP_MIN_AGE_SECS: u64 = 3600;
-
-fn unix_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is after the UNIX epoch")
-        .as_secs()
-}
-
-/// Parses the creation epoch out of `<prefix><epoch>_<pid>_<counter>`.
-/// `None` marks a pre-timestamp legacy name: definitionally past the cutoff,
-/// collected immediately.
-fn isolated_database_epoch(name: &str, prefix: &str) -> Option<u64> {
-    name.strip_prefix(prefix)?
-        .split('_')
-        .next()?
-        .parse::<u64>()
-        .ok()
-}
-
 async fn isolated_postgres_filesystem() -> Option<IsolatedPostgresFilesystem> {
-    let url = match std::env::var("IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            eprintln!(
-                "skipping postgres product workflow ledger contract: IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL not set"
-            );
-            return None;
-        }
-    };
-    let config = match url.parse::<tokio_postgres::Config>() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("skipping postgres product workflow ledger contract: invalid url ({error})");
-            return None;
-        }
-    };
-    // Reachability keeps `postgres_filesystem`'s skip semantics. Past a
-    // reachable server, provisioning failures panic instead: this leg has no
-    // CI executor, and a silent skip would let the retention tests pass
-    // while testing nothing.
-    let (admin, connection) = match config.connect(tokio_postgres::NoTls).await {
-        Ok(connected) => connected,
-        Err(error) => {
-            eprintln!(
-                "skipping postgres product workflow ledger contract: database unavailable ({error})"
-            );
-            return None;
-        }
-    };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    STALE_SWEEP
-        .get_or_init(|| async {
-            // Collect databases previously failed runs unwound past. Age-
-            // gated by the epoch in each name so a concurrent run's fresh
-            // database is never selected — even inside its zero-backend
-            // window between `CREATE DATABASE` and first connection, which
-            // a backend-count check (or the no-`FORCE` drop below) cannot
-            // protect. No `FORCE`: anything old but still held open by a
-            // live run additionally refuses to drop.
-            if let Ok(stale) = admin
-                .query(
-                    "SELECT datname FROM pg_database WHERE datname LIKE 'pwledger_isolated_%'",
-                    &[],
-                )
-                .await
-            {
-                let now = unix_epoch_secs();
-                for row in stale {
-                    let name = row.get::<_, String>(0);
-                    let stale_enough = isolated_database_epoch(&name, "pwledger_isolated_")
-                        .is_none_or(|epoch| now.saturating_sub(epoch) > STALE_SWEEP_MIN_AGE_SECS);
-                    if !stale_enough {
-                        continue;
-                    }
-                    let _ = admin
-                        .execute(&format!("DROP DATABASE IF EXISTS {name}"), &[])
-                        .await;
-                }
-            }
-        })
-        .await;
-    // Identifiers cannot be bind parameters in DDL. The interpolations are
-    // process-generated (epoch + pid + counter) or come from `pg_database`,
-    // never caller input.
-    let name = format!(
-        "pwledger_isolated_{}_{}_{}",
-        unix_epoch_secs(),
-        std::process::id(),
-        NEXT_DATABASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    admin
-        .execute(&format!("CREATE DATABASE {name}"), &[])
-        .await
-        .expect("create the isolated database (the role needs CREATEDB)");
-    let mut isolated = config.clone();
-    isolated.dbname(&name);
-    let manager = deadpool_postgres::Manager::new(isolated, tokio_postgres::NoTls);
+    let db = POSTGRES.provision().await?;
+    let manager = deadpool_postgres::Manager::new(db.config().clone(), tokio_postgres::NoTls);
     let pool = deadpool_postgres::Pool::builder(manager)
         .max_size(4)
         .build()
@@ -472,11 +362,7 @@ async fn isolated_postgres_filesystem() -> Option<IsolatedPostgresFilesystem> {
         .run_migrations()
         .await
         .expect("migrate the isolated database");
-    Some(IsolatedPostgresFilesystem {
-        filesystem,
-        admin,
-        name,
-    })
+    Some(IsolatedPostgresFilesystem { filesystem, db })
 }
 
 async fn postgres_filesystem() -> Option<Arc<PostgresRootFilesystem>> {
