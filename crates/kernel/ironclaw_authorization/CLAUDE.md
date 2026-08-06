@@ -1,8 +1,7 @@
-# ironclaw_authorization guardrails
+# ironclaw_authorization
 
-- Own grant matching, lease state, and dispatch/spawn authorization decisions.
-- Do not execute capabilities, persist run-state, resolve approvals, reserve resources, prompt users, or import runtime/process/dispatcher/capability workflow crates.
-- Authorization is default-deny and resource-owner/invocation scoped (tenant/user/agent/project/mission/thread plus invocation where applicable).
-- Filesystem-backed leases must use async filesystem calls, not nested `block_on`.
-- The filesystem lease store writes via bounded compare-and-swap (`CasExpectation::Version` with a retry budget) over versioned roots, giving cross-process safety; its per-owner keyed mutation locks add in-process serialization on top. Only byte-only/`Unsupported` roots (no version support) degrade to process-local serialization alone — those are not safe for real concurrent cross-process callers.
-- Fingerprinted approval leases are resume-only authority and must not become ambient grants.
+Canonical guidance for this crate lives in [`AGENTS.md`](./AGENTS.md)
+(working rules + guardrails) and [`README.md`](./README.md) (orientation).
+This file is a pointer, kept so tooling that loads `CLAUDE.md` lands there —
+do not add rules here (one canonical home per fact,
+`docs/reborn/guidance-conventions.md`).

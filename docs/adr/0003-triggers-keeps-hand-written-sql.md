@@ -5,6 +5,12 @@
 **Issue / rows:** CHECKLIST WS6 "Domain-internal cleanups" clause (f);
 PROPOSAL §6.4.3, §11.2.6, §12 item 10
 **Measured at:** `89080c5160`
+**Path note (2026-08-05):** crate paths and line numbers in this ADR are as of
+the measured commit, which predates the WS6/WS7 family restructure. Today
+`crates/ironclaw_X` lives at `crates/<family>/ironclaw_X` (e.g.
+`crates/ironclaw_triggers` → `crates/domains/ironclaw_triggers`,
+`crates/ironclaw_architecture` → `crates/app/ironclaw_architecture_tests`).
+The decision itself is unchanged.
 
 ## Context
 

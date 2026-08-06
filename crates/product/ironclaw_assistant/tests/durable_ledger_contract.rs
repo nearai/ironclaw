@@ -6,6 +6,9 @@ use chrono::Duration;
 use ironclaw_assistant::RebornFilesystemIdempotencyLedger;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
+use ironclaw_filesystem::{
+    IsolatedPostgresDatabase, IsolatedPostgresProvisioner, PostgresUnreachable,
+};
 
 /// WS5 collapsed the per-backend ledger newtypes onto the generic fabric form.
 /// These aliases keep the suite's two backend lanes named while proving both
@@ -217,30 +220,38 @@ async fn postgres_duplicate_reservation_contention_serializes_when_configured() 
 }
 #[tokio::test]
 async fn postgres_settled_entry_limit_prunes_oldest_when_configured() {
-    let Some(filesystem) = postgres_filesystem().await else {
+    let Some(db) = isolated_postgres_filesystem().await else {
         return;
     };
-    let ledger =
-        RebornPostgresIdempotencyLedger::with_root_lease(filesystem, Duration::seconds(10))
-            .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
+    let ledger = RebornPostgresIdempotencyLedger::with_root_lease(
+        Arc::clone(&db.filesystem),
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
 
     assert_settled_entry_limit_prunes_oldest(&ledger, &unique_suffix("postgres-retention")).await;
+    drop(ledger);
+    db.cleanup().await;
 }
 #[tokio::test]
 async fn postgres_settled_prune_interval_defers_until_interval_when_configured() {
-    let Some(filesystem) = postgres_filesystem().await else {
+    let Some(db) = isolated_postgres_filesystem().await else {
         return;
     };
-    let ledger =
-        RebornPostgresIdempotencyLedger::with_root_lease(filesystem, Duration::seconds(10))
-            .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
-            .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
+    let ledger = RebornPostgresIdempotencyLedger::with_root_lease(
+        Arc::clone(&db.filesystem),
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+    .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
 
     assert_settled_prune_interval_defers_until_interval(
         &ledger,
         &unique_suffix("postgres-prune-interval"),
     )
     .await;
+    drop(ledger);
+    db.cleanup().await;
 }
 #[tokio::test]
 async fn postgres_superseded_reservation_cannot_settle_when_configured() {
@@ -298,6 +309,62 @@ async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
     )
     .await;
 }
+/// A private database for the settled-entry retention tests, provisioned by
+/// `ironclaw_filesystem`'s shared `test-support` provisioner
+/// (`postgres_isolation`), which owns the once-per-binary age-gated stale
+/// sweep.
+///
+/// Unique fingerprint suffixes isolate every other test's rows, but the
+/// settled-entry prune bookkeeping is global to the ledger root: it counts
+/// and orders *all* settled entries under it, so sibling tests' entries
+/// change which entry a limit of 1 prunes and when an interval of 3 fires —
+/// and a limit-1 pruner running beside the other tests deletes *their*
+/// settled rows in turn ("conflict row disappeared"). A name suffix cannot
+/// isolate that; a private database can (the libsql twins get exactly that
+/// from per-test temp files). The WS12 gauntlet report, §P8, measured the
+/// defect; the two retention tests above are its regression pin.
+///
+/// `PostgresUnreachable::Skip` keeps `postgres_filesystem`'s reachability-
+/// skip semantics; past a reachable server, provisioning failures panic —
+/// this leg has no CI executor, and a silent skip would let the retention
+/// tests pass while testing nothing.
+static POSTGRES: IsolatedPostgresProvisioner = IsolatedPostgresProvisioner::new(
+    "postgres product workflow ledger contract",
+    "IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL",
+    "pwledger_isolated_",
+    PostgresUnreachable::Skip,
+);
+
+struct IsolatedPostgresFilesystem {
+    filesystem: Arc<PostgresRootFilesystem>,
+    db: IsolatedPostgresDatabase,
+}
+
+impl IsolatedPostgresFilesystem {
+    /// Drop the database on the way out of a passing test — the pool goes
+    /// first so `cleanup`'s `FORCE` has less to close.
+    async fn cleanup(self) {
+        let Self { filesystem, db } = self;
+        drop(filesystem);
+        db.cleanup().await;
+    }
+}
+
+async fn isolated_postgres_filesystem() -> Option<IsolatedPostgresFilesystem> {
+    let db = POSTGRES.provision().await?;
+    let manager = deadpool_postgres::Manager::new(db.config().clone(), tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .expect("postgres pool builds against the isolated database");
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+    filesystem
+        .run_migrations()
+        .await
+        .expect("migrate the isolated database");
+    Some(IsolatedPostgresFilesystem { filesystem, db })
+}
+
 async fn postgres_filesystem() -> Option<Arc<PostgresRootFilesystem>> {
     let url = match std::env::var("IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL") {
         Ok(url) => url,

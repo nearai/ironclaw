@@ -410,6 +410,212 @@ async fn policy_aware_direct_submit_uses_default_credential_provider() {
         vec!["Bearer direct-submit-token".to_string()]
     );
 }
+/// Serves exactly one request at the returned `/v1/traces` endpoint: drains
+/// it, answers with `status_line` plus a `content-length: 4096` head but only
+/// the first bytes of the body, then closes — so the response HEAD completes
+/// (`send()` succeeds) while `.text()`'s body stream dies mid-read.
+async fn spawn_truncated_body_trace_mock(status_line: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock trace commons listener binds");
+    let endpoint = format!(
+        "http://{}/v1/traces",
+        listener.local_addr().expect("local addr")
+    );
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        // Drain the request: headers, then the Content-Length'd JSON body.
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.expect("read request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(headers_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..headers_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().expect("content length"))
+                    })
+                    .unwrap_or(0);
+                if request.len() >= headers_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        // The head completes with a Content-Length the body never reaches,
+        // then the socket closes: `send()` succeeds, the body read fails.
+        socket
+            .write_all(
+                format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: 4096\r\n\r\n{{\"status\":"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write truncated response");
+        socket.flush().await.expect("flush");
+        drop(socket);
+    });
+    endpoint
+}
+/// A 2xx whose body STREAM fails mid-read is a transport failure, not a
+/// protocol one: the old `response.text().await.unwrap_or_default()` collapsed
+/// the read error into an empty body, which the strict receipt parse (#7144)
+/// then reported as `response_invalid` ("server returned success with a body
+/// that is not a submission receipt") — blaming the server's payload for the
+/// client's dropped connection and recording the wrong telemetry kind.
+#[tokio::test]
+async fn submit_preserves_response_body_read_failure_as_request_failure() {
+    let endpoint = spawn_truncated_body_trace_mock("HTTP/1.1 200 OK").await;
+
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default(),
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+
+    let failure = submit_trace_envelope_to_endpoint_with_token(&envelope, &endpoint, "test-token")
+        .await
+        .expect_err("a failed body read must surface as an error");
+
+    assert_ne!(
+        failure.kind,
+        TraceQueueTelemetryFailureKind::Submission,
+        "a dropped body stream is a transport failure and must not be \
+         classified as a server-protocol (`response_invalid`) failure: {failure}"
+    );
+    assert!(
+        failure
+            .to_string()
+            .contains("trace submission response body"),
+        "the failure must name the body read as the failing operation, got: {failure}"
+    );
+}
+/// A non-2xx whose REJECTION body read fails must keep both truths: the
+/// received HTTP status (it classifies the rejection — the 401/403 auth-retry
+/// and the Credential/HttpRejection telemetry split both key off it, so the
+/// failure must stay an `http_rejection`) and the body read's own cause. The
+/// old path collapsed the read error with `.unwrap_or_default()`, reporting
+/// "rejected by 503" with an empty detail as though the server had sent an
+/// empty body — hiding that the transport died while the rejection detail was
+/// being read (`.claude/rules/error-handling.md` bans exactly that collapse).
+#[tokio::test]
+async fn submit_preserves_rejection_body_read_failure_cause_with_status() {
+    let endpoint = spawn_truncated_body_trace_mock("HTTP/1.1 503 Service Unavailable").await;
+
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default(),
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+
+    let failure = submit_trace_envelope_to_endpoint_with_token(&envelope, &endpoint, "test-token")
+        .await
+        .expect_err("a rejected submission must surface as an error");
+
+    assert_eq!(
+        failure.kind,
+        TraceQueueTelemetryFailureKind::HttpRejection,
+        "a rejection whose body read fails is still an HTTP rejection: {failure}"
+    );
+    // The structured status is private by design (the failure's message is
+    // built from it in the same constructor); what it drives structurally is
+    // the kind above and the auth-retry split, so pin the split too: a 503
+    // must never read as an auth rejection and trigger a token refresh.
+    assert!(
+        !failure.auth_rejection(),
+        "a 503 rejection must not classify as an auth rejection: {failure}"
+    );
+    assert!(
+        failure.to_string().contains("503"),
+        "the rejection must keep the received HTTP status, got: {failure}"
+    );
+    assert!(
+        failure.to_string().contains("rejection body read failed"),
+        "the rejection must retain the body-read failure's cause instead of \
+         degrading to an empty detail, got: {failure}"
+    );
+}
+/// A 200 whose body is `{}` — or any JSON object with no server-sent `status`
+/// — is not a submission acknowledgement. Every real Trace Commons ingest
+/// response (and every fixture in this workspace) names what happened to the
+/// submission (`{"status": "accepted", ...}`), and callers persist that word
+/// unconditionally as `server_status` truth. The receipt's serde default used
+/// to fabricate `status: "submitted"` for a body that never said so, so a
+/// proxy or faulty server answering `200 {}` counted as submitted — and the
+/// flush caller then deleted the queued envelope, destroying the only
+/// retryable copy (the #7144 failure class, resurfacing through the wire
+/// type's defaults instead of a synthesizing code branch).
+#[tokio::test]
+async fn submit_rejects_success_response_without_explicit_server_status() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits_for_mock = hits.clone();
+    let app = axum::Router::new().route(
+        "/v1/traces",
+        axum::routing::post(move || {
+            let hits = hits_for_mock.clone();
+            async move {
+                if hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    // A proxy's empty-object success.
+                    axum::Json(serde_json::json!({}))
+                } else {
+                    // A faulty server's status-less non-empty object.
+                    axum::Json(serde_json::json!({ "credit_points_pending": 1.0 }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock trace commons listener binds");
+    let endpoint = format!(
+        "http://{}/v1/traces",
+        listener.local_addr().expect("local addr")
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default(),
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+
+    for case in ["empty object", "status-less object"] {
+        let failure =
+            submit_trace_envelope_to_endpoint_with_token(&envelope, &endpoint, "test-token")
+                .await
+                .expect_err(
+                    "a 200 whose body never states a server status must not count as submitted",
+                );
+        assert_eq!(
+            failure.kind,
+            TraceQueueTelemetryFailureKind::Submission,
+            "a status-less 200 body ({case}) is a protocol violation, not a transport one: {failure}"
+        );
+        assert!(
+            failure.to_string().contains("not a submission receipt"),
+            "the failure ({case}) must report the body as not being a receipt, got: {failure}"
+        );
+    }
+}
 #[test]
 fn upload_claim_issuer_url_validation_rejects_unsafe_targets() {
     let allowed_hosts = BTreeSet::from(["issuer.example.com".to_string()]);
