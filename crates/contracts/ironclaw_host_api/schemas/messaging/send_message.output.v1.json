@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging send_message output",
+  "type": "object",
+  "required": ["message_ref"],
+  "properties": {
+    "message_ref": {
+      "type": "object",
+      "required": ["conversation", "message_id"],
+      "properties": {
+        "conversation": { "type": "string", "minLength": 1 },
+        "message_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "description": "Provider-issued evidence for the sent message; pass to edit_message / delete_message / reaction operations."
+    },
+    "thread": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Echoes the input thread when the send posted into a thread/topic container, so a silent drop is checkable. Absent when no thread was supplied or the adapter could not honor it."
+    },
+    "reply_to": {
+      "type": "object",
+      "required": ["conversation", "message_id"],
+      "properties": {
+        "conversation": { "type": "string", "minLength": 1 },
+        "message_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "description": "Echoes the input reply_to when the send quoted a specific message, so a silent drop is checkable. Absent when no reply_to was supplied or the adapter could not honor it."
+    },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

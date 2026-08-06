@@ -520,6 +520,7 @@ fn first_party_capability_manifest(
         effects,
         default_permission,
         visibility: CapabilityVisibility::Model,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
@@ -622,7 +623,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
-            JSON_CAPABILITY_ID => (json::dispatch(&request.input)?, None),
+            JSON_CAPABILITY_ID => (json::dispatch(&request).await?, None),
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;

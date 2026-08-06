@@ -3875,7 +3875,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
         let tool_permission_overrides: Arc<
-            dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+            dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
         > = runtime_surfaces
             .tool_permission_overrides_for_test()
             .clone();

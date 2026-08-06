@@ -58,7 +58,7 @@ mod ratchet_support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use ratchet_support::{find_workspace_root, workspace_root};
+use ratchet_support::{find_workspace_root, strip_cfg_test_blocks, workspace_root};
 
 /// Registration-pipeline vocabulary. Naming any of these outside the owning
 /// files below means a registration concept has entered generic code.
@@ -483,57 +483,33 @@ fn collect_hits(
 // ---------------------------------------------------------------------------
 
 /// Terms named by `source`, with `#[cfg(test)]` blocks stripped first.
+///
+/// ⚠ **Deliberately fed RAW source, and that is not the composition
+/// `ratchet_support::strip_cfg_test_blocks` documents for itself.** This gate
+/// counts a term written in a *comment* as a leak — the shared lifecycle
+/// naming registration vocabulary in prose is the same drift the gate exists to
+/// catch — so pre-stripping comments and strings would silently delete hits
+/// this gate is supposed to report. Two consequences, both recorded rather than
+/// quietly changed (CHECKLIST WS10, the scanner-consolidation row):
+///
+///   * the residual hazard the shared doc names is live here: a `#[cfg(test)]`
+///     written inside a comment or a string literal in a scanned file would
+///     start a brace walk from text that is not code. No file in the scanned
+///     scope contains one today, and the gate's `measured_scan()` floors would
+///     not notice if one appeared — closing it means either a comment-aware
+///     stripper or dropping comment hits, and both change what this gate counts;
+///   * what the shared body *does* fix for free is the missing `;`-before-`{`
+///     guard this gate's private copy shipped without, so a
+///     `#[cfg(test)] use …;` no longer brace-balances from the next item's block
+///     and eats it. That direction only ever KEEPS more production code, so it
+///     cannot weaken the scan.
 fn scan_source(source: &str) -> BTreeSet<String> {
-    let body = strip_cfg_test(source);
+    let body = strip_cfg_test_blocks(source);
     TERMS
         .iter()
         .filter(|term| body.contains(**term))
         .map(|term| (*term).to_string())
         .collect()
-}
-
-/// Remove `#[cfg(test)]`-attributed items by brace matching. Test code may
-/// name the registration vocabulary (overview §8, same as the sibling gates).
-fn strip_cfg_test(source: &str) -> String {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(index) = rest.find(MARKER) {
-        out.push_str(&rest[..index]);
-        let after = &rest[index + MARKER.len()..];
-        let Some(open) = after.find('{') else {
-            // Attribute with no block body (e.g. `#[cfg(test)] use ...;`).
-            // Drop to the end of that item instead.
-            match after.find(';') {
-                Some(semi) => {
-                    rest = &after[semi + 1..];
-                    continue;
-                }
-                None => return out,
-            }
-        };
-        let mut depth = 0usize;
-        let mut end = None;
-        for (offset, ch) in after[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(open + offset + ch.len_utf8());
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        match end {
-            Some(end) => rest = &after[end..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 // ---------------------------------------------------------------------------

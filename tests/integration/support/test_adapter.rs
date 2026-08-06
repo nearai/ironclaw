@@ -17,13 +17,20 @@
 //! see that PR's DEL-5 notes.
 
 use chrono::Utc;
-use ironclaw_assistant::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProjectionCursor,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId,
+};
+use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload,
+    ProjectionSubscriptionPayload, TrustedInboundContext, UserMessagePayload,
+};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
 
 /// Builds verified inbound envelopes for the integration harness.
 ///

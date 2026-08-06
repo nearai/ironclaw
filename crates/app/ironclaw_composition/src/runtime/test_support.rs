@@ -24,8 +24,9 @@ fn build_approval_interaction_service_with_parts(
     let persistent_approval_policies: Arc<
         dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     > = parts.persistent_approval_policies.clone();
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
-        parts.tool_permission_overrides.clone();
+    let tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
+    > = parts.tool_permission_overrides.clone();
 
     Ok(Arc::new(
         DefaultApprovalInteractionService::new(

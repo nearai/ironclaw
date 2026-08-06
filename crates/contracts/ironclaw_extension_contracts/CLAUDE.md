@@ -36,7 +36,7 @@ over from WS1.3 to sixteen; WS1.5's `verified_inbound` made seventeen; WS5's
 | `state` | The installation state machine: `InstallationState`, `LifecyclePublicState`. |
 | `surface` | `CapabilitySurfaceKind` — the manifest surface kinds an extension may declare. |
 | `tool_adapter` | `ToolAdapter` + `RestrictedEgress` and their call/result/error vocabulary — arrived with WS1.4. |
-| `verified_inbound` | The **sealed** channel/webhook mint family: `mark_request_signature_verified`/`mark_shared_secret_header_verified` and their `_for_tenant` variants — arrived with WS1.5. Every entry point consumes a `VerifiedInboundGrant`, so only the generic ingress verifier can call them. |
+| `verified_inbound` | The **sealed** channel/webhook mint family: `mark_request_signature_verified` and `mark_shared_secret_header_verified` — arrived with WS1.5; their `_for_tenant` variants were deleted as zero-caller dead mint surface by WS8 (2026-08-05). Every entry point consumes a `VerifiedInboundGrant`, so only the generic ingress verifier can call them. |
 | `test_support` | Feature-gated: the exported channel-adapter conformance suite (§11.2.10) and the in-memory egress/delivery fakes. |
 
 ## What must never be here

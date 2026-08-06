@@ -42,8 +42,9 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use ratchet_support::{
-    TypeDefOccurrence, cfg_test_only_files, collect_type_defs, names_crate, out_of_line_mod_decls,
-    production_rust_files, strip_comments_and_strings, workspace_root,
+    TypeDefOccurrence, cfg_test_only_files, collect_type_defs, implemented_trait_names,
+    is_rust_identifier, names_crate, out_of_line_mod_decls, production_rust_files,
+    strip_cfg_test_blocks, strip_comments_and_strings, workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_assistant";
@@ -303,15 +304,6 @@ fn crate_src(name: &str) -> PathBuf {
     crate_dir(name).join("src")
 }
 
-fn is_rust_identifier(ident: &str) -> bool {
-    let mut chars = ident.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
 fn traits_defined_in(crate_name: &str) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
@@ -326,137 +318,6 @@ fn traits_defined_in(crate_name: &str) -> BTreeSet<String> {
         "no traits discovered in {crate_name} — the walk is broken, not the crate"
     );
     found.into_keys().collect()
-}
-
-/// Every production `.rs` file under `dir`. **Every I/O error is fatal**: a
-/// scan that silently shrinks its input passes while enforcing nothing, which
-/// is the failure mode this whole file exists to prevent. A missing directory,
-/// an unreadable entry, or a permission error must red the gate, not thin it.
-/// Remove `#[cfg(test)]`-gated items. Only the *production* edge blocks the
-/// layer flip: a test double may implement a product trait through the crate's
-/// dev-dependency without the shipped artifact depending on product. Same
-/// stripping shape as `reborn_registration_pipeline_boundary.rs`.
-///
-/// **Callers must strip comments and string literals first.** This walk finds
-/// the block by counting raw `{`/`}` bytes, so a brace inside a doc comment or
-/// a string literal in a gated block desynchronizes the depth and either leaks
-/// a test-only `impl` into the production set or swallows production code that
-/// follows. `implemented_trait_names` composes them in that order and
-/// `cfg_test_stripping_survives_braces_in_comments_and_strings` pins it.
-///
-/// `#[cfg(feature = "test-support")]` items are deliberately **not** stripped:
-/// that feature compiles into a real build (CI's `--all-features` lanes enable
-/// it), so an `impl` behind it is a genuine normal-dependency edge that would
-/// block the layer flip. Only `#[cfg(test)]` is invisible to a shipped
-/// artifact.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(at) = rest.find(MARKER) {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + MARKER.len()..];
-        let Some(open) = after.find('{') else {
-            // A `#[cfg(test)] use …;` line: drop through the statement end.
-            match after.find(';') {
-                Some(semi) => {
-                    rest = &after[semi + 1..];
-                    continue;
-                }
-                None => return out,
-            }
-        };
-        // An attribute followed by a `;` before any `{` is a gated statement.
-        if let Some(semi) = after.find(';')
-            && semi < open
-        {
-            rest = &after[semi + 1..];
-            continue;
-        }
-        let bytes = after.as_bytes();
-        let mut depth = 0usize;
-        let mut idx = open;
-        while idx < bytes.len() {
-            match bytes[idx] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            idx += 1;
-        }
-        if idx >= bytes.len() {
-            return out;
-        }
-        rest = &after[idx + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Byte index of the `>` that closes the `<` at index 0, counting nesting.
-/// `None` when the brackets never balance (a truncated slice), which the
-/// caller treats as "not an impl header I can read" rather than guessing.
-fn balanced_angle_close(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    for (index, ch) in text.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            // A `->` inside a bound (`impl<F: Fn(&str) -> bool>`) is a return
-            // arrow, not a closing bracket. `-` never opens one, so a `>`
-            // preceded by `-` is skipped.
-            '>' if index > 0 && bytes[index - 1] == b'-' => {}
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Trait names appearing as the *implemented* trait of an `impl … for …` item,
-/// with any leading path qualifier and generic arguments dropped
-/// (`impl ironclaw_assistant::Foo<T> for Bar` → `Foo`). Inherent impls
-/// (`impl Bar {`) have no `for` and never match.
-fn implemented_trait_names(source: &str) -> BTreeSet<String> {
-    let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(source));
-    let mut names = BTreeSet::new();
-    for segment in cleaned.split("impl").skip(1) {
-        let Some(head) = segment.split_once(" for ") else {
-            continue;
-        };
-        let mut candidate = head.0.trim();
-        // Drop an `<'a, T>` generic-parameter list that binds the impl itself.
-        // The close must be found by *balancing*, not by the first `>`: a bound
-        // may itself be generic (`impl<T: Iterator<Item = X>> Port for Host<T>`),
-        // and taking the first `>` would leave `> Port` — not an identifier, so
-        // the impl would be skipped and the gate would enforce nothing for it.
-        if candidate.starts_with('<') {
-            let Some(close) = balanced_angle_close(candidate) else {
-                continue;
-            };
-            candidate = candidate[close + 1..].trim();
-        }
-        // Drop generic arguments on the trait itself, then the path qualifier.
-        let candidate = candidate.split('<').next().unwrap_or(candidate).trim();
-        let Some(last) = candidate.rsplit("::").next() else {
-            continue;
-        };
-        let last = last.trim();
-        if is_rust_identifier(last) {
-            names.insert(last.to_string());
-        }
-    }
-    names
 }
 
 /// Traits implemented by `crate_name`'s production code, counted only in files

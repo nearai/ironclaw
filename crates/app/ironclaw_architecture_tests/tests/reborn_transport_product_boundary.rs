@@ -39,8 +39,8 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, production_rust_files, strip_comments_and_strings,
-    workspace_root,
+    TypeDefOccurrence, collect_type_defs, is_rust_identifier, production_rust_files,
+    strip_cfg_test_blocks, strip_comments_and_strings, workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_assistant";
@@ -332,15 +332,6 @@ fn crate_src(name: &str) -> PathBuf {
     crate_dir(name).join("src")
 }
 
-fn is_rust_identifier(ident: &str) -> bool {
-    let mut chars = ident.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
 fn items_defined_in(crate_name: &str) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
@@ -357,91 +348,6 @@ fn items_defined_in(crate_name: &str) -> BTreeSet<String> {
         "no items discovered in {crate_name} — the walk is broken, not the crate"
     );
     found.into_keys().collect()
-}
-
-/// Walk the crate's production `.rs` files.
-///
-/// Every I/O error panics rather than being skipped: a scan that silently drops
-/// an unreadable directory or entry reports a *smaller* residue than reality and
-/// passes. Same hardening as `reborn_extension_host_port_inversion.rs`.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!("cannot read an entry under {}: {error}", dir.display())
-        });
-        let path = entry.path();
-        if path.is_dir() {
-            if matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("target") | Some("node_modules") | Some("tests") | Some("frontend")
-            ) {
-                continue;
-            }
-            rust_files(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if name == "tests.rs" || name.ends_with("_tests.rs") {
-                continue;
-            }
-            out.push(path);
-        }
-    }
-}
-
-/// Remove `#[cfg(test)]`-gated items. Only the *production* edge matters here:
-/// a test may reach product through the crate's dev-dependency without the
-/// shipped artifact carrying the import. Same stripping shape as
-/// `reborn_extension_host_port_inversion.rs`.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(at) = rest.find(MARKER) {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + MARKER.len()..];
-        let Some(open) = after.find('{') else {
-            match after.find(';') {
-                Some(semi) => {
-                    rest = &after[semi + 1..];
-                    continue;
-                }
-                None => return out,
-            }
-        };
-        if let Some(semi) = after.find(';')
-            && semi < open
-        {
-            rest = &after[semi + 1..];
-            continue;
-        }
-        let bytes = after.as_bytes();
-        let mut depth = 0usize;
-        let mut idx = open;
-        while idx < bytes.len() {
-            match bytes[idx] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            idx += 1;
-        }
-        if idx >= bytes.len() {
-            return out;
-        }
-        rest = &after[idx + 1..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Every `ironclaw_assistant::…` symbol a source names, whether through a braced
@@ -500,8 +406,7 @@ fn product_symbols_in(source: &str) -> BTreeSet<String> {
 }
 
 fn product_symbols_named_by(crate_name: &str) -> (BTreeSet<String>, usize) {
-    let mut files = Vec::new();
-    rust_files(&crate_src(crate_name), &mut files);
+    let files = production_rust_files(&crate_src(crate_name));
     assert!(
         files.len() > 5,
         "expected to walk {crate_name}'s source tree; found {} files",

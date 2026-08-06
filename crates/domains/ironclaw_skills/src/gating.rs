@@ -9,7 +9,7 @@
 //! failure back to the unmet requirement.
 //!
 //! This PR adds the first real caller (`unmet_requirements_refusal` in
-//! `ironclaw_first_party_extension_ports::activation`), which refuses activation and names the
+//! `ironclaw_loop_host::activation`), which refuses activation and names the
 //! missing requirement so the model can adapt instead of meeting it as an unexplained shell error
 //! several steps later. Deleting the module was correct at the time; it is not correct once the
 //! requirement is enforced.

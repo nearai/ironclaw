@@ -322,7 +322,7 @@ async fn runtime_with_ironhub_shared_key_builds_link_service_and_public_register
 fn standalone_selector_config_propagates_regex_activation_disabled() {
     let cfg = super::skill_activation_selector_config(
         false,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
@@ -345,7 +345,7 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
     // behalf, which is the #5417 class.
     assert!(matches!(
         cfg.selection_mode,
-        ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitOnly
     ));
 }
 
@@ -353,7 +353,7 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
 fn standalone_selector_config_propagates_regex_activation_enabled() {
     let cfg = super::skill_activation_selector_config(
         true,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
@@ -372,7 +372,7 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
 /// process state.
 #[test]
 fn skill_injection_mode_resolves_every_env_branch() {
-    use ironclaw_first_party_extension_ports::SkillInjectionMode;
+    use ironclaw_loop_host::SkillInjectionMode;
 
     assert!(
         matches!(
@@ -416,7 +416,7 @@ fn skill_injection_mode_resolves_every_env_branch() {
 fn standalone_selector_config_uses_large_skill_context_budget() {
     let cfg = super::skill_activation_selector_config(
         true,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
@@ -434,8 +434,8 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
 #[test]
 fn standalone_selector_config_propagates_injection_mode() {
     for mode in [
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Full,
     ] {
         let cfg =
             super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
@@ -450,7 +450,7 @@ fn standalone_selector_config_propagates_injection_mode() {
 /// no-op here: `skill_activation_selector_config` used to pin
 /// `ExplicitAndCriteria` at the call site, so no real Reborn user could ever see
 /// `ExplicitOnly` however the default was written. The bug was invisible to every
-/// test in `ironclaw_first_party_extension_ports`, because those construct their own
+/// test in `ironclaw_loop_host`, because those construct their own
 /// config — only a test at the composition layer, on the value this function
 /// actually returns, can catch it.
 ///
@@ -460,12 +460,12 @@ fn standalone_selector_config_propagates_injection_mode() {
 fn reborn_skill_selection_is_model_decided() {
     let cfg = super::skill_activation_selector_config(
         true,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
         cfg.selection_mode,
-        ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitOnly,
         "Reborn must let the model choose the skill from the listing; pinning \
          ExplicitAndCriteria here makes the host keyword-match on the model's behalf"
     );
@@ -487,19 +487,19 @@ fn reborn_skill_selection_is_model_decided() {
 fn skill_injection_mode_default_is_documented_and_guarded() {
     assert_eq!(
         super::DEFAULT_SKILL_INJECTION_MODE,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
         "flipping this default changes three local-dev expectations; see the doc comment"
     );
     // and the opt-in path must still resolve
     assert_eq!(
         super::skill_injection_mode_from("full").expect("full parses"),
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Full
+        ironclaw_loop_host::SkillInjectionMode::Full
     );
 }
 
 #[test]
 fn skill_injection_mode_parses_listing_full_and_defaults() {
-    use ironclaw_first_party_extension_ports::SkillInjectionMode;
+    use ironclaw_loop_host::SkillInjectionMode;
     for (value, expected) in [
         ("", SkillInjectionMode::Listing),
         ("listing", SkillInjectionMode::Listing),
@@ -696,14 +696,11 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
 
 use ironclaw_assistant::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleReadinessBlocker, ProductCreateThreadRequest, ProductListAutomationsRequest,
-    ProductResolveGateRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
-    ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
-    RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    SUBMIT_TURN_COMMAND, approval_gate_ref,
+    LifecycleReadinessBlocker, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
+    RebornSetupExtensionResponse, RebornSkillListResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
-use ironclaw_assistant::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
@@ -735,6 +732,11 @@ use ironclaw_loop_host::{
     HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
     SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
 };
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };

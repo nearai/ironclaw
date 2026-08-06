@@ -4,7 +4,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use ironclaw_assistant::ProductInboundAck;
 use ironclaw_assistant::RebornFilesystemIdempotencyLedger;
 use ironclaw_assistant::{IdempotencyDecision, IdempotencyLedger, ProductSurfaceFailure};
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind, ScopedFilesystem};
@@ -15,6 +14,7 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product_contracts::action::ActionFingerprintKey;
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 
 #[path = "durable_ledger_support/mod.rs"]
 mod support;

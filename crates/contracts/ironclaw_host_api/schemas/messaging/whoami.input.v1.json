@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging whoami input",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

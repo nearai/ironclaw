@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use ironclaw_assistant::ProductInboundAck;
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind, RootFilesystem};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, UserId},
@@ -19,6 +18,7 @@ use ironclaw_openai_compat::{
     OpenAiCompatRefStorePort, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
     OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde_json::json;
 use sha2::{Digest, Sha256};

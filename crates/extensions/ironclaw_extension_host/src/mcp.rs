@@ -548,6 +548,7 @@ mod tests {
                             ],
                             default_permission: PermissionMode::Allow,
                             visibility: ironclaw_extension_registry::CapabilityVisibility::Model,
+                            standard_op: None,
                             input_schema_ref: CapabilityProfileSchemaRef::new(
                                 "schemas/notion/notion-search.input.v1.json",
                             )

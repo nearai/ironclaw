@@ -334,6 +334,19 @@ boot-time adoption of the new bundled record is the accepted path. The
 classifier (`diff_resolved_contracts`) ships as data-model code — the seed for
 a future registry/third-party-distribution trigger.
 
+### 3.4 Standard messaging operations
+
+A messaging-shaped tool (send/read/react over a conversation) does not have
+to invent its own schema. Standard operation families — one closed,
+host-owned vocabulary per domain, messaging first — let a `[[tools]]` entry
+bind `standard_op = "<op_name>"` instead of declaring its own
+`input_schema_ref`/`output_schema_ref`. The contracts (canonical JSON
+schemas, description cores, the error-code vocabulary) are host-owned data in
+`ironclaw_host_api::messaging`, resolved at descriptor build the same way
+builtin schema refs already resolve. See
+`docs/reborn/extension-runtime/standard-operations.md` for the full
+vocabulary, binding rules, and contract principles.
+
 ## 4. The adapters
 
 The count follows the product model: one adapter per surface kind that has
