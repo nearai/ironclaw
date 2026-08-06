@@ -852,6 +852,11 @@ mod tests {
             .zip(rankings)
             .filter(|(intent, _)| intent.relevance.is_empty())
             .collect();
+        // This is standard per-query recall: the denominator is the full judged
+        // relevant set. Recall@1 is therefore intentionally below 1.0 for a
+        // query with multiple relevant tools, even when its first result is
+        // ideal. nDCG is the primary graded-ordering gate; these recall gates
+        // protect breadth and are calibrated to the corpus's judgment density.
         let recall = |at: usize| {
             relevant
                 .iter()
