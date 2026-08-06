@@ -22,7 +22,6 @@ from journey_types import (
     ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
-    SlackChannelFixture,
 )
 from provider_capability_inventory import shipped_provider_manifests, EMULATE_SUPPORTED_TOOLS
 
@@ -118,7 +117,6 @@ def unreset_mutating_tools() -> frozenset[str]:
 
 _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
-    "qa_10f_slack_mention_encoding",
 }
 _PROVIDER_REPLAY_FACTS = {
     "qa_7c_slack_bug_logger_routine": ProviderJourneyReplayFacts(
@@ -126,10 +124,6 @@ _PROVIDER_REPLAY_FACTS = {
     ),
     "qa_7e_slack_bug_sheet_delivery": ProviderJourneyReplayFacts(
         google_spreadsheet_id="sheet_reborn_bug_tracker"
-    ),
-    "qa_10e_slack_error_honesty": ProviderJourneyReplayFacts(
-        slack_channel=SlackChannelFixture.MISSING,
-        expected_capability_failure="channel_not_found",
     ),
 }
 
@@ -418,13 +412,13 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.RESTART_IDEMPOTENCY,
         ),
         evidence=CargoEvidence(
-            source=("crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs"),
+            source=("crates/app/ironclaw_composition/tests/trigger_poller_e2e.rs"),
             test=(
                 "scheduled_trigger_results_reach_exact_slack_targets_once_"
                 "across_restart"
             ),
             target="trigger_poller_e2e",
-            manifest="crates/ironclaw_reborn_composition/Cargo.toml",
+            manifest="crates/app/ironclaw_composition/Cargo.toml",
         ),
         delivery_addresses=(
             DeliveryAddressEvidence(

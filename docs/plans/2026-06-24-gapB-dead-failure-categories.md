@@ -18,10 +18,10 @@ evidence below), not assumed from the arm names.
 ## The two mappers and their producers
 
 ### Mapper A — `reborn_failure_summary_for_category`
-`crates/ironclaw_reborn_composition/src/failure_summary.rs:5`
+`crates/ironclaw_composition/src/failure_summary.rs:5`
 
 Fed by `TurnLifecycleEvent.sanitized_reason`
-(`crates/ironclaw_reborn_composition/src/projection/turn_events.rs:799-806`,
+(`crates/ironclaw_composition/src/projection/turn_events.rs:799-806`,
 `failure_category_for_turn_event`). `sanitized_reason` is set from
 `SanitizedFailure::category()` in
 `crates/ironclaw_turns/src/lifecycle.rs:450-458`
@@ -38,12 +38,12 @@ Exhaustive set of values `sanitized_reason` can take when status is
   `compaction_unavailable`
 - `LoopExitViolationKind::failure_category()` (`loop_exit.rs:692-703`):
   `interrupted_unexpectedly`, `driver_protocol_violation`
-- `RebornTurnRunExecutor` (`crates/ironclaw_runner/src/turn_run_executor.rs`,
+- `RebornTurnRunExecutor` (`crates/ironclaw_turn_runner/src/turn_run_executor.rs`,
   `turn_runner.rs`): `driver_not_found`, `host_creation_failed`,
   `route_snapshot_persistence_failed`, `driver_invalid_request`,
   `driver_unavailable`, `driver_failed`, `model_credits_exhausted`,
   `model_credentials_unavailable`, `unknown_failure`, `exit_application_failed`
-- `TurnRunScheduler` (`crates/ironclaw_runner/src/turn_scheduler.rs:655,668`):
+- `TurnRunScheduler` (`crates/ironclaw_turn_runner/src/turn_scheduler.rs:655,668`):
   **`scheduler_executor_panic`**, **`scheduler_heartbeat_failed`**
 - store paths (`crates/ironclaw_turns/src/memory/mod.rs:2284,2990`):
   `interrupted_unexpectedly`, `lease_expired`
@@ -68,7 +68,7 @@ LIVE/DEAD verdict for Mapper A arms:
 | `unknown_failure` | LIVE | turn_runner.rs:31 |
 
 ### Mapper B — `runtime_failure_summary_for_category`
-`crates/ironclaw_reborn_composition/src/projection.rs:1115`
+`crates/ironclaw_composition/src/projection.rs:1115`
 
 Fed by `RunStatusProjection.error_kind` via `run_failure_category`
 (projection.rs:1092) → `SanitizedFailure::new(category).ok()`. `error_kind`
@@ -155,7 +155,7 @@ function and the file). No enum/type plumbing is removed — both mappers take
   `DispatchError` code) — documenting that Mapper B intentionally only
   specially-cases `unknown`.
 - Driver-level: the failure_explanation projection tests
-  (`crates/ironclaw_reborn_composition/src/projection/tests/failure_explanation.rs`)
+  (`crates/ironclaw_composition/src/projection/tests/failure_explanation.rs`)
   already exercise `failure_details_for_turn_event`; update the `driver_panic`
   fixture to the real `scheduler_executor_panic` string and assert the
   specific summary so the caller path is covered.
@@ -163,4 +163,4 @@ function and the file). No enum/type plumbing is removed — both mappers take
 ## Quality gate
 
 `cargo fmt --all`; `cargo clippy` + `cargo test` on
-`ironclaw_reborn_composition` (the only touched crate).
+`ironclaw_composition` (the only touched crate).

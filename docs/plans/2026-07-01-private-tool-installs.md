@@ -55,7 +55,7 @@ unchanged. The eviction-compensation finding is moot (no eviction).
   member set; it does not limit how many users hold the tool.
 - **Registry**: one global process-wide snapshot; `publish` upserts by
   `ExtensionId`; duplicate `CapabilityId` insert fails closed
-  (`ironclaw_extensions/src/registry.rs`). Capability ids are
+  (`ironclaw_extension_registry/src/registry.rs`). Capability ids are
   validated `<extension_id>.<name>`-prefixed. ⇒ the bundle is
   published **once**; per-user visibility is enforced at grant
   minting, not by duplicate registration. This is exactly why
@@ -135,7 +135,7 @@ unchanged. The eviction-compensation finding is moot (no eviction).
 
 ## Implementation steps (test-first per step)
 
-1. `crates/ironclaw_extensions/src/installations.rs` —
+1. `crates/ironclaw_extension_registry/src/installations.rs` —
    `InstallationOwner::Users { user_ids }`; `user(uid)` constructor
    builds a singleton set (keeps migration + fixture call sites);
    `visible_to` = tenant or membership; join/leave helpers. Tests:

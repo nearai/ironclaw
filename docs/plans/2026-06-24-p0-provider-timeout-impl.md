@@ -31,7 +31,7 @@ in the incident logs:
    lease — exactly the observed failure.
 
 **Log evidence:** `failure_category=lease_expired` plus
-`error=system inference timed out` in `ironclaw_reborn_composition::projection::turn_events`
+`error=system inference timed out` in `ironclaw_composition::projection::turn_events`
 across the 19:39–19:55 window, with 124 `502`s per log file.
 
 ## Constraints / non-goals

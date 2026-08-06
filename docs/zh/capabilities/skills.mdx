@@ -40,7 +40,7 @@ IronClaw 支持从 IronHub 社区注册表搜索和安装技能。详见 [IronHu
   </Step>
 
   <Step title="Attenuate（收敛）">
-    按信任级别施加工具上限：安装技能默认降级为只读工具；受信任技能保留完整能力。
+    按信任级别控制内容可见性：安装技能（来自 IronHub）仅展示描述 — 不注入完整提示内容，模型无法自激活。受信任技能加载完整内容。
   </Step>
 </Steps>
 
@@ -48,10 +48,10 @@ IronClaw 支持从 IronHub 社区注册表搜索和安装技能。详见 [IronHu
 
 ## 信任级别
 
-| 级别 | 来源 | 工具权限 |
-|------|------|----------|
-| Trusted | `~/.ironclaw/skills/` 或工作区 `skills/` | 与代理一致的完整权限 |
-| Installed | 通过 `skill_install` 从 IronHub 安装 | 只读工具（无 shell、无文件写入、无 HTTP） |
+| 级别 | 来源 | 内容可见性 | 模型自激活 |
+|------|------|------------|------------|
+| Trusted | `~/.ironclaw/skills/` 或工作区 `skills/` | 完整提示内容可用 | 是 |
+| Installed | 通过 `skill_install` 从 IronHub 安装 | 仅描述 — 不注入完整内容 | 否 |
 
 <Warning>
 不要把未经审查的 Skill 放到受信任目录。受信任 Skill 与你拥有相同级别的执行能力。

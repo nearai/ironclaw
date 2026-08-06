@@ -140,7 +140,7 @@ them. Continue enriching the same results with display names and
 `is_current_user`.
 
 Do not add Slack identifier parsing or a Slack-aware model-gateway decorator to
-`ironclaw_reborn_composition`, `ironclaw_turns`, `ironclaw_loop_support`, or any
+`ironclaw_composition`, `ironclaw_turns`, `ironclaw_loop_support`, or any
 other neutral/core runtime layer. Q-10I directly evaluates whether the model uses
 the enriched display-name fields and fails when the assistant reply contains raw
 `U…`/`W…` identifiers or encoded mention markup.

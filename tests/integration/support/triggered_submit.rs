@@ -122,14 +122,14 @@ impl RebornIntegrationHarness {
         ))?;
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)?;
 
         let conversations = self.trigger_conversations_with_paired_actor().await?;
 
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            ironclaw_reborn_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
+            ironclaw_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {
@@ -175,7 +175,7 @@ impl RebornIntegrationHarness {
             .ok_or("triggered submit requires a harness binding with an agent id")?;
 
         let (materialized_prompt, turn_scope) =
-            ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test(
+            ironclaw_composition::test_support::materialize_trigger_prompt_for_test(
                 conversations.clone(),
                 thread_service,
                 default_agent_id,
@@ -210,11 +210,11 @@ impl RebornIntegrationHarness {
             .register(turn_scope.clone(), gateway);
 
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)?;
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            ironclaw_reborn_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
+            ironclaw_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {

@@ -1,3 +1,3 @@
-Read the replies of one Slack thread via conversations.replies (channel + the parent message's thread_ts). Conversation history only carries thread parents; use this to read the thread content itself.
+Same enrichment as get_conversation_history: replies' `text` has in-text mentions resolved to `@Display Name`, and `is_self=true` marks the connected account's own replies.
 
 The host selects this operation from the capability id. Provide only the parameters described by the input schema; do not include an action field.

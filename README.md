@@ -152,7 +152,7 @@ Source builds require Rust 1.96+ and Node.js 22+ with Corepack/pnpm.
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 corepack enable pnpm
-cargo install --locked --path crates/ironclaw_reborn_cli
+cargo install --locked --path crates/app/ironclaw_cli
 ```
 
 </details>
