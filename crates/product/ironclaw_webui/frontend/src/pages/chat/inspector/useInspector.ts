@@ -11,6 +11,8 @@ import {
 
 const MAX_RETRY_INTERVAL_MS = 30_000;
 const MAX_RETAINED_UPDATES = 1_024;
+const MAX_SNAPSHOT_ATTEMPTS = 3;
+const SNAPSHOT_RETRY_BASE_DELAY_MS = 500;
 
 interface DiagnosticUpdate {
   stream_id?: string;
@@ -80,25 +82,39 @@ export function useInspector({
     }
 
     const controller = new AbortController();
+    let retryTimer: number | null = null;
     setHealth(INSPECTOR_HEALTH.LOADING);
-    fetchInspectorSnapshot({ threadId, runId, signal: controller.signal })
-      .then((response) => {
-        if (controller.signal.aborted) return;
-        setSnapshot((response as InspectorSnapshotResponse)?.snapshot ?? null);
-        setError(null);
-        setHealth((current) =>
-          current === INSPECTOR_HEALTH.LOADING ? INSPECTOR_HEALTH.CONNECTING : current,
-        );
-      })
-      .catch((cause) => {
-        if (controller.signal.aborted) return;
-        const nextHealth = healthForInspectorStatus(errorStatus(cause));
-        setHealth(nextHealth);
-        setError(nextHealth === INSPECTOR_HEALTH.FORBIDDEN
-          ? "This session is not authorized to inspect diagnostics."
-          : "Diagnostics are currently unavailable.");
-      });
-    return () => controller.abort();
+
+    function loadSnapshot(attempt: number): void {
+      fetchInspectorSnapshot({ threadId, runId, signal: controller.signal })
+        .then((response) => {
+          if (controller.signal.aborted) return;
+          setSnapshot((response as InspectorSnapshotResponse)?.snapshot ?? null);
+          setError(null);
+          setHealth((current) =>
+            current === INSPECTOR_HEALTH.LOADING ? INSPECTOR_HEALTH.CONNECTING : current,
+          );
+        })
+        .catch((cause) => {
+          if (controller.signal.aborted) return;
+          const nextHealth = healthForInspectorStatus(errorStatus(cause));
+          setHealth(nextHealth);
+          setError(nextHealth === INSPECTOR_HEALTH.FORBIDDEN
+            ? "This session is not authorized to inspect diagnostics."
+            : "Diagnostics are currently unavailable.");
+
+          if (nextHealth === INSPECTOR_HEALTH.RECONNECTING && attempt < MAX_SNAPSHOT_ATTEMPTS) {
+            const delay = SNAPSHOT_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1));
+            retryTimer = window.setTimeout(() => loadSnapshot(attempt + 1), delay);
+          }
+        });
+    }
+
+    loadSnapshot(1);
+    return () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      controller.abort();
+    };
   }, [enabled, threadId, runId, snapshotGeneration]);
 
   React.useEffect(() => {
