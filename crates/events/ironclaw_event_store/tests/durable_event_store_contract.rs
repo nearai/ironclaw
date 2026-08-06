@@ -501,12 +501,148 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
         Some("project-a".to_string())
     );
 }
+// ─── Postgres per-test isolation ──────────────────────────────────────────
+//
+// The two `postgres_*` tests below assert *absolute* cursor values
+// (`EventCursor::new(1)`…), and Postgres cursor assignment draws on
+// database-wide state: any other row in the database shifts the numbers.
+// Unique scope suffixes isolate record filtering but not cursor assignment,
+// so the suite ran red as one invocation against the single database named
+// by `IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL` while every test passed
+// alone on a virgin database (WS12 gauntlet report, §P6). Each test
+// therefore provisions a private database on the configured server — the
+// fabric contract's `IsolatedDatabase` pattern
+// (`crates/substrates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`)
+// — which keeps the absolute assertions meaningful, exactly as the
+// jsonl/libsql twins keep theirs through per-test temp files.
+
+struct IsolatedPostgresDatabase {
+    /// Connection string for the private database, in the same libpq form
+    /// the configured URL used.
+    url: String,
+    admin: tokio_postgres::Client,
+    name: String,
+}
+
+impl IsolatedPostgresDatabase {
+    /// Drop the database on the way out of a passing test.
+    ///
+    /// A courtesy, not a guarantee: a failing assertion unwinds straight
+    /// past it, so a red run can leave its database behind — that is what
+    /// the sweep in `isolated_postgres_database` collects on the next run.
+    /// `FORCE` closes store-pool connections that have not gone away by the
+    /// time the handles drop.
+    async fn cleanup(self) {
+        let Self { admin, name, .. } = self;
+        let _ = admin
+            .execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"), &[])
+            .await;
+    }
+}
+
+/// One stale-database sweep per test binary, ahead of every creation.
+/// Sweeping per provisioning call (as the fabric contract does) can race a
+/// sibling test of the same binary between its `CREATE DATABASE` and first
+/// connection; a single up-front sweep removes that window while still
+/// collecting what failed runs left behind.
+static STALE_SWEEP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// Distinguishes the databases of concurrently provisioning tests.
+static NEXT_DATABASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
+    let base_url = match std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!(
+                "skipping postgres event-store contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
+            );
+            return None;
+        }
+    };
+    // Past a configured URL, every failure below is a broken environment
+    // rather than an unconfigured one, so it panics — this leg has no CI
+    // executor, and a silent skip would let the suite pass while testing
+    // nothing.
+    let admin_config = base_url
+        .parse::<tokio_postgres::Config>()
+        .expect("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL parses as a postgres connection string");
+    let (admin, connection) = admin_config
+        .connect(tokio_postgres::NoTls)
+        .await
+        .expect("connect to the configured postgres server");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    STALE_SWEEP
+        .get_or_init(|| async {
+            // Collect databases previously failed runs unwound past. No
+            // `FORCE`: a database another live run still holds open refuses
+            // to drop, which is the outcome we want when two runs share a
+            // server.
+            if let Ok(stale) = admin
+                .query(
+                    "SELECT datname FROM pg_database WHERE datname LIKE 'evstore_isolated_%'",
+                    &[],
+                )
+                .await
+            {
+                for row in stale {
+                    let name = row.get::<_, String>(0);
+                    let _ = admin
+                        .execute(&format!("DROP DATABASE IF EXISTS {name}"), &[])
+                        .await;
+                }
+            }
+        })
+        .await;
+    // Identifiers cannot be bind parameters in DDL. The interpolations are
+    // process-generated (pid + counter) or come from `pg_database`, never
+    // caller input.
+    let name = format!(
+        "evstore_isolated_{}_{}",
+        std::process::id(),
+        NEXT_DATABASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    admin
+        .execute(&format!("CREATE DATABASE {name}"), &[])
+        .await
+        .expect("create the isolated database (the role needs CREATEDB)");
+    Some(IsolatedPostgresDatabase {
+        url: connection_string_with_dbname(&base_url, &name),
+        admin,
+        name,
+    })
+}
+
+/// Rewrites the database name inside a libpq connection string, preserving
+/// every other component. `tokio_postgres::Config` parses both libpq forms
+/// but cannot serialise back, and `build_reborn_event_stores` takes the raw
+/// string, so the rewrite happens at the string level:
+/// - URL form (`postgres://…`): replace the path segment, keep any query.
+/// - Key-value form: append `dbname=…` — `tokio_postgres` applies keys in
+///   order, so the appended one wins.
+fn connection_string_with_dbname(base: &str, dbname: &str) -> String {
+    match base.find("://") {
+        Some(scheme_idx) => {
+            let after_scheme = scheme_idx + "://".len();
+            let (without_query, query) = match base[after_scheme..].find('?') {
+                Some(offset) => base.split_at(after_scheme + offset),
+                None => (base, ""),
+            };
+            let authority_end = without_query[after_scheme..]
+                .find('/')
+                .map(|offset| after_scheme + offset)
+                .unwrap_or(without_query.len());
+            format!("{}/{dbname}{query}", &without_query[..authority_end])
+        }
+        None => format!("{base} dbname={dbname}"),
+    }
+}
+
 #[tokio::test]
 async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
-    let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
-        eprintln!(
-            "skipping postgres event-store cursor contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
-        );
+    let Some(db) = isolated_postgres_database().await else {
         return;
     };
     let suffix = std::time::SystemTime::now()
@@ -520,7 +656,7 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(url.into_boxed_str()),
+            url: SecretString::new(db.url.clone().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -559,13 +695,12 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         EventCursor::new(2),
         "filtered trailing records must advance Postgres replay cursor"
     );
+    drop(stores);
+    db.cleanup().await;
 }
 #[tokio::test]
 async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
-    let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
-        eprintln!(
-            "skipping postgres event-store contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
-        );
+    let Some(db) = isolated_postgres_database().await else {
         return;
     };
     let suffix = std::time::SystemTime::now()
@@ -579,7 +714,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(url.clone().into_boxed_str()),
+            url: SecretString::new(db.url.clone().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -628,7 +763,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(url.into_boxed_str()),
+            url: SecretString::new(db.url.clone().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -661,6 +796,8 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
             .status,
         Some("project-a".to_string())
     );
+    drop(stores);
+    db.cleanup().await;
 }
 
 #[tokio::test]

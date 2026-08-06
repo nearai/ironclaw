@@ -39,4 +39,8 @@ webpki-roots = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+# The Postgres contract leg provisions a private database per test (the
+# fabric contract's isolation pattern), which needs an admin connection
+# beside the store-owned pool.
+tokio-postgres = "0.7"
