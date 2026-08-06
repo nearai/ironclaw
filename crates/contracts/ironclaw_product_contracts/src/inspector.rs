@@ -152,11 +152,51 @@ impl DiagnosticScope {
 ///
 /// Construction is limited to the purpose-specific constructors so callers
 /// cannot silently select an unbounded maximum.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct BoundedDiagnosticText {
     content: String,
     original_bytes: u64,
     truncated: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundedDiagnosticTextWire {
+    content: String,
+    original_bytes: u64,
+    truncated: bool,
+}
+
+impl<'de> Deserialize<'de> for BoundedDiagnosticText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = BoundedDiagnosticTextWire::deserialize(deserializer)?;
+        if wire.content.len() > RECONSTRUCTED_PROMPT_MAX_BYTES {
+            return Err(serde::de::Error::custom(
+                "diagnostic text exceeds the maximum retained byte length",
+            ));
+        }
+        let retained_bytes = u64::try_from(wire.content.len()).map_err(|_| {
+            serde::de::Error::custom("diagnostic text retained byte length is not representable")
+        })?;
+        if wire.original_bytes < retained_bytes {
+            return Err(serde::de::Error::custom(
+                "diagnostic text original byte length is smaller than retained text",
+            ));
+        }
+        if wire.truncated != (wire.original_bytes > retained_bytes) {
+            return Err(serde::de::Error::custom(
+                "diagnostic text truncation metadata is inconsistent",
+            ));
+        }
+        Ok(Self {
+            content: wire.content,
+            original_bytes: wire.original_bytes,
+            truncated: wire.truncated,
+        })
+    }
 }
 
 impl std::fmt::Debug for BoundedDiagnosticText {
@@ -208,6 +248,13 @@ impl BoundedDiagnosticText {
         self.truncated
     }
 
+    fn validate_retained_max(self, max_bytes: usize) -> Result<Self, &'static str> {
+        if self.content.len() > max_bytes {
+            return Err("diagnostic text exceeds its field byte limit");
+        }
+        Ok(self)
+    }
+
     fn rebound(self, max_bytes: usize) -> Self {
         if self.content.len() <= max_bytes {
             return self;
@@ -238,6 +285,54 @@ impl BoundedDiagnosticText {
             truncated: true,
         }
     }
+}
+
+fn deserialize_bounded_label<'de, D>(deserializer: D) -> Result<BoundedDiagnosticText, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BoundedDiagnosticText::deserialize(deserializer)?
+        .validate_retained_max(DIAGNOSTIC_LABEL_MAX_BYTES)
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_bounded_label<'de, D>(
+    deserializer: D,
+) -> Result<Option<BoundedDiagnosticText>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BoundedDiagnosticText>::deserialize(deserializer)?
+        .map(|value| value.validate_retained_max(DIAGNOSTIC_LABEL_MAX_BYTES))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_bounded_summary<'de, D>(
+    deserializer: D,
+) -> Result<Option<BoundedDiagnosticText>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BoundedDiagnosticText>::deserialize(deserializer)?
+        .map(|value| value.validate_retained_max(DIAGNOSTIC_SUMMARY_MAX_BYTES))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_bounded_model_counts<'de, D>(
+    deserializer: D,
+) -> Result<Vec<DiagnosticModelCount>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<DiagnosticModelCount>::deserialize(deserializer)?;
+    if values.len() > MAX_MODELS_IN_STATS {
+        return Err(serde::de::Error::custom(
+            "diagnostic model counts exceed the item limit",
+        ));
+    }
+    Ok(values)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,13 +489,16 @@ pub enum InspectorModelCallStatus {
 pub struct ModelCallDiagnostic {
     pub call_id: DiagnosticModelCallId,
     pub iteration: u32,
+    #[serde(deserialize_with = "deserialize_bounded_label")]
     pub requested_model: BoundedDiagnosticText,
+    #[serde(default, deserialize_with = "deserialize_optional_bounded_label")]
     pub effective_model: Option<BoundedDiagnosticText>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<u64>,
     pub status: InspectorModelCallStatus,
     pub usage: Option<ModelTokenUsage>,
+    #[serde(default, deserialize_with = "deserialize_optional_bounded_summary")]
     pub failure_summary: Option<BoundedDiagnosticText>,
 }
 
@@ -522,6 +620,7 @@ pub struct DiagnosticActivityEvent {
     pub iteration: Option<u32>,
     pub activity_id: Option<CapabilityActivityId>,
     pub model_call_id: Option<DiagnosticModelCallId>,
+    #[serde(default, deserialize_with = "deserialize_optional_bounded_summary")]
     pub summary: Option<BoundedDiagnosticText>,
 }
 
@@ -559,6 +658,7 @@ pub struct DiagnosticMetricTotal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticModelCount {
+    #[serde(deserialize_with = "deserialize_bounded_label")]
     pub model: BoundedDiagnosticText,
     pub calls: u64,
 }
@@ -575,6 +675,7 @@ impl DiagnosticModelCount {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDiagnosticStats {
     pub total_model_calls: u64,
+    #[serde(deserialize_with = "deserialize_bounded_model_counts")]
     pub calls_per_model: Vec<DiagnosticModelCount>,
     pub calls_per_model_truncated: bool,
     pub input_tokens: DiagnosticMetricTotal,
@@ -609,6 +710,7 @@ pub enum DiagnosticUpdateKind {
     ToolExecutionUpdated {
         activity_id: CapabilityActivityId,
         model_call_id: Option<DiagnosticModelCallId>,
+        #[serde(deserialize_with = "deserialize_bounded_label")]
         capability_name: BoundedDiagnosticText,
         status: ToolExecutionStatus,
         duration_ms: Option<u64>,
@@ -817,6 +919,87 @@ mod tests {
                 serde_json::from_value(encoded).expect("deserialize diagnostic update");
             assert_eq!(decoded, update);
         }
+    }
+
+    #[test]
+    fn bounded_text_deserialization_rejects_the_global_retained_byte_limit() {
+        let content = "x".repeat(RECONSTRUCTED_PROMPT_MAX_BYTES + 1);
+        let payload = serde_json::json!({
+            "content": content,
+            "original_bytes": RECONSTRUCTED_PROMPT_MAX_BYTES + 1,
+            "truncated": false,
+        });
+
+        let error = serde_json::from_value::<BoundedDiagnosticText>(payload)
+            .expect_err("oversized diagnostic text must be rejected");
+
+        assert!(error.to_string().contains("maximum retained byte length"));
+    }
+
+    #[test]
+    fn bounded_text_deserialization_rejects_inconsistent_metadata() {
+        for payload in [
+            serde_json::json!({
+                "content": "ok",
+                "original_bytes": 1,
+                "truncated": false,
+            }),
+            serde_json::json!({
+                "content": "ok",
+                "original_bytes": 2,
+                "truncated": true,
+            }),
+            serde_json::json!({
+                "content": "ok",
+                "original_bytes": 3,
+                "truncated": false,
+            }),
+        ] {
+            serde_json::from_value::<BoundedDiagnosticText>(payload)
+                .expect_err("inconsistent diagnostic text metadata must be rejected");
+        }
+    }
+
+    #[test]
+    fn diagnostic_update_deserialization_enforces_the_owning_field_limit() {
+        let update = DiagnosticUpdateKind::ToolExecutionUpdated {
+            activity_id: CapabilityActivityId::new(),
+            model_call_id: None,
+            capability_name: BoundedDiagnosticText::label("filesystem.read"),
+            status: ToolExecutionStatus::Succeeded,
+            duration_ms: None,
+            output_bytes: None,
+            result_truncated: false,
+        };
+        let mut payload = serde_json::to_value(update).expect("serialize diagnostic update");
+        let oversized_label = "x".repeat(DIAGNOSTIC_LABEL_MAX_BYTES + 1);
+        payload["data"]["capability_name"] = serde_json::json!({
+            "content": oversized_label,
+            "original_bytes": DIAGNOSTIC_LABEL_MAX_BYTES + 1,
+            "truncated": false,
+        });
+
+        let error = serde_json::from_value::<DiagnosticUpdateKind>(payload)
+            .expect_err("oversized capability name must be rejected");
+
+        assert!(error.to_string().contains("field byte limit"));
+    }
+
+    #[test]
+    fn diagnostic_stats_deserialization_rejects_too_many_model_counts() {
+        let update = DiagnosticUpdateKind::Stats(SessionDiagnosticStats::default());
+        let mut payload = serde_json::to_value(update).expect("serialize diagnostic stats");
+        payload["data"]["calls_per_model"] = serde_json::to_value(
+            (0..=MAX_MODELS_IN_STATS)
+                .map(|index| DiagnosticModelCount::new(format!("model-{index}"), 1))
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize model counts");
+
+        let error = serde_json::from_value::<DiagnosticUpdateKind>(payload)
+            .expect_err("too many model counts must be rejected");
+
+        assert!(error.to_string().contains("item limit"));
     }
 
     #[test]
