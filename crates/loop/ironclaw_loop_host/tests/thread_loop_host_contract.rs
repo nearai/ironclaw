@@ -31,9 +31,9 @@ use ironclaw_loop_contracts::{
     LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort, ModelProfileId,
     ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PersonalContextPolicy,
     PromptMode, PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
-    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillTrustLevel,
-    SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillName,
+    SkillTrustLevel, SkillVisibility, ToolObservationDetail, ToolObservationStatus,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -43,10 +43,10 @@ use ironclaw_loop_host::{
     HostManagedPromptDiagnosticSink, HostManagedToolResultContent, HostSkillContextBuildError,
     HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
     IdentityFileName, LoopAttachmentReadError, LoopAttachmentReadPort, PromptContextTokenBudget,
-    SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
-    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    build_skill_run_snapshot, identity_message_ref,
+    ProviderModelId, SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId,
+    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
+    ThreadContextWindowCache, build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_outbound::{
     OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
@@ -225,9 +225,9 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
 }
 
 #[tokio::test]
-async fn model_port_records_resolved_prompt_at_the_host_boundary() {
+async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boundary() {
     let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
-    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback("model says hi", 2));
     let sink = Arc::new(RecordingPromptDiagnosticSink::default());
     let messages = user_model_messages(&fixture);
     let bundle = LoopPromptBundle {
@@ -247,7 +247,7 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
             Some(ironclaw_loop_contracts::LoopPromptDiagnosticMetadata {
                 identity_message_count: 0,
                 instruction_snippet_count: 2,
-                active_skills: vec!["workspace-search".to_string()],
+                active_skills: vec![SkillName::new("workspace-search").expect("skill name")],
             }),
         )
         .expect("prompt grant");
@@ -266,7 +266,7 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
         messages,
         surface_version: None,
         model_preference: None,
-        fallback_index: 0,
+        fallback_index: 2,
         capability_view: Some(LoopModelCapabilityView {
             visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
         }),
@@ -278,9 +278,15 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
     assert_eq!(captures.len(), 1);
     assert_eq!(captures[0].messages[0].content, "diagnostic prompt body");
     assert_eq!(captures[0].instruction_snippet_count, 2);
-    assert_eq!(captures[0].active_skills, ["workspace-search"]);
+    assert_eq!(captures[0].active_skills[0].as_str(), "workspace-search");
     assert_eq!(captures[0].capability_ids[0].as_str(), "filesystem.read");
-    assert_eq!(captures[0].effective_model, "provider-model");
+    assert_eq!(
+        captures[0]
+            .effective_model
+            .as_ref()
+            .map(ProviderModelId::as_str),
+        Some("fallback-provider-model")
+    );
     assert_eq!(captures[0].context_limit, 64_000);
 }
 
@@ -6001,9 +6007,15 @@ impl HostManagedModelGateway for RecordingGateway {
     fn diagnostic_effective_model(
         &self,
         _model_profile_id: &ModelProfileId,
+        fallback_index: u32,
         _resolved_model_route: Option<&ironclaw_loop_host::HostManagedModelRouteSnapshot>,
-    ) -> Option<String> {
-        Some("provider-model".to_string())
+    ) -> Option<ProviderModelId> {
+        ProviderModelId::new(if fallback_index == 0 {
+            "provider-model"
+        } else {
+            "fallback-provider-model"
+        })
+        .ok()
     }
 
     async fn stream_model(

@@ -11,7 +11,7 @@ use ironclaw_product_contracts::{
     views::RebornViewPage,
 };
 
-use crate::inspector_store::{DiagnosticStoreError, InMemoryDiagnosticStore};
+use crate::inspector_store::{DiagnosticStoreError, DiagnosticStoreReadPort};
 
 use super::views;
 
@@ -41,7 +41,7 @@ fn store_error(error: DiagnosticStoreError) -> ProductSurfaceError {
 }
 
 pub(super) fn snapshot(
-    store: &InMemoryDiagnosticStore,
+    store: &dyn DiagnosticStoreReadPort,
     caller: ProductSurfaceCaller,
     request: DiagnosticRunRequest,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
@@ -51,7 +51,7 @@ pub(super) fn snapshot(
 }
 
 pub(super) fn prompt(
-    store: &InMemoryDiagnosticStore,
+    store: &dyn DiagnosticStoreReadPort,
     caller: ProductSurfaceCaller,
     request: DiagnosticRunRequest,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
@@ -61,7 +61,7 @@ pub(super) fn prompt(
 }
 
 pub(super) fn tool(
-    store: &InMemoryDiagnosticStore,
+    store: &dyn DiagnosticStoreReadPort,
     caller: ProductSurfaceCaller,
     request: DiagnosticToolRequest,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
@@ -82,7 +82,7 @@ pub(super) fn tool(
 }
 
 pub(super) fn updates(
-    store: &InMemoryDiagnosticStore,
+    store: &dyn DiagnosticStoreReadPort,
     caller: ProductSurfaceCaller,
     request: DiagnosticRunRequest,
     after_cursor: Option<String>,

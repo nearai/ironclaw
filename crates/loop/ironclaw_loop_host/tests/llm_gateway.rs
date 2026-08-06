@@ -3355,6 +3355,38 @@ async fn gateway_preserves_exhausted_fallback_as_unavailable_without_provider_ca
     );
 }
 
+#[test]
+fn diagnostic_effective_model_uses_selected_fallback_route() {
+    let primary = Arc::new(RecordingLlmProvider::reply_for_model(
+        "primary-model",
+        "primary response",
+    ));
+    let fallback = Arc::new(RecordingLlmProvider::reply_for_model(
+        "fallback-model",
+        "fallback response",
+    ));
+    let failover = Arc::new(
+        FailoverProvider::new(vec![
+            primary as Arc<dyn LlmProvider>,
+            fallback as Arc<dyn LlmProvider>,
+        ])
+        .expect("two-provider failover chain"),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        failover,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let effective_model = gateway.diagnostic_effective_model(&interactive_model(), 1, None);
+
+    assert_eq!(
+        effective_model.as_ref().map(|model| model.as_str()),
+        Some("fallback-model")
+    );
+}
+
 #[tokio::test]
 async fn gateway_maps_offline_provider_to_unavailable_scrubbing_only_secret_tokens() {
     let provider = Arc::new(RecordingLlmProvider::fail(LlmError::RequestFailed {
