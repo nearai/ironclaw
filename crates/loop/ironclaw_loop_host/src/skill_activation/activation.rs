@@ -16,7 +16,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
+use ironclaw_loop_contracts::{
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopRunContext, SkillVisibility,
+};
 use ironclaw_skills::{
     LoadedSkill, SkillSelectionOptions, SkillSource, SkillTrust, extract_skill_mentions,
     parse_skill_md, prefilter_skills_with_options, skill_token_cost, validate_skill_name,
@@ -66,10 +68,22 @@ const SKILL_LISTING_HEADER: &str = include_str!("../../prompts/skill_listing_hea
 ///
 /// claude-code pays this cost outright -- it lists every skill with its whole one-line
 /// description and no cap -- and reaches 60% correct activation on the same tasks and catalog.
-/// 512 entries at full length is ~160k chars (~40k tokens) worst case, which is why the
-/// per-entry cap and the enumeration cap (512) both still exist: this is a budget for a real
-/// catalog, not a licence for an unbounded one. Past that, `skill_search` (#4428).
-const LISTING_CHAR_BUDGET: usize = 512 * (MAX_LISTING_DESCRIPTION_CHARS + 64);
+///
+/// BOUNDED BY THE SNIPPET CAP, which is not a nicety. The listing ships as ONE model-visible
+/// snippet, and `skill_context.rs` rejects a snippet over
+/// [`LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES`] with `ContextBudgetExceeded` -- a hard error
+/// that fails the whole skill-context build, not a truncation. At `512 * (250 + 64)` this budget
+/// was 160,768, two and a half times that cap, so a large enough catalog took the runtime down
+/// instead of listing fewer skills. The headroom covers the header and the hidden-count note.
+/// Past what fits, the answer is `skill_search` (#4428).
+const LISTING_CHAR_BUDGET: usize =
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES - LISTING_SNIPPET_HEADROOM_BYTES;
+/// Room reserved inside the snippet cap for the listing header and the hidden-count note.
+const LISTING_SNIPPET_HEADROOM_BYTES: usize = 4 * 1024;
+const _: () = assert!(
+    LISTING_CHAR_BUDGET < LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+    "the rendered listing must fit the single snippet it ships as, or the skill-context build      fails closed with ContextBudgetExceeded"
+);
 /// Longest description rendered for a single entry, when the catalog is small enough
 /// to afford it. Preserves the previous rendering for ordinary catalogs.
 const MAX_LISTING_DESCRIPTION_CHARS: usize = 250;
@@ -1492,8 +1506,13 @@ fn select_skill_activations(
     // The global master switch (`auto_activate_learned`) gates criteria
     // selection on top of the configured mode: when it is off, only explicit
     // mentions activate, regardless of `selection_mode`.
+    // `criteria_enabled()` is the third gate and it had no production caller at all, so
+    // `ActivationStrategy::Disabled` was inert -- it behaved exactly like `CriteriaOnly`, and an
+    // operator who bound it still got keyword activation. The other two gates are the global
+    // switch and the selection mode; this is the strategy's own say.
     if auto_activate_learned
         && config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria
+        && config.activation_strategy.criteria_enabled()
     {
         let outcome = prefilter_skills_with_options(
             &rewritten_message,
@@ -2214,6 +2233,62 @@ mod tests {
                     "#5417 [{label}]: a Hacker News search must not inject tech-debt-tracker"
                 );
             }
+        }
+    }
+
+    /// The rendered listing must fit the single snippet it ships as.
+    ///
+    /// `skill_context.rs` rejects a model-visible snippet over
+    /// `LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES` with `ContextBudgetExceeded`, which is a hard
+    /// error that fails the whole skill-context build rather than truncating. `LISTING_CHAR_BUDGET`
+    /// was `512 * (250 + 64)` = 160,768, two and a half times that 65,536-byte cap, so a large
+    /// enough catalog took the runtime down instead of listing fewer skills.
+    ///
+    /// Asserted in BYTES against the real cap, not in chars against the budget: a description with
+    /// multibyte characters costs more bytes than chars, and the cap is a byte cap.
+    #[tokio::test]
+    async fn the_rendered_listing_fits_inside_the_model_snippet_cap() {
+        // Full-length multibyte descriptions at the enumeration cap (512, the same bound
+        // `filesystem_skill_bundle_source` enforces) -- the worst case the budget may produce.
+        let description = "é".repeat(MAX_LISTING_DESCRIPTION_CHARS);
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..512)
+            .map(|i| {
+                let name = format!("probe-{i:04}");
+                let md = skill_md(&name, &description, &[&name], "PROBE_SENTINEL");
+                (SkillSourceKind::User, name, md)
+            })
+            .collect();
+        let specs: Vec<(SkillSourceKind, &str, &str)> = owned
+            .iter()
+            .map(|(kind, name, md)| (*kind, name.as_str(), md.as_str()))
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(specs));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "do something",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("a large catalog must LIST FEWER SKILLS, never fail the context build");
+        for candidate in &selected {
+            let Some((_, text)) = candidate.discoverable_metadata() else {
+                continue;
+            };
+            assert!(
+                text.len() <= LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+                "the listing renders {} bytes against a {LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES}-byte \
+                 snippet cap; skill_context.rs turns that into ContextBudgetExceeded and the whole \
+                 skill-context build fails",
+                text.len()
+            );
         }
     }
 
