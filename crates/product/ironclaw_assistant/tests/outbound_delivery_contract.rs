@@ -2373,6 +2373,210 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
     );
 }
 
+/// Regression test for the fix that replaced `TransportUnavailable` with
+/// `VendorContactAmbiguous` on the `Err(error) =>` retry-exhaustion arm: a
+/// bare adapter `Err` carries no proof the vendor was never contacted, so a
+/// `Failed` row settled this way must never be reopened by a later replay —
+/// reopening it could resend a message the vendor already received. See
+/// `coordinator_marks_vendor_contact_ambiguous_on_exhausted_retryable_reports_and_never_reopens`
+/// for the sibling case: a fully-`Retryable` typed report exhausted the same
+/// way, which is not type-level proof of non-egress either.
+#[tokio::test]
+async fn coordinator_marks_vendor_contact_ambiguous_on_exhausted_adapter_errors_and_never_reopens()
+{
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Err(ChannelError::Configuration {
+                reason: "scripted vendor error".to_string(),
+            }),
+            Err(ChannelError::Configuration {
+                reason: "scripted vendor error".to_string(),
+            }),
+            Err(ChannelError::Configuration {
+                reason: "scripted vendor error".to_string(),
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("delivery drives");
+
+    let CoordinatedDeliveryOutcome::Failed {
+        attempt,
+        failure_kind,
+    } = outcome
+    else {
+        panic!("expected a terminal Failed outcome once adapter Err retries were exhausted");
+    };
+    assert_eq!(
+        failure_kind,
+        DeliveryFailureKind::VendorContactAmbiguous,
+        "a bare adapter Err carries no proof the vendor was never contacted"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        3,
+        "all retries were consumed against repeated adapter errors"
+    );
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(DeliveryFailureKind::VendorContactAmbiguous)
+    );
+
+    // Replaying the same logical delivery must NOT reopen this row: unlike
+    // TransportUnavailable (which is only ever settled before the egress
+    // claim, so it type-level guarantees nothing reached the vendor),
+    // VendorContactAmbiguous gives no such guarantee, so
+    // record_delivery_attempt must treat this as an idempotent no-op rather
+    // than resetting it to a fresh Prepared reservation a caller could claim
+    // and resend.
+    let mut replay = attempt.clone();
+    replay.status = OutboundDeliveryStatus::Prepared;
+    replay.failure_kind = None;
+    store
+        .record_delivery_attempt(replay)
+        .await
+        .expect("replay is accepted as an idempotent no-op");
+    let after_replay = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempt after replay");
+    assert_eq!(after_replay.len(), 1);
+    assert_eq!(
+        after_replay[0].status,
+        OutboundDeliveryStatus::Failed,
+        "a VendorContactAmbiguous row must stay terminal, unlike TransportUnavailable"
+    );
+    assert_eq!(
+        after_replay[0].failure_kind,
+        Some(DeliveryFailureKind::VendorContactAmbiguous)
+    );
+}
+
+/// Regression test for the fix that extended `VendorContactAmbiguous` to the
+/// `Ok(DeliveryReport)` fully-retryable retry-exhaustion arm: a typed report
+/// whose parts are all `Retryable` is not type-level proof that nothing
+/// reached the vendor, because both in-tree adapters (Slack, Telegram)
+/// report post-send ambiguity — e.g. a timeout after the request was sent —
+/// as `Retryable` rather than `Sent` or `Permanent`. So a `Failed` row
+/// settled this way must never be reopened by a later replay either, exactly
+/// like the sibling bare-`Err` case covered by
+/// `coordinator_marks_vendor_contact_ambiguous_on_exhausted_adapter_errors_and_never_reopens`.
+#[tokio::test]
+async fn coordinator_marks_vendor_contact_ambiguous_on_exhausted_retryable_reports_and_never_reopens()
+ {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("delivery drives");
+
+    let CoordinatedDeliveryOutcome::Failed {
+        attempt,
+        failure_kind,
+    } = outcome
+    else {
+        panic!(
+            "expected a terminal Failed outcome once fully-retryable report retries were exhausted"
+        );
+    };
+    assert_eq!(
+        failure_kind,
+        DeliveryFailureKind::VendorContactAmbiguous,
+        "a fully-retryable report carries no proof the vendor was never contacted"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        3,
+        "all retries were consumed against repeated Retryable reports"
+    );
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(DeliveryFailureKind::VendorContactAmbiguous)
+    );
+
+    // Replaying the same logical delivery must NOT reopen this row, for the
+    // same reason as the bare-Err sibling case: a fresh Prepared clone of the
+    // same attempt (same delivery_id/scope/candidate) must be accepted as an
+    // idempotent no-op, not a reopen a caller could claim and resend.
+    let mut replay = attempt.clone();
+    replay.status = OutboundDeliveryStatus::Prepared;
+    replay.failure_kind = None;
+    store
+        .record_delivery_attempt(replay)
+        .await
+        .expect("replay is accepted as an idempotent no-op");
+    let after_replay = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempt after replay");
+    assert_eq!(after_replay.len(), 1);
+    assert_eq!(
+        after_replay[0].status,
+        OutboundDeliveryStatus::Failed,
+        "a VendorContactAmbiguous row must stay terminal, unlike TransportUnavailable"
+    );
+    assert_eq!(
+        after_replay[0].failure_kind,
+        Some(DeliveryFailureKind::VendorContactAmbiguous)
+    );
+}
+
 #[tokio::test]
 async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
     let scope = scope();

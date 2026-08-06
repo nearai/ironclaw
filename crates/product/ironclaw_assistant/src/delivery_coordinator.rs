@@ -805,9 +805,20 @@ impl DeliveryCoordinator {
                             failure_kind: kind,
                         });
                     }
-                    // Fully-retryable report (nothing sent).
+                    // Fully-retryable report (nothing sent), exhausted.
                     if attempts_used >= self.retry.max_attempts {
-                        let kind = DeliveryFailureKind::TransportUnavailable;
+                        // A `Retryable` part outcome does not prove nothing
+                        // reached the vendor: both in-tree adapters (Slack,
+                        // Telegram) report post-send ambiguity — e.g. a
+                        // timeout after the request was sent, or a 2xx
+                        // response with an unparseable body — as `Retryable`
+                        // rather than `Sent` or `Permanent`. So a "fully
+                        // retryable" report does not type-level guarantee
+                        // nothing was sent, and this must not settle as
+                        // `TransportUnavailable` (which a replay can safely
+                        // reopen) — see
+                        // `DeliveryFailureKind::VendorContactAmbiguous`.
+                        let kind = DeliveryFailureKind::VendorContactAmbiguous;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                             .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
@@ -823,8 +834,21 @@ impl DeliveryCoordinator {
                         error = %error,
                         "delivery coordinator: adapter deliver failed"
                     );
+                    // Known, intentionally out-of-scope residual gap: an
+                    // in-process retry here (attempts 1..max_attempts-1) can
+                    // still duplicate a send if an earlier attempt's `Err`
+                    // was actually a post-send ambiguity and a later retry
+                    // succeeds. This loop only prevents the durable,
+                    // cross-session reopen-and-resend handled below on
+                    // exhaustion; it does not change in-process retry
+                    // behavior.
                     if attempts_used >= self.retry.max_attempts {
-                        let kind = DeliveryFailureKind::TransportUnavailable;
+                        // Unlike the fully-retryable `Ok(DeliveryReport)` arm
+                        // above, a bare adapter `Err` carries no proof the
+                        // vendor was never contacted, so this must not settle
+                        // as `TransportUnavailable` (which a replay can
+                        // reopen) — see `DeliveryFailureKind::VendorContactAmbiguous`.
+                        let kind = DeliveryFailureKind::VendorContactAmbiguous;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                             .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {

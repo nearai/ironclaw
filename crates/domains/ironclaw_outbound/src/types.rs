@@ -226,6 +226,25 @@ pub enum DeliveryFailureKind {
     RateLimited,
     Rejected,
     Unknown,
+    /// Retry exhaustion after the vendor-egress claim, settled without proof
+    /// that no part of this delivery reached the vendor. Two adapter
+    /// outcomes reach this kind: a bare adapter `Err` from `deliver` that
+    /// survived retry exhaustion with no typed delivery report ever
+    /// returned, and a typed report whose parts are all `Retryable` but
+    /// still exhausted retries. Unlike `TransportUnavailable`, `RateLimited`,
+    /// and `TransientValidatorError` — which this delivery id only ever
+    /// settles for when nothing reached the vendor — neither of these
+    /// carries that proof: the channel adapter contract does not guarantee
+    /// `Err` means "no vendor egress was attempted" for every
+    /// implementation, and in-tree adapters may report post-send ambiguity
+    /// (e.g. a timeout after the request was sent) as `Retryable`, so either
+    /// path may have reached the vendor before settling. This is the same
+    /// ambiguity `OutboundDeliveryStatus::Unknown` captures for crash
+    /// recovery — "never blindly resend... unless a vendor idempotency key
+    /// makes a resend provably safe" — and this codebase has no such key
+    /// mechanism, so this kind is permanently terminal, exactly like
+    /// `Unknown`.
+    VendorContactAmbiguous,
 }
 
 impl DeliveryFailureKind {
@@ -236,9 +255,18 @@ impl DeliveryFailureKind {
     /// egress ownership is claimed. It does not classify delivery failures for
     /// retry policy outside that settlement boundary — see
     /// [`Self::is_permanent`] for that broader question.
+    ///
+    /// `VendorContactAmbiguous` is never actually produced at this
+    /// settlement boundary (it is only constructed after the egress claim,
+    /// on adapter retry exhaustion), but it is classified `true` here for
+    /// the same reason `is_permanent` treats it that way: an
+    /// ambiguous-contact kind must never be treated as safely reopenable.
     pub const fn is_permanent_preflight(self) -> bool {
         match self {
-            Self::AuthorizationRevoked | Self::Rejected | Self::Unknown => true,
+            Self::AuthorizationRevoked
+            | Self::Rejected
+            | Self::Unknown
+            | Self::VendorContactAmbiguous => true,
             Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => false,
         }
     }
@@ -260,12 +288,22 @@ impl DeliveryFailureKind {
     /// underlying per-part outcome may itself have been retryable.
     /// `TransportUnavailable`, `RateLimited`, and `TransientValidatorError`
     /// are only ever settled for this delivery id when nothing reached the
-    /// vendor (either before the egress claim, or after in-process retries
-    /// were exhausted with no part sent), so reopening cannot duplicate a
-    /// vendor-accepted send.
+    /// vendor, before the egress claim, so reopening cannot duplicate a
+    /// vendor-accepted send. `VendorContactAmbiguous` is different: it
+    /// settles after the egress claim, once retries are exhausted without
+    /// proof that no part of this delivery reached the vendor — either
+    /// because the adapter's `deliver` call returned a bare `Err` instead of
+    /// a typed report, or because every returned report part was
+    /// `Retryable` (which in-tree adapters also use for post-send
+    /// ambiguity, not just pre-send failure). Reopening it could resend a
+    /// message the vendor already received, so — like `Unknown` — it must
+    /// never reopen.
     pub const fn is_permanent(self) -> bool {
         match self {
-            Self::AuthorizationRevoked | Self::Rejected | Self::Unknown => true,
+            Self::AuthorizationRevoked
+            | Self::Rejected
+            | Self::Unknown
+            | Self::VendorContactAmbiguous => true,
             Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => false,
         }
     }
@@ -449,6 +487,7 @@ mod tests {
             (DeliveryFailureKind::RateLimited, false),
             (DeliveryFailureKind::Rejected, true),
             (DeliveryFailureKind::Unknown, true),
+            (DeliveryFailureKind::VendorContactAmbiguous, true),
         ];
 
         for (kind, expected) in cases {
@@ -465,6 +504,7 @@ mod tests {
             (DeliveryFailureKind::RateLimited, false),
             (DeliveryFailureKind::Rejected, true),
             (DeliveryFailureKind::Unknown, true),
+            (DeliveryFailureKind::VendorContactAmbiguous, true),
         ];
 
         for (kind, expected) in cases {

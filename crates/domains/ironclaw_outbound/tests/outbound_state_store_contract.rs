@@ -2270,8 +2270,8 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
 /// nothing sent) must not be stuck behind `ExistingDeliveryUnconfirmed`
 /// forever: replaying the same logical delivery reopens it to a fresh
 /// `Prepared` attempt so a new send claim can be taken. A `Failed` row with a
-/// permanent kind (`AuthorizationRevoked`, `Rejected`, `Unknown`) must stay
-/// terminal.
+/// permanent kind (`AuthorizationRevoked`, `Rejected`, `Unknown`,
+/// `VendorContactAmbiguous`) must stay terminal.
 async fn record_delivery_attempt_reopens_only_non_permanent_failed_rows(
     store: &impl OutboundStateStorePort,
 ) {
@@ -2333,8 +2333,9 @@ async fn record_delivery_attempt_reopens_only_non_permanent_failed_rows(
         "a reopened attempt must be claimable for a fresh send"
     );
 
-    // Permanent: AuthorizationRevoked, Rejected, and Unknown all stay
-    // terminal — replaying record_delivery_attempt is a no-op.
+    // Permanent: AuthorizationRevoked, Rejected, Unknown, and
+    // VendorContactAmbiguous all stay terminal — replaying
+    // record_delivery_attempt is a no-op.
     for (marker, failure_kind) in [
         (
             "reply-reopen-authorization-revoked",
@@ -2342,6 +2343,10 @@ async fn record_delivery_attempt_reopens_only_non_permanent_failed_rows(
         ),
         ("reply-reopen-rejected", DeliveryFailureKind::Rejected),
         ("reply-reopen-unknown", DeliveryFailureKind::Unknown),
+        (
+            "reply-reopen-vendor-contact-ambiguous",
+            DeliveryFailureKind::VendorContactAmbiguous,
+        ),
     ] {
         let permanent_id = OutboundDeliveryId::new();
         let prepared = prepared_delivery_attempt(permanent_id, scope.clone(), marker);
