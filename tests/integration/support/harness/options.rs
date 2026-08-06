@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::EffectKind,
@@ -65,7 +65,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// that surfaces no bundled WASM capability.
     pub(crate) activate_bundled_extensions_for_test: Vec<(
         ExtensionPackage,
-        Option<ironclaw_extensions::ResolvedExtensionManifest>,
+        Option<ironclaw_extension_registry::ResolvedExtensionManifest>,
     )>,
     /// Fixture extension asset directories copied into the harness storage
     /// root's `/system/extensions/{id}` BEFORE composition builds, so the
@@ -80,8 +80,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Channel-adapter bindings for non-`first_party`-runtime channel
     /// extensions (`RebornHostBindings::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
-    pub(crate) channel_extension_bindings:
-        Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
+    pub(crate) channel_extension_bindings: Vec<ironclaw_composition::ChannelExtensionBinding>,
     /// Typed handle for the recording network egress when the profile wants
     /// `captured_network_requests` assertions (the dyn seam alone loses the
     /// recorder type).
@@ -98,7 +97,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) project_service_fault_injection: bool,
     /// Durable tool-result projection seam (issue #5838): when `true`, the
     /// harness backs its capability io with the REAL `StagedCapabilityIo`
-    /// (via `ironclaw_reborn_composition::test_support::staged_capability_io_for_test`,
+    /// (via `ironclaw_composition::test_support::staged_capability_io_for_test`,
     /// wired over this harness's own local-dev `thread_service`) instead of
     /// the ephemeral `ProductLiveCapabilityIo` test double. Opt-in and
     /// explicit rather than a profile default, so the ~100 other
@@ -123,6 +122,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// default) matches every pre-existing harness: no Google OAuth backend,
     /// i.e. this instance is "unconfigured".
     pub(crate) google_oauth_backend_for_test: bool,
+    /// Raise the deployment's workspace scoping to per-caller, exactly as
+    /// `serve` does unconditionally
+    /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
+    /// which the harness applies in `new_with_options`). `false` (the
+    /// default) keeps the Standalone profile's shared workspace root that
+    /// every pre-existing harness assertion (`workspace_file_path`) assumes.
+    pub(crate) workspace_scoped_per_caller: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -148,6 +154,7 @@ impl HostRuntimeHarnessOptions {
             durable_capability_io: false,
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
+            workspace_scoped_per_caller: false,
         }
     }
 
@@ -246,7 +253,7 @@ impl HostRuntimeHarnessOptions {
     /// rejects every verified request with `ChannelError::Unsupported`.
     pub(crate) fn with_channel_extension_binding(
         mut self,
-        binding: ironclaw_reborn_composition::ChannelExtensionBinding,
+        binding: ironclaw_composition::ChannelExtensionBinding,
     ) -> Self {
         self.channel_extension_bindings.push(binding);
         self
@@ -264,7 +271,7 @@ impl HostRuntimeHarnessOptions {
     pub(crate) fn with_activated_bundled_extension_resolved(
         mut self,
         package: ExtensionPackage,
-        resolved: ironclaw_extensions::ResolvedExtensionManifest,
+        resolved: ironclaw_extension_registry::ResolvedExtensionManifest,
     ) -> Self {
         self.activate_bundled_extensions_for_test
             .push((package, Some(resolved)));
@@ -287,6 +294,13 @@ impl HostRuntimeHarnessOptions {
     /// `google_oauth_backend_for_test`'s doc.
     pub(crate) fn with_google_oauth_backend_for_test(mut self) -> Self {
         self.google_oauth_backend_for_test = true;
+        self
+    }
+
+    /// Raise workspace scoping to per-caller. See
+    /// `workspace_scoped_per_caller`'s doc.
+    pub(crate) fn with_workspace_scoped_per_caller(mut self) -> Self {
+        self.workspace_scoped_per_caller = true;
         self
     }
 }

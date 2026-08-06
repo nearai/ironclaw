@@ -1,5 +1,10 @@
 # Reborn Integration Tests
 
+> **Adding, removing, renaming, or materially re-scoping a test here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+
 In-process tests that run a **whole Reborn turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real
@@ -219,7 +224,7 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
 
@@ -344,7 +349,7 @@ scripted default id is not a vision pattern, so image parts are dropped for it.
 
 ### OAuth / product-auth
 
-Available from crate `ironclaw_reborn_composition::test_support`, gated on
+Available from crate `ironclaw_composition::test_support`, gated on
 `#[cfg(feature = "test-support")]`.
 
 **`ScriptedOAuthTokenEgress`** — `RuntimeHttpEgress` impl returning a fixed
@@ -395,14 +400,14 @@ On a harness built from a `live_approvals` group:
 
 - `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStorePort>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
-`ironclaw_reborn_composition::test_support` exposes:
+`ironclaw_composition::test_support` exposes:
 
 - `build_secret_store_for_test(root, scoped)` — returns the `Arc<ironclaw_secrets::SecretStore<F>>` that production standalone composition builds (via `factory::build_secret_store`); for store read-back in secrets tests.
 - `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
 `RebornRuntime` (returned by `build_runtime`, test-only methods defined in
-`crates/ironclaw_reborn_composition/src/runtime.rs` and
-`crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`crates/app/ironclaw_composition/src/runtime.rs` and
+`crates/app/ironclaw_composition/src/runtime/test_support.rs`) exposes:
 
 - `outbound_delivery_stores_for_test()` — the exact composition-owned outbound
   stores, including the reply-intent store shared by the built-in

@@ -2,19 +2,22 @@
 
 **Status:** Draft implementation contract
 **Date:** 2026-04-24
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `crates/ironclaw_host_api`, `crates/ironclaw_filesystem`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `crates/contracts/ironclaw_host_api`, `crates/substrates/ironclaw_filesystem`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_extensions` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
+`ironclaw_extension_registry` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
 It also owns package manifests and caller-membership installation records.
 Caller membership is the only installation-lifecycle authority; runtime
-publication and administrator configuration are separate host concerns. Domain
-crates such as `ironclaw_product_adapter_registry` project their own host API
-sections from that generic state rather than owning a second installation
-store.
+publication and administrator configuration are separate host concerns. Host
+API sections are projected from that generic state rather than by a second
+installation store: the built-in contracts live in
+`ironclaw_extension_registry::host_api` (`capability_provider`, `product_adapter`), and
+each one's declared section *schema* is the neutral vocabulary crate's
+(`ironclaw_extension_contracts::product_adapter_section` for
+`[product_adapter.*]`).
 
 It answers:
 
@@ -30,7 +33,7 @@ It does **not** execute capabilities.
 Execution belongs to:
 
 - `ironclaw_wasm` for WASM modules
-- `ironclaw_scripts` for Docker-backed native CLI/script capabilities
+- `ironclaw_sandbox` for Docker-backed native CLI/script capabilities
 - `ironclaw_mcp` for MCP adapter calls
 - host-policy-selected service crates for first-party/system work
 
@@ -39,7 +42,7 @@ Execution belongs to:
 ## 2. Core invariant
 
 ```text
-ironclaw_extensions knows what can run.
+ironclaw_extension_registry knows what can run.
 runtime crates know how to run it.
 ```
 
@@ -120,7 +123,7 @@ Removal retries are idempotent, and the record gains `removed_at` only after
 its child tombstones are durable; the tombstone retains the embedded
 definition so reinstall revives the same identities. These transitions are
 pinned by
-`cargo test -p ironclaw_extensions --test installations_contract`
+`cargo test -p ironclaw_extension_registry --test installations_contract`
 (normalized layout, membership mutation, interruption, and backend
 contracts) and
 `cargo test --test reborn_integration_extension_user_lifecycle_isolation`
@@ -426,7 +429,7 @@ prompt_doc_ref = "prompts/telegram/send_message.md"
 
 Rules:
 
-- `ironclaw_extensions` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
+- `ironclaw_extension_registry` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
 - Domain contract handlers own section pattern validation, cardinality, typed section schema validation, and catalog/read-model projection.
 - Domain contract handlers must not treat manifest `trust` / `descriptor_trust_default` as effective runtime authority. Effective trust and grants come from composition-owned trust policy evaluation, not self-declared manifest metadata.
 - Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
@@ -438,7 +441,7 @@ Rules:
 - Every `[[host_api]]` must reference an existing explicit `section` path.
 - Operational sections must be referenced by `[[host_api]]`; inert metadata may live under `[metadata.*]` or `[x.*]`.
 - Manifest validation is atomic: any invalid host API contract invalidates the extension manifest.
-- Runtime loading, handshakes, catalog publication, authority grants, and execution remain outside `ironclaw_extensions`.
+- Runtime loading, handshakes, catalog publication, authority grants, and execution remain outside `ironclaw_extension_registry`.
 
 Cutover (complete):
 
@@ -487,12 +490,12 @@ Rules:
   authority namespace, not the extension id: several extensions (gmail,
   google-drive, ...) may share one provider (`google`).
 
-Tests: `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
+Tests: `crates/extensions/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
 (capability surface projection block) and
-`crates/ironclaw_product_adapter_registry/tests/manifest_ingestion.rs`
+`crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`
 (channel-surface projection through the real product-adapter contract). Run:
-`cargo test -p ironclaw_extensions --test manifest_v2_contract` and
-`cargo test -p ironclaw_product_adapter_registry --test manifest_ingestion`.
+`cargo test -p ironclaw_extension_registry --test manifest_v2_contract` and
+`cargo test -p ironclaw_extension_registry --test product_adapter_manifest_ingestion`.
 
 ---
 
@@ -671,7 +674,7 @@ Local contract tests should prove:
 
 ## 12. Non-goals
 
-Do not add in `ironclaw_extensions` V1:
+Do not add in `ironclaw_extension_registry` V1:
 
 - WASM module loading
 - Docker/container execution

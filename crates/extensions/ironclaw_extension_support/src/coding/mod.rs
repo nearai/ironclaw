@@ -268,9 +268,13 @@ fn bound_safe_summary(summary: String) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
+    use ironclaw_filesystem::{
+        DiskFilesystem, Fault, FaultInjecting, FaultKind, FilesystemError, FilesystemOperation,
+        RootFilesystem,
+    };
     use ironclaw_host_api::{
         dispatch::RuntimeDispatchErrorKind,
+        error::HostApiError,
         ids::{CapabilityId, InvocationId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{HostPath, MountAlias, VirtualPath},
@@ -473,6 +477,23 @@ mod tests {
 
     impl CodingFixture {
         fn new(user: &str) -> Self {
+            Self::with_filesystem(user, |filesystem| Arc::new(filesystem))
+        }
+
+        fn with_faults(user: &str, faults: Vec<Fault>) -> Self {
+            Self::with_filesystem(user, move |filesystem| {
+                let filesystem = FaultInjecting::new(filesystem);
+                for fault in faults {
+                    filesystem.add_fault(fault);
+                }
+                Arc::new(filesystem)
+            })
+        }
+
+        fn with_filesystem(
+            user: &str,
+            wrap: impl FnOnce(DiskFilesystem) -> Arc<dyn RootFilesystem>,
+        ) -> Self {
             let temp_root = tempfile::TempDir::new().expect("temp root");
             let workspace_dir = temp_root.path().join("workspace");
             std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
@@ -483,6 +504,7 @@ mod tests {
                     HostPath::from_path_buf(temp_root.path().to_path_buf()),
                 )
                 .expect("projects mount");
+            let filesystem = wrap(local_filesystem);
             let scope = ResourceScope::local_default(
                 UserId::new(user).expect("user id"),
                 InvocationId::new(),
@@ -491,7 +513,7 @@ mod tests {
             Self {
                 _temp_root: temp_root,
                 workspace_dir,
-                filesystem: Arc::new(local_filesystem),
+                filesystem,
                 mounts: workspace_mounts(),
                 scope,
                 state: super::CodingCapabilityState::default(),
@@ -518,6 +540,193 @@ mod tests {
         }
     }
 
+    #[test]
+    fn filesystem_summaries_preserve_error_class_without_backend_details() {
+        let virtual_path =
+            VirtualPath::new("/projects/private/backend/secret.rs").expect("virtual path");
+        let cases = [
+            (
+                FilesystemError::Unsupported {
+                    path: virtual_path.clone(),
+                    operation: FilesystemOperation::ReadFile,
+                },
+                RuntimeDispatchErrorKind::FilesystemDenied,
+                "permission denied or unsupported path",
+            ),
+            (
+                FilesystemError::Backend {
+                    path: virtual_path.clone(),
+                    operation: FilesystemOperation::ReadFile,
+                    reason: "raw backend detail /host/secret".to_string(),
+                },
+                RuntimeDispatchErrorKind::Backend,
+                "filesystem backend error",
+            ),
+            (
+                FilesystemError::Contract(HostApiError::InvalidPath {
+                    value: "raw/invalid/path".to_string(),
+                    reason: "backend parser detail".to_string(),
+                }),
+                RuntimeDispatchErrorKind::InputEncode,
+                "invalid path",
+            ),
+            (
+                FilesystemError::BackendBusy {
+                    path: virtual_path,
+                    operation: FilesystemOperation::ReadFile,
+                },
+                RuntimeDispatchErrorKind::FilesystemDenied,
+                "filesystem error",
+            ),
+        ];
+
+        for (error, expected_kind, expected_reason) in cases {
+            let mapped = super::paths::filesystem_error_with_summary(
+                "grep",
+                "/workspace\\nested/source.rs",
+                error,
+            );
+            assert_eq!(mapped.kind(), expected_kind);
+            let summary = mapped.safe_summary().expect("model-visible summary");
+            assert_eq!(
+                summary,
+                format!("grep failed for path workspace nested source.rs: {expected_reason}")
+            );
+            assert!(LoopSafeSummary::new(summary.to_string()).is_ok());
+            assert!(!summary.contains("backend detail") && !summary.contains("host secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_missing_root_and_explicit_read_failure_are_actionable() {
+        let missing_fixture = CodingFixture::new("grep-missing-root-user");
+        let missing = missing_fixture
+            .dispatch(
+                super::CodingCapabilityKind::Grep,
+                json!({"path": "/workspace/missing.rs", "pattern": "needle"}),
+            )
+            .await
+            .expect_err("missing grep root must fail");
+        assert_eq!(missing.kind(), RuntimeDispatchErrorKind::OperationFailed);
+        assert_eq!(
+            missing.safe_summary(),
+            Some("grep failed for path workspace missing.rs: file not found")
+        );
+
+        let read_failure_fixture = CodingFixture::with_faults(
+            "grep-explicit-read-user",
+            vec![
+                Fault::on(FilesystemOperation::ReadFile)
+                    .path("gone.rs")
+                    .returning(FaultKind::NotFound),
+            ],
+        );
+        std::fs::write(
+            read_failure_fixture.workspace_dir.join("gone.rs"),
+            "needle\n",
+        )
+        .expect("seed explicit file");
+        let disappeared = read_failure_fixture
+            .dispatch(
+                super::CodingCapabilityKind::Grep,
+                json!({"path": "/workspace/gone.rs", "pattern": "needle"}),
+            )
+            .await
+            .expect_err("disappearing explicit file must fail");
+        assert_eq!(
+            disappeared.safe_summary(),
+            Some("grep failed for path workspace gone.rs: file not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_directory_failures_are_reported_for_every_output_mode() {
+        let fixture = CodingFixture::with_faults(
+            "grep-partial-scan-user",
+            vec![
+                Fault::on(FilesystemOperation::Stat)
+                    .path("stat-fail.rs")
+                    .backend("stat backend detail /host/stat"),
+                Fault::on(FilesystemOperation::ReadFile)
+                    .path("read-fail.rs")
+                    .backend("read backend detail /host/read"),
+            ],
+        );
+        for name in ["ok.rs", "stat-fail.rs", "read-fail.rs"] {
+            std::fs::write(fixture.workspace_dir.join(name), "needle\n").expect("seed file");
+        }
+
+        for output_mode in ["files_with_matches", "count", "content"] {
+            let output = fixture
+                .dispatch(
+                    super::CodingCapabilityKind::Grep,
+                    json!({
+                        "path": "/workspace",
+                        "pattern": "needle",
+                        "output_mode": output_mode,
+                    }),
+                )
+                .await
+                .expect("partial directory scan remains successful")
+                .output;
+
+            assert_eq!(output["incomplete"], json!(true));
+            assert_eq!(output["skipped_file_count"], json!(2));
+            let skipped = output["skipped_files"]
+                .as_array()
+                .expect("skipped file diagnostics");
+            assert!(skipped.contains(&json!({"file": "stat-fail.rs", "operation": "stat"})));
+            assert!(skipped.contains(&json!({
+                "file": "read-fail.rs",
+                "operation": "read_file"
+            })));
+            assert!(
+                !output.to_string().contains("backend detail")
+                    && !output.to_string().contains("host stat")
+                    && !output.to_string().contains("host read")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_bounds_skipped_file_diagnostics_in_the_owning_crate() {
+        let fixture = CodingFixture::with_faults(
+            "grep-skipped-cap-user",
+            vec![
+                Fault::on(FilesystemOperation::Stat)
+                    .path("skip-")
+                    .backend("injected backend detail /host/secret"),
+            ],
+        );
+        for index in 0..25 {
+            std::fs::write(
+                fixture.workspace_dir.join(format!("skip-{index:02}.rs")),
+                "needle\n",
+            )
+            .expect("seed skipped file");
+        }
+
+        let output = fixture
+            .dispatch(
+                super::CodingCapabilityKind::Grep,
+                json!({"path": "/workspace", "pattern": "needle"}),
+            )
+            .await
+            .expect("bounded partial scan remains successful")
+            .output;
+
+        assert_eq!(output["incomplete"], json!(true));
+        assert_eq!(output["skipped_file_count"], json!(25));
+        assert_eq!(
+            output["skipped_files"]
+                .as_array()
+                .expect("skipped file diagnostics")
+                .len(),
+            20
+        );
+        assert!(!output.to_string().contains("backend detail"));
+    }
+
     fn assert_read_before_edit_rejection(err: &super::CodingCapabilityError, file_hint: &str) {
         assert_eq!(err.kind(), RuntimeDispatchErrorKind::OperationFailed);
         let summary = err
@@ -530,6 +739,201 @@ mod tests {
         assert!(
             summary.contains("read_file"),
             "summary should tell the model to use read_file, got: {summary}"
+        );
+    }
+
+    fn assert_binary_document_rejection(err: &super::CodingCapabilityError, file_hint: &str) {
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OperationFailed);
+        let summary = err
+            .safe_summary()
+            .expect("binary-document rejection must carry a model-visible reason");
+        assert!(
+            summary.contains(file_hint),
+            "summary should name the file, got: {summary}"
+        );
+        assert!(
+            summary.contains("binary documents cannot be edited with text tools"),
+            "summary should explain why text editing is unsafe, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_opaque_document_target_without_touching_bytes() {
+        let fixture = CodingFixture::new("opaque-document-user");
+        let file = fixture.workspace_dir.join("review.docx");
+        let original = b"opaque document bytes";
+        std::fs::write(&file, original).expect("seed document");
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/review.docx", "content": "replacement"}),
+            )
+            .await
+            .expect_err("text write to DOCX must be rejected");
+
+        assert_binary_document_rejection(&err, "review.docx");
+        assert_eq!(
+            std::fs::read(file).expect("document after rejected write"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn extracted_rtf_read_does_not_authorize_raw_overwrite() {
+        let fixture = CodingFixture::new("extracted-rtf-user");
+        let file = fixture.workspace_dir.join("review.rtf");
+        let original = br"{\rtf1\ansi Original RTF text}";
+        std::fs::write(&file, original).expect("seed RTF document");
+
+        let read = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/review.rtf"}),
+            )
+            .await
+            .expect("read extracted RTF text");
+        assert!(
+            read.output["content"]
+                .as_str()
+                .expect("read content")
+                .contains("Original RTF text")
+        );
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/review.rtf", "content": "replacement"}),
+            )
+            .await
+            .expect_err("extracted text must not authorize a raw overwrite");
+
+        assert_binary_document_rejection(&err, "review.rtf");
+        assert_eq!(
+            std::fs::read(file).expect("RTF after rejected write"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn readable_text_log_with_a_stray_nul_remains_writable() {
+        let fixture = CodingFixture::new("stray-nul-log-user");
+        let file = fixture.workspace_dir.join("syslog.log");
+        let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+        original.push(0u8);
+        original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+        tokio::fs::write(&file, original)
+            .await
+            .expect("seed text log");
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/syslog.log"}),
+            )
+            .await
+            .expect("text log with a stray NUL must be readable");
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+            )
+            .await
+            .expect("a text log accepted by read_file must remain writable");
+
+        assert_eq!(
+            tokio::fs::read(file)
+                .await
+                .expect("text log after overwrite"),
+            b"redacted log\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_existing_pdf_but_allows_new_pdf() {
+        let fixture = CodingFixture::new("pdf-write-user");
+        let existing = fixture.workspace_dir.join("existing.pdf");
+        let original = b"%PDF-1.4 existing\n";
+        std::fs::write(&existing, original).expect("seed PDF");
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/existing.pdf", "content": "replacement"}),
+            )
+            .await
+            .expect_err("existing PDF overwrite must be rejected");
+        assert_binary_document_rejection(&err, "existing.pdf");
+        assert_eq!(
+            std::fs::read(existing).expect("PDF after rejected write"),
+            original
+        );
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/new.pdf", "content": "%PDF-1.4 new\n"}),
+            )
+            .await
+            .expect("new PDF creation must remain supported");
+        assert_eq!(
+            std::fs::read(fixture.workspace_dir.join("new.pdf")).expect("new PDF"),
+            b"%PDF-1.4 new\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_probe_clean_document_path_after_full_read() {
+        let fixture = CodingFixture::new("pdf-patch-user");
+        let file = fixture.workspace_dir.join("review.pdf");
+        let original = b"alpha beta\n";
+        std::fs::write(&file, original).expect("seed probe-clean PDF path");
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/review.pdf"}),
+            )
+            .await
+            .expect("read probe-clean PDF path as raw text");
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ApplyPatch,
+                json!({"path": "/workspace/review.pdf", "old_string": "alpha", "new_string": "gamma"}),
+            )
+            .await
+            .expect_err("text patch to a PDF path must be rejected");
+
+        assert_binary_document_rejection(&err, "review.pdf");
+        assert_eq!(
+            std::fs::read(file).expect("PDF after rejected patch"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_falls_back_to_legacy_document_extraction() {
+        let fixture = CodingFixture::new("legacy-document-user");
+        let file = fixture.workspace_dir.join("legacy.doc");
+        let mut original = b"Legacy document text".to_vec();
+        original.extend_from_slice(&[0; 32]);
+        std::fs::write(file, original).expect("seed legacy document");
+
+        let read = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/legacy.doc"}),
+            )
+            .await
+            .expect("legacy document extraction fallback succeeds");
+
+        assert!(
+            read.output["content"]
+                .as_str()
+                .expect("read content")
+                .contains("Legacy document text")
         );
     }
 

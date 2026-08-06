@@ -10,9 +10,10 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
-    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    ExtensionRegistry, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
@@ -141,6 +142,7 @@ pub(super) fn mock_mcp_extension_package(
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             visibility: CapabilityVisibility::Model,
+            standard_op: None,
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
@@ -173,6 +175,7 @@ pub(super) fn mock_mcp_extension_package(
         max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
+        standard_op: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

@@ -26,14 +26,14 @@ request builder serializes it (only in `DeviceKey` auth mode, mirroring the
 - Backward compatible: when `subject` is `None`, the serialized request body is
   byte-identical to today (field omitted via `skip_serializing_if`).
 - Wire field name MUST be `subject` to match the Slice 0 server struct field.
-- Tests: `cargo test -p ironclaw_reborn_traces`.
+- Tests: `cargo test -p ironclaw_trace_commons`.
 
 ---
 
 ### Task 1: Add `subject` to the upload-claim request body
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_traces/src/contribution.rs:4546-4568`
+- Modify: `crates/ironclaw_trace_commons/src/contribution.rs:4546-4568`
   (`TraceUploadClaimIssuerRequest`) and `:5076-5102`
   (`build_trace_upload_claim_issuer_request`) and `:4467-4478`
   (`TraceUploadClaimContext`)
@@ -96,7 +96,7 @@ fn upload_claim_request_omits_subject_when_none() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p ironclaw_reborn_traces upload_claim_request_`
+Run: `cargo test -p ironclaw_trace_commons upload_claim_request_`
 Expected: FAIL — `TraceUploadClaimContext` has no field `subject` (compile error).
 
 - [ ] **Step 3: Add the fields and builder copy**
@@ -150,14 +150,14 @@ Then fix every other construction site of `TraceUploadClaimContext` to set
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p ironclaw_reborn_traces upload_claim_request_`
-Expected: PASS (2 tests). Also run `cargo test -p ironclaw_reborn_traces` to
+Run: `cargo test -p ironclaw_trace_commons upload_claim_request_`
+Expected: PASS (2 tests). Also run `cargo test -p ironclaw_trace_commons` to
 confirm no other `TraceUploadClaimContext` construction site is left unfixed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/contribution.rs
+git add crates/ironclaw_trace_commons/src/contribution.rs
 git commit -m "feat(traces): carry optional per-user subject in upload-claim request"
 ```
 
@@ -166,7 +166,7 @@ git commit -m "feat(traces): carry optional per-user subject in upload-claim req
 ### Task 2: Thread subject from the resolver into submission
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_traces/src/contribution.rs` —
+- Modify: `crates/ironclaw_trace_commons/src/contribution.rs` —
   `TraceUploadClaimContext::for_envelope` (line ~4481) gains a `with_subject`
   builder; the submission entry that builds the context
   (`submit_trace_envelope_to_endpoint_with_credential_provider`, line 5978, and
@@ -202,7 +202,7 @@ fn context_with_subject_sets_field() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p ironclaw_reborn_traces context_with_subject_sets_field`
+Run: `cargo test -p ironclaw_trace_commons context_with_subject_sets_field`
 Expected: FAIL — no method `with_subject`.
 
 - [ ] **Step 3: Add the builder and wire the submission path**
@@ -243,13 +243,13 @@ extend it:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p ironclaw_reborn_traces context_with_subject_sets_field`
+Run: `cargo test -p ironclaw_trace_commons context_with_subject_sets_field`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/contribution.rs
+git add crates/ironclaw_trace_commons/src/contribution.rs
 git commit -m "feat(traces): thread resolver subject into submission claim context"
 ```
 
@@ -258,7 +258,7 @@ git commit -m "feat(traces): thread resolver subject into submission claim conte
 ### Task 3: End-to-end — submission sends subject to the issuer
 
 **Files:**
-- Test: `crates/ironclaw_reborn_traces/src/contribution.rs` test module (mirror
+- Test: `crates/ironclaw_trace_commons/src/contribution.rs` test module (mirror
   the loopback mock-issuer test at 12558, capturing the request body).
 
 **Interfaces:**
@@ -326,7 +326,7 @@ async fn fetch_claim_sends_subject_when_present() {
 
 - [ ] **Step 2: Run test to verify it fails (then passes after Tasks 1–2)**
 
-Run: `cargo test -p ironclaw_reborn_traces fetch_claim_sends_subject_when_present`
+Run: `cargo test -p ironclaw_trace_commons fetch_claim_sends_subject_when_present`
 Expected: with Tasks 1–2 implemented, PASS. (If run before them, it fails to
 compile / the body lacks `subject`.)
 
@@ -334,14 +334,14 @@ compile / the body lacks `subject`.)
 
 - [ ] **Step 4: Full crate test + clippy**
 
-Run: `cargo test -p ironclaw_reborn_traces` then
+Run: `cargo test -p ironclaw_trace_commons` then
 `cargo clippy --all --tests`
 Expected: PASS; zero warnings.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/contribution.rs
+git add crates/ironclaw_trace_commons/src/contribution.rs
 git commit -m "test(traces): claim request carries per-user subject end-to-end"
 ```
 

@@ -47,7 +47,7 @@ reviews:
     - "!tests/e2e/ironclaw_e2e.egg-info/**"
     - "!tests/e2e/**/*.png"
     - "!fuzz/corpus/**"
-    - "!crates/ironclaw_safety/fuzz/corpus/**"
+    - "!crates/substrates/ironclaw_safety/fuzz/corpus/**"
     - "!**/*.wasm" # compiled artifacts; new binaries surface via registry/ and manifest review
     - "!crates/ironclaw_webui_v2_static/static/assets/**" # binary icons; static/js IS hand-written and reviewed
     - "!wix/**" # cargo-dist/WiX installer boilerplate
@@ -131,7 +131,7 @@ reviews:
         Verify URLs point at expected upstreams, artifact references carry checksums, and no
         un-audited prebuilt WASM is introduced (root build.rs documents committed WASM as a
         supply-chain risk).
-    - path: "{src/sandbox/**,src/secrets/**,src/safety/**,src/gate/**,src/pairing/**,src/auth/**,crates/ironclaw_safety/**,crates/ironclaw_secrets/**,crates/ironclaw_network/**,crates/ironclaw_trust/**,crates/ironclaw_authorization/**,crates/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/ironclaw_prompt_envelope/**,crates/ironclaw_webui/**}"
+    - path: "{src/sandbox/**,src/secrets/**,src/safety/**,src/gate/**,src/pairing/**,src/auth/**,crates/substrates/ironclaw_safety/**,crates/substrates/ironclaw_secrets/**,crates/substrates/ironclaw_network/**,crates/kernel/ironclaw_trust/**,crates/kernel/ironclaw_authorization/**,crates/kernel/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/contracts/ironclaw_prompt_envelope/**,crates/product/ironclaw_webui/**}"
       instructions: |
         Kernel/safety boundary — review track C (2 approvals + rollback plan). Hold the line
         on: no weakening of bearer/webhook auth, CORS/origin checks, body/rate limits or

@@ -29,7 +29,7 @@ and carries a per-user subject = `local_pseudonymous_contributor_id("{tenant}:{u
 - Zero clippy warnings: `cargo clippy --all --benches --tests --examples --all-features`.
 - Map errors with context per CLAUDE.md.
 - Prompt/large strings are not involved here.
-- Unit tests: `cargo test -p ironclaw_reborn_traces`. Crate-level admin tests:
+- Unit tests: `cargo test -p ironclaw_trace_commons`. Crate-level admin tests:
   `cargo test` (and `--features integration` where DB is needed).
 - "Test through the caller" (CLAUDE.md): the resolver gates a network side
   effect, so add a test that drives the *caller* (the first-party dispatch path
@@ -41,7 +41,7 @@ and carries a per-user subject = `local_pseudonymous_contributor_id("{tenant}:{u
 ### Task 1: `TraceCredentialResolution` type + resolver
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_traces/src/contribution.rs` (add resolver near
+- Modify: `crates/ironclaw_trace_commons/src/contribution.rs` (add resolver near
   `read_trace_policy_for_scope` at line 4058; reuse `trace_scope_key` line 4001,
   `local_pseudonymous_contributor_id` line 4013)
 - Test: same file, test module.
@@ -122,7 +122,7 @@ fn resolver_returns_none_when_unenrolled() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p ironclaw_reborn_traces resolver_`
+Run: `cargo test -p ironclaw_trace_commons resolver_`
 Expected: FAIL — `resolve_trace_credentials` not found.
 
 - [ ] **Step 3: Implement the resolver**
@@ -170,13 +170,13 @@ pub fn resolve_trace_credentials(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p ironclaw_reborn_traces resolver_`
+Run: `cargo test -p ironclaw_trace_commons resolver_`
 Expected: PASS (3 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/contribution.rs
+git add crates/ironclaw_trace_commons/src/contribution.rs
 git commit -m "feat(traces): trace-credential resolver (personal invite wins, instance fallback w/ subject)"
 ```
 
@@ -185,9 +185,9 @@ git commit -m "feat(traces): trace-credential resolver (personal invite wins, in
 ### Task 2: Instance-enrollment write path (scope = None)
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_traces/src/onboarding/mod.rs` (add a thin
+- Modify: `crates/ironclaw_trace_commons/src/onboarding/mod.rs` (add a thin
   instance-enrollment entry that targets the base dir)
-- Test: `crates/ironclaw_reborn_traces/src/onboarding/tests.rs`
+- Test: `crates/ironclaw_trace_commons/src/onboarding/tests.rs`
 
 **Interfaces:**
 - Consumes: `onboard_at_dir_with_sink` (existing, line 207),
@@ -242,7 +242,7 @@ async fn instance_onboard_writes_instance_level_policy() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p ironclaw_reborn_traces instance_onboard_writes_instance_level_policy`
+Run: `cargo test -p ironclaw_trace_commons instance_onboard_writes_instance_level_policy`
 Expected: FAIL — `onboard_instance_with_sink` not found.
 
 - [ ] **Step 3: Implement the instance-enrollment entry**
@@ -272,13 +272,13 @@ per-scope `onboard`).
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p ironclaw_reborn_traces instance_onboard_writes_instance_level_policy`
+Run: `cargo test -p ironclaw_trace_commons instance_onboard_writes_instance_level_policy`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/onboarding/mod.rs crates/ironclaw_reborn_traces/src/onboarding/tests.rs
+git add crates/ironclaw_trace_commons/src/onboarding/mod.rs crates/ironclaw_trace_commons/src/onboarding/tests.rs
 git commit -m "feat(traces): instance-level enrollment write path (scope None)"
 ```
 
@@ -290,7 +290,7 @@ git commit -m "feat(traces): instance-level enrollment write path (scope None)"
 > `AdminScope::enroll_instance_trace_commons` wrapper described below was
 > implemented and later REMOVED from `src/tenant.rs` — new Reborn features must
 > not land in the retiring v1 monolith. The crate-side entry point is
-> `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink` (Task 2);
+> `ironclaw_trace_commons::onboarding::onboard_instance_with_sink` (Task 2);
 > an admin-gated Reborn surface will wrap it when instance enrollment gets a
 > product entry point. That surface now exists: `ironclaw-reborn traces
 > enroll-instance --invite <url>` wraps
@@ -304,7 +304,7 @@ git commit -m "feat(traces): instance-level enrollment write path (scope None)"
   `test_admin_scope_new_returns_some_for_admin` at line 1195)
 
 **Interfaces:**
-- Consumes: `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink`
+- Consumes: `ironclaw_trace_commons::onboarding::onboard_instance_with_sink`
   (Task 2) and the host egress onboarding sink. Because `AdminScope` has no
   egress handle, the method takes the sink as a parameter so the host wires it.
 - Produces:
@@ -313,10 +313,10 @@ git commit -m "feat(traces): instance-level enrollment write path (scope None)"
       pub async fn enroll_instance_trace_commons(
           &self,
           invite_url: &str,
-          consents: ironclaw_reborn_traces::onboarding::OnboardConsents,
-          sink: &dyn ironclaw_reborn_traces::onboarding::OnboardingHttpSink,
-      ) -> Result<ironclaw_reborn_traces::onboarding::OnboardOutcome,
-                  ironclaw_reborn_traces::onboarding::OnboardError>;
+          consents: ironclaw_trace_commons::onboarding::OnboardConsents,
+          sink: &dyn ironclaw_trace_commons::onboarding::OnboardingHttpSink,
+      ) -> Result<ironclaw_trace_commons::onboarding::OnboardOutcome,
+                  ironclaw_trace_commons::onboarding::OnboardError>;
   }
   ```
   The mere existence of `&self: AdminScope` is the gate — it is unconstructable
@@ -364,13 +364,13 @@ Add inside `impl AdminScope` (after `deactivate_user`, line 977):
     pub async fn enroll_instance_trace_commons(
         &self,
         invite_url: &str,
-        consents: ironclaw_reborn_traces::onboarding::OnboardConsents,
-        sink: &dyn ironclaw_reborn_traces::onboarding::OnboardingHttpSink,
+        consents: ironclaw_trace_commons::onboarding::OnboardConsents,
+        sink: &dyn ironclaw_trace_commons::onboarding::OnboardingHttpSink,
     ) -> Result<
-        ironclaw_reborn_traces::onboarding::OnboardOutcome,
-        ironclaw_reborn_traces::onboarding::OnboardError,
+        ironclaw_trace_commons::onboarding::OnboardOutcome,
+        ironclaw_trace_commons::onboarding::OnboardError,
     > {
-        ironclaw_reborn_traces::onboarding::onboard_instance_with_sink(
+        ironclaw_trace_commons::onboarding::onboard_instance_with_sink(
             invite_url, consents, sink,
         )
         .await
@@ -393,7 +393,7 @@ git commit -m "feat(admin): AdminScope::enroll_instance_trace_commons (admin-gat
 > **Superseded in review:** the `AdminScope::enroll_instance_trace_commons`
 > wrapper was removed from `src/tenant.rs` — new Reborn features must not land
 > in the retiring v1 monolith. The crate-side entry point is
-> `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink`; an
+> `ironclaw_trace_commons::onboarding::onboard_instance_with_sink`; an
 > admin-gated Reborn surface will wrap it when instance enrollment gets a
 > product entry point. That surface now exists: `ironclaw-reborn traces
 > enroll-instance --invite <url>` wraps

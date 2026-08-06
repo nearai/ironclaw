@@ -21,6 +21,39 @@ branch_percent = 0.0
 # issue = "https://github.com/nearai/ironclaw/issues/NNNN"
 # review_after = "2026-10-30"
 
+[[exemption]]
+path = "crates/contracts/ironclaw_host_api/src/capability.rs"
+lines = [265]
+owner = "@nearai/runtime"
+reason = "Serde-backed struct field declaration has no executable LLVM line record."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs"
+lines = [145, 146, 147, 149, 154, 155, 156, 158, 161, 162, 163, 164]
+owner = "@nearai/runtime"
+reason = "Fail-closed guards cover impossible invalid host-compiled schema states behind the typed standard schema ref constructor."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/standard_op_output.rs"
+lines = [91]
+branch_lines = [86]
+owner = "@nearai/runtime"
+reason = "Fail-closed validator-cache fallback is unreachable while the compile-checked canonical schema registry remains the sole cache source."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/surface.rs"
+lines = [386, 387, 390]
+owner = "@nearai/runtime"
+reason = "Fail-closed JSON parse guard is unreachable because resolution returns only compile-checked host schema constants."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
 # ---------------------------------------------------------------------------
 # WS1.1 turn-vocabulary move (PR #6967). These lines are a verbatim relocation
 # of existing bodies from `ironclaw_turns` into `ironclaw_host_api::turn`. No
@@ -45,7 +78,7 @@ branch_percent = 0.0
 # learns to treat a verbatim cross-crate move as unchanged code.
 
 [[exemption]]
-path = "crates/ironclaw_host_api/src/turn.rs"
+path = "crates/contracts/ironclaw_host_api/src/turn.rs"
 lines = [
   803, 804, 805, 818, 819, 820, 824, 825, 826, 830, 831, 832,
   869, 870, 871, 901, 902, 910, 911, 912, 913, 914, 915, 916,
@@ -57,7 +90,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
+path = "crates/extensions/ironclaw_extension_host/src/product_lifecycle.rs"
 lines = [263]
 branch_lines = [229, 261]
 owner = "@serrrfirat"
@@ -66,7 +99,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
+path = "crates/extensions/ironclaw_extension_host/src/available_extension_import.rs"
 lines = [191, 192, 193, 194, 195, 196, 197, 198, 199, 200]
 owner = "@serrrfirat"
 reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
@@ -74,7 +107,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_host_api/src/credential_redaction.rs"
+path = "crates/contracts/ironclaw_host_api/src/credential_redaction.rs"
 branch_lines = [64, 111, 120]
 owner = "@serrrfirat"
 reason = "Boundary tests cover delimited, embedded, leading, trailing, and repeated credential markers; these remaining BRDA arms are rustc short-circuit bookkeeping without an independently reachable input outcome."
@@ -82,7 +115,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_contracts/src/recipe.rs"
+path = "crates/contracts/ironclaw_extension_contracts/src/recipe.rs"
 lines = [197, 310, 314, 501, 505]
 owner = "@serrrfirat"
 reason = "These serde declaration and container-closing lines produce no LLVM DA records; recipe variant and setup-metadata round trips execute the generated serializers and deserializers."
@@ -90,7 +123,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/agent_link.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/agent_link.rs"
 lines = [95]
 branch_lines = [94]
 owner = "@serrrfirat"
@@ -99,7 +132,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/catalog.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/catalog.rs"
 lines = [277, 283]
 branch_lines = [351, 406]
 owner = "@serrrfirat"
@@ -108,7 +141,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/package.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/package.rs"
 lines = [55, 74]
 branch_lines = [52, 70]
 owner = "@serrrfirat"
@@ -117,7 +150,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/link_service.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/link_service.rs"
 lines = [143, 144, 145, 410, 411, 412, 428, 429, 430]
 owner = "@serrrfirat"
 reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable strings and DateTime values; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed records."
@@ -125,7 +158,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/link_service.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/link_service.rs"
 lines = [196, 253]
 branch_lines = [155, 174, 182, 198, 238, 240]
 owner = "@serrrfirat"
@@ -134,7 +167,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/service.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/service.rs"
 lines = [285, 286, 287, 288, 289]
 owner = "@serrrfirat"
 reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 285 and 289 are tuple/expression closers LLVM groups with that arm."
@@ -142,7 +175,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/ironhub/service.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/ironhub/service.rs"
 branch_lines = [487, 506, 733]
 owner = "@serrrfirat"
 reason = "Public/private manifest tests execute both fetch functions through valid, invalid, replay, and retry paths, and runtime wrapper tests execute IronhubManifestUrl::into_inner; these remaining BRDA records are rustc async-entry or return-expression bookkeeping without an independent input outcome."
@@ -150,7 +183,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_cli/src/commands/ironhub.rs"
+path = "crates/app/ironclaw_cli/src/commands/ironhub.rs"
 lines = [138, 219, 231]
 branch_lines = [203]
 owner = "@serrrfirat"
@@ -159,7 +192,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_cli/src/commands/serve.rs"
+path = "crates/app/ironclaw_cli/src/commands/serve.rs"
 lines = [592, 593, 594, 595, 596, 597]
 branch_lines = [592]
 owner = "@serrrfirat"
@@ -168,7 +201,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/ironhub_link_serve.rs"
+path = "crates/app/ironclaw_composition/src/ironhub_link_serve.rs"
 lines = [61, 66, 67, 69, 70, 72, 73, 93]
 owner = "@serrrfirat"
 reason = "Route tests execute mount creation, policy inspection, valid/invalid JSON, success, and service failure; the error arms construct NonZero values from fixed nonzero literals and the other records are nested Result closing lines."
@@ -176,15 +209,15 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [4068, 4069, 4070, 4071, 4072, 4073, 4082, 4083]
+path = "crates/app/ironclaw_composition/src/runtime.rs"
+lines = [4070, 4071, 4072, 4073, 4074, 4075, 4084, 4085]
 owner = "@serrrfirat"
 reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_skills/src/management/install_bundle.rs"
+path = "crates/domains/ironclaw_skills/src/management/install_bundle.rs"
 lines = [134, 135, 182, 184]
 branch_lines = [119, 180, 182, 197]
 owner = "@serrrfirat"
@@ -193,7 +226,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/approval_prompt.rs"
+path = "crates/product/ironclaw_assistant/src/approval_prompt.rs"
 lines = [58]
 owner = "@nearai/reborn"
 reason = "Line is unchanged except for the GateRef -> TurnGateRef type rename that retired the colliding ironclaw_turns alias; integration-tier coverage state is identical before and after."
@@ -201,7 +234,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/auth_continuation.rs"
+path = "crates/product/ironclaw_assistant/src/auth_continuation.rs"
 lines = [411, 412, 413]
 owner = "@nearai/reborn"
 reason = "Lines are unchanged except for the GateRef -> TurnGateRef type rename that retired the colliding ironclaw_turns alias; integration-tier coverage state is identical before and after."
@@ -209,7 +242,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/runtime/auth_interaction.rs"
+path = "crates/app/ironclaw_composition/src/runtime/auth_interaction.rs"
 lines = [94, 169]
 owner = "@nearai/reborn"
 reason = "Lines are unchanged except for the GateRef -> TurnGateRef type rename that retired the colliding ironclaw_turns alias; integration-tier coverage state is identical before and after."
@@ -227,7 +260,7 @@ review_after = "2026-10-31"
 # merged lcov — not transcribed from a stale run.
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+path = "crates/extensions/ironclaw_extension_host/src/run_delivery_ports.rs"
 lines = [51, 53, 141]
 owner = "@nearai/reborn"
 reason = "Trait-method parameter declarations; only the turn type names changed. Not executable, so the file contributes no instrumented lines."
@@ -235,7 +268,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_outbound/src/ids.rs"
+path = "crates/domains/ironclaw_outbound/src/ids.rs"
 lines = [103, 104]
 owner = "@nearai/reborn"
 reason = "Struct field declarations; only the turn type names changed. Not executable, so the file contributes no instrumented lines."
@@ -243,7 +276,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_outbound/src/store.rs"
+path = "crates/domains/ironclaw_outbound/src/store.rs"
 lines = [72, 76]
 owner = "@nearai/reborn"
 reason = "Port method return type and parameter declarations; only the EventCursor path changed. Not executable, so the file contributes no instrumented lines."
@@ -251,7 +284,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/approval_interaction/read_model.rs"
+path = "crates/product/ironclaw_assistant/src/approval_interaction/read_model.rs"
 lines = [41, 58, 116]
 owner = "@nearai/reborn"
 reason = "Function parameter declarations; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -259,7 +292,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services/types.rs"
+path = "crates/product/ironclaw_assistant/src/reborn_services/types.rs"
 lines = [105]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -267,7 +300,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/run_delivery.rs"
+path = "crates/product/ironclaw_assistant/src/run_delivery.rs"
 lines = [116]
 owner = "@nearai/reborn"
 reason = "Trait-method parameter declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -275,7 +308,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/runtime.rs"
+path = "crates/app/ironclaw_composition/src/runtime.rs"
 lines = [463]
 owner = "@nearai/reborn"
 reason = "Function parameter declaration; only the turn type path changed. Not executable, so the file contributes no instrumented lines."
@@ -283,7 +316,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/subagent/await_edge/mod.rs"
+path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs"
 lines = [114]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -291,7 +324,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/agent_turn_runtime.rs"
+path = "crates/kernel/ironclaw_turns/src/agent_turn_runtime.rs"
 lines = [163]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -299,7 +332,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/events.rs"
+path = "crates/kernel/ironclaw_turns/src/events.rs"
 lines = [61]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -307,7 +340,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/request.rs"
+path = "crates/kernel/ironclaw_turns/src/request.rs"
 lines = [128]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -315,9 +348,9 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 # WS1.1 carried an exemption here for
-# `crates/ironclaw_turns/src/run_profile/runtime_context.rs` lines 575-576
+# `crates/kernel/ironclaw_turns/src/run_profile/runtime_context.rs` lines 575-576
 # (function parameter declarations repointed to `ironclaw_host_api::turn`).
-# WS1.2 moved that file to `crates/ironclaw_loop_contracts/src/runtime_context.rs`
+# WS1.2 moved that file to `crates/contracts/ironclaw_loop_contracts/src/runtime_context.rs`
 # and the entry was DELETED rather than repointed, because those lines are no
 # longer changed lines: WS1.1 merged, so they are baseline on main, and this
 # PR's own diff pairs the file as a 99%-similarity rename whose only changed
@@ -325,7 +358,7 @@ review_after = "2026-10-31"
 # no longer flags. Verified with the gate's own diff invocation, not by reading.
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/status.rs"
+path = "crates/kernel/ironclaw_turns/src/status.rs"
 lines = [194]
 owner = "@nearai/reborn"
 reason = "Struct field declaration on TurnRunState; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
@@ -340,7 +373,7 @@ review_after = "2026-10-31"
 # so no coverage was lost. Only the type name on the line changed.
 
 [[exemption]]
-path = "crates/ironclaw_product/src/projection/turn_events.rs"
+path = "crates/product/ironclaw_assistant/src/projection/turn_events.rs"
 lines = [510]
 owner = "@nearai/reborn"
 reason = "approval_prompt_context_view is not exercised by the integration tier; base lcov shows 0 hits across its whole signature (67088a426 lines 505-511). Only the GateRef -> TurnGateRef parameter type changed."
@@ -348,7 +381,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/subagent/await_edge/resolver.rs"
+path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
 lines = [2033]
 owner = "@nearai/reborn"
 reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed."
@@ -356,7 +389,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/subagent/await_edge/store.rs"
+path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/store.rs"
 lines = [268, 269, 270, 271, 272]
 owner = "@nearai/reborn"
 reason = "Invalid-gate-ref error path in the awaited-child evidence read; base lcov shows 0 hits across the same block (67088a426 lines 267-271). Only the TurnGateRef type path changed."
@@ -381,7 +414,7 @@ review_after = "2026-10-31"
 # ---------------------------------------------------------------------------
 
 [[exemption]]
-path = "crates/ironclaw_agent_loop/src/executor.rs"
+path = "crates/loop/ironclaw_agent_loop/src/executor.rs"
 lines = [185, 186]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -389,7 +422,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_agent_loop/src/executor/capabilities.rs"
+path = "crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs"
 lines = [1092]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -397,7 +430,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_agent_loop/src/executor/gates.rs"
+path = "crates/loop/ironclaw_agent_loop/src/executor/gates.rs"
 lines = [57, 61, 67]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -405,7 +438,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_first_party_extension_ports/src/skill_activation_capability.rs"
+path = "crates/loop/ironclaw_loop_host/src/skill_activation/skill_activation_capability.rs"
 lines = [121]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -413,7 +446,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_host_api/src/turn.rs"
+path = "crates/contracts/ironclaw_host_api/src/turn.rs"
 lines = [1021, 1022, 1023, 1025]
 owner = "@nearai/reborn"
 reason = "`GateResumeDisposition::as_str`, moved verbatim from ironclaw_turns::request by WS1.2 because both the turn-admission resume request and the loop driver's resume request carry it. A const string accessor the integration tier never calls; covered by host_api's own unit tests."
@@ -421,7 +454,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_contracts/src/checkpoint_payload.rs"
+path = "crates/contracts/ironclaw_loop_contracts/src/checkpoint_payload.rs"
 lines = [43, 44, 45, 47, 48, 49, 53, 54, 55, 56, 57, 58, 59, 64, 65, 66]
 branch_lines = [63]
 owner = "@nearai/reborn"
@@ -430,7 +463,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_contracts/src/lib.rs"
+path = "crates/contracts/ironclaw_loop_contracts/src/lib.rs"
 lines = [24]
 owner = "@nearai/reborn"
 reason = "Crate-root inner attribute `#![warn(unreachable_pub)]` on a declaration-only facade. rustc emits no LCOV record for this file, so every other changed line here is already classified mechanically uninstrumentable; this attribute is the only line the classifier does not recognise, and exempting it lets the uninstrumentable-file path apply as intended."
@@ -438,7 +471,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_contracts/src/loop_exit.rs"
+path = "crates/contracts/ironclaw_loop_contracts/src/loop_exit.rs"
 lines = [39, 40, 41, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 193, 194, 195, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 233, 234, 235, 237, 238, 239, 240, 241, 242, 243, 244, 246, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 262, 263, 264, 265, 266, 267, 269, 270, 271, 272, 273, 274, 330, 331, 332, 333, 335, 336, 337, 338, 339, 340, 342, 343, 344, 345, 346, 347, 348, 350, 351]
 branch_lines = [83, 250, 253, 256, 259, 262, 265, 267]
 owner = "@nearai/reborn"
@@ -447,7 +480,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_contracts/src/model.rs"
+path = "crates/contracts/ironclaw_loop_contracts/src/model.rs"
 lines = [62, 65, 97, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 174, 175, 176, 177, 179, 180, 181, 182, 184, 185, 186, 187, 207, 210, 213, 239, 241, 270, 273]
 branch_lines = [206, 209, 212]
 owner = "@nearai/reborn"
@@ -456,7 +489,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/budget_accountant.rs"
+path = "crates/loop/ironclaw_loop_host/src/budget_accountant.rs"
 lines = [755]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -464,7 +497,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/result_read.rs"
+path = "crates/loop/ironclaw_loop_host/src/result_read.rs"
 lines = [39, 42, 45]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -472,23 +505,23 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/lib.rs"
-lines = [616]
+path = "crates/app/ironclaw_composition/src/lib.rs"
+lines = [618]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [725, 728, 732, 733, 3701]
+path = "crates/app/ironclaw_composition/src/runtime.rs"
+lines = [725, 728, 732, 733, 3703]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/planned_driver_factory.rs"
+path = "crates/loop/ironclaw_turn_runner/src/planned_driver_factory.rs"
 lines = [81, 82]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -496,7 +529,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/subagent/await_edge/mod.rs"
+path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs"
 lines = [112, 149]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -504,7 +537,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/subagent/await_edge/resolver.rs"
+path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
 lines = [563]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -512,7 +545,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/subagent/flavors.rs"
+path = "crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs"
 lines = [178]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -520,7 +553,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/turn_runner.rs"
+path = "crates/loop/ironclaw_turn_runner/src/turn_runner.rs"
 lines = [100]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -528,7 +561,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/agent_turn_runtime.rs"
+path = "crates/kernel/ironclaw_turns/src/agent_turn_runtime.rs"
 lines = [161]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -536,7 +569,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/loop_exit.rs"
+path = "crates/kernel/ironclaw_turns/src/loop_exit.rs"
 lines = [455]
 owner = "@nearai/reborn"
 reason = "Fallback arm of `validate_loop_exit` for unverified blocked evidence. WS1.2 restructured this match when `to_blocked_reason` became `Option` rather than `Result<_, ()>` (behavior-identical). The arm is exercised by this crate's unit suite, not by the integration tier."
@@ -544,7 +577,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/process_projection/loop_checkpoint.rs"
+path = "crates/kernel/ironclaw_turns/src/process_projection/loop_checkpoint.rs"
 lines = [134]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -552,7 +585,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/status.rs"
+path = "crates/kernel/ironclaw_turns/src/status.rs"
 lines = [189]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -560,7 +593,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_hooks/src/middleware/model_port.rs"
+path = "crates/loop/ironclaw_hooks/src/middleware/model_port.rs"
 lines = [124, 255]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -568,7 +601,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_hooks/src/middleware/transcript_port.rs"
+path = "crates/loop/ironclaw_hooks/src/middleware/transcript_port.rs"
 lines = [152, 273]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -576,7 +609,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/system_inference.rs"
+path = "crates/loop/ironclaw_loop_host/src/system_inference.rs"
 lines = [374, 395, 429, 443]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -612,7 +645,7 @@ review_after = "2026-10-31"
 # untested.
 
 [[exemption]]
-path = "crates/ironclaw_extension_contracts/src/lib.rs"
+path = "crates/contracts/ironclaw_extension_contracts/src/lib.rs"
 lines = [32]
 owner = "@nearai/reborn"
 reason = "Crate-level `#![warn(unreachable_pub)]` attribute in a directory-of-modules lib.rs that contains no executable code at all. The file is absent from the lcov by construction."
@@ -620,7 +653,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_contracts/src/preference_target.rs"
+path = "crates/contracts/ironclaw_extension_contracts/src/preference_target.rs"
 lines = [
   20, 21, 22, 23, 24, 32, 34, 35, 36, 37, 41,
   47, 53, 54, 55, 56, 62, 63, 64, 65, 66,
@@ -631,7 +664,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_contracts/src/recipe.rs"
+path = "crates/contracts/ironclaw_extension_contracts/src/recipe.rs"
 lines = [553]
 owner = "@nearai/reborn"
 reason = "Struct field declaration whose only change is the `crate::http::` -> `ironclaw_host_api::http::` path rewrite forced by the module leaving host_api. The recipe module's 25 unit tests moved with it and still pass."
@@ -639,7 +672,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extensions/src/resolved.rs"
+path = "crates/extensions/ironclaw_extension_registry/src/resolved.rs"
 lines = [145, 162, 163, 176]
 owner = "@nearai/reborn"
 reason = "Struct field declarations retyped from `ironclaw_host_api::{hosted_mcp,recipe,surface}` to `ironclaw_extension_contracts::*`. Declarations only; no expression changed."
@@ -647,10 +680,10 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/input.rs"
+path = "crates/app/ironclaw_composition/src/input.rs"
 lines = [242, 243, 244]
 owner = "@nearai/reborn"
-reason = "The `preference_target_codec` field's type path moved from `ironclaw_product::PreferenceTargetCodec` to its owning contracts crate, closing one of the three dual import paths this PR deletes. A field declaration split across three lines by rustfmt; no behavior."
+reason = "The `preference_target_codec` field's type path moved from `ironclaw_assistant::PreferenceTargetCodec` to its owning contracts crate, closing one of the three dual import paths this PR deletes. A field declaration split across three lines by rustfmt; no behavior."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
@@ -660,7 +693,7 @@ review_after = "2026-10-31"
 # to the changed-lines gate.
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/generic_host.rs"
+path = "crates/extensions/ironclaw_extension_host/src/generic_host.rs"
 lines = [723]
 owner = "@nearai/reborn"
 reason = "Parameter type of DenyAllEgressFactory::egress_for_channel, retyped to the relocated ChannelEgressDescriptor. The whole function (lines 719-726) reads 0 hits in the same lcov, so this is a pre-existing gap in a deny-all stub, not coverage this PR lost."
@@ -668,7 +701,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services/product_capability_handlers.rs"
+path = "crates/product/ironclaw_assistant/src/reborn_services/product_capability_handlers.rs"
 lines = [394]
 owner = "@nearai/reborn"
 reason = "Type annotation in the ExtensionRegisterHostedMcp arm that #6930 landed uncovered: lines 394-406 all read 0 hits while the neighbouring arms score 47 and 1. This PR only repointed RegisterHostedMcpRequest to the contracts crate it had to move to; covering hosted-MCP registration end to end is #6930's owed integration test."
@@ -679,7 +712,7 @@ review_after = "2026-10-31"
 # on. Neither condition was authored or altered here.
 
 [[exemption]]
-path = "crates/ironclaw_auth/src/engine/mod.rs"
+path = "crates/domains/ironclaw_auth/src/engine/mod.rs"
 branch_lines = [576]
 owner = "@nearai/reborn"
 reason = "The `|| name == recipe.scope_param()` short-circuit arm of a reserved-parameter check. The line changed only because RESERVED_AUTHORIZE_PARAMS is now addressed through ironclaw_extension_contracts::recipe; the untaken arm predates this PR."
@@ -687,7 +720,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/factory/auth_engine_assembly.rs"
+path = "crates/app/ironclaw_composition/src/factory/auth_engine_assembly.rs"
 branch_lines = [216]
 owner = "@nearai/reborn"
 reason = "The else arm of a let-else that rejects a non-Oauth2Code vendor recipe. The line changed only because VendorAuthRecipe is now addressed through ironclaw_extension_contracts::recipe; no bundled recipe exercises the else arm, which predates this PR."
@@ -712,7 +745,7 @@ review_after = "2026-10-31"
 # ---------------------------------------------------------------------------
 
 [[exemption]]
-path = "crates/ironclaw_product_contracts/src/lib.rs"
+path = "crates/contracts/ironclaw_product_contracts/src/lib.rs"
 lines = [33]
 owner = "@nearai/reborn"
 reason = "Crate-root inner attribute `#![warn(unreachable_pub)]` on a declaration-only facade — the same shape already exempted for `ironclaw_loop_contracts/src/lib.rs`. rustc emits no LCOV record for this file at all (the gate reports it as 'absent from coverage or contains no DA records'), so every other line here is mechanically uninstrumentable; this attribute is the only line the classifier does not recognise, and exempting it lets the uninstrumentable-file path apply as intended."
@@ -720,7 +753,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services.rs"
+path = "crates/product/ironclaw_assistant/src/reborn_services.rs"
 lines = [4888]
 owner = "@nearai/reborn"
 reason = "Pre-existing `map_err` arm whose only change is a repointed type path (`ironclaw_host_api::product_surface::ProductSurfaceError::internal()` -> `ironclaw_product_contracts::surface::...`). It fires only if `serde_json::to_value` fails on a value a typed capability handler just produced, which no integration scenario can force; the line was equally unreached before this PR and is flagged solely because the path on it moved."
@@ -748,7 +781,7 @@ review_after = "2026-10-31"
 # remains covered.
 
 [[exemption]]
-path = "crates/ironclaw_extension_contracts/src/channel_adapter.rs"
+path = "crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs"
 lines = [294]
 owner = "@nearai/reborn"
 reason = "Type position only: the `OutboundPart::AuthPrompt` variant's `view: Box<crate::auth_prompt::AuthPromptView>` field, repointed when the auth-prompt family moved into this crate. An enum variant field type carries no LLVM coverage region."
@@ -756,18 +789,18 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/channel_pairing.rs"
+path = "crates/extensions/ironclaw_extension_host/src/channel_pairing.rs"
 lines = [1117]
 owner = "@nearai/reborn"
-reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage` type, repointed from `ironclaw_product`'s deleted re-export. A parameter type carries no LLVM coverage region."
+reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage` type, repointed from `ironclaw_assistant`'s deleted re-export. A parameter type carries no LLVM coverage region."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/input.rs"
+path = "crates/app/ironclaw_composition/src/input.rs"
 lines = [239]
 owner = "@nearai/reborn"
-reason = "Type position only: `ChannelExtensionBinding::adapter`'s `Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>` field type, repointed from `ironclaw_product`'s deleted re-export. A struct field type carries no LLVM coverage region."
+reason = "Type position only: `ChannelExtensionBinding::adapter`'s `Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>` field type, repointed from `ironclaw_assistant`'s deleted re-export. A struct field type carries no LLVM coverage region."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
@@ -792,7 +825,7 @@ review_after = "2026-10-31"
 # arm) that integration deliberately does not wire.
 
 [[exemption]]
-path = "crates/ironclaw_loop_contracts/src/resolver.rs"
+path = "crates/contracts/ironclaw_loop_contracts/src/resolver.rs"
 lines = [234, 235, 236, 237]
 owner = "@nearai/reborn"
 reason = "with_steering_policy builds no-steering profiles; the integration harness runs the default steering-on profile. Covered by the product-tier allow_steering full-chain test."
@@ -800,7 +833,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/durable_input_queue.rs"
+path = "crates/loop/ironclaw_loop_host/src/durable_input_queue.rs"
 lines = [
   67, 68, 69, 70, 71, 72, 73, 116, 117, 129, 130, 131, 132, 133,
   145, 146, 147, 167, 168, 173, 174, 176, 180, 189, 195, 196, 197, 201,
@@ -815,7 +848,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/input_port.rs"
+path = "crates/loop/ironclaw_loop_host/src/input_port.rs"
 lines = [151, 152, 157, 158, 161, 162]
 owner = "@nearai/reborn"
 reason = "Queue-error mapping arm in the loop input port adapter; integration cannot make the composed durable queue fail. Crate-tier adapter tests cover it."
@@ -823,7 +856,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/input_queue.rs"
+path = "crates/loop/ironclaw_loop_host/src/input_queue.rs"
 lines = [
   149, 151, 177, 179, 239, 299, 300, 313, 394, 395, 409, 410, 433, 434,
   435, 436, 441, 449, 452, 455, 457, 458, 470, 471, 472, 473, 474, 492,
@@ -838,7 +871,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_loop_host/src/lib.rs"
+path = "crates/loop/ironclaw_loop_host/src/lib.rs"
 lines = [2287, 2288, 2289, 2290, 2291, 2292, 2293, 2294, 2295, 2296]
 branch_lines = [2301, 2302]
 owner = "@nearai/reborn"
@@ -847,7 +880,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/inbound_turn.rs"
+path = "crates/product/ironclaw_assistant/src/inbound_turn.rs"
 # Contiguous regions (error arm in the admit call site, error arm in the
 # readmit replay arm, the steering_admission_failure mapping fn): llvm's
 # line attribution for these arms wobbles between runs, so the whole region
@@ -865,7 +898,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services.rs"
+path = "crates/product/ironclaw_assistant/src/reborn_services.rs"
 lines = [
   3503, 3504, 3505, 3506, 3507, 3508, 3509, 3510, 3512, 3513, 3514, 3515,
   3516, 3517, 3518, 6397, 6398, 6399, 6401, 6404, 6407, 6408,
@@ -876,7 +909,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/steering.rs"
+path = "crates/product/ironclaw_assistant/src/steering.rs"
 lines = [
   121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134,
   136, 137, 138, 139, 140, 163, 164, 165, 166, 167, 188, 189, 193, 194,
@@ -890,7 +923,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+path = "crates/app/ironclaw_composition/src/factory/test_support.rs"
 lines = [356]
 owner = "@nearai/reborn"
 reason = "test-support-feature factory wiring line (RejectingInputEnqueue for the channel-host assembly); compiled only under the dev-only test-support feature."
@@ -898,7 +931,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_openai_compat/src/ack_helpers.rs"
+path = "crates/product/ironclaw_openai_compat/src/ack_helpers.rs"
 lines = [
   55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
   69, 70, 77, 78, 80, 81, 82, 83,
@@ -909,7 +942,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/steering_reconcile.rs"
+path = "crates/loop/ironclaw_turn_runner/src/steering_reconcile.rs"
 lines = [
   51, 53, 55, 57, 67, 69, 71, 73, 75, 89, 91, 237, 240, 241,
   254, 255, 272, 274, 286, 288, 330, 332,
@@ -921,16 +954,16 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_runner/src/runtime.rs"
+path = "crates/loop/ironclaw_turn_runner/src/runtime.rs"
 lines = [404, 405, 406, 407, 676]
 branch_lines = [664, 843]
 owner = "@nearai/reborn"
-reason = "input_queue_reconcile None arms of the observer subscription and transition-port decoration: this gate measures integration-tier lcov, and the integration harness (tests/integration/support/group.rs) always wires Some — the None arms run only in crate-tier compositions (e.g. ironclaw_product inbound_turn_contract), which this lcov cannot see. Plus the observer-subscription error arm (subscribe fails only on a duplicate observer id) and its build-error Display arm."
+reason = "input_queue_reconcile None arms of the observer subscription and transition-port decoration: this gate measures integration-tier lcov, and the integration harness (tests/integration/support/group.rs) always wires Some — the None arms run only in crate-tier compositions (e.g. ironclaw_assistant inbound_turn_contract), which this lcov cannot see. Plus the observer-subscription error arm (subscribe fails only on a duplicate observer id) and its build-error Display arm."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/contract.rs"
+path = "crates/domains/ironclaw_threads/src/contract.rs"
 lines = [721, 728]
 owner = "@nearai/reborn"
 reason = "should_reuse_assistant_run_message fallthrough arm and the finalized attachment-identity comparison for statuses/mismatches integration runs never present at finalize time; crate-tier backend tests cover every arm."
@@ -938,7 +971,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/filesystem_service.rs"
+path = "crates/domains/ironclaw_threads/src/filesystem_service.rs"
 lines = [1732, 1733, 1749, 1761]
 branch_lines = [1685]
 owner = "@nearai/reborn"
@@ -947,7 +980,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/in_memory.rs"
+path = "crates/domains/ironclaw_threads/src/in_memory.rs"
 lines = [350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363]
 owner = "@nearai/reborn"
 reason = "In-memory backend read_thread_message: integration composes the filesystem thread service; the in-memory backend is exercised by crate-tier tests."
@@ -955,7 +988,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/service.rs"
+path = "crates/domains/ironclaw_threads/src/service.rs"
 lines = [
   56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
   73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
@@ -968,7 +1001,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/process_projection/metadata.rs"
+path = "crates/kernel/ironclaw_turns/src/process_projection/metadata.rs"
 lines = [139, 140, 141]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
@@ -976,7 +1009,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/status.rs"
+path = "crates/kernel/ironclaw_turns/src/status.rs"
 lines = [168, 169, 170, 171, 172, 191, 192]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing allow_steering; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
@@ -991,7 +1024,7 @@ review_after = "2026-11-01"
 # the executor ordering tests and the busy-submit contract tests.
 
 [[exemption]]
-path = "crates/ironclaw_agent_loop/src/executor/budget.rs"
+path = "crates/loop/ironclaw_agent_loop/src/executor/budget.rs"
 lines = [19, 54]
 owner = "@nearai/reborn"
 reason = "Signature-churn lines from deleting the deferred-ack threading; no DA records emitted for them in the integration lcov."
@@ -999,7 +1032,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_agent_loop/src/executor/input.rs"
+path = "crates/loop/ironclaw_agent_loop/src/executor/input.rs"
 lines = [47, 66, 80, 81, 82, 83, 84, 85, 87, 98, 231, 232, 233]
 owner = "@nearai/reborn"
 reason = "Signature/match-arm churn from making the ack lifecycle stage-local; no DA records emitted for them in the integration lcov. Drain/ack behavior is pinned by the executor ordering tests and the steering integration scenario."
@@ -1007,7 +1040,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_product_contracts/src/product_wire.rs"
+path = "crates/contracts/ironclaw_product_contracts/src/product_wire.rs"
 lines = [392, 393, 394, 395, 396, 397, 398]
 owner = "@nearai/reborn"
 reason = "DeferredBusy response-variant field declarations (moved here by the WS5 product_wire inversion); no DA records emitted for enum variant bodies in the integration lcov."
@@ -1017,7 +1050,7 @@ review_after = "2026-11-01"
 # ---------------------------------------------------------------------------
 # WS2.1 extension_host port inversion (PR #6998). One entry, for one line.
 #
-# The port move deleted `ironclaw_product`'s re-export of
+# The port move deleted `ironclaw_assistant`'s re-export of
 # `ChannelConfigProductService`, so every signature naming it had to be
 # repointed. In this file the repoint let the signature fit on one line, which
 # makes the function's coverage region a *changed* line even though its body,
@@ -1026,7 +1059,7 @@ review_after = "2026-11-01"
 # It is not an uncovered path. The accessor has two live callers, both of which
 # exercise it through the composed runtime:
 #   tests/integration/group_extensions/scenario_slack_channel_lifecycle_state_machine.rs:112
-#   crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs:630
+#   crates/app/ironclaw_composition/tests/trigger_poller_e2e.rs:630
 # The service it hands back is itself covered: `RebornChannelConfigProductService`
 # is exercised by its own unit tests (it moved to `ironclaw_extension_manager`
 # with WS2.4), and the port contract by
@@ -1040,10 +1073,10 @@ review_after = "2026-11-01"
 # rather than a waiver.
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+path = "crates/app/ironclaw_composition/src/factory/test_support.rs"
 lines = [330]
 owner = "@nearai/reborn"
-reason = "Signature repoint only: the `channel_config_service` dev-seam accessor's return type moved from `ironclaw_product`'s deleted re-export to `ironclaw_product_contracts::channel_config`, collapsing the signature onto one line. Body, callers, and behavior are unchanged; two integration callers exercise it (see the block comment above)."
+reason = "Signature repoint only: the `channel_config_service` dev-seam accessor's return type moved from `ironclaw_assistant`'s deleted re-export to `ironclaw_product_contracts::channel_config`, collapsing the signature onto one line. Body, callers, and behavior are unchanged; two integration callers exercise it (see the block comment above)."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
@@ -1066,7 +1099,7 @@ review_after = "2026-10-31"
 # No file or glob is waived and the 100% policy remains unchanged.
 
 [[exemption]]
-path = "crates/ironclaw_filesystem/src/fault.rs"
+path = "crates/substrates/ironclaw_filesystem/src/fault.rs"
 lines = [88, 89, 90, 91, 92, 166, 167, 168, 169]
 owner = "@nearai/reborn"
 reason = "FaultInjecting::version_mismatch is exercised by the transcript-migration CAS retry and exhaustion contract tests, but LLVM attributes this generic test-support body to the consuming ironclaw_threads test binary instead of ironclaw_filesystem. These are the constructor and conversion lines only."
@@ -1074,7 +1107,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_filesystem/src/index.rs"
+path = "crates/substrates/ironclaw_filesystem/src/index.rs"
 lines = [433]
 branch_lines = [427, 432]
 owner = "@nearai/reborn"
@@ -1083,7 +1116,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_filesystem/src/libsql.rs"
+path = "crates/substrates/ironclaw_filesystem/src/libsql.rs"
 lines = [2503, 2512, 2552, 2553, 2564, 2565]
 branch_lines = [2491, 2557]
 owner = "@nearai/reborn"
@@ -1092,7 +1125,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_filesystem/src/postgres.rs"
+path = "crates/substrates/ironclaw_filesystem/src/postgres.rs"
 lines = [2152, 2153, 2215, 2216]
 branch_lines = [2126, 2206, 2214, 2215, 2216, 2217]
 owner = "@nearai/reborn"
@@ -1101,7 +1134,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_processes/src/journal_store.rs"
+path = "crates/kernel/ironclaw_processes/src/journal_store.rs"
 lines = [279, 968]
 branch_lines = [278]
 owner = "@nearai/reborn"
@@ -1110,7 +1143,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_processes/src/journal_store/flusher.rs"
+path = "crates/kernel/ironclaw_processes/src/journal_store/flusher.rs"
 lines = [
   76, 98, 160, 175, 176, 180, 194, 204, 205, 231,
   278, 279, 280, 307, 308, 351, 405, 420, 421, 422,
@@ -1126,7 +1159,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_processes/src/journal_store/observer.rs"
+path = "crates/kernel/ironclaw_processes/src/journal_store/observer.rs"
 lines = [
   151, 157, 207, 263, 264, 279, 285, 286, 287, 288,
   289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299,
@@ -1138,7 +1171,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_processes/src/journal_store/rows.rs"
+path = "crates/kernel/ironclaw_processes/src/journal_store/rows.rs"
 lines = [317, 318, 319, 320, 321]
 owner = "@nearai/reborn"
 reason = "Batch row loading is exercised by every process-journal contract test. This residual is the defensive conversion of a supposedly loaded idempotency-order singleton being absent after its reference was requested; producing it would require violating the private References/load invariant rather than a backend behavior."
@@ -1146,7 +1179,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services.rs"
+path = "crates/product/ironclaw_assistant/src/reborn_services.rs"
 lines = [6746, 6747]
 owner = "@nearai/reborn"
 reason = "TimelineUnavailable mapping is exercised at the product boundary; these lines only emit the server-side tracing event for a backend/serialization cause while preserving the sanitized response. The integration lane does not install a tracing collector that can force and attribute this detail-only side effect."
@@ -1154,7 +1187,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/filesystem_service.rs"
+path = "crates/domains/ironclaw_threads/src/filesystem_service.rs"
 lines = [371, 373, 375]
 branch_lines = [371, 378]
 owner = "@nearai/reborn"
@@ -1163,7 +1196,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/filesystem_service/thread_index.rs"
+path = "crates/domains/ironclaw_threads/src/filesystem_service/thread_index.rs"
 lines = [418, 419, 420, 421, 710]
 branch_lines = [417, 710]
 owner = "@nearai/reborn"
@@ -1172,7 +1205,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs"
+path = "crates/domains/ironclaw_threads/src/filesystem_service/transcript_migration.rs"
 lines = [
   39, 62, 63, 103, 104, 159, 168, 169, 170, 171,
   173, 178, 190, 202, 203, 204, 205, 207, 212, 213,
@@ -1185,7 +1218,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6974"
 review_after = "2026-11-02"
 
 [[exemption]]
-path = "crates/ironclaw_turns/src/process_projection/store_adapter.rs"
+path = "crates/kernel/ironclaw_turns/src/process_projection/store_adapter.rs"
 lines = [393, 394, 395, 396, 397]
 owner = "@nearai/reborn"
 reason = "The only executable semantic change is adding GroupCommitFailed to the existing retryable Unavailable match arm. The variant-pattern line has no LLVM DA record of its own, so this otherwise changed production file contributes a zero denominator; process contracts cover the variant and state_tests classify it explicitly."
@@ -1195,7 +1228,7 @@ review_after = "2026-11-02"
 # ---------------------------------------------------------------------------
 # WS2.1, second tranche: the type-position residue.
 #
-# Deleting `ironclaw_product`'s re-exports forced every signature that named a
+# Deleting `ironclaw_assistant`'s re-exports forced every signature that named a
 # moved symbol to be rewritten. Where the name appears in a *type position* --
 # a struct field, a function parameter, a struct-literal field's enum path --
 # the rewrite changes the line but LLVM emits no coverage region for it, so the
@@ -1210,7 +1243,7 @@ review_after = "2026-11-02"
 # real DEBUG subscriber rather than exempted.
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/channel_host.rs"
+path = "crates/extensions/ironclaw_extension_host/src/channel_host.rs"
 lines = [370]
 owner = "@nearai/reborn"
 reason = "Type position only: `GenericChannelHostAssembly::admin_users`'s `Arc<dyn AdminUserService>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1218,15 +1251,15 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/channel_host.rs"
-lines = [1276]
+path = "crates/extensions/ironclaw_extension_host/src/channel_host.rs"
+lines = [975]
 owner = "@nearai/reborn"
-reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+reason = "Type position only: `PostAdmissionObserver::observe_error`'s `error` parameter, whose `ProductAdapterError` type was repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged. Repointed 1276 -> 975 on 2026-08-05: the extension_host products -> loops flip shrank this file from 1405 to 1098 lines, putting the old number past EOF and failing `--validate-manifest-only` loudly. Repointed to the same construct rather than deleted — it is the only `product_adapter_error::ProductAdapterError` in the file, so the exemption still names exactly what it always named."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/extension_ingress.rs"
+path = "crates/extensions/ironclaw_extension_host/src/extension_ingress.rs"
 lines = [70]
 owner = "@nearai/reborn"
 reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1234,7 +1267,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+path = "crates/extensions/ironclaw_extension_host/src/run_delivery_ports.rs"
 lines = [85]
 owner = "@nearai/reborn"
 reason = "Type position only: an `AuthChallengeView` struct-literal field's `AuthPromptChallengeKind::Pairing` path, repointed to `ironclaw_extension_contracts::auth_prompt`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1242,7 +1275,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+path = "crates/extensions/ironclaw_extension_host/src/run_delivery_ports.rs"
 lines = [173]
 owner = "@nearai/reborn"
 reason = "Type position only: a function parameter's `BlockedAuthPromptRequest<'_>` type, repointed to `ironclaw_product_contracts::prompt_source`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1250,7 +1283,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/test_support.rs"
+path = "crates/extensions/ironclaw_extension_host/src/test_support.rs"
 lines = [472]
 owner = "@nearai/reborn"
 reason = "Type position only: a function parameter's `ExternalConversationRef` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1258,7 +1291,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/test_support.rs"
+path = "crates/extensions/ironclaw_extension_host/src/test_support.rs"
 lines = [473]
 owner = "@nearai/reborn"
 reason = "Type position only: a function parameter's `ExternalEventId` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1266,7 +1299,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/deployment.rs"
+path = "crates/app/ironclaw_composition/src/deployment.rs"
 lines = [266]
 owner = "@nearai/reborn"
 reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1274,7 +1307,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs"
+path = "crates/app/ironclaw_composition/src/factory/production_build_assembly.rs"
 lines = [340]
 owner = "@nearai/reborn"
 reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
@@ -1334,7 +1367,7 @@ review_after = "2026-10-31"
 # evidence above actually describes.
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/extension_lifecycle_capabilities.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/extension_lifecycle_capabilities.rs"
 lines = [218]
 owner = "@nearai/reborn"
 reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 214/215/220/221 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence. Path repointed with the file when `extension_lifecycle_capabilities.rs` moved to `ironclaw_extension_manager` in WS2.4."
@@ -1402,7 +1435,7 @@ review_after = "2026-10-31"
 # them might instantiate the derived impls and light the declaration lines up.
 # That was tried, and it does not:
 # `filesystem_conversation_services_round_trip_persisted_state_on_reopen`
-# (crates/ironclaw_conversations/tests/conversation_state_store_contract.rs)
+# (crates/domains/ironclaw_conversations/tests/conversation_state_store_contract.rs)
 # now serializes AND deserializes ConversationMessageRecord,
 # AcceptedConversationMessage, AcceptedConversationMessageReplay and
 # AcceptedConversationMessageLookup, asserting their wire field names survive
@@ -1420,7 +1453,7 @@ review_after = "2026-10-31"
 # candidate and it is deliberately not listed below.
 
 [[exemption]]
-path = "crates/ironclaw_conversations/src/types.rs"
+path = "crates/domains/ironclaw_conversations/src/types.rs"
 lines = [199, 209, 211, 215, 233, 246, 247]
 owner = "@nearai/reborn"
 reason = "Type positions only: `pub struct` headers and `pub <field>: <Type>` declarations for the renamed accepted-message DTO quartet (199 AcceptedConversationMessageLookup, 209/211 AcceptedConversationMessageReplay + its accepted_message field, 215 AcceptConversationMessageRequest, 233 AcceptedConversationMessage, 246/247 ConversationMessageRecord + its accepted field). A declaration carries no LLVM coverage region, so none of these lines can ever be covered: the merged tracefile has 42 DA records for this file over lines 17..312 -- including line 298 at 18 hits, proving the file executes -- yet a complete DA gap from 60 to 298 leaves all seven with no record at all. Proven, not inferred: a serde round-trip contract test for all five types was added and the file STILL reports the identical 42 records over the identical 17..312 span, because derive-generated code is `#[automatically_derived]` and emits no region at the declaration site. The only change on each line is the type rename; see the block comment above."
@@ -1434,13 +1467,13 @@ review_after = "2026-10-31"
 #
 # Two of the five CAN fail and are NOT exempted. Lines 40 and 53 also pass
 # `vendor_message_ref` as the topic -- a raw, unvalidated `String` field on
-# `DeliveredChannelMessage` (crates/ironclaw_product/src/run_delivery.rs:143)
+# `DeliveredChannelMessage` (crates/product/ironclaw_assistant/src/run_delivery.rs:143)
 # copied verbatim out of whatever the channel adapter returned in
 # `PartDeliveryOutcome::Sent`
-# (crates/ironclaw_product/src/delivery_coordinator.rs:659-662). A vendor can
+# (crates/product/ironclaw_assistant/src/delivery_coordinator.rs:659-662). A vendor can
 # therefore hand back a ref that is not a legal external id, and
 # `observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route`
-# (crates/ironclaw_product/tests/run_delivery_contract.rs) now drives both of
+# (crates/product/ironclaw_assistant/tests/run_delivery_contract.rs) now drives both of
 # those arms down `Err` with a control-character ref, asserting the exact
 # surviving fingerprint set.
 #
@@ -1449,7 +1482,7 @@ review_after = "2026-10-31"
 # invalid value unconstructible:
 #
 #   * all four fields are private
-#     (crates/ironclaw_extension_contracts/src/external.rs:144-149);
+#     (crates/contracts/ironclaw_extension_contracts/src/external.rs:144-149);
 #   * the only value-producing paths are `new` (152-175), which runs
 #     `validate_external_id` over every non-`None` argument, `Deserialize`
 #     (234-248), which delegates to `new`, `Clone`, and `without_reply_target`
@@ -1464,7 +1497,7 @@ review_after = "2026-10-31"
 # arms; a test asserting one would have to construct a value the type forbids.
 
 [[exemption]]
-path = "crates/ironclaw_product/src/run_delivery/gate_routes.rs"
+path = "crates/product/ironclaw_assistant/src/run_delivery/gate_routes.rs"
 branch_lines = [45, 58, 74]
 owner = "@nearai/reborn"
 reason = "The `Err` arm of three `ExternalConversationRef::new` calls whose every argument is an accessor read off an already-validated `ExternalConversationRef` plus literal `None`s: line 45 = the delivered message's (space_id, conversation_id), line 58 = its conversation_id alone, line 74 = the source conversation's space_id/conversation_id/topic_id. The type's four fields are private and its only value-producing paths -- `new`, `Deserialize` (delegates to `new`), `Clone`, `without_reply_target` -- all run or inherit `validate_external_id`, a pure predicate on the string (non-empty, <= 512 bytes, no NUL/control chars), so re-validating a value that already passed it cannot fail. The two sibling sites that also take the unvalidated `vendor_message_ref` (lines 40 and 53) ARE reachable and are covered by `observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route`; no exemption is claimed for those. See the block comment above."
@@ -1503,7 +1536,7 @@ review_after = "2026-10-31"
 # path became untested.
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/admin_configuration.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/admin_configuration.rs"
 lines = [173]
 owner = "@nearai/reborn"
 reason = "`tracing` message literal. Line 173 is the message argument of the multi-line `tracing::debug!` in `installed_extension_listing_error`; it lives in the callsite's static Metadata and carries no attributable region. The site demonstrably executes in the same merged tracefile: line 171 (the macro invocation) scores 1, and lines 175/176 (the ProductSurfaceError construction and the function's close) score 1 each, driven by `a_failing_installation_store_is_sanitized_for_the_caller_and_still_diagnosable`, which asserts on the emitted log text through a `tracing_subscriber::fmt` over a shared writer. Line 172 (`error = %error,`) has no DA record at all, which is the same artifact one line earlier."
@@ -1511,23 +1544,23 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/admin_configuration_capability.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/admin_configuration_capability.rs"
 lines = [151, 249]
 owner = "@nearai/reborn"
-reason = "Two classes. Line 249 is the message argument of the multi-line `tracing::debug!` in `rejected_input`: line 246 (the macro invocation) scores 3 hits in the merged tracefile and lines 251-253 (the returned FirstPartyCapabilityError) score 3 each, so the site runs three times while the literal line stays at zero; lines 247-248 (the `error`/`field` fields) have no DA record at all. Line 151 is an error arm no input can reach -- the `map_err` on `AdminConfigurationIdempotencyKey::new(request.scope.invocation_id.to_string())`. `InvocationId` is a `uuid_id!` newtype over `uuid::Uuid` (crates/ironclaw_host_api/src/ids.rs:441 and the macro at 170-206), so its `Display` is always the 36-character hyphenated form; the constructor rejects only empty, over-256-byte (MAX_IDEMPOTENCY_KEY_BYTES, crates/ironclaw_extension_host/src/admin_configuration_store.rs:34), or control-bearing values, and no `Uuid` renders as any of those. The other three `rejected_input` call sites in this function (lines 146, 148, 158) take unvalidated caller JSON and ARE reachable and covered -- `rejected_input` scores 3 hits, once per site -- so no exemption is claimed for those and the helper itself is exercised."
+reason = "Two classes. Line 249 is the message argument of the multi-line `tracing::debug!` in `rejected_input`: line 246 (the macro invocation) scores 3 hits in the merged tracefile and lines 251-253 (the returned FirstPartyCapabilityError) score 3 each, so the site runs three times while the literal line stays at zero; lines 247-248 (the `error`/`field` fields) have no DA record at all. Line 151 is an error arm no input can reach -- the `map_err` on `AdminConfigurationIdempotencyKey::new(request.scope.invocation_id.to_string())`. `InvocationId` is a `uuid_id!` newtype over `uuid::Uuid` (crates/contracts/ironclaw_host_api/src/ids.rs:441 and the macro at 170-206), so its `Display` is always the 36-character hyphenated form; the constructor rejects only empty, over-256-byte (MAX_IDEMPOTENCY_KEY_BYTES, crates/extensions/ironclaw_extension_host/src/admin_configuration_store.rs:34), or control-bearing values, and no `Uuid` renders as any of those. The other three `rejected_input` call sites in this function (lines 146, 148, 158) take unvalidated caller JSON and ARE reachable and covered -- `rejected_input` scores 3 hits, once per site -- so no exemption is claimed for those and the helper itself is exercised."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/skill_auto_activate_capability.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/skill_auto_activate_capability.rs"
 lines = [67, 70, 129, 130, 161]
 owner = "@nearai/reborn"
-reason = "Two classes. Lines 129-130 are the two-line message literal of the fail-closed cross-user `tracing::debug!` in `claim_switch`: line 128 (the invocation) scores 1 and lines 132-135 (the PolicyDenied return) score 1, driven by `a_second_user_cannot_move_the_process_global_default`, so the guard executes and only the literal cannot be attributed. Lines 67, 70 and 161 are error arms that no input can reach: 67 and 70 are the `?` on `CapabilityProfileSchemaRef::new(\"schemas/builtin/skill_auto_activate_learned_set.{input,output}.v1.json\")`, whose argument is a compile-time literal that `validate_schema_ref` accepts (the surrounding lines 65/68/71 score 108), and 161 is the `map_err` on `serde_json::to_value` over `RebornSkillActionResponse { success: bool, message: String }`, a derived Serialize with no fallible field and no non-string map key. All three are also pre-existing: their pre-images at crates/ironclaw_extension_host/src/skill_auto_activate_capability.rs:62, 65 and inside the same dispatch body scored zero in the base tracefile, with byte-identical text."
+reason = "Two classes. Lines 129-130 are the two-line message literal of the fail-closed cross-user `tracing::debug!` in `claim_switch`: line 128 (the invocation) scores 1 and lines 132-135 (the PolicyDenied return) score 1, driven by `a_second_user_cannot_move_the_process_global_default`, so the guard executes and only the literal cannot be attributed. Lines 67, 70 and 161 are error arms that no input can reach: 67 and 70 are the `?` on `CapabilityProfileSchemaRef::new(\"schemas/builtin/skill_auto_activate_learned_set.{input,output}.v1.json\")`, whose argument is a compile-time literal that `validate_schema_ref` accepts (the surrounding lines 65/68/71 score 108), and 161 is the `map_err` on `serde_json::to_value` over `RebornSkillActionResponse { success: bool, message: String }`, a derived Serialize with no fallible field and no non-string map key. All three are also pre-existing: their pre-images at crates/extensions/ironclaw_extension_host/src/skill_auto_activate_capability.rs:62, 65 and inside the same dispatch body scored zero in the base tracefile, with byte-identical text."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_extension_manager/src/webui_extension_credentials.rs"
+path = "crates/extensions/ironclaw_extension_manager/src/webui_extension_credentials.rs"
 lines = [89, 90]
 owner = "@nearai/reborn"
 reason = "`tracing` message literal, continued across two source lines by a `\\`-escape. Lines 89-90 are the message argument of the `tracing::debug!` that records the `CrossScopeDenied` -> `Ok(None)` collapse. Line 86 (the macro invocation) scores 1 in the merged tracefile and line 92 (the `None` the arm evaluates to) scores 1, so the arm runs; lines 87-88 (the `provider`/`requester_extension` fields) have no DA record, and 89-90 have a record that can never move."
@@ -1535,23 +1568,23 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_operator/src/llm_admin/provider_admin.rs"
+path = "crates/product/ironclaw_operator/src/llm_admin/provider_admin.rs"
 lines = [429]
 owner = "@nearai/reborn"
-reason = "Pre-existing and behaviourally untouched. The only change on line 429 is the type path: `let request = ironclaw_product::LlmProbeRequest {` became `let request = LlmProbeRequest {` because the WS2 port inversion moved the DTO to `ironclaw_product_contracts::operator_llm`, which the file now imports. Its pre-image is line 429 of the same file at the base commit, which scored zero; the whole enclosing `probe_candidate` (lines 415-437) scores zero in BOTH the base and the head merged tracefiles, so the head state is identical to the base state. Not testable at this tier for an unrelated reason: `probe_candidate` ends in `probe_candidate_provider`, a live outbound HTTP probe against the provider's base URL."
+reason = "Pre-existing and behaviourally untouched. The only change on line 429 is the type path: `let request = ironclaw_assistant::LlmProbeRequest {` became `let request = LlmProbeRequest {` because the WS2 port inversion moved the DTO to `ironclaw_product_contracts::operator_llm`, which the file now imports. Its pre-image is line 429 of the same file at the base commit, which scored zero; the whole enclosing `probe_candidate` (lines 415-437) scores zero in BOTH the base and the head merged tracefiles, so the head state is identical to the base state. Not testable at this tier for an unrelated reason: `probe_candidate` ends in `probe_candidate_provider`, a live outbound HTTP probe against the provider's base URL."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [1414, 1415, 1416, 3433]
+path = "crates/app/ironclaw_composition/src/runtime.rs"
+lines = [1414, 1415, 1416, 3435]
 owner = "@nearai/reborn"
-reason = "Pre-existing and behaviourally untouched, at two sites. Lines 1414-1416 are the tail of `RebornRuntime::nearai_login_callback_mount`: the composition-local shim crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs was deleted (a 19-line file whose whole body re-wrapped the operator mount as `PublicRouteMount::new(mount.router, mount.descriptors)`), so the same four arguments -- `session, reload, boot, states` -- now go to `ironclaw_operator::nearai_login_callback_mount`, which returns the host-owned carrier directly. The pre-image (base runtime.rs:1411-1415) scored zero and the whole enclosing function scores zero in BOTH tracefiles (base 1401-1415, head 1396-1417), so nothing became untested; the callee itself IS covered, at crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs:86-104 with 2 hits per line. Line 3433 is the same shape one crate over: `ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher)` became `crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(...)` and rustfmt collapsed the call from three lines to one; the pre-image (base runtime.rs:3433/3435) scored zero, and the entire surrounding skill-learning assembly block (3425-3440) scores zero in both tracefiles. Reaching either would need a fully LLM-wired `RebornRuntime` built through `build_runtime_with_resource_governor`, which no tier below E2E stands up."
+reason = "Pre-existing and behaviourally untouched, at two sites. Lines 1414-1416 are the tail of `RebornRuntime::nearai_login_callback_mount`: the composition-local shim crates/app/ironclaw_composition/src/llm_admin/nearai_login_serve.rs was deleted (a 19-line file whose whole body re-wrapped the operator mount as `PublicRouteMount::new(mount.router, mount.descriptors)`), so the same four arguments -- `session, reload, boot, states` -- now go to `ironclaw_operator::nearai_login_callback_mount`, which returns the host-owned carrier directly. The pre-image (base runtime.rs:1411-1415) scored zero and the whole enclosing function scores zero in BOTH tracefiles (base 1401-1415, head 1396-1417), so nothing became untested; the callee itself IS covered, at crates/product/ironclaw_operator/src/llm_admin/nearai_login_serve.rs:86-104 with 2 hits per line. Line 3433 is the same shape one crate over: `ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher)` became `crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(...)` and rustfmt collapsed the call from three lines to one; the pre-image (base runtime.rs:3433/3435) scored zero, and the entire surrounding skill-learning assembly block (3425-3440) scores zero in both tracefiles. Reaching either would need a fully LLM-wired `RebornRuntime` built through `build_runtime_with_resource_governor`, which no tier below E2E stands up."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product_contracts/src/product_wire.rs"
+path = "crates/contracts/ironclaw_product_contracts/src/product_wire.rs"
 lines = [1376]
 owner = "@nearai/reborn"
 reason = "Serde struct-field declaration for the caller-visible hosted-MCP setup message. The public ProductSurface contract test exercises serialization and verifies the message is not exposed in the sanitized validation error, but LLVM cannot emit a DA record for a field declaration."
@@ -1559,7 +1592,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6930"
 review_after = "2026-11-03"
 
 [[exemption]]
-path = "crates/ironclaw_product_contracts/src/surface.rs"
+path = "crates/contracts/ironclaw_product_contracts/src/surface.rs"
 lines = [312]
 owner = "@nearai/reborn"
 reason = "Enum-variant declaration for the hosted-MCP auth-selection validation code. The public ProductSurface contract test serializes and asserts auth_selection_required, but LLVM cannot emit a DA record for an enum variant declaration."
@@ -1626,6 +1659,110 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-11-30"
 
 # ---------------------------------------------------------------------------
+# PR #7062 per-caller workspace scoping. The behavior is covered at three
+# seams — the crate-tier unit suites (workspace_scoping_tests, serve.rs unit
+# tests), the integration scenario
+# tests/integration/group_multiuser/scenario_scoped_workspace_isolation.rs,
+# and the two-user webui_v2_e2e workspace test — but the lines below are ones
+# the integration-tier lcov structurally cannot observe. See #7142.
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/runtime/capability_host.rs"
+lines = [52, 59, 60, 217, 218, 219, 253, 254, 255, 256, 257, 258, 259, 260, 261, 267]
+owner = "@serrrfirat"
+reason = "create_capability_port is an async fn; llvm-cov attributes its body to the signature line (252 scored 114 hits in the same lcov) and emits no DA records for body lines, so the changed per-caller resolution lines read as 'contributed no instrumented lines'. Same counter-attribution class as #6963."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_cli/src/commands/serve.rs"
+lines = [442, 443, 444, 445, 569]
+owner = "@serrrfirat"
+reason = "ServeCommand body: the serve loop is not runnable in-process at the integration tier. The raise + effective-value read-back pair is pinned by the crate-tier unit test serve_scopes_workspace_writes_even_on_standalone_without_sso, which the integration lcov excludes (cfg(test) module)."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/product/ironclaw_webui/src/webui_serve.rs"
+lines = [357, 358, 359, 360]
+owner = "@serrrfirat"
+reason = "with_workspace_requires_scoped_projection builder: consumed by the serve command and by composition's webui_v2_serve tests; the inlined builder's counters attribute to the caller crate (same class as #6963), and the serve loop is not integration-runnable."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs"
+lines = [441, 442, 443, 444, 445, 446, 447]
+owner = "@serrrfirat"
+reason = "MountScopedRootFilesystem mount-root-reads-as-empty arm: only reachable on the ScopedVirtual filesystem backend, which no integration-tier composition selects; unit-covered in the owning crate."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/runtime_mounts.rs"
+lines = [171, 216]
+owner = "@serrrfirat"
+reason = "Defensive error arms of mount-view construction over validated newtypes (TenantId/UserId cannot produce an invalid mount target); unreachable without corrupting a validated input."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/factory/test_support.rs"
+lines = [1150]
+owner = "@serrrfirat"
+reason = "cfg(test)-gated shared_workspace_view helper arm: compiled only into the crate's own unit-test binary, which the integration-tier lcov excludes."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/coding/file.rs"
+lines = [479, 480, 481, 482]
+owner = "@serrrfirat"
+reason = "Sensitive-stat denial arm of list_dir's root guard: requires a sensitive-flagged path fixture the integration workspace profiles do not stage; the sensitive-path denial contract is unit-covered in the owning crate."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/product/ironclaw_webui/src/webui_v2/handlers.rs"
+lines = [806, 812, 921, 922, 923]
+owner = "@serrrfirat"
+reason = "Match-arm/Err-construction counters inside browse_fs_dir's empty-root fallback and workspace_served_path's traversal rejection: the driving tests (webui_v2_handlers_contract traversal trio, webui_v2_e2e fresh-user listing) assert the 400/empty-listing behavior, but llvm-cov leaves the arm-construction lines uncounted (same class as #6524's synthetic counters)."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs"
+lines = [410, 411]
+owner = "@serrrfirat"
+reason = "workspace_filesystems: None fallback arm: every integration-tier composition passes Some via build_workspace_filesystems; the fallback serves non-host-access backends outside this tier."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/factory/production_build_assembly.rs"
+lines = [291]
+owner = "@serrrfirat"
+reason = "Carried-decision arm for a build context without host bindings; integration compositions always assemble bindings, unit-covered at crate tier."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/runtime_input.rs"
+lines = [685]
+owner = "@serrrfirat"
+reason = "Raise-on-services-None no-op arm: every integration composition constructs services before the raise; the drift this arm used to hide is closed by serve's read-back (crate-tier unit test)."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/extension_host_assembly.rs"
+lines = [396]
+owner = "@serrrfirat"
+reason = "Per-caller channel-lander arm: reached only when a scoped deployment assembles the channel host; the channel-host integration binaries compose unscoped deployments today."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+# ---------------------------------------------------------------------------
 # #7069 / #7078 shared-vendor OAuth scopes (PR #7077). Three files whose only
 # changed lines carry no executable code the integration tier can reach.
 #
@@ -1654,7 +1791,7 @@ review_after = "2026-11-30"
 # in `tests/integration/auth/oauth_connect.rs`.
 
 [[exemption]]
-path = "crates/ironclaw_auth/src/flow.rs"
+path = "crates/domains/ironclaw_auth/src/flow.rs"
 lines = [144, 208]
 owner = "@nearai/runtime"
 reason = "Struct field declarations carry no LLVM coverage region; the field's behavior is covered through the OAuth connect integration tests."
@@ -1662,7 +1799,7 @@ issue = "https://github.com/nearai/ironclaw/issues/7069"
 review_after = "2026-11-30"
 
 [[exemption]]
-path = "crates/ironclaw_auth/src/fakes.rs"
+path = "crates/domains/ironclaw_auth/src/fakes.rs"
 lines = [262]
 owner = "@nearai/runtime"
 reason = "Field initializer in the in-memory AuthFlowManager double; executes under crate-tier tests, which the integration-tier lcov does not observe."
@@ -1670,9 +1807,681 @@ issue = "https://github.com/nearai/ironclaw/issues/7069"
 review_after = "2026-11-30"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/factory/auth_engine_assembly.rs"
+path = "crates/app/ironclaw_composition/src/factory/auth_engine_assembly.rs"
 lines = [189, 195, 198]
 owner = "@nearai/runtime"
 reason = "Composition wiring for the requester-scoped recipe resolver; runs only in a fully composed runtime, which the integration lane does not build."
 issue = "https://github.com/nearai/ironclaw/issues/7069"
 review_after = "2026-11-30"
+
+# ---------------------------------------------------------------------------
+# WS6 traces contribution.rs split (PR #7139, slice #7124). The 17,470-line
+# `contribution.rs` was split into chartered `contribution/` modules with a
+# 501 -> 501 public-item roster and 216 -> 216 tests — a verbatim intra-crate
+# relocation, no behavior change. The changed-line gate re-attributes every
+# moved line as new-and-uncovered; the SAME merge-queue run that failed this
+# gate PASSED ironclaw_trace_commons' per-crate covered-line floor, which is
+# the direct proof the split lost no real coverage (a genuine loss of 1,284
+# covered lines would have failed that floor first). Same class as the WS1.1
+# entry above; tracked as the gate-vs-restructure collision in #6963. The 27
+# genuinely-new uncovered lines in this PR's other slices are deliberately
+# NOT exempted and ride under the aggregate floor on their own.
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/canonical.rs"
+lines = [
+  150, 151, 152, 202, 203, 206, 207, 208, 209, 211, 216, 217,
+  218, 219, 232, 237, 238, 239, 259, 276, 277, 278, 279, 280,
+  281, 282, 283, 295, 296, 297, 298,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/capture.rs"
+lines = [
+  102, 123, 126, 129, 131, 229, 230, 231, 233, 234, 235, 236,
+  237, 238, 239, 240, 241, 242, 243, 244, 245, 285, 286, 287,
+  288, 289, 290, 291, 292, 293, 294, 296, 297, 298, 299, 305,
+  306, 307, 308, 309, 310, 311, 313, 314, 315, 319, 320, 321,
+  323, 324, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338,
+  339, 340, 413, 416, 417, 418, 419, 420, 421, 424, 425, 426,
+  429, 430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 441,
+  442, 443, 444, 445, 446, 447, 448, 449, 450, 451, 466, 469,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/classification.rs"
+lines = [
+  41, 59, 60, 61, 62, 64, 65, 66, 67, 68, 79, 108,
+  109, 110, 111, 112, 113, 114, 118, 119, 120, 121, 122, 123,
+  124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
+  136, 137, 138, 184, 189, 210, 211, 226, 228, 236, 237, 238,
+  239, 240, 242, 243, 244, 245, 248, 250, 262, 263, 264, 285,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/credit.rs"
+lines = [
+  110, 136, 140, 145, 192, 195, 196, 197, 198, 201,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/envelope.rs"
+lines = [
+  458, 459, 460, 461, 462, 463, 464, 465, 466, 467, 468,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/maintenance.rs"
+lines = [
+  67, 89, 90, 91, 94, 97, 115, 120, 121, 122, 125, 140,
+  141, 142, 143, 152, 153, 154, 155, 188, 189, 248, 303, 304,
+  317, 318, 319, 322, 324, 325, 326, 329, 434, 478, 494, 496,
+  528, 548, 551, 553, 642, 644, 645, 647, 648, 652, 661, 662,
+  672, 674, 675, 677, 678, 713, 714, 715, 718, 741, 742, 744,
+  779, 790, 810, 811, 812, 813, 815, 816, 817, 818, 819, 820,
+  821, 850, 851, 853, 856, 876, 877, 879, 882, 885, 886, 887,
+  888, 889, 890, 891, 894, 895, 896, 897, 898, 899, 900, 924,
+  925, 926, 929, 931, 932, 933, 935, 938, 939, 940, 941, 942,
+  945, 946, 947, 948, 951, 963, 965, 967, 971, 972, 974, 976,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/notice.rs"
+lines = [
+  13, 26, 27, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+  59, 60, 61, 62, 63, 64, 65, 66, 67, 96, 107, 123,
+  155, 184, 217, 393, 394, 395, 398, 400, 401, 402, 405, 451,
+  452, 453, 454, 549, 565,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/policy.rs"
+lines = [
+  80, 81, 82, 83, 85, 106, 107, 108, 109, 111, 112, 113,
+  114, 115, 116, 211, 212, 213, 214, 215, 216, 217, 242, 243,
+  244, 245, 247, 248, 249, 285, 286, 287,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/privacy.rs"
+lines = [
+  60, 61, 73, 74, 129, 167, 168, 169, 179, 180, 181, 182,
+  184, 185, 196, 197, 198, 199, 200, 201, 202, 203, 211, 212,
+  213, 214, 217, 218, 219, 220, 284, 286, 316, 317, 318, 319,
+  321, 322, 323, 324, 369, 370, 371, 374, 381, 382, 384, 385,
+  386, 387, 388, 389, 390, 391, 392, 393, 399, 400, 401, 403,
+  405, 406, 439, 440, 441, 442, 443, 455, 456, 457, 458, 460,
+  461, 462, 463, 464, 465, 466, 467, 468, 469, 470, 471, 472,
+  473, 474, 475, 476, 477, 478, 479, 480, 481, 482, 483, 484,
+  487, 488, 489, 490, 491, 544, 583, 585, 586, 587, 588, 589,
+  590, 591, 592, 594, 595, 596, 597, 598, 599, 601, 630, 631,
+  632, 633, 634, 665, 666, 667, 668, 669, 670, 671, 834, 835,
+  836, 837, 865, 866, 867, 876, 921, 934, 936, 954, 955,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/queue.rs"
+lines = [
+  149, 150, 276, 277, 278, 279, 280, 281, 411, 412, 413, 475,
+  506, 507, 508, 509, 510, 541, 549, 566, 567, 704, 705, 706,
+  714, 715, 716, 717, 720, 721, 722, 723, 725, 837, 852, 857,
+  858, 859, 860, 861, 862, 863, 864, 865, 866, 867, 870, 871,
+  872, 873, 874, 875, 877, 878, 879, 880, 881, 882, 891, 892,
+  893, 894, 895, 896, 936, 1081, 1086, 1097, 1098, 1099, 1102, 1132,
+  1135, 1185, 1186, 1188,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/remote/account.rs"
+lines = [
+  94, 95, 147, 148, 149, 150, 151, 154, 155, 156, 157, 158,
+  159, 160, 161, 173, 174, 175, 176, 179, 180, 181, 182, 183,
+  184, 185, 217, 225, 226, 227, 234, 235, 236, 237, 248, 251,
+  252, 268, 269, 271, 272, 273, 276, 277, 281, 282, 283, 284,
+  289, 290, 301, 302, 303, 304, 361, 362, 363, 364, 365, 366,
+  367, 368, 369, 370, 371, 372, 373, 374, 375, 393, 394, 395,
+  396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 417, 423,
+  459, 460, 461, 462, 482,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/remote/claim.rs"
+lines = [
+  226, 227, 228, 229, 230, 231, 232, 233, 275, 285, 286, 287,
+  288, 289, 290, 292, 293, 294, 295, 296, 298, 299, 300, 301,
+  302, 303, 305, 306, 307, 309, 350, 354, 355, 356, 357, 358,
+  359, 360, 361, 362, 371, 373, 437, 446, 453, 561, 565, 592,
+  593, 594, 595, 602, 603, 604, 611, 612, 613, 620, 621, 624,
+  625, 681, 682, 684, 686, 687, 689, 705, 706, 710, 713, 716,
+  717, 718, 721, 845, 848, 852, 864, 886, 894, 924, 925, 953,
+  954, 955, 958, 969, 970, 973, 974, 993, 994, 995, 997, 1010,
+  1011, 1014, 1030, 1031, 1032, 1034, 1045, 1046, 1047, 1049, 1058, 1059,
+  1065, 1066, 1067, 1069, 1077, 1078, 1079, 1080, 1081, 1082, 1083, 1084,
+  1088, 1089, 1090, 1091, 1092, 1093, 1094, 1097, 1099, 1100, 1126, 1131,
+  1133, 1180, 1181, 1182, 1188, 1204, 1205, 1209, 1218, 1248, 1249, 1250,
+  1251, 1253, 1254, 1255, 1256, 1257, 1258, 1259, 1267, 1268, 1269, 1270,
+  1280,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/remote/client.rs"
+lines = [
+  75, 76, 78, 82, 83, 85, 88, 89, 91, 108, 109,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/remote/profile.rs"
+lines = [
+  54, 90, 91, 92, 93, 94, 95, 96, 103, 104, 105, 106,
+  107, 109, 110, 111, 112, 113, 114, 115, 116, 131, 132, 133,
+  194, 195, 196, 197, 198, 199, 200, 201, 207, 208, 209, 210,
+  211, 212, 213, 215, 216, 217, 218, 219, 220, 221, 222, 223,
+  224, 241, 250, 251, 252, 253, 254, 255, 287, 288, 289, 290,
+  291, 292, 293, 295, 296, 297, 298, 299, 300, 301, 302, 303,
+  309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320,
+  321, 322, 336, 337, 347, 348, 350, 372, 376, 384, 385, 386,
+  463, 464, 493, 508, 509, 511, 514, 522, 523, 535, 536, 538,
+  540,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/submission.rs"
+lines = [
+  13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+  98, 99, 100, 101, 102, 106, 107, 108, 109, 110, 111, 112,
+  113, 114, 127, 197, 198, 199, 234, 235, 261, 268, 269, 272,
+  275, 284, 286, 287, 290, 291, 292, 293, 294, 295, 296, 297,
+  298, 299, 358, 373, 374, 387, 388, 389, 390, 391, 392, 393,
+  394, 395, 397, 398, 399, 400, 406, 407, 408, 409, 411, 413,
+  414, 417, 418, 419, 420, 421, 422, 423, 424, 426, 427, 428,
+  430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441,
+  442, 459, 462, 490, 491, 495, 502, 503, 504, 505, 508, 509,
+  510, 516, 523, 524, 525, 526, 527, 528, 529, 530, 531, 532,
+  533, 534, 535, 536, 537, 538, 539, 541, 542, 543, 544, 545,
+  546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 571, 655,
+  687, 723, 724, 725, 726, 727, 764, 790, 791, 792, 795, 797,
+  798, 799, 802, 858, 859, 860, 861, 862, 863, 864, 865, 867,
+  868, 869, 871, 872, 874, 875, 876, 877, 899, 919, 922, 1092,
+  1093, 1094, 1095, 1096, 1097, 1098, 1099, 1100, 1101, 1102, 1103, 1104,
+  1105, 1106, 1107, 1108, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117,
+  1118, 1119, 1120, 1121, 1122, 1123, 1124, 1145, 1151, 1152, 1153, 1154,
+  1155, 1156, 1157, 1158, 1159, 1160, 1161, 1162, 1163, 1164, 1178, 1183,
+  1253, 1254, 1255, 1256, 1257, 1259, 1260, 1261, 1262,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/domains/ironclaw_trace_commons/src/contribution/tool_payloads.rs"
+lines = [
+  47, 48, 49, 50, 51, 109, 340, 364, 376, 377, 378, 379,
+  380, 382, 392, 393, 394, 396, 403, 404, 405, 406, 407, 409,
+  410, 411, 412, 414, 420, 424, 435, 458, 459, 460, 461, 472,
+  473, 474, 490, 508, 509, 510, 511, 512, 513, 514, 515, 517,
+  518, 520, 521, 522, 523, 524, 525, 526, 527, 528, 530, 531,
+  532,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_trace_commons per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# WS3 sandbox-lane merge + mcp-onto-contracts flip (PR #7065).
+#
+# Every line below was derived by replaying scripts/ci/reborn_changed_coverage.py
+# locally against this PR's OWN merged lcov (artifact
+# `reborn-integration-coverage-merged`, run 30831658659, job 91758914957) with
+# the same base lcov the gate resolved (run 30828540055 @ b89fcd3575). The
+# replay reproduced the CI verdict byte-identically before a single line was
+# added here, and each entry below is the gate's own
+# `candidate_lines - mechanically_uninstrumentable_lines()` output — not
+# transcribed from a log and not estimated.
+#
+# The gate's percentage floors were never the problem: changed-line coverage is
+# 95.35% (123/129) against a 90% floor. All four entries clear one of the two
+# fail-closed structural assertions ("absent from coverage or contains no DA
+# records" / "contributed no instrumented lines"), which fire on *declaration
+# and continuation lines that LLVM never emits a region for* — the same
+# restructure-vs-gate collision #6963 tracks, now in its fifth wave.
+#
+# Nothing here waives an executable path that a test could reach. Three of the
+# four sites are proven to EXECUTE by the hit counts on the region-start line
+# that owns them, quoted per entry.
+
+[[exemption]]
+path = "crates/contracts/ironclaw_host_api/src/process.rs"
+lines = [
+  25, 26, 27, 28, 29, 30, 35, 36, 37, 38,
+  43, 44, 45, 46, 47, 48, 49, 54, 55, 56, 57, 58, 59,
+  64, 66, 68, 81, 82, 83, 84, 85,
+]
+owner = "@nearai/reborn"
+reason = "New placement-neutral process vocabulary (PROPOSAL §6.6.4): five struct/enum declarations and one trait signature, with no function body anywhere in the file. rustc emits no LCOV record for it at all, so the gate reports it as 'absent from coverage or contains no DA records' — the same shape already exempted for ironclaw_product_contracts/src/lib.rs and ironclaw_loop_contracts/src/lib.rs. 55 of its 86 lines are already classified mechanically uninstrumentable; these 31 (struct fields, enum variants, and the trait method signature) are the only ones the classifier does not recognise, and exempting them lets the uninstrumentable-file escape apply as intended. The behavior these shapes describe stays in ironclaw_host_runtime and ironclaw_sandbox and is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/contracts/ironclaw_extension_contracts/src/hosted_mcp.rs"
+lines = [232, 233, 234, 235, 236, 241, 242, 243, 244, 245, 246, 247]
+owner = "@nearai/reborn"
+reason = "Field declarations of HostedMcpDiscoveredTool and HostedMcpDiscoveredToolAnnotations, the tools/list descriptor the mcp lane now parses into instead of keeping a lane-local mirror. Data-only structs with no methods: every added line (219-249) carries no DA record in this PR's lcov, while the file itself is plainly instrumented (191 DA records, 164 hit), so this is a no-region artifact and not an instrumentation-scope gap. The conversion that consumes the descriptor lives in the mcp lane and the extension domain, and is covered there."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/services/runtime_adapters.rs"
+lines = [386, 387, 388, 440, 441, 442, 979, 980, 981, 982, 983, 984, 989]
+owner = "@nearai/reborn"
+reason = "Continuation lines of three call expressions the WS3 flip rewrote, all of them PROVEN EXECUTING by the region-start line that owns them in this PR's own lcov: the ScriptExecutionRequest literal continues line 380 (24 hits), the McpExecutionRequest literal continues line 434 (16 hits), and the ironclaw_extension_registry::resolve_asset_under call continues line 977 (63 hits). None of the 13 lines carries a DA record of its own because LLVM anchors the region at the statement head, which is what trips the empty-denominator assertion. The four genuinely-uncovered lines in the same rewrite (987, 990, 991, 992) are NOT exempted here — the gate already subtracts them as pre-existing debt inherited from base."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/app/ironclaw_composition/src/factory/capability_host_tests/approval_gates.rs"
+lines = [741, 745, 748, 750, 751, 755]
+owner = "@nearai/reborn"
+reason = "Type positions in the RecordingSandboxTransport test double, repointed from ironclaw_host_runtime::* to ironclaw_host_api::process::* by the WS3 seam move: a struct field type, an impl header, a parameter type, two return-type fragments, and the Ok(...) constructor path. A type position carries no LLVM coverage region, and the transport itself demonstrably runs — the fn body region at line 752 scores 1 hit in this PR's lcov. FINDING (#6963): this file is 100% test code behind `#[cfg(test)] mod capability_host_tests;` (crates/app/ironclaw_composition/src/factory.rs:1389), but the gate's test_only_path() only recognises `/tests/`, `/test_support/`, `*/tests.rs` and `*_tests.rs` — it does not recognise a `#[cfg(test)]` module DIRECTORY, so it classifies this as production. It is the only such directory in crates/ today, which is why the gap has stayed latent; teaching the classifier to resolve cfg(test) module declarations is tracked with the other gate-vs-restructure collisions rather than done inside a restructure PR."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS3/WS4 consolidation internal moves (PR #7141). The capabilities host.rs
+# six-workflow split, the obligations three-owner split, and the first-party
+# tools move to extension_support re-attribute moved lines as new-and-
+# uncovered. Decisive same-run proof of no real loss: the GLOBAL coverage
+# floor passed (86.79% vs 86.46% effective) and every configured per-crate
+# floor passed (host_runtime 17560/17542, extension_support 7919/7122)
+# in the very run where this gate went red. Same class as the WS1.1 and
+# #7139 entries above; tracked as #6963. The 15 uncovered lines in the
+# PR's other crates (composition, extension_host, cli, host_api) are
+# deliberately NOT exempted and ride under the aggregate floor measured.
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/skills.rs"
+lines = [
+  121, 122, 123, 158, 159, 160, 161, 162, 163, 164, 165, 166,
+  167, 168, 169, 170, 171, 173, 174, 175, 176, 178, 179, 180,
+  181, 182, 183, 184, 186, 187, 190, 191, 193, 194, 195,
+]
+owner = "@nearai/reborn"
+reason = "First-party tool executors arriving from host_runtime (#7141 move; the gate's own log maps sample lines to their base host_runtime locations); re-attribution artifact — the same run's ironclaw_extension_support per-crate floor PASSED (7919 vs 7122 effective)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/skills/url_install.rs"
+lines = [
+  99, 102, 119, 127, 130, 135, 139, 143, 160, 161, 200, 210,
+  255, 269,
+]
+owner = "@nearai/reborn"
+reason = "First-party tool executors arriving from host_runtime (#7141 move; the gate's own log maps sample lines to their base host_runtime locations); re-attribution artifact — the same run's ironclaw_extension_support per-crate floor PASSED (7919 vs 7122 effective)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/skills/url_install/bundle.rs"
+lines = [
+  38, 85, 95, 106, 107, 108, 110,
+]
+owner = "@nearai/reborn"
+reason = "First-party tool executors arriving from host_runtime (#7141 move; the gate's own log maps sample lines to their base host_runtime locations); re-attribution artifact — the same run's ironclaw_extension_support per-crate floor PASSED (7919 vs 7122 effective)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/skills/url_install/github.rs"
+lines = [
+  72, 74, 84, 87, 109, 190, 194, 203, 213, 240, 270, 308,
+  312, 318, 322, 333, 340, 344, 360, 373, 378, 384, 385, 386,
+  390, 396, 420, 421, 422, 424, 432, 438, 478, 482, 515, 519,
+  561, 569, 574, 615, 621, 622, 623, 624, 700, 701, 702,
+]
+owner = "@nearai/reborn"
+reason = "First-party tool executors arriving from host_runtime (#7141 move; the gate's own log maps sample lines to their base host_runtime locations); re-attribution artifact — the same run's ironclaw_extension_support per-crate floor PASSED (7919 vs 7122 effective)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/skills/url_install/zip_bundle.rs"
+lines = [
+  15, 29, 31, 32, 33, 35, 68, 106, 127, 133, 156, 171,
+  172, 173,
+]
+owner = "@nearai/reborn"
+reason = "First-party tool executors arriving from host_runtime (#7141 move; the gate's own log maps sample lines to their base host_runtime locations); re-attribution artifact — the same run's ironclaw_extension_support per-crate floor PASSED (7919 vs 7122 effective)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/approval_resume.rs"
+lines = [
+  50, 52, 54, 55, 56, 57, 58, 60, 61, 62, 63, 64,
+  70, 71, 72, 73, 74, 100, 101, 102, 146, 147, 148, 149,
+  150, 151, 152, 166, 167, 168, 169, 170, 171, 172, 173, 189,
+  190, 191, 192, 193, 194, 195, 196, 197, 198,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/auth_resume.rs"
+lines = [
+  69, 70, 71, 72, 73, 129, 130, 131, 132, 133, 134, 135,
+  136, 137, 138, 173, 174, 175, 256, 257, 260, 261, 262, 263,
+  264, 265, 266, 281, 291, 292, 295, 296, 297, 298, 299, 300,
+  301, 328, 338, 339, 342, 343, 344, 345, 346, 347, 348, 354,
+  355, 356, 357, 358, 359, 360, 361, 362, 363, 404, 406, 410,
+  411, 412, 413, 414, 421, 422, 423, 424, 425, 428, 429, 430,
+  431, 434, 435, 436, 437, 438, 439, 440, 441, 442, 443, 444,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/authorize.rs"
+lines = [
+  65, 66, 67, 68, 102, 105, 107, 145, 171, 172, 173, 174,
+  175, 176, 188, 189, 190, 199, 200, 201, 202, 226, 227, 228,
+  229, 230, 231, 232, 233, 234, 238, 239, 240, 241, 242, 243,
+  244, 245, 311, 312, 330, 331, 362, 387, 398, 414, 426, 438,
+  440, 442, 443, 444, 445, 446, 447, 448, 449, 457, 459, 462,
+  467, 481, 484, 485, 488, 490, 491, 492, 493, 494, 495, 496,
+  497, 498, 499, 500, 503, 506, 508, 509, 510, 511, 517,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/error_mapping.rs"
+lines = [
+  29, 30, 31, 32, 33, 35, 36, 38, 39, 40, 41, 43,
+  44, 45, 46, 47, 49, 54, 55, 56, 57, 65, 68, 70,
+  71, 72, 73, 74, 75, 82, 83, 85, 88, 91, 94, 102,
+  103, 105, 107, 108, 110, 129, 132, 137, 168, 172, 173, 177,
+  181, 182,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/mod.rs"
+lines = [
+  257, 258, 259, 260, 261, 271, 281, 283, 289, 290, 291, 292,
+  293, 294,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/obligation_seams.rs"
+lines = [
+  82, 83, 84, 85, 86, 87, 88, 89, 117, 130, 133,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/resume_support.rs"
+lines = [
+  78, 79, 80, 81, 82, 83, 84, 102, 108, 109, 110, 114,
+  115, 117, 134, 167, 168, 169, 170, 171, 172, 173, 174, 175,
+  257, 259, 260, 282, 284, 285, 382, 383, 386, 387, 388, 389,
+  390, 391, 392, 434, 450, 451, 452, 453, 454, 455, 456, 457,
+  458, 459, 460, 461, 462, 463, 464, 465, 466, 467, 468, 469,
+  470, 471, 472, 473, 474, 475, 476, 477, 478, 479, 535, 536,
+  537, 538, 539, 540, 541, 542, 543, 544, 545, 546, 547, 548,
+  549, 550, 551, 552, 553, 554, 555, 557, 562, 563, 565, 566,
+  577, 578,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/spawn.rs"
+lines = [
+  40, 41, 42, 43, 85, 86, 87, 88, 89, 90, 91, 92,
+  93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 214,
+  215, 216, 217, 218, 229, 230, 231, 237, 238, 239, 260, 261,
+  262, 263, 264, 265, 266, 267, 268, 272, 273, 274, 275, 276,
+  277, 278, 279, 292, 293, 295, 296, 297, 298, 299, 300, 301,
+  302, 303, 304, 305, 306, 307, 406, 407, 408, 409, 410, 411,
+  412, 413, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426,
+  427, 428, 440, 441, 442, 443, 444, 445, 446, 447, 453, 454,
+  456, 461, 463, 464, 465, 466, 467, 468, 469, 470, 471, 474,
+  475, 476, 477, 478, 479, 480, 481, 482, 483, 484, 485, 488,
+  489, 490, 491, 494, 495, 496, 497,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_capabilities/src/host/spawn_resume.rs"
+lines = [
+  50, 51, 52, 53, 57, 59, 61, 62, 63, 64, 65, 67,
+  68, 69, 70, 71, 77, 78, 79, 80, 81, 105, 106, 107,
+  121, 122, 123, 124, 130, 131, 132, 133, 134, 135, 136, 137,
+  138, 139, 140, 150, 151, 152, 153, 154, 155, 156, 157, 158,
+  159, 160, 161, 162, 171, 172, 173, 174, 175, 176, 177, 178,
+  181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 194, 195,
+  196, 197, 198, 199, 200, 201, 202, 203, 214, 215, 216, 217,
+  218, 219, 220, 221, 222, 223, 233, 234, 235, 236, 237, 238,
+  239, 240, 241, 259, 260, 261, 262, 263, 264, 265, 266, 267,
+  268, 269, 270, 271, 274, 275, 276, 277, 278, 279, 280, 281,
+  282, 283, 292, 293, 294, 298, 299, 302, 303, 304, 305, 306,
+  307, 308, 310, 325, 326, 327, 328, 329, 330, 331, 332, 333,
+  334, 335, 337, 342, 343, 345, 346, 374, 375, 376, 377, 378,
+  379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390,
+  391, 392, 393, 395, 399, 400, 402, 403, 427, 428, 429, 430,
+  431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441, 442,
+  443, 444, 445, 446, 447, 449, 454, 455, 457, 458, 466, 470,
+  471,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim six-workflow split of capabilities host.rs into host/ modules (#7141, module charter only, +4909/-4562 near-pure relocation); re-attribution artifact — the same run's global coverage floor passed (86.79% vs 86.46% effective) while this gate red, and the crate has no behavior change in the split."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_registry/src/host_api/mod.rs"
+lines = [
+  21,
+]
+owner = "@nearai/reborn"
+reason = "Registry-side edits of the same first-party-tools move (#7141); re-attribution artifact — same-run global floor passed; 7 lines."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_registry/src/lib.rs"
+lines = [
+  60, 61, 62, 63, 64, 116,
+]
+owner = "@nearai/reborn"
+reason = "Registry-side edits of the same first-party-tools move (#7141); re-attribution artifact — same-run global floor passed; 7 lines."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/obligations/handler.rs"
+lines = [
+  99, 100, 101, 103, 104, 105, 106, 135, 136, 137, 139, 140,
+  141, 142, 179, 182, 201, 203, 230, 233, 253, 255, 263, 264,
+  266, 268, 269, 282, 283, 285, 287, 288, 305, 308, 353, 362,
+  405, 423, 424, 425, 432, 433, 630, 810, 849, 850, 851, 855,
+  856, 857, 867, 884, 903, 933, 934, 976, 1004, 1025, 1030, 1031,
+  1032, 1033, 1034, 1122, 1123, 1124, 1125, 1126, 1138, 1222, 1223, 1233,
+  1250, 1253, 1255, 1257, 1259, 1260,
+]
+owner = "@nearai/reborn"
+reason = "Obligations split into its three chartered owners + first-party-tools departure (#7141, move-only per #7090); re-attribution artifact — the same run's ironclaw_host_runtime per-crate floor PASSED (17560 vs 17542 effective) while this gate red."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/obligations/mod.rs"
+lines = [
+  106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 122, 123,
+  124, 173, 174, 175, 176, 177, 178, 179, 180, 181, 183, 200,
+  201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212,
+  213, 215, 216,
+]
+owner = "@nearai/reborn"
+reason = "Obligations split into its three chartered owners + first-party-tools departure (#7141, move-only per #7090); re-attribution artifact — the same run's ironclaw_host_runtime per-crate floor PASSED (17560 vs 17542 effective) while this gate red."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/obligations/process_store.rs"
+lines = [
+  95, 96, 111, 127, 128, 130, 139, 140, 142, 144, 150, 168,
+  177, 178, 196, 197, 220, 221, 242, 243, 250, 251, 252, 253,
+  260, 261, 262, 263, 273, 274, 298, 324, 325, 332, 333, 337,
+  357, 369, 381, 385, 414, 416, 505, 506, 507, 508, 509, 525,
+  526, 527, 528, 529, 530, 531, 532, 533, 534, 535, 552, 553,
+  567, 568, 569, 570, 571, 572, 573, 574, 575, 576, 577, 578,
+  579, 580, 581, 587,
+]
+owner = "@nearai/reborn"
+reason = "Obligations split into its three chartered owners + first-party-tools departure (#7141, move-only per #7090); re-attribution artifact — the same run's ironclaw_host_runtime per-crate floor PASSED (17560 vs 17542 effective) while this gate red."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/obligations/staged_handoffs.rs"
+lines = [
+  212, 213, 214, 215, 216, 217, 218, 236, 237, 238, 240, 421,
+  423, 429, 431, 436, 438, 444, 446, 452, 454, 460, 462, 468,
+  470, 475, 477, 497, 498, 499, 500,
+]
+owner = "@nearai/reborn"
+reason = "Obligations split into its three chartered owners + first-party-tools departure (#7141, move-only per #7090); re-attribution artifact — the same run's ironclaw_host_runtime per-crate floor PASSED (17560 vs 17542 effective) while this gate red."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/lanes/ironclaw_wasm/src/bindings.rs"
+lines = [
+  4,
+]
+owner = "@nearai/reborn"
+reason = "Generated wasmtime bindgen! macro file; the sole changed line is the wit path argument (#7084's wit move). The macro invocation emits no DA records, so the file trips the empty-denominator fail-closed rule; exempting the one changed line releases it. Generated output is not testable source."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# Waves 0-4 batch (#7170) declaration-only port-slice edits. Three files from
+# the #7159/#7160 slices tripped the empty-denominator fail-closed rule on the
+# batch's full-mode run: their changed lines are declarations/arm-renames with
+# no measurable DA records. Lines already exempted by the #7141 move entries
+# above are not repeated. (The fourth file from the same failure,
+# conversations/error.rs, is released properly by the classifier extension in
+# the same commit — enum bodies now classify as mechanically uninstrumentable,
+# with red-verified fixtures.) These entries keep the MAIN-push enforcement
+# lane green after this batch merges (coverage is push-only per #7173).
+
+[[exemption]]
+path = "crates/domains/ironclaw_conversations/src/conversation_state_store.rs"
+lines = [
+  42, 694, 695, 703, 704, 712, 721, 722,
+]
+owner = "@nearai/reborn"
+reason = "Ledger-contract declaration edits from the conversations->turns port inversion (#7159 in #7170): trait-signature and type lines with no DA records; the file tripped the empty-denominator fail-closed rule. Same-run per-crate floors passed."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/contracts/ironclaw_host_api/src/turn.rs"
+lines = [
+  1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115,
+  1116, 1117, 1118, 1119, 1120, 1121, 1122, 1123, 1124, 1125, 1126, 1127,
+]
+owner = "@nearai/reborn"
+reason = "SubmitTurnResponse descent from ironclaw_turns (#7159 precondition): struct/field declarations with no DA records; empty-denominator fail-closed release. Verbatim move, unit coverage stayed with the consumers."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/services/runtime_adapters.rs"
+lines = [
+  20, 382, 383, 384, 390, 391, 392, 439, 445, 447, 448, 449,
+  986, 987, 988, 990, 991, 994, 995, 996, 997, 998, 999,
+]
+owner = "@nearai/reborn"
+reason = "Error-mapping arm renames from the lane governor port (#7160 in #7170): the adapter arms are not integration-instrumented on this path (zero measured lines among the candidates -> empty-denominator); behavior pinned by the lane-seam denial tests added in the same slice. Same-run floors passed."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

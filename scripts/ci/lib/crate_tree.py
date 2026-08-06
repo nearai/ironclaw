@@ -43,12 +43,25 @@ no `Cargo.toml` of its own — five of them became the outermost manifest on the
 path and were silently promoted to first-class crates, which put ~12k lines of
 workspace-excluded, uncoverable guest code into the changed-coverage and
 composition-budget denominators. The `[workspace]` marker is exactly what those
-directories have in common with `crates/ironclaw_silk_decoder` (also `exclude`d
-from the root workspace, also never built here), so one rule covers both; the
-silk-decoder half is a latent-bug fix that arrives with it.
+directories had in common with the silk decoder (also `exclude`d from the root
+workspace, also never built here), so one rule covered both; the silk-decoder
+half was a latent-bug fix that arrived with it. WS7 then moved that helper out
+of `crates/` entirely (`tools/ironclaw_silk_decoder`, PROPOSAL §5 / §12.13
+D-O), so it is now excluded by *scope* rather than by the `[workspace]` rule
+and the guest components are the rule's remaining members. The rule stays: it
+is what keeps a future `[workspace]`-rooted directory under `crates/` out of
+the denominators.
 
 Usage:
-    python3 scripts/ci/lib/crate_tree.py [repo_root]   # one crate dir per line
+    python3 scripts/ci/lib/crate_tree.py [repo_root]
+        Print every crate directory, one per line (unchanged, load-bearing
+        contract: scripts/build-wasm-extensions.sh and others parse this).
+
+    python3 scripts/ci/lib/crate_tree.py --directory <name> [repo_root]
+        Print the single crate directory whose basename is <name>. Exits 1
+        with the CrateTreeError message on stderr when the name is absent or
+        ambiguous — never falls back to a guessed literal path. The
+        `scripts/ci/crate-dir.sh` wrapper shells to this for bash callers.
 """
 
 from __future__ import annotations
@@ -63,7 +76,8 @@ CRATES_ROOT_NAME = "crates"
 # a handful of results is never a legitimate answer for this repository, and
 # silently returning them is the exact class of bug this module exists to kill.
 # It is a sanity floor, not a ratchet — it is far below the real count (65 at
-# the WS0 baseline) and is never expected to bind.
+# the WS0 baseline, 64 after WS7 moved the silk decoder to `tools/`) and is
+# never expected to bind.
 MIN_CRATE_DIRECTORIES = 20
 
 # Build outputs and dotted directories can contain vendored manifests that are
@@ -210,8 +224,9 @@ def workspace_root_directories(repo_root: str | pathlib.Path = ".") -> list[str]
     """Directories under `crates/` that are roots of a *separate* workspace.
 
     These are excluded from `crate_directories()` on purpose (see the module
-    docstring). Today: `crates/ironclaw_silk_decoder` and the six
-    `crates/extensions/packages/*/wasm-src` guest components.
+    docstring). Today: the six `crates/extensions/packages/*/wasm-src` guest
+    components. (The silk decoder was the seventh until WS7 moved it to
+    `tools/`, where it is out of this walk's scope entirely.)
     """
 
     root = pathlib.Path(repo_root)
@@ -310,10 +325,32 @@ def reset_inventory_cache() -> None:
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    args = sys.argv[1:]
+
+    # Manual parsing (not argparse) so the pre-existing positional-root
+    # contract above is untouched byte-for-byte: every current caller passes
+    # at most one bare positional argument, and that must keep working
+    # exactly as before regardless of how `--directory` is implemented.
+    directory_name: str | None = None
+    if "--directory" in args:
+        flag_index = args.index("--directory")
+        try:
+            directory_name = args[flag_index + 1]
+        except IndexError:
+            print(
+                "crate discovery failed: --directory requires a crate name",
+                file=sys.stderr,
+            )
+            return 1
+        del args[flag_index : flag_index + 2]
+
+    root = args[0] if args else "."
     try:
-        for directory in crate_directories(root):
-            print(directory)
+        if directory_name is not None:
+            print(crate_directory(directory_name, root))
+        else:
+            for directory in crate_directories(root):
+                print(directory)
     except CrateTreeError as error:
         print(f"crate discovery failed: {error}", file=sys.stderr)
         return 1

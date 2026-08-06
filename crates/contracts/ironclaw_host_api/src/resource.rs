@@ -1,0 +1,702 @@
+//! Resource scope, estimate, usage, and quota contracts.
+//!
+//! `ironclaw_resources` owns enforcement, but this module defines the shared
+//! shapes used by callers and audit records. [`ResourceScope`] captures the
+//! tenant/user/agent/project/mission/thread/invocation cascade. [`ResourceEstimate`]
+//! and [`ResourceUsage`] describe budgeted work, while [`SandboxQuota`] and
+//! [`ResourceCeiling`] describe runtime limits that sandbox providers enforce.
+
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    error::HostApiError,
+    ids::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+};
+
+/// Canonical local/single-user tenant id.
+pub const LOCAL_DEFAULT_TENANT_ID: &str = "default";
+/// Canonical local/single-user default agent id.
+pub const LOCAL_DEFAULT_AGENT_ID: &str = "default";
+/// Canonical local/single-user default bootstrap project id.
+pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
+
+/// Reserved tenant/user id used by [`ResourceScope::system`] for filesystem
+/// operations that have no real per-tenant scope (migrations, admin
+/// tooling). Contains an ASCII Unit-Separator control character (`\x1f`)
+/// which `TenantId::new` / `UserId::new` reject during validation, so no
+/// caller-supplied identifier can ever collide with it.
+pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
+
+/// Filesystem path segment for trusted resource-scope identifiers.
+///
+/// The unforgeable system sentinel contains a control byte that is invalid in
+/// virtual paths; durable scoped stores use this stable escaped segment while
+/// preserving ordinary validated IDs unchanged.
+pub fn resource_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
+/// Reserved `user_id` for tenant-shared, admin-managed credentials (#5459 P3).
+///
+/// A secret stored under this sentinel user (paired with the caller's REAL
+/// `tenant_id`) is visible to every user of that tenant — the "admin sets the
+/// key once, the whole usergroup inherits" model. Unlike [`SYSTEM_RESERVED_ID`]
+/// (tenant-global), this stays tenant-scoped: the filesystem secret mount is
+/// `/tenants/<tenant>/users/<this>/secrets`, so tenants remain isolated while
+/// their users share.
+///
+/// Unforgeable by construction, mirroring [`SYSTEM_RESERVED_ID`]: the
+/// `__ironclaw_` prefix is rejected by scope-id validation, so no identity
+/// boundary (env bearer, SSO directory, OIDC claims, request payloads) can
+/// mint a `UserId` that collides with it. It is minted exclusively via
+/// `from_trusted` in [`ResourceScope::tenant_shared_managed_scope`], and
+/// persisted scopes carrying it round-trip through the `ResourceScope`
+/// user-id deserializer carve-out — never through bare `UserId` deserialize
+/// (locked by `tenant_shared_sentinel_is_rejected_for_bare_ids`).
+pub const TENANT_SHARED_MANAGED_USER_ID: &str = "__ironclaw_tenant_shared_admin__";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceScope {
+    // SECURITY: `ResourceScope` is a TRUSTED-PERSISTENCE shape. It is serialized
+    // into durable records (e.g. system-scoped secret entries) and read back; it
+    // is NEVER deserialized from an untrusted HTTP request body. The
+    // WebUI/product request DTOs carry no `tenant_id`/`user_id`/`scope` field,
+    // and the caller scope is stamped host-side from trusted installation config
+    // plus the authenticator's verified `UserId` (see
+    // `webui_serve::authenticate_request` and the rule in
+    // `crates/ironclaw_assistant/CLAUDE.md`), so a browser body cannot
+    // influence it. Do not add a `ResourceScope` (or bare `TenantId`/`UserId`)
+    // field to any untrusted request DTO.
+    //
+    // Sentinels ([`SYSTEM_RESERVED_ID`] on both axes,
+    // [`TENANT_SHARED_MANAGED_USER_ID`] on the user axis) carry shapes that
+    // `TenantId`/`UserId` validation rejects (control bytes / the reserved
+    // `__ironclaw_` prefix), so they are built via `from_trusted`. Persisted
+    // scopes carrying them must therefore round-trip, but the trusted exception
+    // stays scoped to these two fields only — the shared id `Deserialize` keeps
+    // rejecting both shapes everywhere else (locked by
+    // `system_sentinel_is_rejected_for_bare_ids` and
+    // `tenant_shared_sentinel_is_rejected_for_bare_ids`), so untrusted input can
+    // never mint a sentinel-bearing id or collide with a reserved identity on
+    // any other axis.
+    #[serde(deserialize_with = "deserialize_system_aware_tenant_id")]
+    pub tenant_id: TenantId,
+    #[serde(deserialize_with = "deserialize_system_aware_user_id")]
+    pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub mission_id: Option<MissionId>,
+    pub thread_id: Option<ThreadId>,
+    pub invocation_id: InvocationId,
+}
+
+fn deserialize_system_aware_tenant_id<'de, D>(deserializer: D) -> Result<TenantId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw == SYSTEM_RESERVED_ID {
+        Ok(TenantId::from_trusted(raw))
+    } else {
+        TenantId::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_system_aware_user_id<'de, D>(deserializer: D) -> Result<UserId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw == SYSTEM_RESERVED_ID || raw == TENANT_SHARED_MANAGED_USER_ID {
+        Ok(UserId::from_trusted(raw))
+    } else {
+        UserId::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ResourceScope {
+    /// Build the canonical local/single-user scope.
+    ///
+    /// This intentionally uses concrete `default` tenant/agent ids and the
+    /// `bootstrap` project. Optional `None` scopes remain reserved for
+    /// deliberately unscoped/shared records, not for the normal local default.
+    pub fn local_default(
+        user_id: UserId,
+        invocation_id: InvocationId,
+    ) -> Result<Self, HostApiError> {
+        Ok(Self {
+            tenant_id: TenantId::new(LOCAL_DEFAULT_TENANT_ID)?,
+            user_id,
+            agent_id: Some(AgentId::new(LOCAL_DEFAULT_AGENT_ID)?),
+            project_id: Some(ProjectId::new(LOCAL_DEFAULT_PROJECT_ID)?),
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        })
+    }
+
+    /// Synthetic scope for system-level filesystem operations that have no
+    /// real per-tenant identity (master-key checks, migrations, admin
+    /// tooling). Uses [`SYSTEM_RESERVED_ID`] for both tenant and user, which
+    /// validation rejects, so no user-supplied identifier can collide.
+    pub fn system() -> Self {
+        Self {
+            tenant_id: TenantId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
+            user_id: UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    /// True iff this scope is the system sentinel (see [`Self::system`]).
+    pub fn is_system(&self) -> bool {
+        self.tenant_id.as_str() == SYSTEM_RESERVED_ID && self.user_id.as_str() == SYSTEM_RESERVED_ID
+    }
+
+    /// Copy of this scope with the transient `mission_id`/`thread_id`
+    /// sub-scope cleared. This clears mission/thread only: the owner identity
+    /// (tenant/user/agent/project) and `invocation_id` are left unchanged, so it
+    /// does not by itself reduce the scope to a pure owner identity.
+    ///
+    /// This is a neutral scope-narrowing primitive: it makes no claim about
+    /// what the narrowed scope is *used* for. Policy crates that own an
+    /// ownership contract (e.g. credential-account ownership in `ironclaw_auth`)
+    /// build on top of this; the meaning of the narrowing lives there, not here.
+    pub fn without_thread_and_mission(&self) -> Self {
+        Self {
+            mission_id: None,
+            thread_id: None,
+            ..self.clone()
+        }
+    }
+
+    /// Copy of this scope narrowed to the durable per-user settings owner.
+    ///
+    /// Approval settings are shared by tenant/user and must not be keyed by
+    /// transient run axes such as agent, project, mission, or thread.
+    pub fn tenant_user_settings_scope(&self) -> Self {
+        Self {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: self.invocation_id,
+        }
+    }
+
+    /// Copy of this scope narrowed to the tenant-shared, admin-managed
+    /// credential owner (#5459 P3): keeps `tenant_id`, replaces `user_id` with
+    /// [`TENANT_SHARED_MANAGED_USER_ID`], and drops all sub-user axes
+    /// (agent/project/mission/thread). A secret stored at this scope is shared
+    /// by every user of the tenant — the "admin sets it once, everyone
+    /// inherits" model — while remaining tenant-isolated. Used for both storing
+    /// a shared credential (admin write) and the resolution fallback when a
+    /// caller has no personal secret for the handle.
+    pub fn tenant_shared_managed_scope(&self) -> Self {
+        Self {
+            tenant_id: self.tenant_id.clone(),
+            user_id: UserId::from_trusted(TENANT_SHARED_MANAGED_USER_ID.to_string()),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: self.invocation_id,
+        }
+    }
+}
+
+/// Origin of a background reservation. Distinguishes heartbeats, routines,
+/// missions, container jobs, and user-initiated work so per-kind budgets
+/// can be tracked separately within the same user's daily budget.
+///
+/// **Contract-only for now:** schedulers that pre-date this enum still
+/// open reservations through plain [`ResourceScope`]. As the Reborn
+/// runtime grows native heartbeats/routines, those call sites will pass
+/// the kind through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundKind {
+    /// Periodic heartbeat tick (proactive memory / status checks).
+    HeartbeatTick,
+    /// User-defined lightweight routine.
+    RoutineLightweight,
+    /// User-defined standard routine (heavier per-fire budget).
+    RoutineStandard,
+    /// Multi-step mission tick.
+    MissionTick,
+    /// One-shot container job (e.g., sandboxed shell).
+    ContainerJob,
+    /// Explicitly user-triggered work that is not scheduled.
+    UserInitiated,
+}
+
+impl BackgroundKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HeartbeatTick => "heartbeat_tick",
+            Self::RoutineLightweight => "routine_lightweight",
+            Self::RoutineStandard => "routine_standard",
+            Self::MissionTick => "mission_tick",
+            Self::ContainerJob => "container_job",
+            Self::UserInitiated => "user_initiated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceEstimate {
+    pub usd: Option<Decimal>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub wall_clock_ms: Option<u64>,
+    pub output_bytes: Option<u64>,
+    pub network_egress_bytes: Option<u64>,
+    pub process_count: Option<u32>,
+    pub concurrency_slots: Option<u32>,
+}
+
+impl ResourceEstimate {
+    pub fn set_usd(mut self, usd: Decimal) -> Self {
+        self.usd = Some(usd);
+        self
+    }
+
+    pub fn set_input_tokens(mut self, input_tokens: u64) -> Self {
+        self.input_tokens = Some(input_tokens);
+        self
+    }
+
+    pub fn set_output_tokens(mut self, output_tokens: u64) -> Self {
+        self.output_tokens = Some(output_tokens);
+        self
+    }
+
+    pub fn set_wall_clock_ms(mut self, wall_clock_ms: u64) -> Self {
+        self.wall_clock_ms = Some(wall_clock_ms);
+        self
+    }
+
+    pub fn set_output_bytes(mut self, output_bytes: u64) -> Self {
+        self.output_bytes = Some(output_bytes);
+        self
+    }
+
+    pub fn set_network_egress_bytes(mut self, network_egress_bytes: u64) -> Self {
+        self.network_egress_bytes = Some(network_egress_bytes);
+        self
+    }
+
+    pub fn set_process_count(mut self, process_count: u32) -> Self {
+        self.process_count = Some(process_count);
+        self
+    }
+
+    pub fn set_concurrency_slots(mut self, concurrency_slots: u32) -> Self {
+        self.concurrency_slots = Some(concurrency_slots);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceUsage {
+    pub usd: Decimal,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub wall_clock_ms: u64,
+    pub output_bytes: u64,
+    pub network_egress_bytes: u64,
+    pub process_count: u32,
+}
+
+impl ResourceUsage {
+    pub fn set_usd(mut self, usd: Decimal) -> Self {
+        self.usd = usd;
+        self
+    }
+
+    pub fn set_input_tokens(mut self, input_tokens: u64) -> Self {
+        self.input_tokens = input_tokens;
+        self
+    }
+
+    pub fn set_output_tokens(mut self, output_tokens: u64) -> Self {
+        self.output_tokens = output_tokens;
+        self
+    }
+
+    pub fn set_wall_clock_ms(mut self, wall_clock_ms: u64) -> Self {
+        self.wall_clock_ms = wall_clock_ms;
+        self
+    }
+
+    pub fn set_output_bytes(mut self, output_bytes: u64) -> Self {
+        self.output_bytes = output_bytes;
+        self
+    }
+
+    pub fn set_network_egress_bytes(mut self, network_egress_bytes: u64) -> Self {
+        self.network_egress_bytes = network_egress_bytes;
+        self
+    }
+
+    pub fn set_process_count(mut self, process_count: u32) -> Self {
+        self.process_count = process_count;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceProfile {
+    pub default_estimate: ResourceEstimate,
+    pub hard_ceiling: Option<ResourceCeiling>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceCeiling {
+    pub max_usd: Option<Decimal>,
+    pub max_input_tokens: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub max_wall_clock_ms: Option<u64>,
+    pub max_output_bytes: Option<u64>,
+    pub sandbox: Option<SandboxQuota>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxQuota {
+    pub cpu_time_ms: Option<u64>,
+    pub memory_bytes: Option<u64>,
+    pub disk_bytes: Option<u64>,
+    pub network_egress_bytes: Option<u64>,
+    pub process_count: Option<u32>,
+}
+
+/// Active reservation returned by a resource governor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReservation {
+    pub id: crate::ids::ResourceReservationId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+}
+
+/// Reservation lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReservationStatus {
+    Active,
+    Reconciled,
+    Released,
+}
+
+/// Parsed capability-host execution result shared by runtime lanes.
+///
+/// Runtime lanes (MCP, scripts, …) all return the same resource-governed
+/// capability output shape; this is the single owner. Non-serde by design —
+/// it is an in-process host-call value, not a wire/persistence type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityHostResult {
+    pub output: serde_json::Value,
+    pub reservation_id: crate::ids::ResourceReservationId,
+    pub usage: ResourceUsage,
+    pub output_bytes: u64,
+}
+
+/// Receipt returned when a reservation is reconciled or released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReceipt {
+    pub id: crate::ids::ResourceReservationId,
+    pub scope: ResourceScope,
+    pub status: ReservationStatus,
+    pub estimate: ResourceEstimate,
+    pub actual: Option<ResourceUsage>,
+}
+
+/// Stable classification of a [`RuntimeResourceBudget`] failure.
+///
+/// This is the *denial vocabulary* a runtime lane may act on. It deliberately
+/// carries no account, limit, dimension, or threshold value: which account
+/// tripped and by how much is kernel budget authority, and a lane that could
+/// read it could also reason about other tenants' budgets. Same role as
+/// [`crate::http::RuntimeHttpEgressReasonCode`] plays for the egress port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeResourceErrorKind {
+    /// A hard budget cap was reached. Terminal — the work must not run.
+    LimitExceeded,
+    /// A pause threshold was crossed. Not a denial: the caller above the lane
+    /// must surface an approval gate and retry. Distinct from
+    /// [`Self::LimitExceeded`] because the two produce different user-facing
+    /// outcomes, and collapsing them would silently turn "ask the user" into
+    /// "refuse".
+    RequiresApproval,
+    /// The reservation id is already in use.
+    ReservationAlreadyExists,
+    /// The estimate is not a usable budget request (negative, non-finite, …).
+    InvalidEstimate,
+    /// A prepared reservation does not match the scope/estimate it is being
+    /// spent against. Lanes raise this themselves via
+    /// [`RuntimeResourceError::reservation_mismatch`] before any side effect.
+    ReservationMismatch,
+    /// No such reservation.
+    UnknownReservation,
+    /// The reservation was already reconciled or released.
+    ReservationClosed,
+    /// The budget authority could not read or write its durable state.
+    /// Callers must fail closed, exactly as for a denial.
+    Storage,
+}
+
+impl RuntimeResourceErrorKind {
+    /// Stable token safe to log or expose to runtime callers.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LimitExceeded => "limit_exceeded",
+            Self::RequiresApproval => "requires_approval",
+            Self::ReservationAlreadyExists => "reservation_already_exists",
+            Self::InvalidEstimate => "invalid_estimate",
+            Self::ReservationMismatch => "reservation_mismatch",
+            Self::UnknownReservation => "unknown_reservation",
+            Self::ReservationClosed => "reservation_closed",
+            Self::Storage => "storage",
+        }
+    }
+}
+
+/// Failure returned by [`RuntimeResourceBudget`].
+///
+/// Structurally narrower than the kernel governor's own error — a redaction
+/// boundary in the sense of `.claude/rules/type-placement.md` §3, kept manual
+/// so new budget-authority detail never auto-flows into a runtime lane. The
+/// rendered `reason` is the authority's own message, which lanes already
+/// forwarded verbatim as the model-visible cause; only the *structure* behind
+/// it stops at this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{reason}")]
+pub struct RuntimeResourceError {
+    kind: RuntimeResourceErrorKind,
+    reason: String,
+}
+
+impl RuntimeResourceError {
+    pub fn new(kind: RuntimeResourceErrorKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+        }
+    }
+
+    /// The lane-side mismatch check: a prepared reservation was handed to a
+    /// lane whose scope or estimate it does not cover. Raised by the lane
+    /// before any side effect starts, so the budget authority is never asked
+    /// to spend against the wrong hold.
+    pub fn reservation_mismatch(id: crate::ids::ResourceReservationId) -> Self {
+        Self::new(
+            RuntimeResourceErrorKind::ReservationMismatch,
+            format!("resource reservation {id} does not match requested scope or estimate"),
+        )
+    }
+
+    pub fn kind(&self) -> RuntimeResourceErrorKind {
+        self.kind
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+/// The whole of what a runtime lane may do to a budget: open a reservation
+/// before side effects start, then close it exactly once — with actual usage
+/// on success, without usage on failure.
+///
+/// A dependency-inversion port (`.claude/rules/type-placement.md` §2):
+/// declared here in the contracts tier, implemented in the kernel over the
+/// `ResourceGovernor` budget authority. Lanes are given this and nothing else,
+/// so a lane cannot set limits, read account state, name an account, or hand
+/// out a reservation id of its own choosing — the authority surface stays in
+/// the kernel, where the accounting cascade and its denial policy live.
+pub trait RuntimeResourceBudget: Send + Sync {
+    /// Reserve estimated resources before costed or quota-limited work starts.
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, RuntimeResourceError>;
+
+    /// Close a reservation with actual usage, releasing the unused hold.
+    fn reconcile(
+        &self,
+        reservation_id: crate::ids::ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, RuntimeResourceError>;
+
+    /// Close a reservation without usage, when work failed or was cancelled
+    /// before it could be reconciled.
+    fn release(
+        &self,
+        reservation_id: crate::ids::ResourceReservationId,
+    ) -> Result<ResourceReceipt, RuntimeResourceError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The system scope is built from a reserved id that fails normal
+    /// validation, so it must still survive a serde round-trip — otherwise any
+    /// persisted system-scoped record (e.g. an operator-wide secret entry)
+    /// serializes but cannot be read back. Regression for the WebUI NEAR AI
+    /// "save returns service_unavailable" bug.
+    #[test]
+    fn system_scope_survives_json_round_trip() {
+        let scope = ResourceScope::system();
+        let json = serde_json::to_string(&scope).expect("serialize system scope");
+        let restored: ResourceScope =
+            serde_json::from_str(&json).expect("deserialize system scope");
+        assert!(restored.is_system());
+        assert_eq!(restored.tenant_id.as_str(), SYSTEM_RESERVED_ID);
+        assert_eq!(restored.user_id.as_str(), SYSTEM_RESERVED_ID);
+    }
+
+    /// #5459 P3: the tenant-shared, admin-managed scope keeps the tenant, swaps
+    /// the user for the reserved sentinel, and drops all sub-user axes — so one
+    /// admin-set secret is visible to every user of the tenant while tenants
+    /// stay isolated. Two different callers in the same tenant must resolve to
+    /// the SAME shared owner, and the scope must survive a serde round-trip (the
+    /// secret store persists the scope in each record; the sentinel reads back
+    /// through the `ResourceScope` user-id carve-out).
+    #[test]
+    fn tenant_shared_managed_scope_swaps_user_for_sentinel_and_round_trips() {
+        let base = ResourceScope {
+            tenant_id: TenantId::new("acme").unwrap(),
+            user_id: UserId::new("alice").unwrap(),
+            agent_id: Some(AgentId::new("agent-1").unwrap()),
+            project_id: Some(ProjectId::new("proj-1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let shared = base.tenant_shared_managed_scope();
+        assert_eq!(shared.tenant_id.as_str(), "acme");
+        assert_eq!(shared.user_id.as_str(), TENANT_SHARED_MANAGED_USER_ID);
+        assert!(shared.agent_id.is_none());
+        assert!(shared.project_id.is_none());
+
+        // A different caller (different user + agent) in the same tenant resolves
+        // to the identical shared owner — that is what makes the key shared.
+        let other = ResourceScope {
+            user_id: UserId::new("bob").unwrap(),
+            agent_id: Some(AgentId::new("agent-2").unwrap()),
+            ..base.clone()
+        }
+        .tenant_shared_managed_scope();
+        assert_eq!(shared.tenant_id, other.tenant_id);
+        assert_eq!(shared.user_id, other.user_id);
+
+        // Persisted secret records serialize the scope; the sentinel user must
+        // read back through the user-id deserializer carve-out (bare `UserId`
+        // validation rejects the reserved prefix).
+        let json = serde_json::to_string(&shared).expect("serialize shared scope");
+        let restored: ResourceScope =
+            serde_json::from_str(&json).expect("deserialize shared scope");
+        assert_eq!(restored.user_id.as_str(), TENANT_SHARED_MANAGED_USER_ID);
+        assert_eq!(restored.tenant_id.as_str(), "acme");
+    }
+
+    /// The trusted-sentinel exception must not widen into a general bypass. The
+    /// JSON is built via `serde_json::to_string` so the control byte becomes a
+    /// proper `\uXXXX` escape; a raw control byte would be rejected at JSON parse
+    /// time, before id validation runs, and pass the assertion for the wrong
+    /// reason. An ordinary control-bearing id is still rejected by the validator.
+    #[test]
+    fn other_control_character_ids_are_still_rejected() {
+        let json = serde_json::to_string("\u{1f}not-the-sentinel\u{1f}").expect("encode");
+        assert!(serde_json::from_str::<TenantId>(&json).is_err());
+    }
+
+    /// The exception lives only on `ResourceScope`'s tenant/user fields, not on
+    /// the shared id `Deserialize`. The exact system sentinel must NOT deserialize
+    /// into a bare id type (here `TenantId` and `AgentId`), so it can never be
+    /// minted from untrusted input or collide with the system identity elsewhere.
+    #[test]
+    fn system_sentinel_is_rejected_for_bare_ids() {
+        let json = serde_json::to_string(SYSTEM_RESERVED_ID).expect("encode sentinel");
+        assert!(
+            serde_json::from_str::<TenantId>(&json).is_err(),
+            "bare TenantId must not accept the system sentinel"
+        );
+        assert!(
+            serde_json::from_str::<AgentId>(&json).is_err(),
+            "AgentId must not accept the system sentinel"
+        );
+    }
+
+    /// #5459: the tenant-shared sentinel must be unforgeable the same way the
+    /// system sentinel is — rejected by `UserId::new` and by every bare id
+    /// `Deserialize`, so no identity boundary (env bearer, SSO directory, OIDC
+    /// claims, request payloads) can ever mint a principal that reads or writes
+    /// the tenant-shared secret subtree. It round-trips ONLY through
+    /// `ResourceScope`'s user-id carve-out
+    /// (`tenant_shared_managed_scope_swaps_user_for_sentinel_and_round_trips`).
+    /// The lane-raised mismatch is the one [`RuntimeResourceError`] a lane
+    /// constructs itself, and its rendered text reaches the model as the
+    /// dispatch cause. It must stay byte-identical to the budget authority's
+    /// own `ReservationMismatch` message that lanes forwarded before the port
+    /// existed, and it must classify as a mismatch — not as a denial.
+    #[test]
+    fn lane_raised_reservation_mismatch_keeps_the_authority_wording_and_kind() {
+        let id = crate::ids::ResourceReservationId::new();
+        let error = RuntimeResourceError::reservation_mismatch(id);
+        assert_eq!(error.kind(), RuntimeResourceErrorKind::ReservationMismatch);
+        assert_eq!(
+            error.to_string(),
+            format!("resource reservation {id} does not match requested scope or estimate")
+        );
+    }
+
+    /// The denial vocabulary is a stable log/wire token set. Every kind must
+    /// render distinctly, so a widened budget authority cannot quietly collapse
+    /// `requires_approval` into `limit_exceeded`.
+    #[test]
+    fn runtime_resource_error_kinds_have_distinct_stable_tokens() {
+        let kinds = [
+            RuntimeResourceErrorKind::LimitExceeded,
+            RuntimeResourceErrorKind::RequiresApproval,
+            RuntimeResourceErrorKind::ReservationAlreadyExists,
+            RuntimeResourceErrorKind::InvalidEstimate,
+            RuntimeResourceErrorKind::ReservationMismatch,
+            RuntimeResourceErrorKind::UnknownReservation,
+            RuntimeResourceErrorKind::ReservationClosed,
+            RuntimeResourceErrorKind::Storage,
+        ];
+        let tokens: std::collections::BTreeSet<&str> =
+            kinds.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(tokens.len(), kinds.len());
+    }
+
+    #[test]
+    fn tenant_shared_sentinel_is_rejected_for_bare_ids() {
+        assert!(
+            UserId::new(TENANT_SHARED_MANAGED_USER_ID).is_err(),
+            "UserId::new must reject the tenant-shared sentinel"
+        );
+        let json = serde_json::to_string(TENANT_SHARED_MANAGED_USER_ID).expect("encode sentinel");
+        assert!(
+            serde_json::from_str::<UserId>(&json).is_err(),
+            "bare UserId must not accept the tenant-shared sentinel"
+        );
+        assert!(
+            serde_json::from_str::<TenantId>(&json).is_err(),
+            "TenantId must not accept the tenant-shared sentinel"
+        );
+    }
+}

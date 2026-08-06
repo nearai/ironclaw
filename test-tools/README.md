@@ -7,7 +7,7 @@ Import button accepts.
 
 These are used by both manual/live QA and automated tests: the E2E suite builds
 and uploads these bundles, while the Rust suites build their zip fixtures in-memory
-(`ironclaw_reborn_composition::extension_lifecycle` tests) and pin only the
+(`ironclaw_composition::extension_lifecycle` tests) and pin only the
 manifests here via `include_str!`
 (`available_extensions::tests::test_tool_fixture_manifests_stay_importable`),
 so a manifest that drifts out of the import-legal shape fails CI, not the
@@ -40,7 +40,7 @@ For `market-data`, seed the shared key before activating:
 ├── wasm/           # built module at the path [runtime].module declares
 ├── schemas/        # capability input/output JSON schemas
 ├── prompts/        # capability prompt docs
-└── wasm-src/       # cargo source (cdylib + wit-bindgen against /wit/tool.wit)
+└── wasm-src/       # cargo source (cdylib + wit-bindgen against crates/lanes/ironclaw_wasm/wit/tool.wit)
 ```
 
 The import path requires every manifest-declared asset (module, schemas,

@@ -56,13 +56,31 @@ const MAX_READ_STATE_ENTRIES: usize = 8192;
 
 type ReadStateKey = (CodingReadScopeKey, String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadRepresentation {
+    RawText,
+    ExtractedText,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReadState {
+    pub(super) fingerprint: u64,
+    pub(super) representation: ReadRepresentation,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct CodingReadStates {
-    entries: std::sync::Mutex<HashMap<ReadStateKey, u64>>,
+    entries: std::sync::Mutex<HashMap<ReadStateKey, ReadState>>,
 }
 
 impl CodingReadStates {
-    pub(super) fn record(&self, scope: &CodingReadScopeKey, path: &str, fingerprint: u64) {
+    pub(super) fn record(
+        &self,
+        scope: &CodingReadScopeKey,
+        path: &str,
+        fingerprint: u64,
+        representation: ReadRepresentation,
+    ) {
         let mut entries = self.lock_entries();
         let key = (scope.clone(), path.to_string());
         if entries.len() >= MAX_READ_STATE_ENTRIES && !entries.contains_key(&key) {
@@ -72,16 +90,22 @@ impl CodingReadStates {
                 entries.remove(&evicted);
             }
         }
-        entries.insert(key, fingerprint);
+        entries.insert(
+            key,
+            ReadState {
+                fingerprint,
+                representation,
+            },
+        );
     }
 
-    pub(super) fn recorded(&self, scope: &CodingReadScopeKey, path: &str) -> Option<u64> {
+    pub(super) fn recorded(&self, scope: &CodingReadScopeKey, path: &str) -> Option<ReadState> {
         self.lock_entries()
             .get(&(scope.clone(), path.to_string()))
             .copied()
     }
 
-    fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<ReadStateKey, u64>> {
+    fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<ReadStateKey, ReadState>> {
         // A poisoned lock means another thread panicked mid-update; the map
         // itself stays coherent (single insert/remove ops), so keep serving.
         match self.entries.lock() {

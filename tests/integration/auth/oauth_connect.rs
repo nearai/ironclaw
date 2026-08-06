@@ -28,7 +28,10 @@ use ironclaw_auth::{
     OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
     PrepareOAuthFlowRequest, ProviderScope,
 };
-use ironclaw_extensions::{
+use ironclaw_composition::test_support::{
+    ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
+};
+use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
@@ -37,9 +40,6 @@ use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle, UserId},
     path::VirtualPath,
     resource::ResourceScope,
-};
-use ironclaw_reborn_composition::test_support::{
-    ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
 };
 
 /// Core slice-7 scenario: a real OAuth connect flow produces a persisted
@@ -616,8 +616,9 @@ async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionIn
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/oauth-connect-multiuser")
             .expect("valid installation root"),
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"),
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+        ironclaw_extension_registry::default_host_api_contract_registry()
+            .expect("host API contracts"),
     )
     .await
     .expect("filesystem installation store");
@@ -634,7 +635,7 @@ async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionIn
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Users {
+                    ironclaw_extension_registry::InstallationOwner::Users {
                         user_ids: [UserId::new(*owner).expect("owner user id")]
                             .into_iter()
                             .collect(),
@@ -656,8 +657,9 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/oauth-connect")
             .expect("valid installation root"),
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"),
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+        ironclaw_extension_registry::default_host_api_contract_registry()
+            .expect("host API contracts"),
     )
     .await
     .expect("filesystem installation store");
@@ -674,7 +676,7 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -687,7 +689,7 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
 /// Parse a real bundled package manifest the way the installation store does.
 fn bundled_manifest_record(package: &str) -> ExtensionManifestRecord {
     let host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog loads");
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog loads");
     let contracts = ironclaw_extension_host::product_extension_host_api_contract_registry()
         .expect("host api contracts load");
     let path = format!(
@@ -738,7 +740,7 @@ fn provider_scopes(
 
 /// A real `AuthEngine` whose recipes come from the installed-manifest
 /// resolver — the production wiring in
-/// `ironclaw_reborn_composition::factory::auth_engine_assembly`.
+/// `ironclaw_composition::factory::auth_engine_assembly`.
 fn engine_over_resolver(
     recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
     egress: Arc<ScriptedOAuthTokenEgress>,

@@ -15,7 +15,7 @@ use types::{Story, TopStories, TopStoriesInput};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../wit/tool.wit",
+    path: "../../../crates/lanes/ironclaw_wasm/wit/tool.wit",
 });
 
 struct HackerNewsTool;

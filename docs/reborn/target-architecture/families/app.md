@@ -113,7 +113,7 @@ An excluded helper binary decodes a legacy voice-note codec into a standard audi
 
 A fuzz-testing surface exercises the parsing paths most exposed to untrusted input, built and run in isolation from the main workspace so that fuzzing infrastructure never becomes part of the product's own dependency graph.
 
-The workspace root hosts a dedicated integration-test package, `ironclaw_reborn_integration_tests`, with no library or binary target of its own — a natural home for the tests that exercise interactions across every family at once, distinct from any single crate's own test suite because no single crate is the right owner for a test that spans five of them.
+The workspace root hosts a dedicated integration-test package, `ironclaw_integration_tests`, with no library or binary target of its own — a natural home for the tests that exercise interactions across every family at once, distinct from any single crate's own test suite because no single crate is the right owner for a test that spans five of them.
 
 ## Family AGENTS.md requirements
 
