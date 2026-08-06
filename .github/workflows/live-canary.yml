@@ -817,7 +817,7 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Remove canonical action checkout
-        if: steps.lookup.outputs.found != '1'
+        if: always() && steps.lookup.outputs.found != '1'
         shell: bash
         run: rm -rf .canonical-live-canary-actions
 
