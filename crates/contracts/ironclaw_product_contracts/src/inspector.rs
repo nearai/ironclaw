@@ -35,7 +35,7 @@ pub const DEFAULT_MAX_MODEL_CALLS_PER_RUN: usize = 128;
 pub const DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN: usize = 16;
 pub const DEFAULT_MAX_RETAINED_UPDATES_PER_RUN: usize = 1_024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DiagnosticModelCallId(Uuid);
 
@@ -152,7 +152,7 @@ impl DiagnosticScope {
 ///
 /// Construction is limited to the purpose-specific constructors so callers
 /// cannot silently select an unbounded maximum.
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundedDiagnosticText {
     content: String,
     original_bytes: u64,
@@ -240,7 +240,7 @@ impl BoundedDiagnosticText {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptComponentKind {
     System,
@@ -374,7 +374,7 @@ impl PromptDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelTokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -382,7 +382,7 @@ pub struct ModelTokenUsage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InspectorModelCallStatus {
     Started,
@@ -390,7 +390,7 @@ pub enum InspectorModelCallStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCallDiagnostic {
     pub call_id: DiagnosticModelCallId,
     pub iteration: u32,
@@ -434,7 +434,7 @@ impl ModelCallDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExecutionStatus {
     Started,
@@ -497,7 +497,7 @@ impl ToolExecutionDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticActivityKind {
     TurnStarted,
@@ -515,7 +515,7 @@ pub enum DiagnosticActivityKind {
     StreamResumed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticActivityEvent {
     pub occurred_at: DateTime<Utc>,
     pub kind: DiagnosticActivityKind,
@@ -551,13 +551,13 @@ pub struct DiagnosticActivityEntry {
     pub event: DiagnosticActivityEvent,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticMetricTotal {
     pub known_total: u64,
     pub unavailable_samples: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticModelCount {
     pub model: BoundedDiagnosticText,
     pub calls: u64,
@@ -572,7 +572,7 @@ impl DiagnosticModelCount {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDiagnosticStats {
     pub total_model_calls: u64,
     pub calls_per_model: Vec<DiagnosticModelCount>,
@@ -597,7 +597,7 @@ impl SessionDiagnosticStats {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum DiagnosticUpdateKind {
     PromptUpdated {
@@ -656,7 +656,21 @@ pub struct DiagnosticSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use serde::de::DeserializeOwned;
+
     use super::*;
+
+    fn assert_unit_enum_wire<T>(cases: &[(T, &str)])
+    where
+        T: std::fmt::Debug + PartialEq + Serialize + DeserializeOwned,
+    {
+        for (value, wire_name) in cases {
+            let encoded = serde_json::to_value(value).expect("serialize wire enum");
+            assert_eq!(encoded, serde_json::Value::String((*wire_name).to_string()));
+            let decoded: T = serde_json::from_value(encoded).expect("deserialize wire enum");
+            assert_eq!(&decoded, value);
+        }
+    }
 
     #[test]
     fn bounded_text_preserves_utf8_and_reports_original_size() {
@@ -680,6 +694,129 @@ mod tests {
             serde_json::from_value(encoded).expect("deserialize cursor");
 
         assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn unit_wire_enums_round_trip_with_their_snake_case_names() {
+        assert_unit_enum_wire(&[
+            (PromptComponentKind::System, "system"),
+            (PromptComponentKind::Identity, "identity"),
+            (PromptComponentKind::Instruction, "instruction"),
+            (PromptComponentKind::Skill, "skill"),
+            (PromptComponentKind::Capability, "capability"),
+            (PromptComponentKind::Conversation, "conversation"),
+            (PromptComponentKind::Other, "other"),
+        ]);
+        assert_unit_enum_wire(&[
+            (InspectorModelCallStatus::Started, "started"),
+            (InspectorModelCallStatus::Succeeded, "succeeded"),
+            (InspectorModelCallStatus::Failed, "failed"),
+        ]);
+        assert_unit_enum_wire(&[
+            (ToolExecutionStatus::Started, "started"),
+            (ToolExecutionStatus::Succeeded, "succeeded"),
+            (ToolExecutionStatus::Failed, "failed"),
+        ]);
+        assert_unit_enum_wire(&[
+            (DiagnosticActivityKind::TurnStarted, "turn_started"),
+            (DiagnosticActivityKind::PromptPrepared, "prompt_prepared"),
+            (
+                DiagnosticActivityKind::ModelCallStarted,
+                "model_call_started",
+            ),
+            (
+                DiagnosticActivityKind::ModelCallCompleted,
+                "model_call_completed",
+            ),
+            (DiagnosticActivityKind::ModelCallFailed, "model_call_failed"),
+            (DiagnosticActivityKind::Progress, "progress"),
+            (DiagnosticActivityKind::ToolStarted, "tool_started"),
+            (DiagnosticActivityKind::ToolCompleted, "tool_completed"),
+            (DiagnosticActivityKind::ToolFailed, "tool_failed"),
+            (DiagnosticActivityKind::GateBlocked, "gate_blocked"),
+            (
+                DiagnosticActivityKind::FinalResponseCompleted,
+                "final_response_completed",
+            ),
+            (
+                DiagnosticActivityKind::StreamDisconnected,
+                "stream_disconnected",
+            ),
+            (DiagnosticActivityKind::StreamResumed, "stream_resumed"),
+        ]);
+    }
+
+    #[test]
+    fn diagnostic_update_variants_round_trip_with_their_tagged_wire_names() {
+        let model_call_id = DiagnosticModelCallId::new();
+        let updates = [
+            (
+                DiagnosticUpdateKind::PromptUpdated {
+                    component_count: 2,
+                    total_estimated_tokens: Some(3),
+                    truncated: false,
+                },
+                "prompt_updated",
+            ),
+            (
+                DiagnosticUpdateKind::ModelCall(ModelCallDiagnostic::new(
+                    model_call_id,
+                    1,
+                    "requested-model",
+                    Some("effective-model".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    Some(4),
+                    InspectorModelCallStatus::Succeeded,
+                    Some(ModelTokenUsage {
+                        input_tokens: Some(5),
+                        output_tokens: Some(6),
+                        ..ModelTokenUsage::default()
+                    }),
+                    None,
+                )),
+                "model_call",
+            ),
+            (
+                DiagnosticUpdateKind::ToolExecutionUpdated {
+                    activity_id: CapabilityActivityId::new(),
+                    model_call_id: Some(model_call_id),
+                    capability_name: BoundedDiagnosticText::label("filesystem.read"),
+                    status: ToolExecutionStatus::Succeeded,
+                    duration_ms: Some(7),
+                    output_bytes: Some(8),
+                    result_truncated: false,
+                },
+                "tool_execution_updated",
+            ),
+            (
+                DiagnosticUpdateKind::Activity(DiagnosticActivityEvent::new(
+                    Utc::now(),
+                    DiagnosticActivityKind::Progress,
+                    Some(1),
+                    None,
+                    Some(model_call_id),
+                    Some("working".to_string()),
+                )),
+                "activity",
+            ),
+            (
+                DiagnosticUpdateKind::Stats(SessionDiagnosticStats {
+                    total_model_calls: 1,
+                    calls_per_model: vec![DiagnosticModelCount::new("model", 1)],
+                    ..SessionDiagnosticStats::default()
+                }),
+                "stats",
+            ),
+        ];
+
+        for (update, wire_name) in updates {
+            let encoded = serde_json::to_value(&update).expect("serialize diagnostic update");
+            assert_eq!(encoded["type"], wire_name);
+            let decoded: DiagnosticUpdateKind =
+                serde_json::from_value(encoded).expect("deserialize diagnostic update");
+            assert_eq!(decoded, update);
+        }
     }
 
     #[test]
