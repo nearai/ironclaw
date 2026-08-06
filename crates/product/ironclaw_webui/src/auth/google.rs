@@ -240,7 +240,7 @@ impl OAuthProvider for GoogleProvider {
                 // log-injection guard as the GitHub provider.
                 let safe_error = sanitize_error_code(&error_code);
                 tracing::warn!(
-                    target = "ironclaw::reborn::webui_ingress::auth",
+                    target: "ironclaw::reborn::webui_ingress::auth",
                     %status,
                     error_code = %safe_error,
                     "Google token endpoint rejected OAuth code exchange",
@@ -250,7 +250,7 @@ impl OAuthProvider for GoogleProvider {
                 )));
             }
             tracing::warn!(
-                target = "ironclaw::reborn::webui_ingress::auth",
+                target: "ironclaw::reborn::webui_ingress::auth",
                 %status,
                 "Google token endpoint returned a non-success response without a JSON error code",
             );

@@ -267,7 +267,16 @@ async fn queue_compaction_failure_records_sanitized_queue_telemetry() {
     let error = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
         .await
         .expect_err("compaction hold removal failure should fail flush");
-    assert!(error.to_string().contains("duplicate queue hold"));
+    // #7144: the unreadable sidecar used to be swallowed by
+    // `.ok().flatten()`, so compaction ranked the held envelope as unheld
+    // and only tripped later, on the duplicate-hold removal. It now fails at
+    // the read — earlier, and naming the artifact that could not be read
+    // instead of a downstream symptom.
+    let message = error.to_string();
+    assert!(
+        message.contains("hold sidecar"),
+        "the failure must name the unreadable hold, got: {message}"
+    );
 
     let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
     let failure = diagnostics
@@ -670,7 +679,8 @@ async fn server_rescrub_redacts_late_leaks_before_storage() {
         "Authorization": "Bearer abcdefghijklmnopqrstuvwxyz123456",
         "path": "/tmp/ironclaw/private/token.txt"
     });
-    rescrub_trace_envelope_with(&DeterministicTraceRedactor::new(Vec::new()), &mut envelope);
+    rescrub_trace_envelope_with(&DeterministicTraceRedactor::new(Vec::new()), &mut envelope)
+        .expect("re-scrub should succeed");
 
     let json = serde_json::to_string(&envelope).expect("envelope serializes");
     assert!(json.contains("<PRIVATE_LOCAL_PATH_"));
