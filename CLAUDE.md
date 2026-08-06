@@ -22,8 +22,9 @@ The rest of this file is Claude-specific.
 The `codebase-memory` MCP server indexes `crates/` into a knowledge graph;
 prefer it over `Grep` for *code structure* (cross-crate call chains are
 invisible to text search). `.codebase-memory/graph.db.zst` is the committed
-bootstrap snapshot; local databases and ✎ `.codebase-memory/artifact.json`
-stay git-ignored (per-environment state, deliberately untracked). Check
+bootstrap snapshot; local databases and
+`.codebase-memory/artifact.json` <!-- check-guidance: path-ok --> stay
+git-ignored (per-environment state, deliberately untracked). Check
 freshness first: `bash scripts/codebase-graph.sh status`.
 
 - Missing → `index_repository(repo_path=".", persistence=true)` once.
