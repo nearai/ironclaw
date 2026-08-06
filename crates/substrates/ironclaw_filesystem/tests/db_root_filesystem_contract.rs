@@ -791,7 +791,7 @@ async fn libsql_fts_treats_free_form_queries_as_plain_text() {
         IndexKind::Fts,
     );
     filesystem.ensure_index(&prefix, &spec).await.unwrap();
-    let entry = Entry::record(kind, &serde_json::json!({}))
+    let entry = Entry::record(kind.clone(), &serde_json::json!({}))
         .unwrap()
         .with_indexed(
             content.clone(),
@@ -801,6 +801,24 @@ async fn libsql_fts_treats_free_form_queries_as_plain_text() {
         .put(
             &VirtualPath::new("/memory/plain-query/a").unwrap(),
             entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+    // Negative document: shares only some terms with every multi-term query
+    // below, so it can tell the FTS5 implicit-AND join apart from an OR join.
+    // If terms were OR-joined (or a required term were wrongly stop-listed),
+    // this partial match would leak into the results.
+    let partial = Entry::record(kind, &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(
+            content.clone(),
+            IndexValue::Text("banana-99 staging".into()),
+        );
+    filesystem
+        .put(
+            &VirtualPath::new("/memory/plain-query/partial").unwrap(),
+            partial,
             CasExpectation::Absent,
         )
         .await
@@ -828,9 +846,32 @@ async fn libsql_fts_treats_free_form_queries_as_plain_text() {
         assert_eq!(
             results.len(),
             1,
-            "plain FTS query {query:?} must match literal terms"
+            "plain FTS query {query:?} must require every term (partial doc excluded)"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|result| result.path.as_str().ends_with("/partial")),
+            "plain FTS query {query:?} must not return the partial-match document"
         );
     }
+
+    // The negative document is itself searchable: a single-term query for a
+    // term it contains must return it, proving the exclusion above is
+    // term-based rather than a total index failure.
+    let partial_only = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content.clone(),
+                query: "banana-99".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partial_only.len(), 1);
+    assert!(partial_only[0].path.as_str().ends_with("/partial"));
 
     let punctuation_only = filesystem
         .query(

@@ -214,18 +214,39 @@ pub(crate) async fn core_builtin_tools(
                     process_port_dyn,
                 )?
             };
-            let mut harness = core_builtin_tools_from_runtime(
+            recording_harness_from_runtime(
                 root,
                 workspace_root,
                 runtime,
                 network_policy,
                 UserId::new("reborn-e2e-core-builtins-user")?,
-            )?;
-            harness.http_egress = Some(runtime_http_egress);
-            harness.process_port = recording_process_port;
-            Ok(harness)
+                runtime_http_egress,
+                recording_process_port,
+            )
         }
     }
+}
+
+/// Shared tail for the recording-egress harness shape: wrap a built runtime
+/// in the harness with the recording HTTP egress and (optionally) the
+/// recording process port attached. Both the storage-root branch of
+/// [`core_builtin_tools`] and the shared-filesystem variant
+/// [`core_builtin_tools_over_shared_filesystem`] assemble this exact shape,
+/// differing only in how the runtime is constructed.
+fn recording_harness_from_runtime(
+    root: Arc<tempfile::TempDir>,
+    workspace_root: PathBuf,
+    runtime: Arc<dyn HostRuntime>,
+    network_policy: NetworkPolicy,
+    user_id: UserId,
+    runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<super::super::super::process::RecordingProcessPort>>,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness =
+        core_builtin_tools_from_runtime(root, workspace_root, runtime, network_policy, user_id)?;
+    harness.http_egress = Some(runtime_http_egress);
+    harness.process_port = process_port;
+    Ok(harness)
 }
 
 /// Zero-arg convenience; most callers want this and never touch
@@ -257,17 +278,15 @@ pub(crate) fn core_builtin_tools_over_shared_filesystem(
             Arc::clone(&runtime_http_egress),
             Some(Arc::clone(&process_port) as Arc<dyn RuntimeProcessPort>),
         )?;
-    let workspace_root = root.path().join("workspace");
-    let mut harness = core_builtin_tools_from_runtime(
-        root,
-        workspace_root,
+    recording_harness_from_runtime(
+        root.clone(),
+        root.path().join("workspace"),
         runtime,
         http_test_policy(),
         user_id,
-    )?;
-    harness.http_egress = Some(runtime_http_egress);
-    harness.process_port = Some(process_port);
-    Ok(harness)
+        runtime_http_egress,
+        Some(process_port),
+    )
 }
 
 pub(crate) async fn core_builtin_tools_with_durable_capability_io()
