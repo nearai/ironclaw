@@ -34,7 +34,7 @@ The generic backbone landed via #6816 and neighbors:
   `ironclaw_host_api::product_adapter::inbound`) on every normalized channel
   message; `/cmd args` becomes `ChannelInboundClassification::Command` with a
   normalized `InboundCommandPayload`.
-- Admission: `ironclaw_product::DirectConversationCommandAdmission` — direct
+- Admission: `ironclaw_assistant::DirectConversationCommandAdmission` — direct
   conversations only + the channel manifest's declared set, fail-closed;
   rejection help lists only declared commands.
 - Dispatch: typed `ProductCommand` → `ProductSurface::invoke` operations
@@ -44,7 +44,7 @@ The generic backbone landed via #6816 and neighbors:
 - Results: `CommandResultView` (title/fields/lines) delivered by
   `RunDeliveryObserver` as a channel message; help text scoped via
   `with_enabled_commands`.
-- Registry: `ironclaw_product::commands` — descriptors carry name + aliases
+- Registry: `ironclaw_assistant::commands` — descriptors carry name + aliases
   only (no title/description/usage); inventory = `model`, `status`
   (alias `progress`), + ten lifecycle commands.
 
@@ -83,7 +83,7 @@ parsing, privilege policy, execution, and result shaping is defined once.
    → shared slash parser (host_api)        → same shared parser
                    │                                 │
                    ▼                                 ▼
-  ┌────────── shared command center (ironclaw_product) ──────────┐
+  ┌────────── shared command center (ironclaw_assistant) ──────────┐
   │ registry: names + metadata + audience (commands.rs)          │
   │ typed parse: ProductCommand::from_payload                    │
   │ policy: direct-conv + declared set + required_audience ×     │
@@ -103,7 +103,7 @@ operations — policy is defined once and consulted from both entries.
 
 ## PR-1 — Role-gated command admission
 
-### Registry (`crates/ironclaw_product/src/commands.rs`)
+### Registry (`crates/ironclaw_assistant/src/commands.rs`)
 
 - `CommandAudience { User, Admin }`.
 - `ProductCommandDescriptor` gains `audience: CommandAudience` — the
@@ -122,7 +122,7 @@ operations — policy is defined once and consulted from both entries.
 
 ### Role resolution port
 
-New trait in `ironclaw_product` beside `ProductCommandAdmissionService`:
+New trait in `ironclaw_assistant` beside `ProductCommandAdmissionService`:
 resolve the **bound** user's `AdminUserRole`
 (`reborn_services/admin_users.rs`: `Owner | Admin | Member`, `is_admin()`)
 from the admission context's `installation_id` + `external_actor_ref`. The
@@ -138,7 +138,7 @@ Fail-closed semantics:
 - Unpaired/unknown actors never reach admission (pairing interceptor
   upstream rejects first).
 
-### Admission (`crates/ironclaw_product/src/command_admission.rs`)
+### Admission (`crates/ironclaw_assistant/src/command_admission.rs`)
 
 `DirectConversationCommandAdmission` order: direct-conversation check →
 declared-set check → audience check (only when `required_audience` is Admin:
@@ -176,9 +176,9 @@ keyed by the reused wire-stable `ProductRejectionKind::AccessDenied`.
 
 ### Rebase posture
 
-Main wins: registry stays in `ironclaw_product::commands` (drop the PR's
+Main wins: registry stays in `ironclaw_assistant::commands` (drop the PR's
 `ironclaw_host_api::product_commands` move — `ironclaw_extension_host`
-already depends on `ironclaw_product` for validation);
+already depends on `ironclaw_assistant` for validation);
 `DirectConversationCommandAdmission` stays (drop `PairedDmCommandAdmission`);
 already-landed slices (classification, manifest opt-in, observer scoping)
 drop out. Surviving slices: descriptor metadata
@@ -415,5 +415,8 @@ Telegram is unchanged.
   additive beside the dispatcher if the shorter spelling is ever wanted.
 - **`response_url` delivery** for out-of-DM slash rejections.
 - **Durable command results** in the WebUI timeline (Decision 6 revisit).
-- **Future user commands** (`/new`, `/stop`, `/compact`, Telegram `/start`
-  deep-link) ride the same registry + audience model.
+- **Delivered follow-up:** `/new`, `/stop`, and `/interrupt` now ride the same
+  registry + audience model; continuous channels reset by non-destructively
+  rotating their external binding, while WebUI `/new` opens a fresh task.
+- **Future user commands** (`/compact`, Telegram `/start` deep-link) ride the
+  same registry + audience model.

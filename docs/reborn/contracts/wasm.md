@@ -1,6 +1,6 @@
 # Reborn WASM runtime contract
 
-The Reborn WASM runtime executes sandboxed extension components through the canonical component-model ABI declared in `crates/ironclaw_wasm/wit/tool.wit`.
+The Reborn WASM runtime executes sandboxed extension components through the canonical component-model ABI declared in `crates/lanes/ironclaw_wasm/wit/tool.wit`.
 
 ## ABI
 

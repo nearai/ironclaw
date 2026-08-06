@@ -6,7 +6,7 @@
 
 **Architecture:** The Slack extension's inbound path branches on `Content-Type`: JSON keeps today's Events-API flow; `application/x-www-form-urlencoded` parses the slash form (`serde_urlencoded`, already in the workspace lock — zero new compiled crates), answering `ssl_check` with an immediate empty 200 and mapping `/ironclaw <text>` to a normalized message whose text is `/<text>` — trigger DERIVED via DM detection (`DirectChat` for DMs, `BotCommand` otherwise, which the direct-conversation admission rejects). Everything downstream is the existing pipeline. `ChannelPresentation` gains `command_prefix: Option<String>`; the observer's help renders `/ironclaw model` on Slack; the WebUI and admission internals stay bare. Spec: `docs/superpowers/specs/2026-07-29-product-command-train-design.md` PR-3 section (as corrected in d80bb29c9). Branch: `pr3-slack-native-dispatcher` (stacks on `pr2-webui-command-palette`; PR base = that branch until PR-2 merges).
 
-**Tech Stack:** Rust 2024 (`ironclaw_slack_extension`, `ironclaw_host_api`, `ironclaw_product`, `ironclaw_extension_host`), serde_urlencoded 0.7, Mintlify docs.
+**Tech Stack:** Rust 2024 (`ironclaw_slack_extension`, `ironclaw_host_api`, `ironclaw_assistant`, `ironclaw_extension_host`), serde_urlencoded 0.7, Mintlify docs.
 
 ## Global Constraints
 
@@ -23,7 +23,7 @@
 
 - `crates/ironclaw_slack_extension/src/payload.rs` — form parse + dispatcher mapping; `src/channel.rs` — SslCheck arm + test helper; `Cargo.toml` — dep.
 - `crates/ironclaw_host_api/src/channel.rs` — `ChannelPresentation.command_prefix` + validation.
-- `crates/ironclaw_product/src/commands.rs` — prefix-aware help; `run_delivery/observer.rs` — prefix threading.
+- `crates/ironclaw_assistant/src/commands.rs` — prefix-aware help; `run_delivery/observer.rs` — prefix threading.
 - `crates/ironclaw_extension_host/src/channel_host.rs` — assembly read (~1030); `channel_host/e2e_tests.rs` — journeys.
 - `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml` — `command_prefix`.
 - `docs/reborn/setup-slack-for-reborn-binary.md`, `docs/channels/slack.mdx` — registration.
@@ -62,8 +62,8 @@
 ### Task 2: Command display prefix (manifest → observer help)
 
 **Files:**
-- Modify: `crates/ironclaw_host_api/src/channel.rs` (~396-405 + validate), `crates/ironclaw_product/src/commands.rs` (`declared_command_help_text`), `crates/ironclaw_product/src/run_delivery/observer.rs` (`with_enabled_commands` ~198), `crates/ironclaw_extension_host/src/channel_host.rs` (`build_observer` ~1030), `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml` (`[channel.presentation]` ~227)
-- Test: host_api channel tests, `crates/ironclaw_product/tests/run_delivery_contract.rs`, extension_host `available_extensions` manifest pins
+- Modify: `crates/ironclaw_host_api/src/channel.rs` (~396-405 + validate), `crates/ironclaw_assistant/src/commands.rs` (`declared_command_help_text`), `crates/ironclaw_assistant/src/run_delivery/observer.rs` (`with_enabled_commands` ~198), `crates/ironclaw_extension_host/src/channel_host.rs` (`build_observer` ~1030), `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml` (`[channel.presentation]` ~227)
+- Test: host_api channel tests, `crates/ironclaw_assistant/tests/run_delivery_contract.rs`, extension_host `available_extensions` manifest pins
 
 **Interfaces:**
 - Produces: `ChannelPresentation { …, pub command_prefix: Option<String> }` (serde default + skip-if-none; validation: non-empty, starts with `/`, ≤ 32 bytes, no control chars); `declared_command_help_text_with_prefix<I, S>(commands: I, prefix: Option<&str>) -> String` (existing `declared_command_help_text` delegates with `None`; prefixed rendering replaces the leading `/` formatting: `Some("/ironclaw ")` + `model` → `/ironclaw model`); `RunDeliveryObserver::with_enabled_commands` gains the prefix (new signature `with_enabled_commands<I, S>(self, commands: I, prefix: Option<&str>)` — update ALL call sites/tests).
@@ -112,7 +112,7 @@
 ### Task 5: Gauntlet + PR
 
 - [ ] `cargo fmt`; three clippy lanes (default / `--all-features` / `--workspace --all-targets --all-features`), all `-D warnings`.
-- [ ] `cargo test -p ironclaw_slack_extension -p ironclaw_host_api -p ironclaw_product -p ironclaw_extension_host -p ironclaw_architecture --no-fail-fast`; `scripts/pre-commit-safety.sh`; `RUST_MIN_STACK=67108864 bash scripts/reborn-e2e-rust.sh`.
+- [ ] `cargo test -p ironclaw_slack_extension -p ironclaw_host_api -p ironclaw_assistant -p ironclaw_extension_host -p ironclaw_architecture_tests --no-fail-fast`; `scripts/pre-commit-safety.sh`; `RUST_MIN_STACK=67108864 bash scripts/reborn-e2e-rust.sh`.
 - [ ] Spec sync: re-read the PR-3 section against the diff; fix drift in the spec.
 - [ ] Controller pushes and opens the PR (base `pr2-webui-command-palette` until PR-2 merges; retarget to `main` after). Body notes: the 20s-deadline nuance, slash-retry citation, the four Slack apps' one-time registration steps, follow-ups (`response_url` delivery for out-of-DM rejections; Telegram `setMyCommands`).
 

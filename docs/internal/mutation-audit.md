@@ -73,8 +73,8 @@ audit dies at the baseline with no mutants tested. Set `SKIP_FRONTEND_BUILD=1`,
 which the build script already honours:
 
 ```bash
-SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_reborn_composition \
-    crates/ironclaw_reborn_composition/src/extension_host/channel_outbound_targets.rs
+SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_composition \
+    crates/ironclaw_composition/src/extension_host/channel_outbound_targets.rs
 ```
 
 The frontend is not under mutation, so skipping it costs no coverage.
@@ -87,7 +87,7 @@ adding a second heavy build on top starves the test processes, and **starvation
 is indistinguishable from a hang** — libtest prints "has been running for over
 60 seconds" and then nothing.
 
-This cost real time while writing this guide. `ironclaw_reborn_composition`'s
+This cost real time while writing this guide. `ironclaw_composition`'s
 lib suite appeared to hang at 807 of 981 tests, twice, and was written up as an
 environment problem needing Docker. Run on an idle machine it is
 **981 passed in 77 seconds**. Nothing was wrong with the suite; the audit was
