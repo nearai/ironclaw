@@ -204,11 +204,6 @@ export function useChatEvents({
     (envelope) => {
       const { type, frame } = envelope || {};
       if (!type || !frame) return;
-      publishInspectorEnvelope(
-        envelope,
-        threadId,
-        activeRunRef?.current?.runId || latestRunIdRef.current,
-      );
 
       // Per-thread run bookkeeping, owned and reset by `useChat` (see
       // `lib/run-tracking-state.ts`). Read from the ref on every event rather
@@ -229,6 +224,11 @@ export function useChatEvents({
         latestRunId: latestRunIdRef,
         promptRunId: promptRunIdRef,
       } = runTrackingRef.current;
+      publishInspectorEnvelope(
+        envelope,
+        threadId,
+        activeRunRef?.current?.runId || latestRunIdRef.current,
+      );
 
       switch (type) {
         case "accepted": {
