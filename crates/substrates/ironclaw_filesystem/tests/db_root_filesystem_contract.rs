@@ -1,4 +1,6 @@
 // arch-exempt: large_file, backend parity contracts stay in one shared behavioral suite, plan #5274
+use std::time::Duration;
+
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{
@@ -885,6 +887,36 @@ async fn libsql_fts_treats_free_form_queries_as_plain_text() {
         .await
         .expect("punctuation-only FTS is a valid empty query");
     assert!(punctuation_only.is_empty());
+}
+
+#[tokio::test]
+async fn libsql_repeated_fts_declaration_does_not_wait_for_the_writer() {
+    // Regression for #7283: memory search re-declares its FTS index on the
+    // query hot path. Once the cataloged declaration has committed, checking
+    // it must remain available while an unrelated durable write owns libSQL's
+    // single writer lease.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/repeated-fts").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_repeated").unwrap(),
+        vec![content],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let writer = filesystem.begin(&prefix).await.unwrap();
+    let redeclaration = tokio::time::timeout(
+        Duration::from_secs(1),
+        filesystem.ensure_index(&prefix, &spec),
+    )
+    .await;
+    writer.rollback().await;
+
+    assert!(
+        matches!(redeclaration, Ok(Ok(()))),
+        "an existing FTS declaration must not require the writer: {redeclaration:?}"
+    );
 }
 
 #[tokio::test]

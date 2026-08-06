@@ -140,6 +140,45 @@ impl LibSqlRootFilesystem {
             .await
             .map_err(|error| map_runtime_write_connection_error(path.clone(), operation, error))
     }
+
+    async fn fts_index_spec_is_registered(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+        keys_json: &str,
+        kind: &str,
+    ) -> Result<bool, FilesystemError> {
+        let conn = self.read_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = ?1 AND name = ?2",
+                libsql::params![path.as_str(), spec.name.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+            })?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+        })?
+        else {
+            return Ok(false);
+        };
+        let existing_keys: String = row.get(0).map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+        })?;
+        let existing_kind: String = row.get(1).map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+        })?;
+        if existing_keys != keys_json || existing_kind != kind {
+            return Err(FilesystemError::IndexConflict {
+                path: path.clone(),
+                name: spec.name.clone(),
+                reason: crate::IndexConflictReason::SpecMismatch,
+            });
+        }
+        Ok(true)
+    }
 }
 
 fn map_runtime_connection_error(
@@ -439,6 +478,32 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 };
             }
         }
+        let catalog_prefix = path.as_str();
+        let keys_json = serde_json::to_string(
+            &spec
+                .keys
+                .iter()
+                .map(|k| k.as_str().to_string())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| FilesystemError::SerializeIndexed {
+            path: path.clone(),
+            operation: FilesystemOperation::EnsureIndex,
+        })?;
+
+        // The FTS catalog row and physical table/triggers commit in the same
+        // transaction below. A matching committed row therefore proves FTS
+        // was fully materialized, and repeated declarations can remain on the
+        // read lane instead of contending for libSQL's sole writer. Ordered
+        // projections still enter their versioned installation path below.
+        if matches!(spec.kind, IndexKind::Fts)
+            && self
+                .fts_index_spec_is_registered(path, spec, &keys_json, &kind_str)
+                .await?
+        {
+            return Ok(());
+        }
+
         let _ddl_guard = self.index_ddl_lock.lock().await;
         if shared_projection {
             let cache = self
@@ -461,18 +526,15 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 };
             }
         }
-        let catalog_prefix = path.as_str();
-        let keys_json = serde_json::to_string(
-            &spec
-                .keys
-                .iter()
-                .map(|k| k.as_str().to_string())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|_| FilesystemError::SerializeIndexed {
-            path: path.clone(),
-            operation: FilesystemOperation::EnsureIndex,
-        })?;
+        // Another FTS declaration in this process may have completed while
+        // this task waited for the DDL guard.
+        if matches!(spec.kind, IndexKind::Fts)
+            && self
+                .fts_index_spec_is_registered(path, spec, &keys_json, &kind_str)
+                .await?
+        {
+            return Ok(());
+        }
 
         let conn = self
             .write_connection(path, FilesystemOperation::EnsureIndex)
@@ -492,7 +554,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // then read back the canonical row and compare. If the stored
         // spec matches ours we're idempotent; if it differs we surface
         // IndexConflict.
-        transaction
+        let inserted = transaction
             .execute(
                 "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
              VALUES (?1, ?2, ?3, ?4) \
@@ -543,6 +605,16 @@ impl RootFilesystem for LibSqlRootFilesystem {
             });
         }
         drop(rows);
+
+        // A different process can win the FTS declaration race after both
+        // read checks. Its committed catalog row also proves its DDL/backfill
+        // committed atomically, so do not repeat that work under this writer.
+        if inserted == 0 && matches!(spec.kind, IndexKind::Fts) {
+            transaction.commit().await.map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+            })?;
+            return Ok(());
+        }
 
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
         match &spec.kind {
@@ -3541,14 +3613,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_index_rolls_back_the_catalog_when_ddl_fails() {
+    async fn ensure_index_rolls_back_the_catalog_when_materialization_fails() {
         let (fs, _dir) = fresh_backend().await;
         let path = VirtualPath::new("/resources/index-atomicity").unwrap();
-        let spec = IndexSpec::new(
-            IndexName::new("by_status").unwrap(),
-            vec![IndexKey::new("status").unwrap()],
-            IndexKind::Exact,
-        );
         let writer = fs.migration_write_connection().await.unwrap();
         writer
             .execute("DROP TABLE root_filesystem_entries", ())
@@ -3556,26 +3623,36 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        let error = fs
-            .ensure_index(&path, &spec)
-            .await
-            .expect_err("the conflicting table must make index DDL fail");
-        assert!(matches!(error, FilesystemError::Backend { .. }));
+        for (name, key, kind) in [
+            ("by_status", "status", IndexKind::Exact),
+            ("by_content", "content", IndexKind::Fts),
+        ] {
+            let spec = IndexSpec::new(
+                IndexName::new(name).unwrap(),
+                vec![IndexKey::new(key).unwrap()],
+                kind,
+            );
+            let error = fs
+                .ensure_index(&path, &spec)
+                .await
+                .expect_err("the missing entries table must make index materialization fail");
+            assert!(matches!(error, FilesystemError::Backend { .. }));
 
-        let reader = fs.read_connection().await.unwrap();
-        let mut rows = reader
-            .query(
-                "SELECT COUNT(*) FROM root_filesystem_index_specs \
-                 WHERE prefix = ?1 AND name = ?2",
-                libsql::params![path.as_str(), spec.name.as_str()],
-            )
-            .await
-            .unwrap();
-        let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(
-            count, 0,
-            "failed index DDL must roll back the preceding catalog upsert"
-        );
+            let reader = fs.read_connection().await.unwrap();
+            let mut rows = reader
+                .query(
+                    "SELECT COUNT(*) FROM root_filesystem_index_specs \
+                     WHERE prefix = ?1 AND name = ?2",
+                    libsql::params![path.as_str(), spec.name.as_str()],
+                )
+                .await
+                .unwrap();
+            let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+            assert_eq!(
+                count, 0,
+                "failed index materialization must roll back the preceding catalog upsert"
+            );
+        }
     }
 
     #[tokio::test]

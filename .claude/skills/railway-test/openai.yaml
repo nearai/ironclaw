@@ -1,0 +1,4 @@
+interface:
+  display_name: "Railway Test"
+  short_description: "Test Railway PR previews and post evidence"
+  default_prompt: "Use $railway-test to run exact-head browser acceptance tests on this Railway preview and publish the evidence on the pull request."
