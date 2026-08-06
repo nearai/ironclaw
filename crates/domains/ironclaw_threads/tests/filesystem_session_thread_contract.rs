@@ -5,8 +5,8 @@
 //! [`InMemoryBackend`] composed under a `/threads` mount alias whose
 //! `VirtualPath` target encodes a tenant/user prefix. Mirrors the shape of
 //! the approval and process-journal filesystem contract suites — see
-//! `crates/ironclaw_approvals/tests/approval_resolution_contract.rs` and
-//! `crates/ironclaw_processes/tests/process_journal_store_contract.rs`.
+//! `crates/kernel/ironclaw_approvals/tests/approval_resolution_contract.rs` and
+//! `crates/kernel/ironclaw_processes/tests/process_journal_store_contract.rs`.
 
 use std::{
     collections::HashMap,
@@ -4022,7 +4022,7 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
 /// `put` impl rejects entries with `kind.is_some()`, which `cas_update`
 /// surfaces as `CasUnsupported`. This mirrors
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend` in
-/// `crates/ironclaw_approvals/tests/run_state_contract.rs`.
+/// `crates/kernel/ironclaw_approvals/tests/approval_store_contract.rs`.
 #[tokio::test]
 async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backend() {
     let dir = tempfile::tempdir().expect("temp dir");
