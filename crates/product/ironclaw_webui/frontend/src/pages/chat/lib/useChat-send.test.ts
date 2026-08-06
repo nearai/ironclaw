@@ -18,6 +18,10 @@ import {
   resetToolActivityState,
 } from "./tool-activity-state";
 import {
+  createRunTrackingState,
+  resetRunTrackingState,
+} from "./run-tracking-state";
+import {
   CONNECTION_LOST_RUN_FAILURE_KEY,
   failureMessageForRequestError,
   rewriteConnectionLostRunFailures,
@@ -116,6 +120,8 @@ function runUseChatSource(context) {
     createToolActivityState,
     failGateToolActivity,
     resetToolActivityState,
+    createRunTrackingState,
+    resetRunTrackingState,
     timelineMessageIdFromAcceptedRef,
     rewriteConnectionLostRunFailures,
     upsertConnectionLostRunFailure,
@@ -6013,4 +6019,91 @@ test("useChat.runCommand: fences the failure notice to the thread it executed ag
   assert.equal(seeded?.length, 1);
   assert.equal(seeded[0].role, CHAT_MESSAGE_ROLES.SYSTEM);
   assert.equal(seeded[0].content, t("chat.commandFailed"));
+});
+
+/* Caller-level cover for the per-thread run bookkeeping.
+ *
+ * `useChatEvents`'s own suite proves the handler behaves correctly GIVEN a
+ * reset. It cannot prove `useChat` performs one — the handler is stubbed
+ * there. This drives the real `useChat` across a thread switch and asserts
+ * the reset actually happens, which is the half that was missing when
+ * `settledRunsRef` / `latestRunIdRef` / `promptRunIdRef` lived inside
+ * `useChatEvents` with no owner clearing them.
+ */
+test("useChat: opening another thread resets the run bookkeeping handed to useChatEvents", () => {
+  const setCalls = [];
+  const react = createReactStub({ setCalls, runEffects: true });
+  let capturedRunTrackingRef = null;
+  let renderedMessages = [];
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: react,
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearInterval,
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: { invalidateQueries: () => {} },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("send should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (props) => {
+      capturedRunTrackingRef = props.runTrackingRef;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  react.__beginRender();
+  context.globalThis.__testExports.useChat("thread-1");
+  const runTrackingRef = capturedRunTrackingRef;
+  assert.ok(runTrackingRef, "useChat must hand a run-tracking ref to useChatEvents");
+
+  // A run that starts and never reaches a terminal status: nothing in the
+  // event handler will clear these on its own.
+  runTrackingRef.current.latestRunId.current = "run-stuck";
+  runTrackingRef.current.promptRunId.current = "run-stuck";
+  runTrackingRef.current.settledRuns.current.add("run-stuck");
+
+  react.__beginRender();
+  context.globalThis.__testExports.useChat("thread-2");
+
+  assert.equal(
+    capturedRunTrackingRef,
+    runTrackingRef,
+    "the ref object stays stable across renders",
+  );
+  assert.equal(runTrackingRef.current.latestRunId.current, null);
+  assert.equal(runTrackingRef.current.promptRunId.current, null);
+  assert.equal(runTrackingRef.current.settledRuns.current.size, 0);
 });
