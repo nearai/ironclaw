@@ -54,14 +54,17 @@ enforce = true
 # Ceiling on composition's share of production crate code, in basis points.
 # 2398 bp = 23.98%, the observed value on the date below (a true ratchet: set to
 # current, not padded). tolerance_bp gives working slack for in-flight PRs.
-ceiling_bp = 2398
+# 2026-08-05 (program closure): 2398 -> 658 — locked to the WS0 baseline share
+# exactly (the arch-test WS0 record is this ceiling's floor by assertion;
+# observed today is 578 bp, inside the nudge window).
+ceiling_bp = 658
 tolerance_bp = 30
 
 # Informational — the observed share when this file was last updated. Lets a
 # reviewer see the baseline and lets the gate emit a down-ratchet nudge. Not
 # consulted for the pass/fail decision.
-observed_bp = 2398
-observed_date = "2026-07-16"
+observed_bp = 578
+observed_date = "2026-08-05"
 
 # --- Absolute mass (production LOC) ---------------------------------------
 # The BINDING mass bound. Same numerator as the share metric — production `.rs`
@@ -129,7 +132,10 @@ observed_date = "2026-07-16"
 # current, not padded. (The eviction itself removed 199 lines; 9 came back as
 # the module doc-comment that records what stayed behind and why, which is the
 # honest number to bank.)
-loc_ceiling = 40419
+# Re-equalized 40419 -> 40423 on 2026-08-05 (program closure): #6831 (standardized
+# messaging framework) added 4 governed LOC through the queue's tolerance window;
+# ceiling, observed, and the arch-test record move together in this commit.
+loc_ceiling = 40423
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -140,7 +146,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40419
+loc_observed = 40423
 loc_observed_date = "2026-08-05"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -168,6 +174,8 @@ loc_observed_date = "2026-08-05"
 # product-auth, capability-surface, and channel-state vocabulary while leaving
 # the branch at 1122 governed sites. This ratifies the current post-cleanup
 # baseline without lowering the mass ratchet; future work must shrink again.
-arc_dyn_ceiling = 1122
+# 2026-08-05 (program closure): nudge taken, 1122 -> 814 — locked at today's
+# observed count; the WS0 record (827) stays within the effective ceiling (829).
+arc_dyn_ceiling = 814
 arc_dyn_tolerance = 15
-arc_dyn_observed = 1129
+arc_dyn_observed = 814
