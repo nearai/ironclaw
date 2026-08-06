@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::OutboundPart;
 use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
-use ironclaw_host_api::ids::{AgentId, UserId};
+use ironclaw_host_api::ids::AgentId;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
