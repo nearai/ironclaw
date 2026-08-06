@@ -464,6 +464,50 @@ async fn narrowed_allow_set_filters_tool_search_results() {
     }
 }
 
+/// #7177: retrieval must use admitted schema vocabulary, not only provider
+/// names and top-level descriptions. `committer` exists in the GitHub file
+/// mutation schemas but not in their catalog descriptions.
+#[tokio::test]
+async fn tool_search_discovers_authorized_tools_by_parameter_only_vocabulary() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "committer", "limit": 10}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("find a tool that accepts committer identity")
+        .await
+        .expect("turn completes");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    let ids: std::collections::BTreeSet<&str> = output["results"]
+        .as_array()
+        .expect("results is an array")
+        .iter()
+        .filter_map(|result| result["capability_id"].as_str())
+        .collect();
+    assert!(
+        ids.contains("github.delete_file") || ids.contains("github.create_or_update_file"),
+        "parameter-only query must discover a matching authorized file tool, got {ids:?}"
+    );
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "committer")
+        .await
+        .expect("richer internal search metadata must not grow the prompt-side names-only index");
+}
+
 /// #5712: tool_describe of a non-allowlisted id reads as unknown — same
 /// message as a nonexistent name, so existence itself is not disclosed.
 ///

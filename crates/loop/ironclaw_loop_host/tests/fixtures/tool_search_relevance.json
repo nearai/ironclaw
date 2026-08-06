@@ -1,0 +1,186 @@
+{
+  "tools": [
+    {
+      "kind": "builtin",
+      "capability_id": "builtin.time",
+      "name": "builtin__time",
+      "description": "Return the current local time.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timezone": { "type": "string" }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "github.add_issue_assignees",
+      "name": "github__add_issue_assignees",
+      "description": "Assign users to an issue or pull request.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "issue_number": { "type": "integer" },
+          "assignees": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "github.create_or_update_file",
+      "name": "github__create_or_update_file",
+      "description": "Create or replace repository file content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "path": { "type": "string" },
+          "committer": {
+            "type": "object",
+            "properties": {
+              "display_name": { "type": "string" },
+              "email_address": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-calendar.create_event",
+      "name": "google_calendar__create_event",
+      "description": "Create a calendar event.",
+      "verified": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "calendar_id": { "type": "string" },
+          "schedule": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "recurrence": { "type": "string", "description": "Repeated event rule" }
+                }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "start_at": { "type": "string" }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "linear.create_issue",
+      "name": "linear__create_issue",
+      "description": "Create a work item.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "team_id": { "type": "string" },
+          "title": { "type": "string" },
+          "priority": { "type": "integer" }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "linear.search_issues",
+      "name": "linear__search_issues",
+      "description": "Search work items.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" },
+          "team_id": { "type": "string" }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.install",
+      "name": "extension__install",
+      "description": "Install a catalog extension.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": { "type": "string" }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "slack.send_message",
+      "name": "slack__send_message",
+      "description": "Send a message to a channel.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "channel_id": { "type": "string" },
+          "thread_ts": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    }
+  ],
+  "intents": [
+    {
+      "class": "exact_name",
+      "query": "github__add_issue_assignees",
+      "expected": ["github__add_issue_assignees"]
+    },
+    {
+      "class": "alias",
+      "query": "assign issue users",
+      "expected": ["github__add_issue_assignees"]
+    },
+    {
+      "class": "canonical_id",
+      "query": "extension.install",
+      "expected": ["extension__install"]
+    },
+    {
+      "class": "parameter",
+      "query": "timezone",
+      "expected": ["builtin__time"]
+    },
+    {
+      "class": "parameter",
+      "query": "committer",
+      "expected": ["github__create_or_update_file"]
+    },
+    {
+      "class": "nested",
+      "query": "recurrence",
+      "expected": ["google_calendar__create_event"]
+    },
+    {
+      "class": "nested",
+      "query": "email address",
+      "expected": ["github__create_or_update_file"]
+    },
+    {
+      "class": "provider",
+      "query": "slack channel",
+      "expected": ["slack__send_message"]
+    },
+    {
+      "class": "ambiguous",
+      "query": "linear issue",
+      "expected": ["linear__create_issue", "linear__search_issues"]
+    },
+    {
+      "class": "no_match",
+      "query": "quantum banana telescope",
+      "expected": []
+    }
+  ]
+}

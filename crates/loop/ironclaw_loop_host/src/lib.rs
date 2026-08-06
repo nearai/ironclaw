@@ -59,6 +59,7 @@ mod token_estimator;
 mod tool_disclosure;
 mod tool_disclosure_mode;
 mod tool_disclosure_port;
+mod tool_search;
 pub mod user_profile_context;
 
 pub use await_edge_port::{

@@ -25,7 +25,10 @@ use tracing::debug;
 use crate::tool_disclosure::{
     ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
     TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, definition_matches_provider_name,
-    is_bridge_capability_id, is_bridge_name, select_active_set, tool_search_rank,
+    is_bridge_capability_id, is_bridge_name, select_active_set,
+};
+use crate::tool_search::{
+    AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
 };
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
@@ -103,30 +106,18 @@ struct ToolDisclosureCapabilityPort {
 #[derive(Debug, Clone)]
 struct ToolDisclosureTurnState {
     turn_id: TurnId,
-    /// Fingerprint of the inner tool surface the catalog was built from. The
-    /// catalog is rebuilt when this changes so tools that become available
+    /// Fingerprint of the effective authorized tool surface and indexed
+    /// metadata. The catalog and search index are rebuilt when this changes so tools that become available
     /// mid-turn (an activated extension, a completed OAuth connect) enter the
     /// disclosure catalog and become discoverable/describable/callable — without
     /// it, `tool_describe`/`tool_call` report a just-activated tool as "unknown".
     definitions_fingerprint: u64,
     surface_version: Option<CapabilitySurfaceVersion>,
     catalog: CapabilityCatalog,
+    search_index: AuthorizedToolSearchIndex,
     active: ActiveSet,
     disclosed_names: BTreeSet<String>,
-}
-
-/// Cheap order-independent-of-content fingerprint of the visible tool surface,
-/// used to detect mid-turn changes (extension activation / OAuth connect) so the
-/// disclosure catalog can refresh. `tool_definitions()` is already name-sorted,
-/// so hashing count + names in order is deterministic.
-fn definitions_fingerprint(definitions: &[ProviderToolDefinition]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    definitions.len().hash(&mut hasher);
-    for definition in definitions {
-        definition.name.as_str().hash(&mut hasher);
-    }
-    hasher.finish()
+    search_ranks: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -581,7 +572,14 @@ impl ToolDisclosureCapabilityPort {
             )
         })?;
         let definitions = self.inner.tool_definitions()?;
-        let fingerprint = definitions_fingerprint(&definitions);
+        // Fit and cache retrieval only over the effective authorized corpus.
+        // Denied schemas therefore cannot affect IDF, ordering, counts, cache
+        // invalidation, or search-index construction work.
+        let authorized_definitions: Vec<_> = definitions
+            .into_iter()
+            .filter(|definition| self.allow_set.permits(&definition.capability_id))
+            .collect();
+        let fingerprint = definitions_fingerprint(&authorized_definitions);
         let same_turn = guard
             .as_ref()
             .map(|state| state.turn_id == self.run_context.turn_id)
@@ -594,24 +592,41 @@ impl ToolDisclosureCapabilityPort {
             })
             .unwrap_or(true);
         if rebuild {
-            let catalog = CapabilityCatalog::new(&definitions, &[]);
+            let index_started_at = std::time::Instant::now();
+            let catalog = CapabilityCatalog::new(&authorized_definitions, &[]);
+            let search_index = AuthorizedToolSearchIndex::new(authorized_definitions.iter());
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                authorized_document_count = authorized_definitions.len(),
+                index_build_micros = index_started_at.elapsed().as_micros(),
+                metadata_fingerprint = fingerprint,
+                "rebuilt authorized deferred-tool search index"
+            );
             let promoted = self.promoted_for_scope()?;
             let active = select_active_set(&catalog, &promoted, self.caps, &self.allow_set);
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
-            let (surface_version, disclosed_names) = guard
+            let (surface_version, disclosed_names, search_ranks) = guard
                 .take()
                 .filter(|_| same_turn)
-                .map(|state| (state.surface_version, state.disclosed_names))
-                .unwrap_or((None, BTreeSet::new()));
+                .map(|state| {
+                    (
+                        state.surface_version,
+                        state.disclosed_names,
+                        state.search_ranks,
+                    )
+                })
+                .unwrap_or((None, BTreeSet::new(), BTreeMap::new()));
             *guard = Some(ToolDisclosureTurnState {
                 turn_id: self.run_context.turn_id,
                 definitions_fingerprint: fingerprint,
                 surface_version,
                 catalog,
+                search_index,
                 active,
                 disclosed_names,
+                search_ranks,
             });
         }
         Ok(guard)
@@ -629,7 +644,7 @@ impl ToolDisclosureCapabilityPort {
     }
 
     fn promote_target(&self, capability_id: &CapabilityId) -> Result<(), AgentLoopHostError> {
-        let name = {
+        let target = {
             let guard = self.turn_state()?;
             let Some(state) = guard.as_ref() else {
                 return Ok(());
@@ -637,11 +652,23 @@ impl ToolDisclosureCapabilityPort {
             state
                 .catalog
                 .definition_by_capability_id(capability_id)
-                .map(|definition| definition.name.to_string())
+                .map(|definition| {
+                    let name = definition.name.to_string();
+                    let selected_rank = state.search_ranks.get(&name).copied();
+                    (name, selected_rank)
+                })
         };
-        let Some(name) = name else {
+        let Some((name, selected_rank)) = target else {
             return Ok(());
         };
+        if let Some(selected_rank) = selected_rank {
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                selected_rank,
+                selection_action = "invoke",
+                "observed deferred-tool selection without logging tool or query metadata"
+            );
+        }
         let key = PromotionScopeKey::from_run_context(&self.run_context);
         let mut guard = self.promoted_by_scope.lock().map_err(|e| {
             AgentLoopHostError::new(
@@ -926,6 +953,9 @@ impl ToolDisclosureCapabilityPort {
         if query.is_empty() {
             return Ok(failed_invalid_input("tool_search requires query"));
         }
+        if query.len() > MAX_SEARCH_QUERY_BYTES {
+            return Ok(failed_invalid_input("tool_search query is too long"));
+        }
         let limit = bridge
             .arguments
             .get("limit")
@@ -938,11 +968,21 @@ impl ToolDisclosureCapabilityPort {
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let names = tool_search_rank(&state.catalog, query, limit, |id| {
-                self.allow_set.permits(id)
-            });
+            let search_started_at = std::time::Instant::now();
+            let outcome = state.search_index.search(query, limit);
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                query_class = outcome.query_class.as_str(),
+                empty_result = outcome.names.is_empty(),
+                returned_count = outcome.names.len(),
+                query_latency_micros = search_started_at.elapsed().as_micros(),
+                "ranked deferred-tool search without logging raw query or schemas"
+            );
             let mut results = Vec::new();
-            for name in names {
+            for (index, name) in outcome.names.into_iter().enumerate() {
+                state
+                    .search_ranks
+                    .insert(name.clone(), index.saturating_add(1));
                 state.disclosed_names.insert(name.clone());
                 if let Some(result) = state.catalog.search_result(&name) {
                     results.push(json!({
@@ -987,6 +1027,14 @@ impl ToolDisclosureCapabilityPort {
             // must not learn that a non-allowlisted tool exists.
             if !self.allow_set.permits(&result.capability_id) {
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
+            }
+            if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
+                debug!(
+                    target: "ironclaw::reborn::tool_search",
+                    selected_rank,
+                    selection_action = "describe",
+                    "observed deferred-tool selection without logging tool or query metadata"
+                );
             }
             state.disclosed_names.insert(name.to_string());
             json!({
@@ -3215,6 +3263,7 @@ mod tests {
             json!({"query": 42}),
             json!({"query": ""}),
             json!({"query": "   "}),
+            json!({"query": "x".repeat(MAX_SEARCH_QUERY_BYTES.saturating_add(1))}),
         ] {
             let candidate =
                 port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
