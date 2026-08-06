@@ -1409,7 +1409,10 @@ pub async fn stream_events(
 /// and `sse_capacity::REJECTION_REFUND_LIMIT` for why refunding stops once
 /// a caller hammers a saturated cap.
 fn sse_capacity_rejected(refundable: bool) -> Response {
-    let response = sse_concurrency_exhausted().into_response();
+    let mut response = sse_concurrency_exhausted().into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     if refundable {
         mark_rate_limit_refundable(response)
     } else {

@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
@@ -407,7 +407,7 @@ pub(crate) async fn enforce_rate_limit(
     let window_seconds = window.as_secs().max(1);
 
     let shard_idx = shard_index(&key.bucket_key);
-    let charged_generation = {
+    let (charged_generation, retry_after_seconds) = {
         let mut guard = match state.shards[shard_idx].lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -435,21 +435,26 @@ pub(crate) async fn enforce_rate_limit(
             window_entry.window_start = now;
             window_entry.remaining = max_requests.saturating_sub(1);
             window_entry.generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
-            Some(window_entry.generation)
+            (Some(window_entry.generation), 0)
         } else if window_entry.remaining == 0 {
-            None
+            let elapsed = now.saturating_sub(window_entry.window_start);
+            (None, window_seconds.saturating_sub(elapsed).max(1))
         } else {
             window_entry.remaining -= 1;
-            Some(window_entry.generation)
+            (Some(window_entry.generation), 0)
         }
     };
 
     let Some(charged_generation) = charged_generation else {
-        return (
+        let mut response = (
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Try again shortly.",
         )
             .into_response();
+        if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return response;
     };
 
     let mut response = next.run(request).await;

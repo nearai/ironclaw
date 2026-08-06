@@ -6761,6 +6761,14 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
         StatusCode::TOO_MANY_REQUESTS,
         "third concurrent open from same caller must be rejected"
     );
+    assert_eq!(
+        third
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1"),
+        "capacity rejection must tell the stream client when it may retry"
+    );
     let body = read_json(third).await;
     assert_eq!(body["error"], "rate_limited");
     assert_eq!(body["kind"], "busy");

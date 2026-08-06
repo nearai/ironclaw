@@ -238,12 +238,18 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
-  `Last-Event-ID`, abort, and retry/backoff over `fetch`/`ReadableStream`. The
-  bearer is sent in the `Authorization` header rather than the request URL. A
-  bounded, random `connection_id` remains stable for one browser tab across SPA
-  mounts and document reloads, while `connection_generation` increments for
-  every package-managed request. Fresh top-level navigations use a new identity
-  even when a duplicated tab copied `sessionStorage`. A same-caller, same-id
+  `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
+  IronClaw owns one reconnect coordinator across transport failures, stream
+  endings, activity stalls, visibility recovery, and network recovery. It uses
+  jittered 1/2/4/8/16/30-second backoff, honors `Retry-After`, and resets only
+  after a valid application frame arrives beyond a stable 15-second interval;
+  HTTP headers and the immediate admission keep-alive do not reset it. The
+  bearer is sent in the `Authorization` header rather than
+  the request URL. A bounded, random `connection_id` remains stable for one
+  browser tab across SPA mounts and document reloads, while
+  `connection_generation` increments for every package-managed request. Fresh
+  top-level navigations use a new identity even when a duplicated tab copied
+  `sessionStorage`. A same-caller, same-id
   stream supersedes its prior generation without consuming another slot; a
   delayed older generation receives `204` and cannot cancel the current stream.
   This prevents proxy-reordered closes/opens during thread navigation or reload
