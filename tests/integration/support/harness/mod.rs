@@ -23,7 +23,6 @@ use std::{
 
 use super::{filesystem::BlockingTurnStatePutFilesystem, product_surface::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
-use ironclaw_assistant::{ProjectService, ResolvedBinding};
 use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
@@ -63,6 +62,8 @@ use ironclaw_loop_host::{
     LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
+use ironclaw_product_contracts::binding::ResolvedBinding;
+use ironclaw_product_contracts::project_service::ProjectService;
 use ironclaw_trust::EffectiveTrustClass;
 
 pub(crate) use super::doubles::{
@@ -201,7 +202,7 @@ struct OutboundTargetToolsParts {
     /// upcast to `Arc<dyn OutboundPreferencesProductService>` at wrap time.
     service: Arc<super::outbound_preferences::FakeOutboundPreferencesService>,
     requires_approval: bool,
-    tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    tool_permission_overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
 }
 
@@ -342,7 +343,8 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// dynamic `ToolPermissionOverride::AskEachTime` override on any capability
     /// via `set_ask_each_time_override_for_test`, independent of the
     /// `outbound_target_tools()`-only `OutboundTargetToolsParts` copy.
-    tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>>,
+    tool_permission_overrides:
+        Option<Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>>,
     /// Local-dev persistent approval-policy store, captured unconditionally
     /// like `tool_permission_overrides`/`auto_approve_settings` above. `Some`
     /// only for `new_with_options`-built harnesses.
@@ -1649,7 +1651,7 @@ impl HostRuntimeCapabilityHarness {
     /// override store, for wiring `RebornServices::with_operator_approval_config`.
     pub(crate) fn tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>> {
         self.tool_permission_overrides.clone()
     }
 
@@ -1769,7 +1771,7 @@ impl HostRuntimeCapabilityHarness {
                     )),
                 ))
             });
-        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
                 Arc::new(
                     ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),

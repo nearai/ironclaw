@@ -31,6 +31,34 @@
   projection; metadata and bounded opaque payload persistence are owned by
   `ironclaw_processes`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+- `external_tool_catalog` — the per-run catalog of client-supplied ("external")
+  tools. PROPOSAL §6.5.8 lists it as a shed, *"→ product, its self-described
+  owner"*; **that destination is refuted, measured 2026-08-05 (WS5 `product`
+  narrows), and the module stays here for now.** Recorded so the next agent does
+  not re-litigate it:
+  - **`ironclaw_assistant` is not a consumer — it names zero of the six exported
+    symbols.** The production readers are exactly two: `ironclaw_loop_host`
+    (`src/external_tool_capability.rs`, which imports `ExternalToolCatalog`,
+    `PendingExternalCall`, `ExternalToolSpec` and `ExternalToolCatalogError`
+    outside any `cfg(test)`) and `ironclaw_composition`, which wires it. So the
+    move would place the module where nothing reads it.
+  - **And `loops → products` is matrix-illegal.** `ironclaw_loop_host` is
+    `layer = "loops"`, `ironclaw_assistant` is `layer = "products"`, and
+    `layer_allows_dependency` admits nothing above `loops` for a `loops` crate —
+    the move needs a `LAYER_MATRIX_EXCEPTION`, which the WS0 ratchet forbids.
+    Same refutation shape as `ironclaw_common`'s `provider_transcript`.
+  - **`ironclaw_openai_compat` is not the product-side consumer the §6.5.8
+    sentence implies.** It declares its own `OpenAiCompatExternalToolSpec` /
+    `OpenAiCompatExternalToolStore` port and names `ironclaw_turns` only as a
+    *dev*-dependency; composition adapts between the two. Its `BoundaryRule`
+    also forbids `ironclaw_loop_host` outright, so "put it beside its reader"
+    is closed off in that direction too.
+  - **The shed itself is still sound**: nothing in `ironclaw_turns` uses the
+    module — it is a pure passenger, re-exported and never called from a product-tier crate (loop_host and composition are its production readers). A legal home
+    must sit at or below `loops` and be reachable from `products` and `app`;
+    `ironclaw_loop_contracts` is the candidate, and choosing it is a design call
+    (it would put an in-memory store impl in a contracts crate), not this row's
+    mechanical move.
 
 ## Do Not Move In Here
 

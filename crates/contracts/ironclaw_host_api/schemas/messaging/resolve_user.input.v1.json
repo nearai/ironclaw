@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging resolve_user input",
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Search query to match against this extension's people (name, handle, or similar)."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Maximum matches to return. The host rejects values above 1000; adapters may clamp further to vendor maxima."
+    },
+    "cursor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque pagination cursor from a previous call's next_cursor."
+    }
+  },
+  "additionalProperties": false
+}

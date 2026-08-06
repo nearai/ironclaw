@@ -1,11 +1,11 @@
 use super::*;
 use async_trait::async_trait;
-use ironclaw_assistant::{
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView, ProductAdapterError,
-    RedactedString,
-};
 use ironclaw_host_api::dispatch::CapabilityDisplayOutputPreview;
+use ironclaw_host_api::product_adapter::{ProductAdapterError, RedactedString};
 use ironclaw_loop_contracts::CapabilityInputRef;
+use ironclaw_product_contracts::outbound::{
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView,
+};
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
     CapabilityInputRef::new(format!("input:{label}")).unwrap()

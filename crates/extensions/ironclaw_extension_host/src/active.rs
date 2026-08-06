@@ -13,7 +13,7 @@ use ironclaw_extension_contracts::extension::{
     Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
 };
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
-use ironclaw_extension_registry::ResolvedExtensionManifest;
+use ironclaw_extension_registry::{ResolvedExtensionManifest, composed_capability_description};
 use ironclaw_host_api::{
     capability::CapabilityDescriptor, ids::CapabilityId, runtime::TrustClass,
     trust::RequestedTrustClass,
@@ -70,7 +70,7 @@ fn capability_descriptors(resolved: &ResolvedExtensionManifest) -> Vec<Capabilit
             provider: resolved.id.clone(),
             runtime,
             trust_ceiling,
-            description: tool.description.clone(),
+            description: composed_capability_description(tool),
             parameters_schema: serde_json::json!({
                 "$ref": tool.input_schema_ref.as_str(),
             }),
@@ -81,6 +81,7 @@ fn capability_descriptors(resolved: &ResolvedExtensionManifest) -> Vec<Capabilit
             max_egress_bytes: tool.max_egress_bytes,
             resource_profile: tool.resource_profile.clone(),
             origin_gate_matrix: tool.origin_gate_matrix.clone(),
+            standard_op: tool.standard_op,
         })
         .collect()
 }

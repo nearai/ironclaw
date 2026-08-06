@@ -36,10 +36,6 @@ use ironclaw_product_contracts::operator_tools::{
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
-use crate::{
-    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor,
-    ProjectionSubscriptionRequest,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -48,6 +44,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, ChannelConnectionService, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
     TurnScope, TurnStatus,
@@ -65,6 +62,8 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -94,9 +93,8 @@ use crate::{
     PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
     ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
-    ProductRejectionKind, ProductStatusCommandInput, ProductStopCommandInput,
-    ProductStopInvocation, ProductSurfaceFailure, ProductTriggerReason,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
@@ -106,9 +104,10 @@ use crate::{
         bounded_source_binding_ref,
     },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
-    parse_product_slash_command, product_command_descriptors, required_audience,
-    thread_metadata_is_automation_trigger,
+    product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_product_contracts::inbound::{ProductRejectionKind, parse_product_slash_command};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
@@ -170,9 +169,9 @@ pub use trace_credits::{
 
 use approval_settings::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    CapabilityPermissionOverrideStorePort, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
@@ -228,6 +227,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
 };
+// A product-tier port gets exactly one import path (§11.2.4), so this is a
+// private `use` and never a `pub use` — callers name the contracts crate.
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
@@ -256,12 +258,12 @@ pub use project_fs::{
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
 };
 pub use projects::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    ProjectCaller, RebornAddMemberRequest, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest,
 };
 pub use run_artifact::{
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
@@ -570,7 +572,7 @@ pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentR
 
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
@@ -2373,7 +2375,7 @@ where
 
     pub fn with_operator_approval_config(
         mut self,
-        overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+        overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
         auto_approve: Arc<dyn AutoApproveSettingStorePort>,
         persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
         tool_catalog: Arc<dyn RebornOperatorToolCatalog>,

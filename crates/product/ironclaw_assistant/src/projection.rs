@@ -5,14 +5,6 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
-    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductSurfaceRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStreamSubscription,
-    ProjectionSubscriptionRequest, RedactedString,
-};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_approvals::ApprovalRequestStorePort;
@@ -31,8 +23,12 @@ use ironclaw_event_streams::{
     ProjectionSubscription as EventProjectionSubscription, ProjectionTarget, ProjectionViewClass,
     SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
-use ironclaw_first_party_extension_ports::SkillActivationObserver;
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
+    RedactedString,
+};
 use ironclaw_host_api::{
     error::HostApiError,
     ids::UserId,
@@ -41,7 +37,16 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneSink;
+use ironclaw_loop_host::SkillActivationObserver;
 use ironclaw_outbound::OutboundStateStore;
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
+    ProductProjectionState, ProjectionCursor as ProductProjectionCursor,
+};
+use ironclaw_product_contracts::projection::{
+    ProjectionStreamSubscription, ProjectionSubscriptionRequest,
+};
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,

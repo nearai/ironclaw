@@ -2,6 +2,7 @@
 //! Contract tests for the product workflow service.
 
 use ironclaw_loop_host::RejectingInputEnqueue;
+use ironclaw_product_contracts::binding::ResetBindingRequest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,29 +22,25 @@ use ironclaw_assistant::{
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
     ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
-    ResetBindingRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, StaticProductInstallationResolver, approval_gate_ref,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    StaticProductInstallationResolver, approval_gate_ref,
 };
-use ironclaw_assistant::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalEventId, InboundCommandPayload,
-    LinkedThreadActionPayload, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
-    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductSurfaceRejectionKind, ProductTriggerReason, ProjectionCursor, ProjectionReadPayload,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
-    TrustedInboundContext, UserMessagePayload,
-};
+
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::ExternalEventId;
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
     TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -63,7 +60,20 @@ use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload, TrustedInboundContext,
+    UserMessagePayload,
+};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+};
 use ironclaw_product_contracts::subject_route::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
     ProductConversationSubjectRouteResolver,
@@ -5787,7 +5797,7 @@ async fn concrete_product_surface_bot_mention_uses_shared_route() {
     assert_eq!(submissions.len(), 1);
     assert_eq!(
         binding.route_kinds(),
-        vec![ironclaw_assistant::ProductConversationRouteKind::Shared]
+        vec![ironclaw_product_contracts::binding::ProductConversationRouteKind::Shared]
     );
 }
 
@@ -5911,7 +5921,7 @@ async fn concrete_product_surface_reuses_prepared_binding_for_content_only_polic
     assert_eq!(binding.resolve_count(), 1);
     assert_eq!(
         binding.route_kinds(),
-        vec![ironclaw_assistant::ProductConversationRouteKind::Direct]
+        vec![ironclaw_product_contracts::binding::ProductConversationRouteKind::Direct]
     );
 }
 
@@ -5953,8 +5963,8 @@ async fn concrete_product_surface_recomputes_route_after_policy_rewrites_trigger
     assert_eq!(
         binding.route_kinds(),
         vec![
-            ironclaw_assistant::ProductConversationRouteKind::Direct,
-            ironclaw_assistant::ProductConversationRouteKind::Shared,
+            ironclaw_product_contracts::binding::ProductConversationRouteKind::Direct,
+            ironclaw_product_contracts::binding::ProductConversationRouteKind::Shared,
         ]
     );
 }

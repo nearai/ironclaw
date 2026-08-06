@@ -240,13 +240,15 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
   `Last-Event-ID`, abort, and retry/backoff over `fetch`/`ReadableStream`. The
   bearer is sent in the `Authorization` header rather than the request URL. A
-  bounded, random `connection_id` remains stable for one loaded browser tab and
-  `connection_generation` increments for every package-managed request. A
-  same-caller, same-id stream supersedes its prior generation without consuming
-  another slot; a delayed older generation receives `204` and cannot cancel the
-  current stream. This prevents proxy-reordered closes/opens during thread
-  navigation from stranding the replacement stream behind the cap; distinct
-  tabs still consume distinct slots.
+  bounded, random `connection_id` remains stable for one browser tab across SPA
+  mounts and document reloads, while `connection_generation` increments for
+  every package-managed request. Fresh top-level navigations use a new identity
+  even when a duplicated tab copied `sessionStorage`. A same-caller, same-id
+  stream supersedes its prior generation without consuming another slot; a
+  delayed older generation receives `204` and cannot cancel the current stream.
+  This prevents proxy-reordered closes/opens during thread navigation or reload
+  from stranding the replacement stream behind the cap; distinct tabs still
+  consume distinct slots.
 - A successful facade subscription emits an application-level `keep_alive`
   frame immediately after admission and every 15 seconds while the projection
   is idle. Browser connection state and its activity watchdog use those frames

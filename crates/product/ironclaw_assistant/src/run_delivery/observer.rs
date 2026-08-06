@@ -14,20 +14,24 @@ use crate::commands::{
     declared_command_help_text_with_prefix, product_command_descriptors,
     render_command_result_text,
 };
-use crate::{
-    AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind,
-    ProductTriggerReason,
-};
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
+use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ProductTriggerReason};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
     ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
+};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionKind,
 };
 use ironclaw_threads::{
     AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
@@ -45,10 +49,11 @@ use super::{
     delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
     thread_scope_from_binding, turn_scope_from_thread_scope,
 };
+use crate::ProductSurfaceFailure;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
-use crate::{ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding};
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1345,7 +1350,10 @@ pub(crate) fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     }
 }
 
-fn render_command_result(command: &str, payload: &crate::ProductCommandResultPayload) -> String {
+fn render_command_result(
+    command: &str,
+    payload: &ironclaw_product_contracts::inbound::ProductCommandResultPayload,
+) -> String {
     if let Ok(view) = serde_json::from_value::<CommandResultView>(payload.as_value().clone()) {
         return render_command_result_text(&view);
     }
@@ -1382,16 +1390,16 @@ fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInbo
         ProductInboundPayload::AuthResolution(payload)
             if matches!(
                 &payload.result,
-                crate::AuthResolutionResult::Denied
+                ironclaw_product_contracts::inbound::AuthResolutionResult::Denied
             )
     ) && !matches!(
         envelope.payload(),
         ProductInboundPayload::ApprovalResolution(payload)
-            if payload.decision == crate::ApprovalDecision::Deny
+            if payload.decision == ironclaw_product_contracts::inbound::ApprovalDecision::Deny
     ) && !matches!(
         envelope.payload(),
         ProductInboundPayload::ScopedApprovalResolution(payload)
-            if payload.decision == crate::ApprovalDecision::Deny
+            if payload.decision == ironclaw_product_contracts::inbound::ApprovalDecision::Deny
     )
 }
 
@@ -1486,7 +1494,7 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
             ProductInboundPayload::AuthResolution(payload)
                 if matches!(
                     &payload.result,
-                    crate::AuthResolutionResult::Denied
+                    ironclaw_product_contracts::inbound::AuthResolutionResult::Denied
                 )
         )
 }

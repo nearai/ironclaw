@@ -76,7 +76,7 @@ use serde_json::Value;
 // (`crates/<family>/ironclaw_*`, PROPOSAL §5) turns every row into a term that
 // matches nothing — and a census whose rows match nothing reports a clean
 // family it never checked (CHECKLIST WS10).
-use ratchet_support::{crate_path, resolve_crate_relative, workspace_root};
+use ratchet_support::{crate_path, resolve_crate_relative, strip_cfg_test_blocks, workspace_root};
 
 /// LLM-vendor vocabulary, lower-case. Deliberately a **literal list**, not
 /// derived from manifests: the whole finding behind D-E is that the
@@ -280,51 +280,6 @@ fn strip_comments(source: &str) -> String {
     out
 }
 
-/// Remove every `#[cfg(test)]`-attributed item by brace balance. Test doubles
-/// naming a vendor are not production vendor coupling, and counting them would
-/// make the frozen numbers churn with every test edit.
-fn strip_cfg_test_items(source: &str) -> String {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(at) = rest.find(MARKER) {
-        out.push_str(&rest[..at]);
-        let tail = &rest[at + MARKER.len()..];
-        let brace = tail.find('{');
-        let semi = tail.find(';');
-        match (brace, semi) {
-            // `#[cfg(test)] mod tests;` — an out-of-line declaration.
-            (None, Some(s)) => rest = &tail[s + 1..],
-            (Some(b), Some(s)) if s < b => rest = &tail[s + 1..],
-            (Some(b), _) => {
-                let bytes = tail.as_bytes();
-                let mut depth = 0usize;
-                let mut index = b;
-                while index < bytes.len() {
-                    match bytes[index] {
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                index += 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    index += 1;
-                }
-                rest = &tail[index.min(tail.len())..];
-            }
-            (None, None) => {
-                rest = "";
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Byte offsets at which `term` occurs in `text` with identifier boundaries.
 ///
 /// `_` is a **word separator**, not an identifier-internal character, so
@@ -476,7 +431,7 @@ fn scan_contracts_family() -> (BTreeMap<String, BTreeMap<String, usize>>, usize)
             scanned += 1;
             let raw = std::fs::read_to_string(&file)
                 .unwrap_or_else(|error| panic!("read {}: {error}", file.display()));
-            let text = strip_cfg_test_items(&strip_comments(&raw));
+            let text = strip_cfg_test_blocks(&strip_comments(&raw));
             let mut per_term = BTreeMap::new();
             for term in LLM_VENDOR_TERMS {
                 let carved = carve_outs
@@ -639,7 +594,7 @@ fn reborn_d_e_sanctioned_vendor_api_surface_is_frozen() {
              exact module, and a gate that cannot find it enforces nothing: {error}"
         )
     });
-    let text = strip_cfg_test_items(&strip_comments(&raw));
+    let text = strip_cfg_test_blocks(&strip_comments(&raw));
     assert!(
         text.len() > 1_000,
         "{SANCTIONED_MODULE} stripped to {} chars — the strippers ate the file, so every \
@@ -782,7 +737,7 @@ fn reborn_vendor_term_collision_carve_outs_stay_live_and_narrow() {
                  suppresses nothing here and everything at the new path is unmeasured: {error}"
             )
         });
-        let text = strip_cfg_test_items(&strip_comments(&raw));
+        let text = strip_cfg_test_blocks(&strip_comments(&raw));
         assert!(
             !vendor_hits(&text, term).is_empty(),
             "carve-out ({path}, {term}) no longer matches anything. Delete it — a stale \
@@ -850,7 +805,7 @@ mod tests {
 }
 pub fn tail_after_cfg_block_groq() {}
 "#;
-    let stripped = strip_cfg_test_items(&strip_comments(source));
+    let stripped = strip_cfg_test_blocks(&strip_comments(source));
 
     for invisible in ["anthropic", "gemini", "cohere", "mistral", "bedrock"] {
         assert!(
@@ -886,7 +841,7 @@ pub fn tail_after_cfg_block_groq() {}
     let out_of_line = "#[cfg(test)]\nmod tests;\nconst ID: &str = \"tinfoil\";\n";
     assert_eq!(
         vendor_hits(
-            &strip_cfg_test_items(&strip_comments(out_of_line)),
+            &strip_cfg_test_blocks(&strip_comments(out_of_line)),
             "tinfoil"
         )
         .len(),

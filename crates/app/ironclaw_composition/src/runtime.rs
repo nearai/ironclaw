@@ -42,10 +42,6 @@ use ironclaw_assistant::{
 use ironclaw_event_log::{DurableAuditLog, DurableEventLog, RuntimeEvent};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
-use ironclaw_first_party_extension_ports::{
-    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
-    SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
-};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -71,6 +67,10 @@ use ironclaw_loop_host::{
     HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ModelGatewayBackedSystemInferencePort,
+};
+use ironclaw_loop_host::{
+    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
+    SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
@@ -236,7 +236,7 @@ struct RuntimeStoreParts {
     /// Process lifecycle source for trigger active-run lookup. Every substrate
     /// now provides the same typed process-journal projection.
     admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
-    project_service: Arc<dyn ironclaw_assistant::ProjectService>,
+    project_service: Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     trigger_conversation_services: Option<RebornFilesystemConversationServices>,
 }
 
@@ -551,7 +551,8 @@ pub struct RebornRuntime {
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
-    pub(crate) project_service: Arc<dyn ironclaw_assistant::ProjectService>,
+    pub(crate) project_service:
+        Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -1013,7 +1014,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn standalone_project_service_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_assistant::ProjectService>> {
+    ) -> Option<Arc<dyn ironclaw_product_contracts::project_service::ProjectService>> {
         Some(Arc::clone(&self.project_service))
     }
 
@@ -1208,9 +1209,10 @@ impl RebornRuntime {
         else {
             return Ok(None);
         };
-        let installation_id =
-            ironclaw_assistant::AdapterInstallationId::new(authenticated_installation_id)
-                .map_err(|error| error.to_string())?;
+        let installation_id = ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+            authenticated_installation_id,
+        )
+        .map_err(|error| error.to_string())?;
         let outcome = service
             .consume(
                 &installation_id,
@@ -1305,9 +1307,9 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn standalone_tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>> {
         Some(self.tool_permission_overrides.clone()
-            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>)
+            as Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1615,7 +1617,9 @@ impl RebornRuntime {
 
     /// First-class projects + membership (ACL) facade over the host-owned scoped
     /// substrate, backing the WebUI project surface.
-    pub(crate) fn reborn_project_service(&self) -> Arc<dyn ironclaw_assistant::ProjectService> {
+    pub(crate) fn reborn_project_service(
+        &self,
+    ) -> Arc<dyn ironclaw_product_contracts::project_service::ProjectService> {
         Arc::clone(&self.project_service)
     }
 
@@ -4489,8 +4493,7 @@ fn skill_activation_selector_config(
         // `max_active_skills` / `max_context_tokens`. Under the default
         // `Listing` injection mode a criteria match ranks the skill in the
         // one-line listing instead of injecting its body.
-        selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
+        selection_mode: ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         ..SkillActivationSelectorConfig::default()

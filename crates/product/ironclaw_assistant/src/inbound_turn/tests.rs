@@ -8,22 +8,24 @@ use std::{
     },
 };
 
-use crate::{
-    AdapterInstallationId, DeliveryReport, ExternalActorRef, ExternalConversationRef,
-    InboundOutcome, OutboundEnvelope, ProductAdapterId, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductRejectionKind, ProductTriggerReason, UserMessagePayload,
-    VerifiedInbound,
-};
 use async_trait::async_trait;
 use chrono::TimeZone;
+use ironclaw_extension_contracts::channel_adapter::{
+    DeliveryReport, InboundOutcome, OutboundEnvelope, ProductTriggerReason, VerifiedInbound,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ProductAttachmentDescriptor, ProductAttachmentKind,
+};
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::turn::{
     EventCursor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_loop_host::RejectingInputEnqueue;
+use ironclaw_product_contracts::inbound::{ProductRejectionKind, UserMessagePayload};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,

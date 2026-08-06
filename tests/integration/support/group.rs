@@ -54,15 +54,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use ironclaw_assistant::ProductTriggerReason;
 use ironclaw_assistant::{
     DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
-    ResolvedBinding,
 };
 use ironclaw_composition::RebornTrajectoryObserver;
 use ironclaw_composition::build_default_budget_accountant;
 use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_config::BudgetDefaults;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{
@@ -81,6 +80,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::ResolvedBinding;
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStorePort, InMemoryBudgetEventSink, InMemoryResourceGovernor,

@@ -18,7 +18,6 @@ async-trait = "0.1"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["clock"] }
 hex = "0.4"
-ironclaw_attachments = { path = "../../domains/ironclaw_attachments", version = "0.1.0" }
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
 # `ProductTriggerReason` — the channel-facing DTO the submit path stamps on a
 # turn — is owned here (PROPOSAL §6.1.2). §6.9.3 grants this adapter the same
@@ -27,6 +26,13 @@ ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" 
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+# Route-mount carrier vocabulary (`ProtectedRouteMount`) for `src/mount.rs`,
+# the WS6 OpenAI-compat eviction: the router-state assembly this crate's own
+# ports feed is owned here, and composition hands over ports rather than
+# builder order. `ironclaw_host_ingress` is `substrates` — a downward edge —
+# and this crate is pinned as its fifth permitted consumer in
+# `reborn_same_layer_edge_inventory.rs`'s `DOWNGRADE_PINS`.
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress", version = "0.1.0" }
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_assistant = { path = "../ironclaw_assistant", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }

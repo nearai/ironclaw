@@ -43,6 +43,7 @@ mod model_routes;
 mod model_visible_scrub;
 mod prompt_context_budget;
 mod result_read;
+mod skill_activation;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
@@ -125,6 +126,17 @@ pub use model_visible_scrub::scrub_model_visible_detail;
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};
+pub use skill_activation::{
+    DEFAULT_MAX_ACTIVE_SKILLS, DEFAULT_MAX_SKILL_CONTEXT_TOKENS, FirstPartySelectableSkillsRuntime,
+    FirstPartySkillsExtension, FirstPartySkillsExtensionError, FirstPartySkillsExtensionHandles,
+    SKILL_ACTIVATE_CAPABILITY_ID, SelectableSkillContextSource, SkillActivationMode,
+    SkillActivationObservedEvent, SkillActivationObserver, SkillActivationPlan,
+    SkillActivationRequest, SkillActivationSelection, SkillActivationSelectionError,
+    SkillActivationSelectionMode, SkillActivationSelectorConfig, SkillBundleAsset,
+    SkillBundleAssetReadError, SkillBundleAssetReader, SkillExecutionAdapter,
+    SkillExecutionAdapterError, SkillExecutionPlan, SkillInjectionMode,
+    skill_activation_capability,
+};
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,

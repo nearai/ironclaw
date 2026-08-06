@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extension_registry::{
-    CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    CapabilityVisibility, ExtensionManifest, ExtensionManifestRecord, ExtensionPackage,
+    ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
@@ -33,6 +34,7 @@ use ironclaw_host_api::{
         CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, CapabilitySet,
         EffectKind, GrantConstraints,
     },
+    capability_profile::CapabilityProfileSchemaRef,
     decision::{Decision, Obligations},
     dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
     host_port::HostPortCatalog,
@@ -334,6 +336,70 @@ async fn hot_capability_catalog_fails_closed_when_bounded_backend_returns_too_ma
         matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
             if reason.contains("input_schema_ref") && reason.contains("exceeds")),
         "unexpected error: {err:?}"
+    );
+}
+
+/// `standard_op` binding (standardized messaging framework, task 4): a v3
+/// manifest tool bound to `send_message` carries host-synthesized
+/// `standard:messaging/send_message.{input,output}.v1` refs (task 2/3) —
+/// `publish_hot_capability_catalog` must resolve both from the compiled-in
+/// registry and never touch the filesystem/package root.
+#[tokio::test]
+async fn hot_capability_catalog_resolves_standard_messaging_schema_ref_without_filesystem() {
+    let manifest_record = ExtensionManifestRecord::from_toml(
+        SLACK_STANDARD_OP_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        None,
+        &capability_provider_contracts(),
+        None,
+    )
+    .unwrap();
+    let manifest: ExtensionManifest = manifest_record.manifest().clone().try_into().unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/slack").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    // Deliberately unmounted: any attempt to read a package asset from disk
+    // fails immediately, proving standard-ref resolution never reaches it.
+    let fs = DiskFilesystem::new();
+
+    let catalog = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap();
+
+    let record = catalog.get(&capability_id("slack.send_message")).unwrap();
+    let input_properties = record
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("resolved standard input schema has properties");
+    assert!(input_properties.contains_key("conversation"));
+    assert!(input_properties.contains_key("text"));
+    let output_properties = record
+        .output_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("resolved standard output schema has properties");
+    assert!(output_properties.contains_key("message_ref"));
+}
+
+/// Unknown standard schema identities are rejected before a hot catalog can
+/// ever observe them. Generic string construction and resolved-record
+/// deserialization are both fail-closed; only the typed standard-op
+/// constructors can mint the reserved namespace.
+#[test]
+fn unknown_standard_schema_ref_is_unconstructible() {
+    assert!(CapabilityProfileSchemaRef::new("standard:messaging/bogus.input.v1").is_err());
+    assert!(
+        serde_json::from_value::<CapabilityProfileSchemaRef>(serde_json::json!(
+            "standard:messaging/bogus.input.v1"
+        ))
+        .is_err()
     );
 }
 
@@ -2410,6 +2476,32 @@ visibility = "model"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 prompt_doc_ref = "prompts/echo/say.md"
+"#;
+
+/// v3 manifest with one `[[tools]]` entry bound to the `send_message`
+/// standard op: no declared schema refs (the host synthesizes
+/// `standard:messaging/send_message.{input,output}.v1`), matching the
+/// canonical `<extension>.<op_name>` id shape and the `external_write` effect
+/// the write-op rule requires.
+const SLACK_STANDARD_OP_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "slack"
+name = "Slack"
+version = "0.1.0"
+description = "Slack standard-op fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack.wasm"
+
+[[tools]]
+standard_op = "send_message"
+id = "slack.send_message"
+description = "Send a message to a conversation."
+effects = ["external_write"]
+default_permission = "ask"
+visibility = "model"
 "#;
 
 const ECHO_MANIFEST: &str = r#"

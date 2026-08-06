@@ -75,6 +75,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         ],
         default_permission: PermissionMode::Allow,
         visibility: CapabilityVisibility::Api,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(
             "schemas/builtin/admin_configuration_replace.input.v1.json",
         )?,

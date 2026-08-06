@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_assistant::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_assistant::{
     ProductOutboundTargetResolver, ProductSurfaceFailure, ProjectFilesystemReader, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsError, ProjectFsStat, VerifiedProductOutboundTargetMetadata,
 };
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
@@ -253,14 +253,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use ironclaw_assistant::{
-    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
-    VerifiedInbound,
-};
-use ironclaw_assistant::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
 };
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
+    VerifiedInbound,
+};
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
@@ -681,9 +681,11 @@ fn coordinated_final_reply<'a>(
     CoordinatedDeliveryRequest {
         intent: DeliveryIntent::FinalReply,
         delivery: delivery_request(scope),
-        parts: vec![ironclaw_assistant::OutboundPart::Text(
-            "final reply".to_string(),
-        )],
+        parts: vec![
+            ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                "final reply".to_string(),
+            ),
+        ],
         attachments: Vec::new(),
         thread_anchor: Some("thread-1".to_string()),
         require_direct_message_target: false,
@@ -719,7 +721,8 @@ async fn coordinate_workspace_reply(
     let coordinator = coordinator_over(&store, &adapter);
     let thread_scope = project_thread_scope();
     let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
-    request.parts = vec![ironclaw_assistant::OutboundPart::Text(text.to_string())];
+    request.parts =
+        vec![ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(text.to_string())];
     request.attachments = attachments;
     let result = coordinator
         .deliver(
@@ -863,9 +866,11 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
     let request = CoordinatedDeliveryRequest {
         intent: DeliveryIntent::FinalReply,
         delivery: delivery_request(scope.clone()),
-        parts: vec![ironclaw_assistant::OutboundPart::Text(
-            "dm only".to_string(),
-        )],
+        parts: vec![
+            ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                "dm only".to_string(),
+            ),
+        ],
         attachments: Vec::new(),
         thread_anchor: Some("thread-1".to_string()),
         require_direct_message_target: true,
@@ -1080,7 +1085,7 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
     );
     assert!(matches!(
         &adapter.envelopes()[0].parts[1],
-        ironclaw_assistant::OutboundPart::File(file)
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::File(file)
             if file.path.as_str() == "/workspace/report.pdf"
                 && file.filename.as_deref() == Some("final-report.pdf")
                 && file.mime_type == "application/pdf"
@@ -1125,7 +1130,7 @@ async fn coordinator_preserves_text_and_materializes_only_durable_attachment_ref
     ));
     assert!(matches!(
         &adapter.envelopes()[0].parts[0],
-        ironclaw_assistant::OutboundPart::Text(text)
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(text)
             if text == "Literal [ bracket stays.\nCreated both files:\n\
                 1. [Readable report](/workspace/report.txt)\n\
                 2. [/workspace/data.csv](/workspace/data.csv)\n\
@@ -1133,14 +1138,14 @@ async fn coordinator_preserves_text_and_materializes_only_durable_attachment_ref
     ));
     assert!(matches!(
         &adapter.envelopes()[0].parts[1],
-        ironclaw_assistant::OutboundPart::File(file)
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::File(file)
             if file.path.as_str() == "/workspace/report.txt"
                 && file.filename.as_deref() == Some("report.txt")
                 && file.mime_type == "text/plain"
     ));
     assert!(matches!(
         &adapter.envelopes()[0].parts[2],
-        ironclaw_assistant::OutboundPart::File(file)
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::File(file)
             if file.path.as_str() == "/workspace/data.csv"
                 && file.filename.as_deref() == Some("data.csv")
                 && file.mime_type == "text/csv"
@@ -1169,7 +1174,7 @@ async fn coordinator_does_not_materialize_workspace_path_mentioned_only_in_prose
     assert_eq!(adapter.envelopes()[0].parts.len(), 1);
     assert!(matches!(
         &adapter.envelopes()[0].parts[0],
-        ironclaw_assistant::OutboundPart::Text(text)
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(text)
             if text.contains("/workspace/report.pdf")
     ));
 }
@@ -1211,9 +1216,11 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
     };
     let thread_scope = project_thread_scope();
     let mut request = coordinated_final_reply(scope, "vendorx", &thread_scope);
-    request.parts = vec![ironclaw_assistant::OutboundPart::Text(
-        "report: /workspace/ordered.pdf".to_string(),
-    )];
+    request.parts = vec![
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+            "report: /workspace/ordered.pdf".to_string(),
+        ),
+    ];
     request.attachments = vec![workspace_attachment_ref(
         "ordered",
         "/workspace/ordered.pdf",
@@ -1252,14 +1259,14 @@ async fn coordinator_rejects_caller_supplied_file_parts_before_policy_or_egress(
     let coordinator = coordinator_over(&store, &adapter);
     let thread_scope = project_thread_scope();
     let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
-    request
-        .parts
-        .push(ironclaw_assistant::OutboundPart::File(WorkspaceFile {
+    request.parts.push(
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::File(WorkspaceFile {
             path: ScopedPath::new("/workspace/untrusted.bin").expect("scoped path"),
             filename: Some("untrusted.bin".to_string()),
             mime_type: "application/octet-stream".to_string(),
             bytes: vec![0; 1],
-        }));
+        }),
+    );
 
     let error = coordinator
         .deliver(
@@ -1298,14 +1305,14 @@ async fn coordinator_rejects_pre_materialized_files_on_notice_path() {
     ));
     let coordinator = coordinator_over(&store, &adapter);
     let mut request = working_notice(scope.clone(), "vendorx");
-    request
-        .parts
-        .push(ironclaw_assistant::OutboundPart::File(WorkspaceFile {
+    request.parts.push(
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::File(WorkspaceFile {
             path: ScopedPath::new("/workspace/untrusted.bin").expect("scoped path"),
             filename: Some("untrusted.bin".to_string()),
             mime_type: "application/octet-stream".to_string(),
             bytes: vec![0; 1],
-        }));
+        }),
+    );
 
     let error = coordinator
         .deliver_notice(request)
@@ -1675,9 +1682,11 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
         turn_run_id: None,
         conversation: notice_source_conversation(),
         thread_anchor: Some("1719.100".to_string()),
-        parts: vec![ironclaw_assistant::OutboundPart::Text(
-            "Working on it...".to_string(),
-        )],
+        parts: vec![
+            ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                "Working on it...".to_string(),
+            ),
+        ],
         extension_id,
         notice_ref: "run-42".to_string(),
     }
@@ -1834,9 +1843,11 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
 
     let mut request = working_notice(scope.clone(), "vendorx");
     request.intent = DeliveryIntent::Cleanup;
-    request.parts = vec![ironclaw_assistant::OutboundPart::Retract {
-        vendor_message_ref: "ts-900".to_string(),
-    }];
+    request.parts = vec![
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::Retract {
+            vendor_message_ref: "ts-900".to_string(),
+        },
+    ];
     let outcome = coordinator
         .deliver_notice(request)
         .await
@@ -1849,7 +1860,7 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
     assert_eq!(envelopes.len(), 1);
     assert!(matches!(
         &envelopes[0].parts[..],
-        [ironclaw_assistant::OutboundPart::Retract { vendor_message_ref }]
+        [ironclaw_extension_contracts::channel_adapter::OutboundPart::Retract { vendor_message_ref }]
             if vendor_message_ref == "ts-900"
     ));
 }

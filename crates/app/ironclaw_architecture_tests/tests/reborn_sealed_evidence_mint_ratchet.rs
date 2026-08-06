@@ -26,6 +26,15 @@
 //! compile when `ironclaw_agent_loop` was built alone). A seal that any sibling
 //! crate's manifest silently unlocks, workspace-wide, is not a seal.
 //!
+//! ✎ **2026-08-05 (CHECKLIST WS8):** the family is **three** functions now, not
+//! eight. The five with zero callers in any build were deleted as dead mint
+//! surface — every reachable mint entry point is a forgeable one, so an unused
+//! one is pure liability. The paragraph above is kept as the historical
+//! measurement that motivated the witness-token replacement;
+//! `mark_bearer_token_verified` is one of the five and no longer exists.
+//! `RETIRED_MINT_FNS` below keeps all five governed by name so a revival cannot
+//! slip in outside the live census.
+//!
 //! The replacement is the repo's existing witness-token idiom
 //! (`ironclaw_host_api::authorized`, whose companion ratchet is
 //! `reborn_authorized_seal_ratchet.rs`), which is feature-independent:
@@ -96,17 +105,35 @@ const CHANNEL_MINT_OWNER: &str = "ironclaw_extension_contracts";
 /// rename or deletion has to come here in the same change.
 const CHANNEL_MINT_FNS: &[&str] = &[
     "mark_request_signature_verified",
-    "mark_request_signature_verified_for_tenant",
     "mark_shared_secret_header_verified",
-    "mark_shared_secret_header_verified_for_tenant",
 ];
 
 /// The bearer/session half. PROPOSAL §6.1.1 keeps these in `ironclaw_host_api`.
-const HOST_MINT_FNS: &[&str] = &[
+const HOST_MINT_FNS: &[&str] = &["mark_bearer_token_verified_for_tenant"];
+
+/// Mint entry points that existed, had zero callers in any build, and were
+/// deleted by CHECKLIST WS8's deletion-candidate row (2026-08-05).
+///
+/// ## Why a retired list rather than just shorter live lists
+///
+/// The live tables above are what `mint_functions_are_named_only_by_their_owners_and_sanctioned_minters`
+/// scans for, so dropping a name from them **narrows the governed set**: the
+/// day someone reintroduces `mark_session_verified` in a product handler, no
+/// test would notice, because the scan no longer looks for that name. The
+/// WS8 row anticipated exactly this — "a deletion must come through that test
+/// rather than silently narrowing the governed set" — so the names stay
+/// governed here instead, as a denylist.
+///
+/// Reviving one is legitimate; doing it *silently* is not. A revival moves the
+/// name out of this list and into `CHANNEL_MINT_FNS`/`HOST_MINT_FNS` in the
+/// same change, which puts it back under the owner/minter scan and forces the
+/// reviewer to see a mint entry point being created.
+const RETIRED_MINT_FNS: &[&str] = &[
     "mark_bearer_token_verified",
-    "mark_bearer_token_verified_for_tenant",
+    "mark_request_signature_verified_for_tenant",
     "mark_session_verified",
     "mark_session_verified_for_tenant",
+    "mark_shared_secret_header_verified_for_tenant",
 ];
 
 /// This ratchet's own file, skipped so its own frozen-name tables and doc
@@ -1026,6 +1053,78 @@ fn each_mint_half_is_defined_only_in_the_crate_that_owns_it() {
         "the mint family must stay split by trust role: channel/webhook in {CHANNEL_MINT_OWNER} \
          (§6.1.2), bearer/session in {EVIDENCE_TYPE_OWNER} (§6.1.1).\n{}",
         misplaced.join("\n")
+    );
+}
+
+/// Closed path #11 — a retired mint entry point coming back unnoticed
+/// (CHECKLIST WS8, 2026-08-05).
+///
+/// `#10` above asserts every *live* mint function still exists in its assigned
+/// crate. Its mirror image is this: every function WS8 deleted must exist
+/// **nowhere**. Without it, deleting a name from `CHANNEL_MINT_FNS` /
+/// `HOST_MINT_FNS` would hand a future author a mint entry point that no test
+/// in this file looks for — the seal narrowing itself as a side effect of a
+/// deletion, which is the one thing the WS8 row said the deletion must not do.
+#[test]
+fn retired_mint_functions_do_not_return() {
+    let root = workspace_root();
+    let files = collect_workspace_production_rs(&root);
+
+    let mut revived = Vec::new();
+    for name in RETIRED_MINT_FNS {
+        let definition = format!("pub fn {name}(");
+        for file in &files {
+            let source = read_source(file);
+            if strip_comments_and_strings(&source).contains(&definition) {
+                revived.push(format!(
+                    "{name} is defined again in {}",
+                    render(&root, file)
+                ));
+            }
+        }
+    }
+
+    assert!(
+        revived.is_empty(),
+        "these mint entry points were deleted as dead surface (CHECKLIST WS8) and must not \
+         reappear un-governed. Reviving one is allowed, but it moves out of RETIRED_MINT_FNS \
+         and into CHANNEL_MINT_FNS/HOST_MINT_FNS in the same change, with the caller that \
+         justifies it — otherwise the workspace gains a forgeable mint seam that \
+         `mint_functions_are_named_only_by_their_owners_and_sanctioned_minters` is not \
+         scanning for.\n{}",
+        revived.join("\n")
+    );
+}
+
+/// The two tables are a partition, not overlapping sets: a name that is both
+/// live and retired would make `#10` and `#11` contradict each other, and
+/// whichever ran first would decide. Also pins that neither table is empty —
+/// an empty live table silently disarms every census in this file, and an
+/// empty retired table would mean this ratchet governs nothing WS8 deleted.
+#[test]
+fn live_and_retired_mint_tables_are_disjoint_and_populated() {
+    let live: BTreeSet<&str> = all_mint_fns().into_iter().collect();
+    let retired: BTreeSet<&str> = RETIRED_MINT_FNS.iter().copied().collect();
+
+    let both: Vec<&&str> = live.intersection(&retired).collect();
+    assert!(
+        both.is_empty(),
+        "a mint function cannot be both live and retired: {both:?}"
+    );
+    assert_eq!(
+        live.len(),
+        all_mint_fns().len(),
+        "CHANNEL_MINT_FNS/HOST_MINT_FNS contain a duplicate name"
+    );
+    assert_eq!(
+        retired.len(),
+        RETIRED_MINT_FNS.len(),
+        "RETIRED_MINT_FNS contains a duplicate name"
+    );
+    assert!(!live.is_empty(), "the live mint family cannot be empty");
+    assert!(
+        !retired.is_empty(),
+        "RETIRED_MINT_FNS cannot be empty while WS8's deletion stands"
     );
 }
 

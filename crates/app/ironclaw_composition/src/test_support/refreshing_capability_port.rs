@@ -53,7 +53,8 @@ pub struct RefreshingCapabilityPortTestParts {
     /// production factory.
     pub skill_activation_source:
         Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
-    pub project_service: std::sync::Arc<dyn ironclaw_assistant::ProjectService>,
+    pub project_service:
+        std::sync::Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     /// Backs the `result_read` synthetic capability's durable tool-result
     /// reads; production wires the runtime's session thread service
     /// (`standalone.rs` `create_capability_port`).
@@ -79,7 +80,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`standalone.rs:1002`).
     pub tool_permission_overrides:
-        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        std::sync::Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     pub auto_approve_settings: std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
     pub persistent_approval_policies:
         std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,

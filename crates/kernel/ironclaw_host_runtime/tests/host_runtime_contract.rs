@@ -19,7 +19,8 @@ use ironclaw_authorization::{
     in_memory_backed_capability_lease_store,
 };
 use ironclaw_extension_registry::{
-    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
+    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
+    MANIFEST_SCHEMA_VERSION_V3, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
@@ -33,7 +34,7 @@ use ironclaw_host_api::{
     capability::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
-    decision::{Decision, DenyReason},
+    decision::{Decision, DenyReason, Obligations},
     dispatch::CapabilityDispatchResult,
     host_port::HostPortCatalog,
     ids::{
@@ -129,6 +130,60 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         other => panic!("expected Completed outcome, got {:?}", other),
     }
     assert!(dispatcher.call_count() > 0);
+}
+
+/// A capability bound to a standard messaging op (`standard_op:
+/// Some(SendMessage)`) whose dispatch returns a shape that violates the
+/// op's canonical output schema (missing `message_ref`) must not complete —
+/// the runtime must reclassify it as a model-visible `Failed` outcome with
+/// the same `InvalidOutput` kind wasm `InvalidResult` dispatch errors
+/// already produce (see `failure_kind_from` in `production.rs`), carrying
+/// the bounded "standard op output failed validation" summary.
+///
+/// `default_runtime_returns_completed_outcome_for_authorized_dispatch` above
+/// is the paired regression check that a bespoke capability
+/// (`standard_op: None`) dispatching the exact same bogus `{"ok": true}`
+/// shape completes untouched — it already asserts `Completed` for the echo
+/// capability with that output, so a hook that (incorrectly) fired for every
+/// capability regardless of `standard_op` would fail it immediately.
+#[tokio::test]
+async fn standard_op_output_violation_becomes_failed_outcome() {
+    let registry = Arc::new(registry_with_standard_op_capability());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result_with_output(
+        standard_op_capability_id(),
+        standard_op_extension_id(),
+        json!({"ok": true}),
+    )));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(AllowAllAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    );
+
+    let context = execution_context_for_standard_op();
+    let request = (
+        context,
+        standard_op_capability_id(),
+        ResourceEstimate::default(),
+        json!({"conversation": "C1", "text": "hi"}),
+    );
+
+    let outcome = runtime.invoke_capability(request).await.unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, FailureKind::InvalidResult);
+            let message = failure.message.as_deref().unwrap_or_default();
+            assert!(
+                message.contains("standard op output failed validation"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected Failed outcome, got {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -1400,6 +1455,134 @@ fn dispatch_result() -> CapabilityDispatchResult {
             actual: Some(ResourceUsage::default()),
         },
     }
+}
+
+/// [`dispatch_result`] parameterized over capability/provider/output, for
+/// scenarios (like the standard-op output check) that need a specific bogus
+/// or canonical output shape rather than the fixed echo `{"ok": true}`.
+fn dispatch_result_with_output(
+    capability_id: CapabilityId,
+    provider: ExtensionId,
+    output: serde_json::Value,
+) -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id,
+        provider,
+        runtime: RuntimeKind::Wasm,
+        output,
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
+    }
+}
+
+/// Unconditional-allow authorizer for scenarios that only need to reach
+/// dispatch and don't care about grant/trust-ceiling matching (the standard-op
+/// output check runs strictly after authorization succeeds).
+struct AllowAllAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for AllowAllAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Obligations::empty(),
+        }
+    }
+}
+
+/// v3 manifest binding one tool to the `send_message` standard op (mirrors
+/// `zeta_standard_op_manifest` in
+/// `ironclaw_extensions/tests/manifest_v3_contract.rs`, trimmed to the
+/// fields the standard-op binding rule actually requires: no credentials/auth
+/// section, since this fixture never dispatches through a real WASM runtime
+/// or credential path).
+fn standard_op_manifest(extension_id: &str) -> String {
+    format!(
+        r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "{extension_id}"
+name = "Standard op test extension"
+version = "0.1.0"
+description = "Standard-op output validation test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[tools]]
+standard_op = "send_message"
+id = "{extension_id}.send_message"
+description = "Sends a message."
+effects = ["external_write"]
+default_permission = "allow"
+"#
+    )
+}
+
+/// Registry holding one capability bound to `StandardMessagingOp::SendMessage`
+/// (`descriptor.standard_op == Some(SendMessage)`), built through the real v3
+/// manifest parse path (`ExtensionManifestRecord::from_toml` ->
+/// `ExtensionManifest` -> `ExtensionPackage`) rather than a hand-built
+/// descriptor, so the same binding/validation rules a real extension install
+/// goes through are exercised here too.
+fn registry_with_standard_op_capability() -> ExtensionRegistry {
+    let extension = standard_op_extension_id().as_str().to_string();
+    let record = ExtensionManifestRecord::from_toml(
+        standard_op_manifest(&extension),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        None,
+        &capability_provider_contracts(),
+        None,
+    )
+    .expect("standard-op v3 manifest should parse");
+    let manifest = ExtensionManifest::try_from(record.manifest().clone())
+        .expect("manifest rebuild should succeed");
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new(format!("/system/extensions/{extension}")).unwrap(),
+    )
+    .expect("standard-op test package should build");
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
+fn standard_op_capability_id() -> CapabilityId {
+    CapabilityId::new("msgstd.send_message").unwrap()
+}
+
+fn standard_op_extension_id() -> ExtensionId {
+    ExtensionId::new("msgstd").unwrap()
+}
+
+/// Execution context for the standard-op scenarios: no grants, because
+/// [`AllowAllAuthorizer`] doesn't check them.
+fn execution_context_for_standard_op() -> ExecutionContext {
+    let mut context = ExecutionContext::local_default(
+        UserId::new("user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::Wasm,
+        TrustClass::UserTrusted,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 struct DenyAuthorizer;
