@@ -512,6 +512,19 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(stats.get_by_text("Output tokens", exact=True).locator("..")).not_to_contain_text(
             "Unavailable"
         )
+        await expect(stats.get_by_text("Tool calls", exact=True).locator("..")).to_contain_text(
+            "0"
+        )
+        await expect(
+            stats.get_by_text("Successful tool calls", exact=True).locator("..")
+        ).to_contain_text("0")
+        await expect(
+            stats.get_by_text("Failed tool calls", exact=True).locator("..")
+        ).to_contain_text("0")
+        await expect(stats.get_by_text("Browser-observed stream health", exact=True)).to_be_visible()
+        await expect(page.locator("[data-testid='inspector-stream-state']")).to_have_text(
+            re.compile(r"^(Live|Connecting)$")
+        )
         await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
         await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
 
@@ -547,9 +560,10 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(activity.get_by_text("Turn 1 of 2", exact=True)).to_be_visible()
         await expect(activity.get_by_label("Previous turn")).to_be_disabled()
         await expect(activity.get_by_label("Next turn")).to_be_enabled()
+        await expect(activity.get_by_label("Latest turn")).to_be_enabled()
         await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(run_id)
 
-        await activity.get_by_label("Next turn").click()
+        await activity.get_by_label("Latest turn").click()
         await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
         await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(
             second_run_id
@@ -590,6 +604,45 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(
             activity.locator("[data-activity-kind='model_call_completed']")
         ).to_have_count(1)
+
+        await page.locator("[data-testid='inspector-tab-stats']").click()
+        reconnects = page.locator("[data-testid='inspector-stream-reconnects']")
+        await expect(reconnects).to_have_text(re.compile(r"^[1-9][0-9,]*$"))
+        updates = page.locator("[data-testid='inspector-stream-updates']")
+        updates_before_reload = int((await updates.inner_text()).replace(",", ""))
+        await page.reload()
+        await expect(page.locator("[data-testid='inspector-stats-content']")).to_be_visible(
+            timeout=30000
+        )
+        await expect(updates).to_have_text(f"{updates_before_reload:,}")
+    finally:
+        await context.close()
+
+
+async def test_inspector_uses_the_selected_locale(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """Inspector chrome, status, tabs, and accessibility labels follow the locale."""
+    context = await reborn_v2_browser.new_context(
+        locale="zh-CN",
+        viewport={"width": 1440, "height": 900},
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        panel = page.locator("[data-testid='inspector-panel']")
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(panel.get_by_text("Web 调试检查器", exact=True)).to_be_visible()
+        await expect(page.locator("[data-testid='inspector-health']")).to_have_text("空闲")
+        await expect(page.locator("[data-testid='inspector-close']")).to_have_attribute(
+            "aria-label", "关闭检查器"
+        )
+        await expect(page.locator("[data-testid='inspector-tab-prompt']")).to_have_text(
+            "提示词"
+        )
     finally:
         await context.close()
 
