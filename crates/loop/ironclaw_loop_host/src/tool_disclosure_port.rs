@@ -734,8 +734,12 @@ impl ToolDisclosureCapabilityPort {
             state.disclosed_names.insert(name);
             capability_id
         };
+        // Field named `tool`, not `target`: a first-argument `target = …` in a
+        // tracing macro is the field form of the metadata-target syntax (#7146),
+        // so a field that genuinely means "the tool this call targeted" has to
+        // be spelled differently or it reads as a mis-typed target.
         debug!(
-            target = target_name,
+            tool = target_name,
             capability_id = capability_id.as_str(),
             "capability_info inspected a deferred tool; disclosing + promoting it for direct use"
         );

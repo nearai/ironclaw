@@ -231,7 +231,7 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         .local_addr()
         .map_err(RebornWebuiServeError::LocalAddr)?;
     tracing::info!(
-        target = "ironclaw::reborn::webui_ingress",
+        target: "ironclaw::reborn::webui_ingress",
         %bound,
         "WebChat v2 listener bound",
     );
@@ -251,7 +251,7 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         // cleanly rather than running forever.
         let _ = shutdown.await;
         tracing::info!(
-            target = "ironclaw::reborn::webui_ingress",
+            target: "ironclaw::reborn::webui_ingress",
             "WebChat v2 graceful shutdown signal received",
         );
     })

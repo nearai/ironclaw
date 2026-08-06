@@ -294,7 +294,7 @@ impl std::fmt::Debug for MutableOutboundDeliveryTargetRegistry {
             Ok(providers) => providers.len(),
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::outbound::delivery_targets",
+                    target: "ironclaw::outbound::delivery_targets",
                     error = ?error,
                     "outbound target registry read lock failed during debug formatting"
                 );
@@ -324,7 +324,7 @@ impl MutableOutboundDeliveryTargetRegistry {
     ) -> Result<OutboundDeliveryTargetRegistrationOutcome, OutboundError> {
         let mut providers = self.providers.write().map_err(|error| {
             tracing::debug!(
-                target = "ironclaw::outbound::delivery_targets",
+                target: "ironclaw::outbound::delivery_targets",
                 error = ?error,
                 "outbound target registry write lock failed"
             );
@@ -343,7 +343,7 @@ impl MutableOutboundDeliveryTargetRegistry {
             .map(|providers| providers.values().cloned().collect())
             .map_err(|error| {
                 tracing::debug!(
-                    target = "ironclaw::outbound::delivery_targets",
+                    target: "ironclaw::outbound::delivery_targets",
                     error = ?error,
                     "outbound target registry read lock failed"
                 );

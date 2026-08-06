@@ -10,7 +10,7 @@ set -euo pipefail
 # mutate process-global env in parallel and race each other (e.g. the
 # `build_runtime_input_production_*` block, 14 tests failing together). Since
 # Rust 1.82 `std::env::set_var` is also UB in a multi-threaded program unless
-# serialized. `crates/ironclaw_common/src/env_helpers.rs` documents the
+# serialized. `crates/contracts/ironclaw_common/src/env_helpers.rs` documents the
 # sanctioned pattern: acquire `lock_env()` and mutate through an `EnvGuard`.
 #
 # Delta-scoped and function-scoped: it inspects `git diff -W` (whole-function
@@ -100,7 +100,7 @@ if [ -n "$HITS" ]; then
     echo "Process env is global; unguarded mutation races parallel tests (see #6015)"
     echo "and is UB on Rust 1.82+. Acquire crate::env_helpers::lock_env() (or the"
     echo "module's lock_runtime_env()) and mutate through an EnvGuard, per"
-    echo "crates/ironclaw_common/src/env_helpers.rs."
+    echo "crates/contracts/ironclaw_common/src/env_helpers.rs."
     echo "Genuine single-threaded case? Annotate the line with '// env-hermetic: <reason>'."
     echo "Bypass (not recommended): git push --no-verify"
     exit 1

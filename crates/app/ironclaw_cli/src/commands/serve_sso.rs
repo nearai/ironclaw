@@ -223,7 +223,7 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
         // the stricter Workspace-only check.
         if allowed_hd.is_none() {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD is unset — Google login is gated \
                  only by IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS, not by a Workspace \
                  hosted domain; set it to also require a specific hd claim",
@@ -360,7 +360,7 @@ fn validate_test_google_endpoint(name: &str, raw: &str) -> anyhow::Result<()> {
 /// without leaking it or needing to capture a live login attempt.
 fn log_provider_config(provider: &str, client_id: &str, client_secret_len: usize) {
     tracing::info!(
-        target = "ironclaw::reborn::cli::serve",
+        target: "ironclaw::reborn::cli::serve",
         provider,
         client_id,
         client_secret_len,
@@ -391,7 +391,7 @@ fn non_empty_env(name: &str) -> Option<String> {
     }
     if trimmed.len() != raw.len() {
         tracing::warn!(
-            target = "ironclaw::reborn::cli::serve",
+            target: "ironclaw::reborn::cli::serve",
             var = name,
             "environment variable had surrounding whitespace that was trimmed — check the \
              deployment secret for a trailing newline; an untrimmed OAuth client secret is \
@@ -411,7 +411,7 @@ fn oauth_http_timeout_from_env() -> Option<Duration> {
         Ok(secs) if secs > 0 => Some(Duration::from_secs(secs)),
         _ => {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 value = %raw,
                 "IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS is not a positive integer; \
                  using the provider default timeout",

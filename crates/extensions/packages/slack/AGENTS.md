@@ -1,16 +1,22 @@
-# Agent Map — ironclaw_slack_extension
+# Agent Map — ironclaw_slack_extension (`crates/extensions/packages/slack/`)
 
 ## Start Here
 
-- No crate-local CLAUDE.md exists yet; use this map plus `Cargo.toml` and source files.
+- Read `README.md` for orientation (surfaces, vendor, runtime, tests); this
+  map plus `Cargo.toml` and source files carry the working rules.
+- This directory is the whole Slack **package**: the adapter crate, its
+  `manifest.toml`, `prompts/`, and the WASM user-token tools (`wasm/` +
+  `wasm-src/`) live together, per the family's self-containment rule.
 - Read `src/lib.rs` first, then:
   - `channel.rs` — the `SlackChannelAdapter` (`ChannelAdapter`) implementation.
   - `payload.rs` — Slack Events API payload parsing/DTO handling.
   - `mrkdwn.rs` — Slack outbound mrkdwn rendering and message chunking.
   - `delivery.rs`, `attachment_transfer.rs`, `preference_targets.rs` — delivery DTOs, attachment transfer, reply-target codec.
   - Re-derive this list with `ls crates/extensions/packages/slack/src/`.
-- Read upstream contracts before changing adapter behavior:
-  - `crates/product/ironclaw_assistant/AGENTS.md`
+- Read the contract before changing adapter behavior:
+  - `crates/contracts/ironclaw_extension_contracts/` — `ChannelAdapter` and the
+    surface vocabulary (a channel package depends on contracts-tier crates
+    only; never on `ironclaw_assistant`, the registry, or the extension host).
 
 ## What This Crate Owns
 

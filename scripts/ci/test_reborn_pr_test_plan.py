@@ -462,6 +462,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             # whole rename PR on that one line.
             "scripts/live_canary/common.py",
             "scripts/live_canary/auth_runtime.py",
+            # 2026-08-06: the live Telegram release smoke harness — run by
+            # hand, referenced by no workflow. PR #7264's stale-command fix in
+            # its README hit the fail-closed arm.
+            "scripts/telegram_smoke/README.md",
+            "scripts/telegram_smoke/run_smoke.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -867,6 +872,44 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", [".env.local"])
 
+    def test_github_pr_template_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.github/pull_request_template.md` is a GitHub UI template.
+
+        Regression for the gap PR #7264 hit: `ISSUE_TEMPLATE/` was classified
+        but its exact sibling — the PR-body template, the other GitHub UI
+        template — was not, so a one-line checklist correction failed the whole
+        `Tests (Reborn)` roll-up. GitHub renders the file into the PR editor;
+        no crate, test, or workflow reads it (`classify-test-scope.sh` already
+        pairs it with `ISSUE_TEMPLATE/` in its docs-only arm).
+
+        Paired assertions, same reason as the `.claude/` test above: the path
+        must be *accepted* AND select no Rust lane. The sibling probes then
+        keep the fail-closed arm authoritative for the rest of `.github/` —
+        real, undecided neighbours must still refuse.
+        """
+        plan = self.plan("pull_request", [".github/pull_request_template.md"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        # The ignore is per-path, not per-PR: a real change riding along still
+        # selects its lane.
+        paired = self.plan(
+            "pull_request",
+            [".github/pull_request_template.md", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
+
+        # And an unknown `.github/` sibling still refuses.
+        for path in (".github/dependabot.yml", ".github/labeler.yml"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
+
     def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root files another workflow owns outright.
 
@@ -876,7 +919,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
         the panic baseline belongs to Code Style, the E2E selector script
         belongs to the `Reborn E2E` workflow's own scope detector,
         `check-version-bumps.sh` is invoked only by `platform-and-compat.yml`,
-        `run-reborn-webui.sh` is a local launcher no workflow references, and
+        `run-reborn-webui.sh` is a local launcher no workflow references,
+        `mutation-audit.sh` is run only by `nightly-deep-ci.yml`'s
+        mutation-frontier job (the lane that already owned its self-test;
+        unclassified until 2026-08-06, when PR #7264's one-line usage-comment
+        fix in it failed the whole `Tests (Reborn)` roll-up), and
         `.gitignore` is read by Code Style's `Reject tracked files that match
         .gitignore` guard (#6965 — unclassified until 2026-08-04, which failed
         the whole `Tests (Reborn)` roll-up on any PR that added an ignore
@@ -894,6 +941,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/check-version-bumps.sh",
             "scripts/run-reborn-webui.sh",
             "scripts/codebase-graph.sh",
+            "scripts/mutation-audit.sh",
             ".gitignore",
         ):
             with self.subTest(path=path):
@@ -1166,6 +1214,67 @@ class RebornPrTestPlanTests(unittest.TestCase):
                         f"{embedder} compiles files from {prefix} but does not "
                         f"depend on {owner}, so routing there never schedules it",
                     )
+
+    # `.env.example` classification (the other half of the run-30921860394
+    # rejection, which sorts first and masked the entrypoint miss below) is
+    # covered by `test_repo_root_example_env_is_classified_and_selects_no_rust_lane`
+    # above — main classified it independently via `IGNORED_ROOT_FILES` while
+    # this branch was in flight, same fix by the same route.
+    def test_reborn_container_entrypoint_is_owned_by_code_style(self) -> None:
+        """`docker/reborn/entrypoint.sh` is shell that Code Style self-tests.
+
+        Second half of the same rejection. It is deliberately *not* an ignore:
+        the plan names an owner, because one exists —
+        `scripts/ci/test-reborn-docker-entrypoint.sh` drives the real script in
+        Code Style's script self-test step, and `code_style.yml`'s `has_code`
+        filter lights that lane for this exact path. No Reborn Rust lane
+        executes it, so it selects nothing here.
+        """
+        plan = self.plan("pull_request", ["docker/reborn/entrypoint.sh"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertIn(
+            "static CI or workspace-policy checks own: docker/reborn/entrypoint.sh",
+            plan["reasons"],
+        )
+
+    def test_classified_operator_paths_do_not_mask_a_real_lane(self) -> None:
+        """Neither classification may swallow its neighbours.
+
+        The planner raises on the *first* unclassified path in sorted order, so
+        a per-PR shortcut would look identical to a per-path rule on the diff
+        that motivated them. Drive both together with a crate change and assert
+        the crate lane still gets selected.
+        """
+        plan = self.plan(
+            "pull_request",
+            [
+                ".env.example",
+                "docker/reborn/entrypoint.sh",
+                "crates/alpha/src/lib.rs",
+            ],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
+        """The entrypoint is decided; its neighbours are not.
+
+        `docker/` is classified per-file for the same reason repo-root
+        `scripts/` is: a blanket prefix would silently absorb the runtime
+        configs, which have no owning lane yet. Keep the fail-closed arm proven
+        for the paths nobody has decided.
+        """
+        for path in (
+            "docker/reborn/config.production.toml",
+            "docker/process-sandbox-entrypoint.sh",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
 
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.

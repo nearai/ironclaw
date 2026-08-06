@@ -206,6 +206,22 @@ fn trace_coding_latency(
     started_at: Option<std::time::Instant>,
     result: &Result<CodingCapabilityOutput, CodingCapabilityError>,
 ) {
+    // `output_bytes` feeds nothing but the latency trace, and both `trace_tool_*`
+    // return immediately on `None` fields — so measuring first paid a full
+    // serialization pass over every successful `read_file` / `write_file` /
+    // `apply_patch` / `list_dir` / `grep` result on every deployment that has
+    // not turned the `ironclaw_latency` TRACE target on, which is all of them
+    // by default. `ironclaw_observability`'s charter is zero-cost-when-off; the
+    // trace was, this field was not (#7103). The two neighbouring constructors
+    // in `latency.rs` already check before measuring; this now matches them.
+    //
+    // Not the same as `web_access.rs` / `gsuite/handlers.rs`, which also call
+    // `json_bytes` unconditionally: there the value feeds
+    // `ResourceUsage::set_output_bytes`, i.e. resource accounting, which must
+    // happen whether or not anyone is tracing. Those are correct as written.
+    if fields.is_none() {
+        return;
+    }
     let output_bytes = result
         .as_ref()
         .ok()
@@ -310,6 +326,90 @@ mod tests {
         let input = "x".repeat(512);
 
         assert_eq!(super::bound_safe_summary(input.clone()), input);
+    }
+
+    /// #7103: `output_bytes` feeds only the latency trace, and `trace_tool_ok` /
+    /// `trace_tool_error` both return immediately when latency tracing is off —
+    /// but the measurement ran first, so every successful coding-tool call paid
+    /// a full serialization pass over its output on deployments that never
+    /// enabled the `ironclaw_latency` TRACE target.
+    ///
+    /// Driven through `CodingCapabilityState::dispatch`, the public entry point,
+    /// rather than `trace_coding_latency` directly: the guard is only worth
+    /// anything if the real dispatch path honours it, and `dispatch` also builds
+    /// the latency fields that decide whether it should.
+    ///
+    /// The counter's own liveness is asserted in the same test — a probe that
+    /// never increments would report "no serialization" forever.
+    #[tokio::test]
+    async fn coding_dispatch_does_not_measure_output_bytes_when_latency_tracing_is_off() {
+        use crate::latency::JSON_BYTES_CALLS;
+
+        assert!(
+            !ironclaw_observability::live_latency_enabled(),
+            "this test asserts the tracing-off path; a subscriber enabling the \
+             `ironclaw_latency` TRACE target would make it pass vacuously"
+        );
+
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        std::fs::create_dir_all(temp_root.path().join("workspace")).expect("workspace dir");
+        std::fs::write(
+            temp_root.path().join("workspace/big.txt"),
+            "some text worth not serializing\n".repeat(512),
+        )
+        .expect("seed a payload worth not serializing");
+        let mut local_filesystem = DiskFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("latency-off-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+        let capability_id = CapabilityId::new("builtin.read_file").expect("capability id");
+        let input = json!({ "path": "/workspace/big.txt" });
+        let request = super::CodingCapabilityRequest::new(
+            &capability_id,
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            None,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &input,
+        );
+
+        JSON_BYTES_CALLS.with(|calls| calls.set(0));
+        let output = state.dispatch(&request).await.expect("read file");
+        assert!(
+            output.output["content"]
+                .as_str()
+                .is_some_and(|content| { content.len() > 1024 }),
+            "the dispatch must actually have produced a large output, or there \
+             would be nothing worth not serializing"
+        );
+
+        assert_eq!(
+            JSON_BYTES_CALLS.with(std::cell::Cell::get),
+            0,
+            "with latency tracing off, dispatch must not serialize the tool \
+             output to count its bytes"
+        );
+
+        // The probe is live: the same helper still counts when it is called.
+        crate::latency::json_bytes(&output.output);
+        assert_eq!(
+            JSON_BYTES_CALLS.with(std::cell::Cell::get),
+            1,
+            "the call counter itself must work, or the assertion above proves \
+             nothing"
+        );
     }
 
     #[tokio::test]

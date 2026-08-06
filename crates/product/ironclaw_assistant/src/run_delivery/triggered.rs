@@ -223,7 +223,7 @@ impl TriggeredRunDeliveryDriver {
 
             let Ok(_permit) = permits.clone().acquire_owned().await else {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     run_id = %request.run_id,
                     "triggered run delivery skipped: delivery semaphore closed"
                 );
@@ -247,7 +247,7 @@ impl TriggeredRunDeliveryDriver {
             )
             .await;
             tracing::debug!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 %run_id,
                 ?outcome,
                 "triggered run delivery completed"
@@ -338,7 +338,7 @@ async fn deliver_triggered_run(
                 // stay actionable, so stale-prompt cleanup deliberately does
                 // NOT run here.
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "triggered run parked awaiting user after delivering blocked prompt; recording Delivered"
                 );
@@ -348,7 +348,7 @@ async fn deliver_triggered_run(
             }
             Err(err) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     error = %err,
                     "triggered run wait failed"
@@ -381,7 +381,7 @@ async fn deliver_triggered_run(
             }
             Err(err) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     error = %err,
                     "triggered run notification build failed"
@@ -456,7 +456,7 @@ async fn deliver_triggered_run(
                 // Cancel the blocked run FIRST — a transient cancel failure
                 // must leave the existing prompt in place.
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "triggered run OAuth URL suppressed by send-time backstop: resolved \
                      target is not a personal DM; cancelling run"
@@ -472,7 +472,7 @@ async fn deliver_triggered_run(
                 .await
                 {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target: "ironclaw::reborn::run_delivery",
                         %run_id,
                         error = %err,
                         "triggered run OAuth backstop: cancel_auth_blocked_run failed"
@@ -523,7 +523,7 @@ async fn deliver_triggered_run(
             }
             Err(failure) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     reason = %failure,
                     "triggered run delivery failed"
@@ -584,7 +584,7 @@ async fn triggered_notification_for_state(
                 .await?
             else {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "completed triggered run has no finalized assistant message; skipping delivery"
                 );
@@ -592,7 +592,7 @@ async fn triggered_notification_for_state(
             };
             let Some(text) = message.content else {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "completed triggered run finalized assistant message has no content; skipping delivery"
                 );
@@ -610,7 +610,7 @@ async fn triggered_notification_for_state(
         TurnStatus::BlockedApproval => {
             let Some(gate_ref) = state.gate_ref.as_ref() else {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "triggered run blocked on approval without gate ref; skipping"
                 );
@@ -642,7 +642,7 @@ async fn triggered_notification_for_state(
         TurnStatus::BlockedAuth => {
             let Some(gate_ref) = state.gate_ref.as_ref() else {
                 tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "triggered run blocked on auth without gate ref; skipping"
                 );
@@ -817,7 +817,7 @@ async fn record_triggered_run_outcome(
     };
     if let Err(error) = store.record_triggered_run_delivery(record).await {
         tracing::warn!(
-            target = "ironclaw::reborn::run_delivery",
+            target: "ironclaw::reborn::run_delivery",
             %run_id,
             error = %error,
             "failed to record triggered run delivery outcome (best-effort)"
