@@ -843,6 +843,29 @@ class RebornPrTestPlanTests(unittest.TestCase):
         finally:
             planner._wasm_wit_prefix.cache_clear()
 
+    def test_wasm_wit_prefix_resolution_failure_fails_closed(self) -> None:
+        """An unresolvable ironclaw_wasm crate must raise, never fall back
+        to the literal — a silent fallback is exactly the WS10 failure mode
+        (a moved crate makes the prefix match nothing and the planner reports
+        "no Reborn test surface changed" for a real WIT diff), mirroring
+        `test_frontend_prefix_resolution_failure_fails_closed`."""
+        planner._wasm_wit_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                side_effect=planner.CrateTreeError("boom"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "cannot resolve the ironclaw_wasm crate"
+                ):
+                    self.plan(
+                        "pull_request",
+                        ["crates/ironclaw_wasm/wit/tool.wit"],
+                    )
+        finally:
+            planner._wasm_wit_prefix.cache_clear()
+
     def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
         for wit_path in ("wit/tool.wit", f"{planner._wasm_wit_prefix()}tool.wit"):
             with self.subTest(wit_path=wit_path):
