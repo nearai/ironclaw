@@ -403,6 +403,9 @@ test("does not prove the regression", () => {
   const result = runRegression();
   assert(true);
   strictEqual(result, result);
+  expect("fixed").toBe("fixed");
+  expect(buildResult({ a: 1 })).toEqual(buildResult({ a: 1 }));
+  expect(getStatus()).resolves.toBe(getStatus());
 });
 EOF
 expect_fail "tautological TypeScript assertion" \
@@ -429,6 +432,33 @@ match|assert.match(actualMessage(), /fixed/);
 notEqual|assert.notEqual(actualStatus(), "broken");
 strictEqual|assert.strictEqual(actualCount(), 1);
 deepStrictEqual|assert.deepStrictEqual(actualItems(), ["fixed"]);
+match with escaped slashes|assert.match(actualUrl(), /^https?:\/\//);
+match with escaped comment delimiters|assert.match(actualSource(), /\/\* fixed \*\//);
+match with a slash in a character class|assert.match(actualPath(), /[/]fixed/);
+bare strictEqual import|strictEqual(actualCount(), 1);
+bare deepEqual import|deepEqual(actualItems(), ["fixed"]);
+EOF
+
+# `added_text` splices the `+` lines of a diff, so the text handed to the
+# scanner need not have balanced quoting. An unterminated literal is a diff
+# artifact and must not swallow the assertion that follows it.
+typescript_unbalanced="$TMP_ROOT/typescript-unbalanced-literal"
+init_repo "$typescript_unbalanced"
+mkdir -p "$typescript_unbalanced/tests"
+while IFS='|' read -r name prose; do
+  {
+    printf 'test("keeps the assertion visible", () => {\n'
+    printf '  %s\n' "$prose"
+    printf '  expect(actualStatus()).toBe("fixed");\n'
+    printf '});\n'
+  } > "$typescript_unbalanced/tests/regression.test.tsx"
+  expect_pass "assertion survives $name" run_check "$typescript_unbalanced"
+done <<'EOF'
+an apostrophe in JSX prose|render(<p>Don't panic</p>);
+an apostrophe inside a regex|const pattern = /doesn't/;
+a hunk landing inside a template literal|`first line of an unclosed template
+a JSDoc continuation line|* Ensures the composer doesn't steal focus.
+a division before the assertion|const ratio = total / count;
 EOF
 
 typescript_node_assert_tautology="$TMP_ROOT/typescript-node-assert-tautology"
@@ -450,6 +480,10 @@ test("does not accept tautological node:assert methods", () => {
   assert.ok(1);
   assert.fail();
   assert(true);
+  assert.equal(actualStatus());
+  strictEqual(buildResult({ a: 1 }), buildResult({ a: 1 }));
+  const matched = actualUrl().match(/fixed/);
+  ok(somethingHappened());
   // assert.equal(result.status, "fixed");
 });
 EOF
@@ -463,7 +497,10 @@ mkdir -p "$typescript_node_assert_string/tests"
 cat > "$typescript_node_assert_string/tests/regression.test.ts" <<'EOF'
 test("does not accept assertion-shaped strings", () => {
   const docs = "assert.equal(actualStatus(), fixedStatus())";
-  renderDocumentation(docs);
+  const snippet = `
+    assert.equal(actualStatus(), fixedStatus());
+  `;
+  renderDocumentation(docs, snippet);
 });
 EOF
 expect_fail "node:assert text in a TypeScript string" \

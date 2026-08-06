@@ -73,12 +73,34 @@ PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# `node:assert`, in the three shapes a test can call it. `assert.equal(…)` is
+# unambiguous, so the qualified form accepts every method. The bare form (a
+# named import, `import { strictEqual } from "node:assert/strict"`) only accepts
+# names nothing else plausibly answers to: bare `match(…)` is `url.match(/x/)`
+# and bare `ok(…)` is anybody's helper, neither of which is evidence of anything.
+_ASSERT_QUALIFIED_METHODS = (
+    "strictEqual|deepStrictEqual|notStrictEqual|notDeepStrictEqual"
+    "|equal|deepEqual|notEqual|notDeepEqual"
+    "|ok|match|doesNotMatch|throws|rejects|doesNotThrow|doesNotReject|fail"
+)
+_ASSERT_BARE_METHODS = (
+    "strictEqual|deepStrictEqual|notStrictEqual|notDeepStrictEqual"
+    "|deepEqual|notDeepEqual"
+)
 _ASSERT_METHOD_START = re.compile(
-    r"\bassert\s*\.\s*"
-    r"(strictEqual|deepStrictEqual|notStrictEqual|notDeepStrictEqual"
-    r"|equal|deepEqual|notEqual|notDeepEqual"
-    r"|ok|match|doesNotMatch|throws|rejects|doesNotThrow|doesNotReject|fail)"
-    r"\s*\(",
+    rf"(?:\bassert\s*\.\s*(?P<qualified>{_ASSERT_QUALIFIED_METHODS})"
+    rf"|(?<![.\w$])(?P<bare>{_ASSERT_BARE_METHODS})"
+    r"|\bassert(?=\s*\())\s*\(",
+)
+
+# `expect(actual).toEqual(expected)`, split so both operands can be read with
+# the balanced parser. A single regex cannot: `(.*?)` stops at the first `)`
+# unless something after it forces backtracking, so `expected` loses its last
+# character whenever it nests — and `expect(f(1)).toEqual(f(1))` then looks like
+# two *different* operands and passes the tautology filter.
+_EXPECT_START = re.compile(r"\bexpect\s*\(")
+_EXPECT_MATCHER = re.compile(
+    r"\s*\.\s*(?:to[A-Z]\w*|resolves|rejects)(?:\s*\.\s*\w+)?\s*\(",
 )
 
 _ASSERT_COMPARISON_METHODS = {
@@ -92,29 +114,53 @@ _ASSERT_COMPARISON_METHODS = {
     "notDeepEqual",
 }
 
+# Literal interiors are replaced character-for-character with this filler rather
+# than blanked. Offsets stay valid for the argument parser, and two identical
+# literals still normalize equal, so `expect("fixed").toBe("fixed")` is still
+# caught as a tautology. Two *different* literals of the same length collide and
+# are rejected too, which is the safe direction for a guardrail.
+_LITERAL_FILLER = "~"
+
+# A `/` following any of these cannot be division, so it opens a regex literal.
+# `>` covers the arrow in `() => /fixed/.test(value)`. Everything else —
+# identifiers, numbers, `)`, `]` — is division, which is the safe default: a
+# misread regex would mask real code.
+_REGEX_PRECEDING_PUNCTUATION = frozenset("(,=:[!&|?{};>")
+_REGEX_PRECEDING_KEYWORDS = frozenset(
+    {
+        "return",
+        "typeof",
+        "instanceof",
+        "in",
+        "of",
+        "new",
+        "delete",
+        "void",
+        "throw",
+        "case",
+        "do",
+        "else",
+        "yield",
+        "await",
+    }
+)
+
+
+# Both argument parsers below run on masked text, where every literal interior
+# is filler: no bracket, comma, or quote survives inside a string, a regex, or a
+# comment. Bracket depth is therefore the whole grammar they need.
+_BRACKET_CLOSERS = {"(": ")", "[": "]", "{": "}"}
+
 
 def balanced_arguments(text: str, start: int) -> str | None:
     """Return the contents of a call whose opening parenthesis is at start."""
 
-    pairs = {"(": ")", "[": "]", "{": "}"}
     stack = [")"]
-    quote: str | None = None
-    escaped = False
     for index in range(start + 1, len(text)):
         character = text[index]
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == quote:
-                quote = None
-            continue
-        if character in {"'", '"', "`"}:
-            quote = character
-        elif character in pairs:
-            stack.append(pairs[character])
-        elif character in ")]}" and character == stack[-1]:
+        if character in _BRACKET_CLOSERS:
+            stack.append(_BRACKET_CLOSERS[character])
+        elif character == stack[-1]:
             stack.pop()
             if not stack:
                 return text[start + 1 : index]
@@ -124,26 +170,13 @@ def balanced_arguments(text: str, start: int) -> str | None:
 def top_level_operands(expression: str) -> list[str]:
     """Split call arguments without treating nested commas as separators."""
 
-    pairs = {"(": ")", "[": "]", "{": "}"}
     stack: list[str] = []
-    quote: str | None = None
-    escaped = False
     operands: list[str] = []
     operand_start = 0
     for index, character in enumerate(expression):
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == quote:
-                quote = None
-            continue
-        if character in {"'", '"', "`"}:
-            quote = character
-        elif character in pairs:
-            stack.append(pairs[character])
-        elif character in ")]}" and stack and character == stack[-1]:
+        if character in _BRACKET_CLOSERS:
+            stack.append(_BRACKET_CLOSERS[character])
+        elif stack and character == stack[-1]:
             stack.pop()
         elif character == "," and not stack:
             operands.append(expression[operand_start:index])
@@ -152,48 +185,122 @@ def top_level_operands(expression: str) -> list[str]:
     return operands
 
 
+def line_end(text: str, index: int) -> int:
+    newline = text.find("\n", index)
+    return len(text) if newline == -1 else newline
+
+
+def mask_span(masked: list[str], start: int, end: int, filler: str) -> None:
+    """Overwrite [start, end) with filler, keeping newlines so offsets hold."""
+
+    for index in range(start, end):
+        if masked[index] != "\n":
+            masked[index] = filler
+
+
+def string_literal_end(text: str, start: int, quote: str) -> int | None:
+    """Index just past the closing quote, or None if the literal never closes.
+
+    Only a template literal may span lines. An unclosed `'` or `"` on a line is
+    an apostrophe in prose, not a string.
+    """
+
+    escaped = False
+    for index in range(start + 1, len(text)):
+        character = text[index]
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == quote:
+            return index + 1
+        elif character == "\n" and quote != "`":
+            return None
+    return None
+
+
+def regex_literal_end(text: str, start: int) -> int | None:
+    """Index just past the closing slash, or None if it never closes.
+
+    A `/` inside a character class does not terminate the literal, and neither
+    does an escaped one — which is the whole point: `/^https?:\\/\\//` must not
+    be read as code followed by a `//` comment.
+    """
+
+    escaped = False
+    in_class = False
+    for index in range(start + 1, len(text)):
+        character = text[index]
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == "\n":
+            return None
+        elif in_class:
+            in_class = character != "]"
+        elif character == "[":
+            in_class = True
+        elif character == "/":
+            return index + 1
+    return None
+
+
+def opens_regex_literal(masked: list[str], index: int) -> bool:
+    """Whether the `/` at index starts a regex literal rather than a division."""
+
+    cursor = index - 1
+    while cursor >= 0 and masked[cursor].isspace():
+        cursor -= 1
+    if cursor < 0:
+        return True
+    if masked[cursor] in _REGEX_PRECEDING_PUNCTUATION:
+        return True
+    word_end = cursor + 1
+    while cursor >= 0 and (masked[cursor].isalnum() or masked[cursor] in "_$"):
+        cursor -= 1
+    return "".join(masked[cursor + 1 : word_end]) in _REGEX_PRECEDING_KEYWORDS
+
+
 def without_typescript_comments_and_strings(text: str) -> str:
-    """Mask TypeScript comments and string literals while preserving offsets."""
+    """Mask comments, string bodies, and regex bodies, preserving offsets.
+
+    The input is `added_text`: the `+` lines of a diff spliced together, so its
+    quoting is not guaranteed to balance. An unterminated literal is therefore
+    left alone rather than allowed to swallow the rest of the text — otherwise
+    one apostrophe in JSX prose, or a hunk landing inside a template literal,
+    hides every assertion after it and the gate rejects a legitimate fix.
+    """
 
     masked = list(text)
     index = 0
     while index < len(text):
         character = text[index]
-        if character in {"'", '"', "`"}:
-            quote = character
-            masked[index] = " "
-            index += 1
-            escaped = False
-            while index < len(text):
-                character = text[index]
-                if character != "\n":
-                    masked[index] = " "
-                index += 1
-                if escaped:
-                    escaped = False
-                elif character == "\\":
-                    escaped = True
-                elif character == quote:
-                    break
-            continue
+        # Comments are checked before the regex heuristic and always win: no
+        # regex literal can start with `/` or `*`.
         if text.startswith("//", index):
-            while index < len(text) and text[index] != "\n":
-                masked[index] = " "
-                index += 1
+            end = line_end(text, index)
+            mask_span(masked, index, end, " ")
+            index = end
             continue
         if text.startswith("/*", index):
-            masked[index : index + 2] = [" ", " "]
-            index += 2
-            while index < len(text):
-                if text.startswith("*/", index):
-                    masked[index : index + 2] = [" ", " "]
-                    index += 2
-                    break
-                if text[index] != "\n":
-                    masked[index] = " "
-                index += 1
+            close = text.find("*/", index + 2)
+            end = close + 2 if close != -1 else line_end(text, index)
+            mask_span(masked, index, end, " ")
+            index = end
             continue
-        index += 1
+        end = None
+        if character == "/" and opens_regex_literal(masked, index):
+            end = regex_literal_end(text, index)
+        elif character in {"'", '"', "`"}:
+            end = string_literal_end(text, index, character)
+        if end is None:
+            index += 1
+            continue
+        # Keep the delimiters: `expect("x").toBe("x")` stays visible as a
+        # comparison of two literals, so the tautology filter still sees it.
+        mask_span(masked, index + 1, end - 1, _LITERAL_FILLER)
+        index = end
     return "".join(masked)
 
 
@@ -433,13 +540,16 @@ def has_meaningful_python_assertion(text: str) -> bool:
 
 def has_meaningful_typescript_assertion(text: str) -> bool:
     text = without_typescript_comments_and_strings(text)
-    for match in re.finditer(
-        r"expect\s*\((.*?)\)\s*\.\s*"
-        r"(to[A-Z]\w*|resolves|rejects)(?:\.\w+)?\s*\((.*?)\)",
-        text,
-        re.DOTALL,
-    ):
-        actual, _matcher, expected = match.groups()
+    for match in _EXPECT_START.finditer(text):
+        actual = balanced_arguments(text, match.end() - 1)
+        if actual is None:
+            continue
+        matcher = _EXPECT_MATCHER.match(text, match.end() + len(actual) + 1)
+        if matcher is None:
+            continue
+        expected = balanced_arguments(text, matcher.end() - 1)
+        if expected is None:
+            continue
         if normalized(actual) == normalized(expected) and expected.strip():
             continue
         if normalized(actual) in {"true", "1"} and normalized(expected) in {
@@ -448,31 +558,22 @@ def has_meaningful_typescript_assertion(text: str) -> bool:
         }:
             continue
         return True
-    for match in re.finditer(r"\bassert\s*\((.*?)\)", text, re.DOTALL):
-        if normalized(match.group(1)) in {"true", "false", "1", "0", ""}:
-            continue
-        return True
     for match in _ASSERT_METHOD_START.finditer(text):
-        method = match.group(1)
+        # None for a plain `assert(value)`, which has no method to dispatch on.
+        method = match.group("qualified") or match.group("bare")
         expression = balanced_arguments(text, match.end() - 1)
         if expression is None:
             continue
         operands = top_level_operands(expression)
         if method in _ASSERT_COMPARISON_METHODS:
-            if len(operands) >= 2 and normalized(operands[0]) == normalized(
+            # A comparison missing its second operand is malformed, and a
+            # comparison of a value against itself holds whether or not the bug
+            # is fixed. Neither is regression evidence.
+            if len(operands) < 2 or normalized(operands[0]) == normalized(
                 operands[1]
             ):
                 continue
         elif normalized(operands[0]) in {"true", "false", "1", "0", ""}:
-            continue
-        return True
-    for match in re.finditer(
-        r"\b(?:strictEqual|deepStrictEqual)\s*\((.*?)\)",
-        text,
-        re.DOTALL,
-    ):
-        operands = match.group(1).split(",", 2)
-        if len(operands) >= 2 and normalized(operands[0]) == normalized(operands[1]):
             continue
         return True
     return False
