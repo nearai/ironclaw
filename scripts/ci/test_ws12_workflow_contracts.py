@@ -99,7 +99,7 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         errors = validate_e2e_scope_filters(sabotaged)
 
         self.assertTrue(
-            any("substrates/ironclaw_events" in error for error in errors), errors
+            any("substrates/ironclaw_event_log" in error for error in errors), errors
         )
 
     def test_flat_tree_paths_glob_fails_loudly(self) -> None:
@@ -386,8 +386,8 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         for workflow, flat, nested_probe in (
             (
                 CODE_STYLE_WORKFLOW,
-                "crates/([^/]+/)*ironclaw_runner/",
-                "crates/substrates/ironclaw_runner/src/lib.rs",
+                "crates/([^/]+/)*ironclaw_turn_runner/",
+                "crates/substrates/ironclaw_turn_runner/src/lib.rs",
             ),
             (
                 PLATFORM_WORKFLOW,
@@ -449,21 +449,25 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
     def test_dropping_a_governed_crate_name_fails_loudly(self) -> None:
         errors = validate_crate_scope_filters(
             self.sabotage(
-                CODE_STYLE_WORKFLOW, "crates/([^/]+/)*ironclaw_reborn_config/|", ""
+                CODE_STYLE_WORKFLOW, "crates/([^/]+/)*ironclaw_config/|", ""
             ),
             ROOT,
         )
 
         self.assertTrue(
-            any("ironclaw_reborn_config" in error for error in errors), errors
+            any("ironclaw_config" in error for error in errors), errors
         )
 
     def test_over_broadening_a_filter_fails_loudly(self) -> None:
         """Matching everything is not a fix — the dist-build and stress lanes
         are deliberately scoped and must stay scoped."""
         for workflows in (
-            self.sabotage(CODE_STYLE_WORKFLOW, "^(crates/([^/]+/)*ironclaw_runner/", "^(crates/"),
-            self.sabotage(STRESS_WORKFLOW, '- "crates/ironclaw_turns/**"', '- "crates/**"'),
+            self.sabotage(CODE_STYLE_WORKFLOW, "^(crates/([^/]+/)*ironclaw_turn_runner/", "^(crates/"),
+            self.sabotage(
+                STRESS_WORKFLOW,
+                '- "crates/kernel/ironclaw_turns/**"',
+                '- "crates/**"',
+            ),
         ):
             errors = validate_crate_scope_filters(workflows, ROOT)
             self.assertTrue(
@@ -475,7 +479,7 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
             (
                 self.sabotage(
                     CODE_STYLE_WORKFLOW,
-                    "grep -Eq '^(crates/([^/]+/)*ironclaw_runner/",
+                    "grep -Eq '^(crates/([^/]+/)*ironclaw_turn_runner/",
                     "true #",
                 ),
                 "expected exactly one scope regex",
@@ -531,13 +535,13 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         """The pin is only worth anything if `main()`'s entry point sees it."""
         flattened = self.sabotage(
             CODE_STYLE_WORKFLOW,
-            "crates/([^/]+/)*ironclaw_runner/",
-            "crates/ironclaw_runner/",
+            "crates/([^/]+/)*ironclaw_turn_runner/",
+            "crates/ironclaw_turn_runner/",
         )
 
         self.assertTrue(
             any(
-                "crates/substrates/ironclaw_runner" in error
+                "crates/substrates/ironclaw_turn_runner" in error
                 for error in validate_workflow_texts(flattened, ROOT)
             )
         )
@@ -760,14 +764,14 @@ class CrateNameResidueSabotageTests(unittest.TestCase):
 
     def test_dropping_the_docker_crate_name_fails_loudly(self) -> None:
         sabotaged = self.sabotage(
-            DOCKER_WORKFLOW, "ironclaw_reborn_cli", "ironclaw_renamed_cli"
+            DOCKER_WORKFLOW, "ironclaw_cli", "ironclaw_renamed_cli"
         )
         errors = validate_crate_name_residue(sabotaged, ROOT)
 
         self.assertTrue(
             any(
                 DOCKER_WORKFLOW in error
-                and "ironclaw_reborn_cli" in error
+                and "ironclaw_cli" in error
                 and "no longer names" in error
                 for error in errors
             ),
@@ -797,7 +801,7 @@ class CrateNameResidueSabotageTests(unittest.TestCase):
         # Make the workflow text contain the stale name too, so the "no
         # longer names" branch does not fire first and mask this one.
         workflows = self.sabotage(
-            DOCKER_WORKFLOW, "ironclaw_reborn_cli", "ironclaw_reborn_cli_renamed"
+            DOCKER_WORKFLOW, "ironclaw_cli", "ironclaw_reborn_cli_renamed"
         )
         with self.patched_residue(stale):
             errors = validate_crate_name_residue(workflows, ROOT)

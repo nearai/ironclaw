@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-26
 **Status:** V1 service-boundary slice
-**Crate:** `crates/ironclaw_secrets`
+**Crate:** `crates/substrates/ironclaw_secrets`
 **Depends on:** `docs/reborn/contracts/host-api.md`
 
 ---

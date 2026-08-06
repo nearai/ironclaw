@@ -7,7 +7,7 @@
 # Crate paths are normalized to `crates/<crate>/...` BEFORE the case arms run,
 # so the arms below stay keyed to crate identity rather than to how deep the
 # crate sits under `crates/`. Without that, the target-architecture family move
-# (`crates/ironclaw_events` -> `crates/substrates/ironclaw_events`, PROPOSAL §5)
+# (`crates/ironclaw_event_log` -> `crates/substrates/ironclaw_event_log`, PROPOSAL §5)
 # makes every crate-scoped arm stop matching: the paths still look like code, so
 # they fall through to `is_code_path` and get bucketed legacy-only, and the whole
 # Reborn suite is silently skipped on a green PR. See
@@ -42,9 +42,8 @@ min_crate_directories=20
 # exactly what `crates/<crate>/*` globs did before.
 #
 # Manifests that declare their own `[workspace]` table are skipped entirely:
-# they root a *separate* workspace (the `wasm-src/` guest components,
-# `ironclaw_silk_decoder`), so this workspace never builds them and no test run
-# can cover them. `scripts/ci/lib/crate_tree.py` applies the same rule and
+# they root a *separate* workspace (the `wasm-src/` guest components), so this
+# workspace never builds them and no test run can cover them. `scripts/ci/lib/crate_tree.py` applies the same rule and
 # `test-classify-test-scope.sh` pins the two inventories equal.
 crate_dirs=""
 workspace_root_dirs=""
@@ -189,7 +188,7 @@ normalize_crate_path() {
     # The crate DIRECTORY basename is the key, not the cargo package name.
     # Usually they are identical; two documented exceptions make the package
     # name the wrong choice here (PROPOSAL §5.1's directory rule):
-    # `crates/ironclaw_reborn_cli` declares `name = "ironclaw"`, and package
+    # `crates/ironclaw_cli` declares `name = "ironclaw"`, and package
     # directories under `extensions/packages/` are named by extension identity
     # (`packages/slack/` holds `ironclaw_slack_extension`). The arms below are
     # therefore keyed on directory names, and every package directory needs its
@@ -207,14 +206,13 @@ normalize_crate_path() {
   #     no `Cargo.toml` (PROPOSAL §5). Its data is embedded by
   #     `ironclaw_extension_support`, which is where it used to live, so it
   #     lights the same lane that crate does.
-  #   * a separate cargo workspace (the `wasm-src/` guest components,
-  #     `ironclaw_silk_decoder`).
+  #   * a separate cargo workspace (the `wasm-src/` guest components).
   #
   # Checked in this order and NOT symmetrically: a package-asset path is
   # rewritten onto the canonical `crates/extensions/packages/<rest>` identity
   # (the same treatment the crate-owned branch above gives its match), while a
-  # non-package workspace root (ironclaw_silk_decoder) passes through
-  # unchanged, matching its literal-path arms below. Without the rewrite, a
+  # non-package workspace root passes through unchanged, matching its
+  # literal-path arms below. Without the rewrite, a
   # data-only package's path stays literally wherever `packages/` sits
   # (`crates/<family>/packages/...`) after the family move (PROPOSAL §5), the
   # `crates/extensions/packages/*` arms in is_shared_test_path stop matching,
@@ -244,10 +242,30 @@ normalize_crate_path() {
       # fallback is as depth-independent as the tree lookup above it. Anchored on
       # the FIRST `ironclaw_` segment (`%%` keeps the shortest prefix): a greedy
       # match on the last one would fold
-      # `crates/f/ironclaw_events/src/ironclaw_helper.rs` down to
+      # `crates/f/ironclaw_event_log/src/ironclaw_helper.rs` down to
       # `crates/ironclaw_helper.rs`.
       NORMALIZED_PATH="crates/${tail#"${tail%%/ironclaw_*}"/}"
       return 0
+      ;;
+  esac
+
+  # A direct child file of a FAMILY directory (`crates/app/AGENTS.md`,
+  # `crates/kernel/AGENTS.md`, ...) is attributable but crate-less, exactly like
+  # a file sitting directly in `crates/` — the family dirs exist since WS7 and
+  # each carries its own guidance file. Recognized structurally: the parent
+  # directory is a prefix of at least one discovered crate dir, and the path
+  # has no further directory below it. Falls through to the same buckets as
+  # `crates/AGENTS.md` (code-adjacent, legacy suite) — conservative, never
+  # silent.
+  case "${tail}" in
+    */*/*) ;;
+    */*)
+      local family_seg="crates/${tail%%/*}/"
+      case "${crate_dirs}" in
+        *"${family_seg}"*)
+          return 0
+          ;;
+      esac
       ;;
   esac
 
@@ -282,7 +300,7 @@ is_docs_only_path() {
 is_shared_test_path() {
   local path="$1"
   case "$path" in
-    Cargo.toml|Cargo.lock|providers.json|Dockerfile)
+    Cargo.toml|Cargo.lock|crates/ironclaw_llm/assets/providers.json|Dockerfile)
       return 0
       ;;
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
@@ -294,7 +312,7 @@ is_shared_test_path() {
     crates/ironclaw_common/*|crates/ironclaw_extension_contracts/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_contracts/*|crates/ironclaw_loop_host/*|crates/ironclaw_processes/*|crates/ironclaw_product_contracts/*)
       return 0
       ;;
-    crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_events/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)
+    crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_event_log/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)
       return 0
       ;;
     crates/ironclaw_capabilities/*|crates/ironclaw_secrets/*|crates/ironclaw_network/*|crates/ironclaw_runtime_policy/*)
@@ -325,10 +343,23 @@ is_reborn_test_path() {
     docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
-    crates/ironclaw_architecture/*)
+    crates/ironclaw_architecture_tests/*)
       return 0
       ;;
-    crates/ironclaw_runner/*|crates/ironclaw_reborn_*/*)
+    # The WS6 renames dropped the `ironclaw_reborn_` prefix from all seven
+    # crates that carried it, so the `crates/ironclaw_reborn_*/*` glob this
+    # arm used to rely on now matches NOTHING and every one of these crates
+    # silently reclassified as legacy. Enumerated rather than re-globbed:
+    # the new names share no prefix, and a glob that matches nothing fails
+    # open (quietly) instead of closed.
+    crates/ironclaw_turn_runner/*|\
+    crates/ironclaw_cli/*|\
+    crates/ironclaw_composition/*|\
+    crates/ironclaw_config/*|\
+    crates/ironclaw_event_store/*|\
+    crates/ironclaw_identity/*|\
+    crates/ironclaw_openai_compat/*|\
+    crates/ironclaw_trace_commons/*)
       return 0
       ;;
     crates/ironclaw_product_*/*|\
@@ -338,7 +369,7 @@ is_reborn_test_path() {
     crates/ironclaw_webui/*)
       return 0
       ;;
-    crates/ironclaw_conversations/*|crates/ironclaw_extension_host/*|crates/ironclaw_extension_manager/*|crates/ironclaw_outbound/*|crates/ironclaw_product/*|crates/ironclaw_triggers/*)
+    crates/ironclaw_conversations/*|crates/ironclaw_extension_host/*|crates/ironclaw_extension_manager/*|crates/ironclaw_outbound/*|crates/ironclaw_assistant/*|crates/ironclaw_triggers/*)
       return 0
       ;;
     scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/reborn_changed_coverage.py|scripts/ci/test_reborn_changed_coverage.py|scripts/ci/critical_mutation_gate.py|scripts/ci/test-critical-mutation-gate.sh|scripts/ci/check-reborn-branch-coverage-flags.py|scripts/ci/test-check-reborn-branch-coverage-flags.sh|scripts/ci/check-reborn-qa-fixtures.sh|scripts/ci/test-check-reborn-qa-fixtures.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/ws12-suite-shards.toml|scripts/ci/ws12_suite_shards.py|scripts/ci/test_ws12_suite_shards.py|scripts/ci/ws12_workflow_contracts.py|scripts/ci/test_ws12_workflow_contracts.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
@@ -356,7 +387,7 @@ is_code_path() {
     crates/*|tests/*|migrations/*)
       return 0
       ;;
-    Cargo.toml|Cargo.lock|Dockerfile|providers.json)
+    Cargo.toml|Cargo.lock|Dockerfile)
       return 0
       ;;
     scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)

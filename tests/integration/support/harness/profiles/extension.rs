@@ -4,13 +4,23 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
+use ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer;
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressRequest, RestrictedEgressResponse, ToolAdapter, ToolCall,
+    ToolError, ToolPorts, ToolResult,
+};
 use ironclaw_host_api::{
+    action::NetworkMethod,
+    dispatch::RuntimeDispatchErrorKind,
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+    messaging::StandardMessagingErrorCode,
     mount::{MountPermissions, MountView},
     resource::ResourceScope,
 };
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::super::super::extension_surface::{
     EXTENSION_LIFECYCLE_CAPABILITY_IDS, bundled_extension_manifest_capability_ids,
@@ -59,7 +69,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
@@ -210,21 +220,22 @@ output_schema_ref = "schemas/audit.output.json"
 "#;
 
 fn visibility_probe_package() -> HarnessResult<(
-    ironclaw_extensions::ExtensionPackage,
-    ironclaw_extensions::ResolvedExtensionManifest,
+    ironclaw_extension_registry::ExtensionPackage,
+    ironclaw_extension_registry::ResolvedExtensionManifest,
 )> {
     let root = ironclaw_host_api::path::VirtualPath::new("/system/extensions/visprobe")?;
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
-        ironclaw_extensions::ManifestSource::HostBundled,
+        ironclaw_extension_registry::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
         Some(root.clone()),
     )?;
-    let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
+    let manifest =
+        ironclaw_extension_registry::ExtensionManifest::try_from(record.manifest().clone())?;
     Ok((
-        ironclaw_extensions::ExtensionPackage::from_manifest(manifest, root)?,
+        ironclaw_extension_registry::ExtensionPackage::from_manifest(manifest, root)?,
         record.resolved().clone(),
     ))
 }
@@ -244,7 +255,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
         effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
@@ -375,8 +386,8 @@ fn prompt_description_files(
 }
 
 fn verified_prompt_description_package() -> HarnessResult<(
-    ironclaw_extensions::ExtensionPackage,
-    ironclaw_extensions::ResolvedExtensionManifest,
+    ironclaw_extension_registry::ExtensionPackage,
+    ironclaw_extension_registry::ResolvedExtensionManifest,
 )> {
     let available = ironclaw_extension_host::registry_extension_package(
         prompt_description_files(
@@ -392,8 +403,8 @@ fn verified_prompt_description_package() -> HarnessResult<(
 }
 
 fn local_prompt_description_package() -> HarnessResult<(
-    ironclaw_extensions::ExtensionPackage,
-    ironclaw_extensions::ResolvedExtensionManifest,
+    ironclaw_extension_registry::ExtensionPackage,
+    ironclaw_extension_registry::ResolvedExtensionManifest,
 )> {
     let available = ironclaw_extension_host::imported_extension_package(
         prompt_description_files(
@@ -425,7 +436,7 @@ pub(crate) fn extension_prompt_description_trust_probe_tools_profile() -> Harnes
         effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(verified_package, verified_resolved)
         .with_activated_bundled_extension_resolved(local_package, local_resolved),
@@ -461,7 +472,7 @@ pub(crate) async fn extension_prompt_description_trust_probe_tools()
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(
-    services: &ironclaw_reborn_composition::RebornRuntime,
+    services: &ironclaw_composition::RebornRuntime,
     user_id: &UserId,
 ) -> HarnessResult<()> {
     let product_auth = services.product_auth_for_test();
@@ -569,11 +580,11 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
     ]
 }
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");
@@ -586,16 +597,186 @@ fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegist
 /// `tests/fixtures/extensions/acme-messenger/manifest.toml`.
 pub(crate) const ACME_FIXTURE_SERVICE: &str = "acme-messenger.extension/v1";
 pub(crate) const ACME_SEND_NOTE_CAPABILITY_ID: &str = "acme-messenger.send_note";
+pub(crate) const ACME_CREDENTIAL_SCOPES: &[&str] = &["notes:write", "notes:read"];
+
+/// Every standard-op capability id the acme fixture's manifest binds
+/// (standardized messaging framework, task 7), in
+/// [`ironclaw_host_api::messaging::StandardMessagingOp::ALL`] core-op order. Pushed into
+/// the harness profile's granted capability set alongside
+/// [`ACME_SEND_NOTE_CAPABILITY_ID`] so the standard ops dispatch through the
+/// same active-surface path the bespoke tool already proves.
+const ACME_STANDARD_OP_CAPABILITY_IDS: &[&str] = &[
+    "acme-messenger.send_message",
+    "acme-messenger.edit_message",
+    "acme-messenger.delete_message",
+    "acme-messenger.add_reaction",
+    "acme-messenger.remove_reaction",
+    "acme-messenger.open_dm",
+    "acme-messenger.list_conversations",
+    "acme-messenger.get_conversation_info",
+    "acme-messenger.get_conversation_history",
+    "acme-messenger.get_thread_replies",
+    "acme-messenger.get_message",
+    "acme-messenger.search_messages",
+    "acme-messenger.get_user_info",
+    "acme-messenger.resolve_user",
+    "acme-messenger.list_members",
+    "acme-messenger.whoami",
+];
 
 fn acme_fixture_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/extensions/acme-messenger")
 }
 
+// ── Acme vendor egress fallback (standardized messaging framework, task 7
+//    fix round) ─────────────────────────────────────────────────────────────
+//
+// `ToolPorts.egress` is `None` on every production dispatch path today (no
+// first-party adapter has ever had a live consumer — see
+// `ironclaw_extension_host::resolver::SnapshotBoundCapability::dispatch_json`
+// and `ironclaw_capabilities::registry`, both of which hardcode
+// `ToolPorts { egress: None }` unconditionally). Wiring a REAL
+// `RestrictedEgress` into that production seam for a test-only fixture is out
+// of scope (YAGNI — the framework's host-mediated egress story for a real
+// extension is the WASM/MCP staged pipeline, exercised by Slack in task 9).
+// Instead `AcmeFixtureToolAdapter` carries its OWN constructor-held scripted
+// vendor egress and `post_acme` falls back to it whenever `ports.egress` is
+// `None`, so the fixture dispatches end to end through the real turn/dispatch
+// pipeline (Task 8's through-the-stack scenarios) exactly as it does when a
+// test drives `invoke` directly with `ports.egress` supplied.
+
+/// One scripted outcome for one acme vendor op: either a canned success body
+/// or a canned vendor failure code (mapped through
+/// [`acme_error_to_standard_code`] the same way a real non-2xx response is).
+#[derive(Clone)]
+enum AcmeVendorOutcome {
+    Body(serde_json::Value),
+    VendorError(String),
+}
+
+/// Shared, mutable per-op script for the acme vendor fixture's constructor-
+/// held fallback egress. `Clone` + `Arc`-backed: a scenario builds one,
+/// scripts whatever ops it needs (`respond`/`fail`), hands it to
+/// [`extension_runtime_acme_tools_profile_with_vendor_script`], and reads the
+/// returned `ScriptedVendorServer::requests()` back after driving its turn —
+/// the same "only the external server response is replaced here" idiom
+/// `hosted_mcp_discovery_fixture_response` and `delivery_vendor_router` use
+/// for the runtime HTTP egress lane, mirrored here for the restricted-egress
+/// lane. Every op not explicitly scripted still answers with a working
+/// built-in default (see [`default_acme_vendor_response`]), so a scenario
+/// that scripts nothing still gets a successful dispatch.
+#[derive(Clone, Default)]
+pub(crate) struct AcmeVendorScript {
+    overrides: Arc<Mutex<HashMap<String, AcmeVendorOutcome>>>,
+}
+
+impl AcmeVendorScript {
+    /// Script `op_name`'s response body, replacing its built-in default.
+    pub(crate) fn respond(&self, op_name: &str, body: serde_json::Value) {
+        self.overrides
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(op_name.to_string(), AcmeVendorOutcome::Body(body));
+    }
+
+    /// Script `op_name` to fail with the given acme vendor error code
+    /// (e.g. `"conversation_missing"`), replacing its built-in default.
+    pub(crate) fn fail(&self, op_name: &str, vendor_code: &str) {
+        self.overrides
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                op_name.to_string(),
+                AcmeVendorOutcome::VendorError(vendor_code.to_string()),
+            );
+    }
+
+    fn outcome_for(&self, op_name: &str) -> AcmeVendorOutcome {
+        self.overrides
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(op_name)
+            .cloned()
+            .unwrap_or_else(|| AcmeVendorOutcome::Body(default_acme_vendor_response(op_name)))
+    }
+}
+
+/// Built-in happy-path vendor response for one op, keyed by op name — the
+/// same shapes the adapter's own conformance test scripts by hand
+/// (`acme_standard_ops_satisfy_canonical_contracts`), so a scenario that
+/// never calls [`AcmeVendorScript::respond`]/[`AcmeVendorScript::fail`] still
+/// gets a working dispatch for every one of the 16 core ops. Ops the adapter
+/// only checks for a 2xx status (edit/delete/react) share the generic
+/// `{"ok": true}` fallback.
+fn default_acme_vendor_response(op_name: &str) -> serde_json::Value {
+    match op_name {
+        "send_message" => serde_json::json!({ "id": "AMSG-1" }),
+        "open_dm" => serde_json::json!({ "conversation": "ACME-C-DM-1" }),
+        "list_conversations" => serde_json::json!({
+            "conversations": [
+                { "conversation": "ACME-C-1", "kind": "channel", "name": "general", "member": true },
+            ],
+        }),
+        "get_conversation_info" => serde_json::json!({
+            "conversation": "ACME-C-1", "kind": "channel", "name": "general", "member": true,
+        }),
+        "get_conversation_history" | "get_thread_replies" => serde_json::json!({
+            "messages": [
+                { "conversation": "ACME-C-1", "message_id": "AMSG-1", "author_ref": "U1",
+                  "author_name": "Ann", "text": "hi", "ts": "2026-07-27T00:00:00Z", "self": false },
+            ],
+        }),
+        "get_message" => serde_json::json!({
+            "conversation": "ACME-C-1", "message_id": "AMSG-1", "author_ref": "U1",
+            "text": "hi", "self": true,
+        }),
+        "search_messages" => serde_json::json!({
+            "matches": [
+                { "conversation": "ACME-C-1", "message_id": "AMSG-1", "author_ref": "U1",
+                  "text": "hi", "self": true },
+            ],
+        }),
+        "get_user_info" => serde_json::json!({
+            "user_ref": "U1", "name": "Ann", "bot": false, "presence": "active",
+        }),
+        "resolve_user" => serde_json::json!({ "matches": [{ "user_ref": "U1", "name": "Ann" }] }),
+        "list_members" => serde_json::json!({ "members": [{ "user_ref": "U1", "name": "Ann" }] }),
+        "whoami" => serde_json::json!({ "user_ref": "U-SELF", "name": "Acme Bot" }),
+        _ => serde_json::json!({ "ok": true }),
+    }
+}
+
+/// Builds the constructor-held fallback egress: a [`ScriptedVendorServer`]
+/// (the SAME double the adapter's own conformance tests hand-build) that
+/// extracts the op name from the request URL's final path segment and
+/// consults `script` for its outcome.
+fn acme_scripted_vendor_egress(script: AcmeVendorScript) -> ScriptedVendorServer {
+    ScriptedVendorServer::new(Arc::new(move |request: &RestrictedEgressRequest| {
+        let op_name = request.url.rsplit('/').next().unwrap_or_default();
+        match script.outcome_for(op_name) {
+            AcmeVendorOutcome::Body(body) => RestrictedEgressResponse {
+                status: 200,
+                body: serde_json::to_vec(&body).unwrap_or_default(),
+            },
+            AcmeVendorOutcome::VendorError(vendor_code) => RestrictedEgressResponse {
+                status: 400,
+                body: serde_json::to_vec(&serde_json::json!({ "error": vendor_code }))
+                    .unwrap_or_default(),
+            },
+        }
+    }))
+}
+
 /// The binary-assembled native factory for the fixture: binds the tool
-/// adapter (routes `send_note`) plus the scripted channel adapter the
-/// binding rule requires for the declared `[channel]`.
-struct AcmeFixtureFactory;
+/// adapter (routes `send_note` and the 16 standard ops) plus the scripted
+/// channel adapter the binding rule requires for the declared `[channel]`.
+/// Carries the constructor-held fallback egress
+/// [`AcmeFixtureToolAdapter::post_acme`] uses whenever a dispatch arrives
+/// with `ports.egress = None` (every production path today).
+struct AcmeFixtureFactory {
+    fallback_egress: Arc<ScriptedVendorServer>,
+}
 
 impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
     fn service(&self) -> &str {
@@ -609,11 +790,15 @@ impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
         Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
         ironclaw_extension_host::BindError,
     > {
-        Ok(Box::new(AcmeFixtureEntrypoint))
+        Ok(Box::new(AcmeFixtureEntrypoint {
+            fallback_egress: Arc::clone(&self.fallback_egress),
+        }))
     }
 }
 
-struct AcmeFixtureEntrypoint;
+struct AcmeFixtureEntrypoint {
+    fallback_egress: Arc<ScriptedVendorServer>,
+}
 
 impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
     fn bind(
@@ -622,7 +807,9 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
-            tools: Some(Arc::new(AcmeFixtureToolAdapter)),
+            tools: Some(Arc::new(AcmeFixtureToolAdapter {
+                fallback_egress: Arc::clone(&self.fallback_egress),
+            })),
             channel: Some(Arc::new(AcmeFixtureChannelAdapter)),
         })
     }
@@ -641,12 +828,17 @@ pub(crate) struct AcmeFixtureChannelAdapter;
 impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
-        request: ironclaw_product::VerifiedInbound<'_>,
-    ) -> Result<ironclaw_product::InboundOutcome, ironclaw_product::ChannelError> {
+        request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::InboundOutcome,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
         use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
-        use ironclaw_product::{
-            ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-            ImmediateResponse, InboundOutcome, ProductTriggerReason,
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, ImmediateResponse, InboundOutcome, ProductTriggerReason,
+        };
+        use ironclaw_extension_contracts::external::{
+            ExternalActorRef, ExternalConversationRef, ExternalEventId,
         };
         let parse = |reason: String| ChannelError::Parse { reason };
         let value: serde_json::Value =
@@ -699,10 +891,15 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
     /// fixture.
     async fn deliver(
         &self,
-        envelope: ironclaw_product::OutboundEnvelope,
+        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
         egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
-        use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, OutboundPart, PartDeliveryOutcome,
+        };
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -754,22 +951,23 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
                 break;
             }
         }
-        Ok(ironclaw_product::DeliveryReport { parts })
+        Ok(ironclaw_extension_contracts::channel_adapter::DeliveryReport { parts })
     }
 }
 
-struct AcmeFixtureToolAdapter;
+/// Binds `send_note` plus the 16 standard messaging ops. Carries a
+/// constructor-held scripted vendor egress (`fallback_egress`) that
+/// [`Self::post_acme`] falls back to whenever `ports.egress` is `None` —
+/// every production dispatch path today, since no first-party adapter has a
+/// live `RestrictedEgress` consumer wired (see the module doc above
+/// `AcmeVendorOutcome`).
+struct AcmeFixtureToolAdapter {
+    fallback_egress: Arc<ScriptedVendorServer>,
+}
 
 #[async_trait::async_trait]
-impl ironclaw_extension_contracts::tool_adapter::ToolAdapter for AcmeFixtureToolAdapter {
-    async fn invoke(
-        &self,
-        call: ironclaw_extension_contracts::tool_adapter::ToolCall,
-        _ports: &ironclaw_extension_contracts::tool_adapter::ToolPorts<'_>,
-    ) -> Result<
-        ironclaw_extension_contracts::tool_adapter::ToolResult,
-        ironclaw_extension_contracts::tool_adapter::ToolError,
-    > {
+impl ToolAdapter for AcmeFixtureToolAdapter {
+    async fn invoke(&self, call: ToolCall, ports: &ToolPorts<'_>) -> Result<ToolResult, ToolError> {
         match call.capability_id.as_str() {
             ACME_SEND_NOTE_CAPABILITY_ID => {
                 let text = call
@@ -789,16 +987,641 @@ impl ironclaw_extension_contracts::tool_adapter::ToolAdapter for AcmeFixtureTool
                     output_bytes,
                 })
             }
-            _ => Err(
-                ironclaw_extension_contracts::tool_adapter::ToolError::Failed {
-                    kind:
-                        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
-                    safe_summary: None,
-                    model_visible_cause: None,
-                },
-            ),
+            // ── standardized messaging framework: the 16 core ops ──────────
+            // Every arm: parse the canonical input, POST to the invented acme
+            // vendor API (one op per path segment, scripted in tests), map
+            // the vendor response onto the canonical output. Vendor failures
+            // (non-2xx) are mapped to a `StandardMessagingErrorCode` inside
+            // `post_acme`/`acme_vendor_error` before they reach here.
+            "acme-messenger.send_message" => {
+                let conversation = input_str(&call.input, "conversation")?;
+                let text = input_str(&call.input, "text")?;
+                // W3/W4 (pre-merge amendment wave): `reply_to` (quotes one
+                // specific message) is distinct from `thread` (posts into a
+                // thread/topic container); acme has only one vendor mechanism
+                // so both forward to the vendor, and both echo back on the
+                // output — when supplied — so a silent drop is checkable.
+                // `.filter(!is_empty)`: unlike `reply_to` (whose nested
+                // conversation/message_id both carry canonical minLength: 1),
+                // the standalone `thread` string has none pre-dispatch —
+                // treat an empty string the same as absent rather than echo
+                // it back and trip the output schema's own minLength: 1.
+                let thread = call
+                    .input
+                    .get("thread")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|thread| !thread.is_empty());
+                let reply_to = call.input.get("reply_to");
+                let response = self
+                    .post_acme(
+                        "send_message",
+                        serde_json::json!({
+                            "conversation": conversation,
+                            "text": text,
+                            "thread": thread,
+                            "reply_to": reply_to,
+                        }),
+                        ports,
+                    )
+                    .await?;
+                let message_id = vendor_str(&response, "id")?;
+                let mut output = serde_json::json!({
+                    "message_ref": { "conversation": conversation, "message_id": message_id }
+                });
+                if let Some(thread) = thread {
+                    output["thread"] = serde_json::json!(thread);
+                }
+                if let Some(reply_to) = reply_to {
+                    output["reply_to"] = reply_to.clone();
+                }
+                Ok(tool_result(output))
+            }
+            "acme-messenger.edit_message" => {
+                let message_ref = input_object(&call.input, "message_ref")?;
+                let text = input_str(&call.input, "text")?;
+                self.post_acme(
+                    "edit_message",
+                    serde_json::json!({ "message_ref": message_ref, "text": text }),
+                    ports,
+                )
+                .await?;
+                Ok(tool_result(
+                    serde_json::json!({ "message_ref": message_ref }),
+                ))
+            }
+            "acme-messenger.delete_message" => {
+                let message_ref = input_object(&call.input, "message_ref")?;
+                self.post_acme(
+                    "delete_message",
+                    serde_json::json!({ "message_ref": message_ref }),
+                    ports,
+                )
+                .await?;
+                Ok(tool_result(serde_json::json!({
+                    "deleted": true,
+                    "message_ref": message_ref
+                })))
+            }
+            "acme-messenger.add_reaction" => {
+                let message_ref = input_object(&call.input, "message_ref")?;
+                let emoji = input_str(&call.input, "emoji")?;
+                self.post_acme(
+                    "add_reaction",
+                    serde_json::json!({ "message_ref": message_ref, "emoji": emoji }),
+                    ports,
+                )
+                .await?;
+                Ok(tool_result(serde_json::json!({
+                    "message_ref": message_ref,
+                    "emoji": emoji
+                })))
+            }
+            "acme-messenger.remove_reaction" => {
+                let message_ref = input_object(&call.input, "message_ref")?;
+                // W5 (pre-merge amendment wave): `emoji` is optional on
+                // remove — absent means "remove the connected account's own
+                // reaction(s)". acme continues echoing it back when given.
+                let emoji = call.input.get("emoji").and_then(serde_json::Value::as_str);
+                self.post_acme(
+                    "remove_reaction",
+                    serde_json::json!({ "message_ref": message_ref, "emoji": emoji }),
+                    ports,
+                )
+                .await?;
+                let mut output = serde_json::json!({ "message_ref": message_ref });
+                if let Some(emoji) = emoji {
+                    output["emoji"] = serde_json::json!(emoji);
+                }
+                Ok(tool_result(output))
+            }
+            "acme-messenger.open_dm" => {
+                let user_ref = input_str(&call.input, "user_ref")?;
+                let response = self
+                    .post_acme(
+                        "open_dm",
+                        serde_json::json!({ "user_ref": user_ref }),
+                        ports,
+                    )
+                    .await?;
+                let conversation = vendor_str(&response, "conversation")?;
+                Ok(tool_result(
+                    serde_json::json!({ "conversation": conversation }),
+                ))
+            }
+            "acme-messenger.list_conversations" => {
+                let response = self
+                    .post_acme(
+                        "list_conversations",
+                        serde_json::json!({
+                            "kinds": call.input.get("kinds"),
+                            "limit": call.input.get("limit"),
+                            "cursor": call.input.get("cursor"),
+                        }),
+                        ports,
+                    )
+                    .await?;
+                let conversations = response
+                    .get("conversations")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(conversation_info_from_vendor)
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut output = serde_json::json!({ "conversations": conversations });
+                if let Some(cursor) = response
+                    .get("next_cursor")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    output["next_cursor"] = serde_json::json!(cursor);
+                }
+                Ok(tool_result(output))
+            }
+            "acme-messenger.get_conversation_info" => {
+                let conversation = input_str(&call.input, "conversation")?;
+                let response = self
+                    .post_acme(
+                        "get_conversation_info",
+                        serde_json::json!({ "conversation": conversation }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(conversation_info_from_vendor(&response)?))
+            }
+            "acme-messenger.get_conversation_history" => {
+                let conversation = input_str(&call.input, "conversation")?;
+                let response = self
+                    .post_acme(
+                        "get_conversation_history",
+                        serde_json::json!({
+                            "conversation": conversation,
+                            "limit": call.input.get("limit"),
+                            "cursor": call.input.get("cursor"),
+                        }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(messages_output_from_vendor(
+                    &response, "messages",
+                )?))
+            }
+            "acme-messenger.get_thread_replies" => {
+                let conversation = input_str(&call.input, "conversation")?;
+                let thread = input_str(&call.input, "thread")?;
+                let response = self
+                    .post_acme(
+                        "get_thread_replies",
+                        serde_json::json!({
+                            "conversation": conversation,
+                            "thread": thread,
+                            "limit": call.input.get("limit"),
+                            "cursor": call.input.get("cursor"),
+                        }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(messages_output_from_vendor(
+                    &response, "messages",
+                )?))
+            }
+            "acme-messenger.get_message" => {
+                let message_ref = input_object(&call.input, "message_ref")?;
+                let response = self
+                    .post_acme(
+                        "get_message",
+                        serde_json::json!({ "message_ref": message_ref }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(serde_json::json!({
+                    "message": message_from_vendor(&response)?
+                })))
+            }
+            "acme-messenger.search_messages" => {
+                let query = input_str(&call.input, "query")?;
+                let response = self
+                    .post_acme(
+                        "search_messages",
+                        serde_json::json!({
+                            "query": query,
+                            "limit": call.input.get("limit"),
+                            "cursor": call.input.get("cursor"),
+                        }),
+                        ports,
+                    )
+                    .await?;
+                let mut output = messages_output_from_vendor(&response, "matches")?;
+                if let Some(total) = response.get("total").and_then(serde_json::Value::as_u64) {
+                    output["total"] = serde_json::json!(total);
+                }
+                Ok(tool_result(output))
+            }
+            "acme-messenger.get_user_info" => {
+                let user_ref = input_str(&call.input, "user_ref")?;
+                let response = self
+                    .post_acme(
+                        "get_user_info",
+                        serde_json::json!({ "user_ref": user_ref }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(user_info_from_vendor(&response)?))
+            }
+            "acme-messenger.resolve_user" => {
+                let query = input_str(&call.input, "query")?;
+                let response = self
+                    .post_acme(
+                        "resolve_user",
+                        serde_json::json!({
+                            "query": query,
+                            "limit": call.input.get("limit"),
+                            "cursor": call.input.get("cursor"),
+                        }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(user_ref_list_from_vendor(
+                    &response, "matches",
+                )?))
+            }
+            "acme-messenger.list_members" => {
+                let conversation = input_str(&call.input, "conversation")?;
+                let response = self
+                    .post_acme(
+                        "list_members",
+                        serde_json::json!({
+                            "conversation": conversation,
+                            "limit": call.input.get("limit"),
+                            "cursor": call.input.get("cursor"),
+                        }),
+                        ports,
+                    )
+                    .await?;
+                Ok(tool_result(user_ref_list_from_vendor(
+                    &response, "members",
+                )?))
+            }
+            "acme-messenger.whoami" => {
+                let response = self
+                    .post_acme("whoami", serde_json::json!({}), ports)
+                    .await?;
+                Ok(tool_result(user_ref_entry_from_vendor(&response)?))
+            }
+
+            _ => Err(ToolError::Failed {
+                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+                safe_summary: None,
+                model_visible_cause: None,
+            }),
         }
     }
+}
+
+impl AcmeFixtureToolAdapter {
+    /// One POST per standard op at `https://api.acme.example/<op_name>` —
+    /// the invented acme vendor API (standardized messaging framework, task
+    /// 7). Uses `ports.egress` when the dispatch supplied one (the shape a
+    /// test driving `invoke` directly hands in, e.g. this adapter's own
+    /// conformance tests), otherwise falls back to the constructor-held
+    /// [`Self::fallback_egress`] — every production dispatch path today, since
+    /// no first-party adapter has a live `RestrictedEgress` consumer wired
+    /// (see the module doc above `AcmeVendorOutcome`). Mirrors the egress
+    /// pattern [`AcmeFixtureChannelAdapter::deliver`] uses for real outbound
+    /// delivery. A non-2xx vendor response maps its `error` code onto the
+    /// standard messaging error taxonomy via [`acme_vendor_error`] before the
+    /// caller ever sees it.
+    async fn post_acme(
+        &self,
+        op_name: &str,
+        body: serde_json::Value,
+        ports: &ToolPorts<'_>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let egress: &dyn RestrictedEgress = ports
+            .egress
+            .unwrap_or(self.fallback_egress.as_ref() as &dyn RestrictedEgress);
+        let credential = SecretHandle::new("acme_user_token").map_err(|error| {
+            acme_tool_error(
+                RuntimeDispatchErrorKind::Manifest,
+                format!("acme credential handle is invalid: {error}"),
+            )
+        })?;
+        let response = egress
+            .send(RestrictedEgressRequest {
+                method: NetworkMethod::Post,
+                url: format!("https://api.acme.example/{op_name}"),
+                headers: vec![("content-type".to_string(), "application/json".to_string())],
+                body: serde_json::to_vec(&body).ok(),
+                credential: Some(credential),
+                body_credentials: Vec::new(),
+            })
+            .await
+            .map_err(|error| {
+                acme_tool_error(
+                    RuntimeDispatchErrorKind::Backend,
+                    format!("acme vendor request failed: {error}"),
+                )
+            })?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&response.body).unwrap_or(serde_json::Value::Null);
+        if (200..300).contains(&response.status) {
+            Ok(payload)
+        } else {
+            let vendor_code = payload
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Err(acme_vendor_error(vendor_code))
+        }
+    }
+}
+
+/// Builds a successful [`ToolResult`] from a canonical
+/// output value — the shared envelope every standard-op arm (and send_note)
+/// returns through.
+fn tool_result(output: serde_json::Value) -> ToolResult {
+    let output_bytes = serde_json::to_vec(&output)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or_default();
+    ToolResult {
+        output,
+        display_preview: None,
+        output_bytes,
+    }
+}
+
+fn acme_tool_error(kind: RuntimeDispatchErrorKind, safe_summary: String) -> ToolError {
+    ToolError::Failed {
+        kind,
+        safe_summary: Some(safe_summary),
+        model_visible_cause: None,
+    }
+}
+
+fn missing_input_field(field: &str) -> ToolError {
+    acme_tool_error(
+        RuntimeDispatchErrorKind::Unknown,
+        format!("acme adapter input missing required field: {field}"),
+    )
+}
+
+/// A required top-level string field from canonical (already
+/// schema-validated) input.
+fn input_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, ToolError> {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| missing_input_field(field))
+}
+
+/// A required top-level object field from canonical input — used for
+/// `message_ref`, which every write/read-by-ref op forwards to the vendor
+/// and echoes back verbatim rather than decomposing.
+fn input_object<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a serde_json::Value, ToolError> {
+    input
+        .get(field)
+        .filter(|value| value.is_object())
+        .ok_or_else(|| missing_input_field(field))
+}
+
+/// A required string field from a vendor response — fails loud (rather than
+/// silently embedding `null`) when the scripted/real vendor body is
+/// malformed, so a bad fixture surfaces as a test failure instead of an
+/// invalid canonical output.
+fn vendor_str<'a>(response: &'a serde_json::Value, field: &str) -> Result<&'a str, ToolError> {
+    response
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            acme_tool_error(
+                RuntimeDispatchErrorKind::OutputDecode,
+                format!("acme vendor response missing or empty field: {field}"),
+            )
+        })
+}
+
+/// Maps one acme vendor error code onto the closed standard messaging error
+/// taxonomy (standardized messaging framework spec §8); an unmapped vendor
+/// code falls back to `VendorError`, matching every other adapter's
+/// contract for the day the vendor adds a new failure mode.
+fn acme_error_to_standard_code(vendor_code: &str) -> StandardMessagingErrorCode {
+    use StandardMessagingErrorCode::*;
+    match vendor_code {
+        "conversation_missing" => UnknownConversation,
+        "message_missing" => UnknownMessage,
+        "user_missing" => UnknownUser,
+        "not_member" => NotAMember,
+        "forbidden" => PermissionDenied,
+        "dm_closed" => CannotMessageUser,
+        "window_closed" => OutsideMessagingWindow,
+        "too_long" => MessageTooLong,
+        "bad_content" => UnsupportedContent,
+        "slow_down" => RateLimited,
+        "edit_locked" => EditNotAllowed,
+        _ => VendorError,
+    }
+}
+
+/// Builds the adapter error for a non-2xx vendor response: maps the vendor
+/// code and puts the standard code string in the safe summary — the same
+/// error path `send_note` surfaces through today (`ToolError::Failed`'s
+/// `safe_summary`), which is the channel the standard messaging error
+/// taxonomy is documented to ride
+/// (`ironclaw_host_api::messaging::StandardMessagingErrorCode`).
+fn acme_vendor_error(vendor_code: &str) -> ToolError {
+    let code = acme_error_to_standard_code(vendor_code);
+    acme_tool_error(
+        RuntimeDispatchErrorKind::OperationFailed,
+        format!("acme vendor rejected the request: {}", code.as_str()),
+    )
+}
+
+/// One canonical `message` object (spec appendix) from one vendor-shaped
+/// message row. Shared by `get_message`, `get_conversation_history`,
+/// `get_thread_replies`, and `search_messages` — the vendor's row shape
+/// (`author_ref`/`author_name`/`ts`/`self`) is deliberately distinct from
+/// the canonical field names to prove this is a real mapping, not a
+/// passthrough.
+fn message_from_vendor(value: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    let conversation = vendor_str(value, "conversation")?;
+    let message_id = vendor_str(value, "message_id")?;
+    let author_ref = vendor_str(value, "author_ref")?;
+    let text = vendor_str(value, "text")?;
+    let mut author = serde_json::json!({
+        "user_ref": author_ref,
+    });
+    if let Some(name) = value.get("author_name").and_then(serde_json::Value::as_str) {
+        author["display_name"] = serde_json::json!(name);
+    }
+    let mut message = serde_json::json!({
+        "message_ref": {
+            "conversation": conversation,
+            "message_id": message_id,
+        },
+        "author": author,
+        "text": text,
+        "is_self": value.get("self").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    });
+    if let Some(ts) = value.get("ts").and_then(serde_json::Value::as_str) {
+        message["timestamp"] = serde_json::json!(ts);
+    }
+    if let Some(thread) = value.get("thread").and_then(serde_json::Value::as_str) {
+        let mut thread_obj = serde_json::json!({ "thread": thread });
+        if let Some(count) = value.get("reply_count").and_then(serde_json::Value::as_u64) {
+            thread_obj["reply_count"] = serde_json::json!(count);
+        }
+        message["thread"] = thread_obj;
+    }
+    Ok(message)
+}
+
+/// The canonical `{ "<list_key>": [message, ...], "next_cursor"? }` envelope
+/// shared by `get_conversation_history`/`get_thread_replies`
+/// (`list_key = "messages"`) and `search_messages`
+/// (`list_key = "matches"`).
+fn messages_output_from_vendor(
+    response: &serde_json::Value,
+    list_key: &str,
+) -> Result<serde_json::Value, ToolError> {
+    let messages = response
+        .get(list_key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(message_from_vendor)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut output = serde_json::json!({ list_key: messages });
+    if let Some(cursor) = response
+        .get("next_cursor")
+        .and_then(serde_json::Value::as_str)
+    {
+        output["next_cursor"] = serde_json::json!(cursor);
+    }
+    Ok(output)
+}
+
+/// One canonical `conversation_info`-shaped object (used both as
+/// `get_conversation_info`'s top-level output and per-item in
+/// `list_conversations`) from one vendor-shaped conversation row.
+fn conversation_info_from_vendor(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, ToolError> {
+    let conversation = vendor_str(value, "conversation")?;
+    let kind = vendor_str(value, "kind")?;
+    if !matches!(kind, "dm" | "group_dm" | "channel" | "other") {
+        return Err(acme_tool_error(
+            RuntimeDispatchErrorKind::OutputDecode,
+            format!("acme vendor response has unknown conversation kind: {kind}"),
+        ));
+    }
+    let mut info = serde_json::json!({
+        "conversation": conversation,
+        "kind": kind,
+    });
+    if let Some(name) = value.get("name").and_then(serde_json::Value::as_str) {
+        info["display_name"] = serde_json::json!(name);
+    }
+    if let Some(member) = value.get("member").and_then(serde_json::Value::as_bool) {
+        info["is_member"] = serde_json::json!(member);
+    }
+    if value.get("counterpart_ref").is_some() {
+        let counterpart_ref = vendor_str(value, "counterpart_ref")?;
+        let mut counterpart = serde_json::json!({ "user_ref": counterpart_ref });
+        if let Some(name) = value
+            .get("counterpart_name")
+            .and_then(serde_json::Value::as_str)
+        {
+            counterpart["display_name"] = serde_json::json!(name);
+        }
+        info["counterpart"] = counterpart;
+    } else if kind == "dm" {
+        return Err(acme_tool_error(
+            RuntimeDispatchErrorKind::OutputDecode,
+            "acme vendor dm response missing counterpart_ref".to_string(),
+        ));
+    }
+    Ok(info)
+}
+
+/// One canonical `{ "user_ref", "display_name"? }` entry from one
+/// vendor-shaped user row — shared by `resolve_user`/`list_members`'s
+/// per-item shape and `whoami`'s top-level output.
+fn user_ref_entry_from_vendor(value: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    let user_ref = vendor_str(value, "user_ref")?;
+    let mut entry = serde_json::json!({
+        "user_ref": user_ref,
+    });
+    if let Some(name) = value.get("name").and_then(serde_json::Value::as_str) {
+        entry["display_name"] = serde_json::json!(name);
+    }
+    Ok(entry)
+}
+
+/// The canonical `{ "<list_key>": [{user_ref, display_name?}, ...],
+/// "next_cursor"? }` envelope shared by `resolve_user`
+/// (`list_key = "matches"`) and `list_members` (`list_key = "members"`).
+fn user_ref_list_from_vendor(
+    response: &serde_json::Value,
+    list_key: &str,
+) -> Result<serde_json::Value, ToolError> {
+    let entries = response
+        .get(list_key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(user_ref_entry_from_vendor)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut output = serde_json::json!({ list_key: entries });
+    if let Some(cursor) = response
+        .get("next_cursor")
+        .and_then(serde_json::Value::as_str)
+    {
+        output["next_cursor"] = serde_json::json!(cursor);
+    }
+    Ok(output)
+}
+
+/// The canonical `get_user_info`/`whoami`-adjacent user-info shape from one
+/// vendor-shaped user record; unlike [`user_ref_entry_from_vendor`] this
+/// carries the fuller profile fields `get_user_info` alone exposes.
+fn user_info_from_vendor(value: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    let user_ref = vendor_str(value, "user_ref")?;
+    let mut info = serde_json::json!({
+        "user_ref": user_ref,
+    });
+    for (vendor_key, canonical_key) in [
+        ("name", "display_name"),
+        ("real_name", "real_name"),
+        ("status_text", "status_text"),
+        ("status_emoji", "status_emoji"),
+        ("tz", "timezone"),
+        ("title", "title"),
+    ] {
+        if let Some(field_value) = value.get(vendor_key).and_then(serde_json::Value::as_str) {
+            info[canonical_key] = serde_json::json!(field_value);
+        }
+    }
+    if let Some(bot) = value.get("bot").and_then(serde_json::Value::as_bool) {
+        info["is_bot"] = serde_json::json!(bot);
+    }
+    if let Some(presence) = value.get("presence").and_then(serde_json::Value::as_str) {
+        info["presence"] = serde_json::json!(presence);
+    }
+    Ok(info)
 }
 
 /// The extension-lifecycle profile extended with the invented-vendor fixture:
@@ -806,13 +1629,42 @@ impl ironclaw_extension_contracts::tool_adapter::ToolAdapter for AcmeFixtureTool
 /// them), its native factory assembled into the composition input, its tool
 /// granted, and its provider trusted — the acme lifecycle then runs through
 /// the REAL service (install → activate → dispatch-from-snapshot → remove).
+///
+/// Builds with a fresh, all-default [`AcmeVendorScript`] — every scenario
+/// gets a working built-in response for all 16 standard ops, but cannot
+/// script a failure or read the fallback egress's recorded requests. Use
+/// [`extension_runtime_acme_tools_profile_with_vendor_script`] for that.
 pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfile> {
+    Ok(extension_runtime_acme_tools_profile_with_vendor_script(AcmeVendorScript::default())?.0)
+}
+
+/// [`extension_runtime_acme_tools_profile`], but the caller supplies (and
+/// retains, via the returned handle) the acme vendor script: script per-op
+/// responses/failures with [`AcmeVendorScript::respond`]/`fail` before
+/// building, then read `ScriptedVendorServer::requests()` (method, URL path,
+/// body) off the returned handle after driving a turn — e.g. Task 8's "the
+/// send hit api.acme.example/send_message" proofs. This is the SAME
+/// `ScriptedVendorServer` `AcmeFixtureToolAdapter::post_acme` falls back to
+/// when a real dispatch supplies no `ports.egress` (every production path
+/// today), so the recorded requests it captures are the real ones the
+/// install → activate → dispatch-from-snapshot pipeline made.
+pub(crate) fn extension_runtime_acme_tools_profile_with_vendor_script(
+    script: AcmeVendorScript,
+) -> HarnessResult<(ToolsProfile, Arc<ScriptedVendorServer>)> {
+    let fallback_egress = Arc::new(acme_scripted_vendor_egress(script));
     let mut profile = extension_lifecycle_tools_profile()?;
     profile
         .capability_ids
         .push(ironclaw_host_api::ids::CapabilityId::new(
             ACME_SEND_NOTE_CAPABILITY_ID,
         )?);
+    for standard_op_capability_id in ACME_STANDARD_OP_CAPABILITY_IDS {
+        profile
+            .capability_ids
+            .push(ironclaw_host_api::ids::CapabilityId::new(
+                *standard_op_capability_id,
+            )?);
+    }
     // The real Slack package's five tools (TOOL-7 drives them through the
     // generic dispatcher after the install reaches `active`).
     for slack_tool in [
@@ -839,8 +1691,10 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     profile.options = profile
         .options
         .with_fixture_extension_dir(acme_fixture_dir(), "acme-messenger")
-        .with_native_extension_factory(Arc::new(AcmeFixtureFactory));
-    Ok(profile)
+        .with_native_extension_factory(Arc::new(AcmeFixtureFactory {
+            fallback_egress: Arc::clone(&fallback_egress),
+        }));
+    Ok((profile, fallback_egress))
 }
 
 pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
@@ -850,12 +1704,12 @@ pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeC
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
 
 /// The bundled telegram manifest's `runtime.service` id — the same native
-/// binding the binary assembles (`ironclaw_reborn_cli::runtime::native_extensions`).
+/// binding the binary assembles (`ironclaw_cli::runtime::native_extensions`).
 pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 
 /// Native factory for the bundled telegram package: binds the REAL
 /// `TelegramChannelAdapter` as its channel surface, exactly like the binary
-/// assembly in `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+/// assembly in `crates/ironclaw_cli/src/runtime/native_extensions.rs`
 /// (mirrored here because the integration harness composes its own runtime
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
@@ -994,15 +1848,15 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
 }
 
 /// Slack's channel-adapter binding, mirrored from the binary assembly
-/// (`ironclaw_reborn_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
+/// (`ironclaw_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
 /// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
 /// harness composes its own runtime and cannot depend on the CLI crate.
 /// Slack's WASM-runtime package cannot ride a native factory, so without
 /// this binding composition serves its `[channel]` surface with the
 /// transitional `HostServedChannelBridge`, which rejects every verified
 /// inbound request.
-fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
-    ironclaw_reborn_composition::ChannelExtensionBinding {
+fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: Some(Arc::new(
@@ -1011,8 +1865,8 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
     }
 }
 
-fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
-    ironclaw_reborn_composition::ChannelExtensionBinding {
+fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         preference_target_codec: None,
@@ -1021,4 +1875,501 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
 
 pub(crate) async fn extension_delivery_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_delivery_tools_profile()?.build().await
+}
+
+// ── Standard messaging op conformance (standardized messaging framework,
+//    task 7) ────────────────────────────────────────────────────────────────
+//
+// Drives `AcmeFixtureToolAdapter::invoke` directly (bypassing the generic
+// dispatch pipeline entirely — no registry, no resolver, no authorization),
+// against a scripted vendor server standing in for `api.acme.example` behind
+// `ToolPorts.egress`. This is the adapter's own conformance/error-taxonomy
+// proof; Task 8's integration scenarios separately drive these ops through
+// the full turn/dispatch pipeline.
+#[cfg(test)]
+pub(crate) mod standard_op_contract_tests {
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgressRequest, RestrictedEgressResponse, ToolAdapter, ToolCall, ToolError,
+        ToolPorts, ToolResult,
+    };
+    use ironclaw_host_api::action::NetworkMethod;
+    use ironclaw_host_api::ids::{
+        AgentId, CapabilityId, InvocationId, ProjectId, TenantId, UserId,
+    };
+    use ironclaw_host_api::messaging::{StandardMessagingErrorCode, StandardMessagingOp};
+    use ironclaw_host_api::resource::ResourceScope;
+    use ironclaw_host_api::test_support::messaging_conformance::{
+        assert_canonical_input_accepted, assert_canonical_output, message_ref_from_output,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn test_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-acme-standard-ops").expect("tenant id"),
+            user_id: UserId::new("user-acme-standard-ops").expect("user id"),
+            agent_id: Some(AgentId::new("agent-acme-standard-ops").expect("agent id")),
+            project_id: Some(ProjectId::new("project-acme-standard-ops").expect("project id")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    /// A scripted vendor that always answers `200` with `body`, regardless of
+    /// which op it was asked for — one per happy-path call in these tests.
+    fn vendor_ok(body: serde_json::Value) -> ScriptedVendorServer {
+        ScriptedVendorServer::new(Arc::new(move |_request: &RestrictedEgressRequest| {
+            RestrictedEgressResponse {
+                status: 200,
+                body: serde_json::to_vec(&body).expect("fixture body serializes"),
+            }
+        }))
+    }
+
+    /// A scripted vendor that always answers a non-2xx `{"error": vendor_code}`
+    /// — the acme vendor's invented failure shape.
+    fn vendor_err(vendor_code: &'static str) -> ScriptedVendorServer {
+        ScriptedVendorServer::new(Arc::new(move |_request: &RestrictedEgressRequest| {
+            RestrictedEgressResponse {
+                status: 400,
+                body: serde_json::to_vec(&json!({ "error": vendor_code }))
+                    .expect("fixture body serializes"),
+            }
+        }))
+    }
+
+    /// A fresh adapter with a throwaway constructor-held fallback egress —
+    /// irrelevant to every test here except the fallback proof below (which
+    /// builds its own adapter directly, so it controls the fallback), since
+    /// `invoke_acme` always supplies `ports.egress = Some(vendor)`.
+    fn test_adapter() -> AcmeFixtureToolAdapter {
+        AcmeFixtureToolAdapter {
+            fallback_egress: Arc::new(acme_scripted_vendor_egress(AcmeVendorScript::default())),
+        }
+    }
+
+    async fn invoke_acme(
+        op_name: &str,
+        input: serde_json::Value,
+        vendor: &ScriptedVendorServer,
+    ) -> Result<ToolResult, ToolError> {
+        let capability_id =
+            CapabilityId::new(format!("acme-messenger.{op_name}")).expect("capability id");
+        let call = ToolCall::new(capability_id, test_scope(), input);
+        let ports = ToolPorts {
+            egress: Some(vendor),
+        };
+        test_adapter().invoke(call, &ports).await
+    }
+
+    /// The 16-op conformance loop: for each core op, build the canonical
+    /// happy-path input (asserted accepted by the Task 1 registry first),
+    /// invoke the adapter against a scripted vendor response, then assert the
+    /// output against the canonical output schema (Task 6 helpers). The
+    /// evidence loop — send's `message_ref` feeds edit/delete/react — is
+    /// exercised explicitly rather than inventing a fresh ref per op.
+    pub(crate) async fn acme_standard_ops_satisfy_canonical_contracts() {
+        let send_input = json!({ "conversation": "ACME-C-1", "text": "hello" });
+        assert_canonical_input_accepted(StandardMessagingOp::SendMessage, &send_input);
+        let vendor = vendor_ok(json!({ "id": "AMSG-1" }));
+        let send_output = invoke_acme("send_message", send_input, &vendor)
+            .await
+            .expect("send_message succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::SendMessage, &send_output);
+        // One POST, to the op-named path, real teeth on `post_acme`'s URL
+        // construction (a scripted vendor answers any URL the same way, so
+        // only reading back the recorded request proves this).
+        let requests = vendor.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://api.acme.example/send_message");
+        assert!(matches!(requests[0].method, NetworkMethod::Post));
+        let message_ref = message_ref_from_output(&send_output);
+
+        // W3/W4 (pre-merge amendment wave): `thread` (a thread/topic
+        // container) and `reply_to` (a quoted message_ref) are distinct,
+        // both accepted, both forwarded to the vendor, and both echoed back
+        // on the output when supplied — so a silent drop is checkable.
+        let reply_to_ref = json!({ "conversation": "ACME-C-1", "message_id": "AMSG-QUOTED-1" });
+        let send_with_thread_and_reply_to_input = json!({
+            "conversation": "ACME-C-1",
+            "text": "hello again",
+            "thread": "AMSG-THREAD-1",
+            "reply_to": reply_to_ref,
+        });
+        assert_canonical_input_accepted(
+            StandardMessagingOp::SendMessage,
+            &send_with_thread_and_reply_to_input,
+        );
+        let vendor = vendor_ok(json!({ "id": "AMSG-2" }));
+        let send_with_thread_and_reply_to_output =
+            invoke_acme("send_message", send_with_thread_and_reply_to_input, &vendor)
+                .await
+                .expect("send_message with thread+reply_to succeeds")
+                .output;
+        assert_canonical_output(
+            StandardMessagingOp::SendMessage,
+            &send_with_thread_and_reply_to_output,
+        );
+        assert_eq!(
+            send_with_thread_and_reply_to_output["thread"],
+            json!("AMSG-THREAD-1"),
+            "thread must echo back on the output: {send_with_thread_and_reply_to_output}"
+        );
+        assert_eq!(
+            send_with_thread_and_reply_to_output["reply_to"], reply_to_ref,
+            "reply_to must echo back on the output: {send_with_thread_and_reply_to_output}"
+        );
+        let forward_request = vendor
+            .requests()
+            .into_iter()
+            .find(|request| request.url.contains("send_message"))
+            .expect("send_message must call the vendor");
+        let forward_body: serde_json::Value =
+            serde_json::from_slice(forward_request.body.as_deref().expect("request body"))
+                .expect("request body is JSON");
+        assert_eq!(
+            forward_body["thread"],
+            json!("AMSG-THREAD-1"),
+            "thread must forward to the vendor: {forward_body}"
+        );
+        assert_eq!(
+            forward_body["reply_to"], reply_to_ref,
+            "reply_to must forward to the vendor: {forward_body}"
+        );
+
+        let edit_input = json!({ "message_ref": message_ref.clone(), "text": "hello, edited" });
+        assert_canonical_input_accepted(StandardMessagingOp::EditMessage, &edit_input);
+        let vendor = vendor_ok(json!({ "ok": true }));
+        let edit_output = invoke_acme("edit_message", edit_input, &vendor)
+            .await
+            .expect("edit_message succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::EditMessage, &edit_output);
+
+        let delete_input = json!({ "message_ref": message_ref.clone() });
+        assert_canonical_input_accepted(StandardMessagingOp::DeleteMessage, &delete_input);
+        let vendor = vendor_ok(json!({ "ok": true }));
+        let delete_output = invoke_acme("delete_message", delete_input, &vendor)
+            .await
+            .expect("delete_message succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::DeleteMessage, &delete_output);
+
+        for (op_name, op) in [
+            ("add_reaction", StandardMessagingOp::AddReaction),
+            ("remove_reaction", StandardMessagingOp::RemoveReaction),
+        ] {
+            let input = json!({ "message_ref": message_ref.clone(), "emoji": "tada" });
+            assert_canonical_input_accepted(op, &input);
+            let vendor = vendor_ok(json!({ "ok": true }));
+            let output = invoke_acme(op_name, input, &vendor)
+                .await
+                .unwrap_or_else(|error| panic!("{op_name} succeeds: {error:?}"))
+                .output;
+            assert_canonical_output(op, &output);
+        }
+
+        // W5 (pre-merge amendment wave): remove_reaction's `emoji` is
+        // optional — absent means "remove the connected account's own
+        // reaction(s)" (some vendors cannot name the emoji on removal). The
+        // canonical output must omit `emoji` entirely rather than fabricate
+        // one when it wasn't supplied. `add_reaction` is unaffected — its
+        // `emoji` stays required (asserted in the loop above).
+        let remove_reaction_without_emoji_input = json!({ "message_ref": message_ref.clone() });
+        assert_canonical_input_accepted(
+            StandardMessagingOp::RemoveReaction,
+            &remove_reaction_without_emoji_input,
+        );
+        let vendor = vendor_ok(json!({ "ok": true }));
+        let remove_reaction_without_emoji_output = invoke_acme(
+            "remove_reaction",
+            remove_reaction_without_emoji_input,
+            &vendor,
+        )
+        .await
+        .expect("remove_reaction without emoji succeeds")
+        .output;
+        assert_canonical_output(
+            StandardMessagingOp::RemoveReaction,
+            &remove_reaction_without_emoji_output,
+        );
+        assert!(
+            remove_reaction_without_emoji_output.get("emoji").is_none(),
+            "emoji must be omitted, not fabricated, when absent on input: {remove_reaction_without_emoji_output}"
+        );
+
+        let open_dm_input = json!({ "user_ref": "U1" });
+        assert_canonical_input_accepted(StandardMessagingOp::OpenDm, &open_dm_input);
+        let vendor = vendor_ok(json!({ "conversation": "ACME-C-DM-1" }));
+        let open_dm_output = invoke_acme("open_dm", open_dm_input, &vendor)
+            .await
+            .expect("open_dm succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::OpenDm, &open_dm_output);
+
+        let list_conversations_input = json!({});
+        assert_canonical_input_accepted(
+            StandardMessagingOp::ListConversations,
+            &list_conversations_input,
+        );
+        let vendor = vendor_ok(json!({
+            "conversations": [
+                { "conversation": "ACME-C-1", "kind": "channel", "name": "general", "member": true },
+                { "conversation": "ACME-C-DM-1", "kind": "dm", "counterpart_ref": "U1", "counterpart_name": "Ann" },
+            ],
+            "next_cursor": "cursor-1",
+        }));
+        let list_conversations_output =
+            invoke_acme("list_conversations", list_conversations_input, &vendor)
+                .await
+                .expect("list_conversations succeeds")
+                .output;
+        assert_canonical_output(
+            StandardMessagingOp::ListConversations,
+            &list_conversations_output,
+        );
+
+        let get_conversation_info_input = json!({ "conversation": "ACME-C-1" });
+        assert_canonical_input_accepted(
+            StandardMessagingOp::GetConversationInfo,
+            &get_conversation_info_input,
+        );
+        let vendor = vendor_ok(
+            json!({ "conversation": "ACME-C-1", "kind": "channel", "name": "general", "member": true }),
+        );
+        let get_conversation_info_output = invoke_acme(
+            "get_conversation_info",
+            get_conversation_info_input,
+            &vendor,
+        )
+        .await
+        .expect("get_conversation_info succeeds")
+        .output;
+        assert_canonical_output(
+            StandardMessagingOp::GetConversationInfo,
+            &get_conversation_info_output,
+        );
+
+        let get_conversation_history_input = json!({ "conversation": "ACME-C-1" });
+        assert_canonical_input_accepted(
+            StandardMessagingOp::GetConversationHistory,
+            &get_conversation_history_input,
+        );
+        let vendor = vendor_ok(json!({
+            "messages": [
+                { "conversation": "ACME-C-1", "message_id": "AMSG-1", "author_ref": "U1",
+                  "author_name": "Ann", "text": "hi", "ts": "2026-07-27T00:00:00Z", "self": false },
+            ],
+        }));
+        let get_conversation_history_output = invoke_acme(
+            "get_conversation_history",
+            get_conversation_history_input,
+            &vendor,
+        )
+        .await
+        .expect("get_conversation_history succeeds")
+        .output;
+        assert_canonical_output(
+            StandardMessagingOp::GetConversationHistory,
+            &get_conversation_history_output,
+        );
+
+        let get_thread_replies_input = json!({ "conversation": "ACME-C-1", "thread": "AMSG-1" });
+        assert_canonical_input_accepted(
+            StandardMessagingOp::GetThreadReplies,
+            &get_thread_replies_input,
+        );
+        let vendor = vendor_ok(json!({
+            "messages": [
+                { "conversation": "ACME-C-1", "message_id": "AMSG-2", "author_ref": "U2",
+                  "text": "reply", "self": true, "thread": "AMSG-1", "reply_count": 1 },
+            ],
+        }));
+        let get_thread_replies_output =
+            invoke_acme("get_thread_replies", get_thread_replies_input, &vendor)
+                .await
+                .expect("get_thread_replies succeeds")
+                .output;
+        assert_canonical_output(
+            StandardMessagingOp::GetThreadReplies,
+            &get_thread_replies_output,
+        );
+
+        let get_message_input = json!({ "message_ref": message_ref.clone() });
+        assert_canonical_input_accepted(StandardMessagingOp::GetMessage, &get_message_input);
+        let vendor = vendor_ok(json!({
+            "conversation": "ACME-C-1", "message_id": "AMSG-1", "author_ref": "U1",
+            "text": "hi", "self": true,
+        }));
+        let get_message_output = invoke_acme("get_message", get_message_input, &vendor)
+            .await
+            .expect("get_message succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::GetMessage, &get_message_output);
+
+        let search_messages_input = json!({ "query": "hi" });
+        assert_canonical_input_accepted(
+            StandardMessagingOp::SearchMessages,
+            &search_messages_input,
+        );
+        let vendor = vendor_ok(json!({
+            "matches": [
+                { "conversation": "ACME-C-1", "message_id": "AMSG-1", "author_ref": "U1",
+                  "text": "hi", "self": true },
+            ],
+            "total": 1,
+        }));
+        let search_messages_output = invoke_acme("search_messages", search_messages_input, &vendor)
+            .await
+            .expect("search_messages succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::SearchMessages, &search_messages_output);
+
+        let get_user_info_input = json!({ "user_ref": "U1" });
+        assert_canonical_input_accepted(StandardMessagingOp::GetUserInfo, &get_user_info_input);
+        let vendor = vendor_ok(
+            json!({ "user_ref": "U1", "name": "Ann", "bot": false, "presence": "active" }),
+        );
+        let get_user_info_output = invoke_acme("get_user_info", get_user_info_input, &vendor)
+            .await
+            .expect("get_user_info succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::GetUserInfo, &get_user_info_output);
+
+        let resolve_user_input = json!({ "query": "ann" });
+        assert_canonical_input_accepted(StandardMessagingOp::ResolveUser, &resolve_user_input);
+        let vendor = vendor_ok(json!({ "matches": [{ "user_ref": "U1", "name": "Ann" }] }));
+        let resolve_user_output = invoke_acme("resolve_user", resolve_user_input, &vendor)
+            .await
+            .expect("resolve_user succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::ResolveUser, &resolve_user_output);
+
+        let list_members_input = json!({ "conversation": "ACME-C-1" });
+        assert_canonical_input_accepted(StandardMessagingOp::ListMembers, &list_members_input);
+        let vendor = vendor_ok(json!({ "members": [{ "user_ref": "U1", "name": "Ann" }] }));
+        let list_members_output = invoke_acme("list_members", list_members_input, &vendor)
+            .await
+            .expect("list_members succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::ListMembers, &list_members_output);
+
+        let whoami_input = json!({});
+        assert_canonical_input_accepted(StandardMessagingOp::Whoami, &whoami_input);
+        let vendor = vendor_ok(json!({ "user_ref": "U-SELF", "name": "Acme Bot" }));
+        let whoami_output = invoke_acme("whoami", whoami_input, &vendor)
+            .await
+            .expect("whoami succeeds")
+            .output;
+        assert_canonical_output(StandardMessagingOp::Whoami, &whoami_output);
+    }
+
+    /// All 12 standard messaging error codes, via a table of (scripted
+    /// vendor code -> expected code) driven through one representative op
+    /// (`send_message`) — `acme_error_to_standard_code`/`post_acme`'s
+    /// mapping is shared verbatim by all 16 arms, so this proves the shared
+    /// logic once rather than 16 times.
+    pub(crate) async fn acme_standard_ops_emit_canonical_error_codes() {
+        let cases: &[(&str, StandardMessagingErrorCode)] = &[
+            (
+                "conversation_missing",
+                StandardMessagingErrorCode::UnknownConversation,
+            ),
+            (
+                "message_missing",
+                StandardMessagingErrorCode::UnknownMessage,
+            ),
+            ("user_missing", StandardMessagingErrorCode::UnknownUser),
+            ("not_member", StandardMessagingErrorCode::NotAMember),
+            ("forbidden", StandardMessagingErrorCode::PermissionDenied),
+            ("dm_closed", StandardMessagingErrorCode::CannotMessageUser),
+            (
+                "window_closed",
+                StandardMessagingErrorCode::OutsideMessagingWindow,
+            ),
+            ("too_long", StandardMessagingErrorCode::MessageTooLong),
+            (
+                "bad_content",
+                StandardMessagingErrorCode::UnsupportedContent,
+            ),
+            ("slow_down", StandardMessagingErrorCode::RateLimited),
+            ("edit_locked", StandardMessagingErrorCode::EditNotAllowed),
+            (
+                "something_acme_never_documented",
+                StandardMessagingErrorCode::VendorError,
+            ),
+        ];
+        assert_eq!(cases.len(), StandardMessagingErrorCode::ALL.len());
+
+        for (vendor_code, expected) in cases {
+            let vendor = vendor_err(vendor_code);
+            let input = json!({ "conversation": "ACME-C-1", "text": "hello" });
+            let error = invoke_acme("send_message", input, &vendor)
+                .await
+                .expect_err("a non-2xx vendor response must surface as an error");
+            let ToolError::Failed { safe_summary, .. } = error else {
+                panic!("expected ToolError::Failed for vendor code {vendor_code}");
+            };
+            let summary = safe_summary.expect("acme vendor errors carry a safe summary");
+            assert!(
+                summary.contains(expected.as_str()),
+                "vendor code {vendor_code}: expected {summary:?} to contain {}",
+                expected.as_str()
+            );
+        }
+    }
+
+    /// The fallback proof (fix round: `ToolPorts.egress` is `None` on every
+    /// production dispatch path today — see the module doc above
+    /// `AcmeVendorOutcome`). Builds an adapter with its OWN constructor-held
+    /// scripted vendor egress (not one supplied via `ports`, unlike every
+    /// test above), invokes it with `ToolPorts { egress: None }` — the exact
+    /// shape a real production dispatch hands in — and asserts both that the
+    /// canonical output still comes back (the fallback egress served the
+    /// call) and that the SAME fallback instance recorded the request
+    /// (method, URL, body all readable off it), proving it is genuinely the
+    /// egress the arm used and not a coincidentally-matching default.
+    pub(crate) async fn acme_standard_ops_fall_back_to_the_constructor_held_vendor_when_ports_lack_egress()
+     {
+        let script = AcmeVendorScript::default();
+        script.respond("send_message", json!({ "id": "AMSG-FALLBACK-1" }));
+        let fallback_egress = Arc::new(acme_scripted_vendor_egress(script));
+        let adapter = AcmeFixtureToolAdapter {
+            fallback_egress: Arc::clone(&fallback_egress),
+        };
+
+        let input = json!({ "conversation": "ACME-C-1", "text": "hello via fallback" });
+        assert_canonical_input_accepted(StandardMessagingOp::SendMessage, &input);
+        let capability_id =
+            CapabilityId::new("acme-messenger.send_message").expect("capability id");
+        let call = ToolCall::new(capability_id, test_scope(), input);
+        let ports = ToolPorts { egress: None };
+
+        let output = adapter
+            .invoke(call, &ports)
+            .await
+            .expect("the fallback egress serves the call when ports.egress is None")
+            .output;
+        assert_canonical_output(StandardMessagingOp::SendMessage, &output);
+        let message_ref = message_ref_from_output(&output);
+        assert_eq!(message_ref["message_id"], "AMSG-FALLBACK-1");
+
+        let requests = fallback_egress.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the constructor-held fallback, not some other egress, must have served the call"
+        );
+        assert_eq!(requests[0].url, "https://api.acme.example/send_message");
+        assert!(matches!(requests[0].method, NetworkMethod::Post));
+        let body: serde_json::Value =
+            serde_json::from_slice(requests[0].body.as_deref().expect("request body"))
+                .expect("request body is JSON");
+        assert_eq!(body["conversation"], "ACME-C-1");
+        assert_eq!(body["text"], "hello via fallback");
+    }
 }

@@ -23,7 +23,7 @@ use ironclaw_auth::{
     CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest,
 };
-use ironclaw_reborn_composition::test_support::build_oauth_product_auth_for_test;
+use ironclaw_composition::test_support::build_oauth_product_auth_for_test;
 
 /// Extension-runtime P6 S3: a CHANNEL extension's OAuth connect must bind
 /// the proven vendor identity to the authenticated caller through the
@@ -50,13 +50,17 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
         OAuthProviderCallbackRequest, PkceVerifierSecret, ProviderScope,
     };
+    use ironclaw_composition::test_support::{
+        build_oauth_product_auth_with_identity_for_test,
+        handle_oauth_callback_with_channel_identity_binding_for_test,
+    };
     use ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig;
     use ironclaw_extension_host::{
         AdminConfigurationIdempotencyKey, AdminConfigurationService,
         AdminConfigurationSubmittedValue, ChannelConfigReactivation,
         ChannelConfigReactivationError, ChannelConfigService, FilesystemAdminConfigurationStore,
     };
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
@@ -71,10 +75,6 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
             RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
             RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         },
-    };
-    use ironclaw_reborn_composition::test_support::{
-        build_oauth_product_auth_with_identity_for_test,
-        handle_oauth_callback_with_channel_identity_binding_for_test,
     };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use secrecy::SecretString;
@@ -221,7 +221,8 @@ app_id = "/app_id"
             VirtualPath::new("/system/extensions/.installations/oauth-popup")
                 .expect("valid installation root"),
             ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
-            ironclaw_extensions::default_host_api_contract_registry().expect("host API contracts"),
+            ironclaw_extension_registry::default_host_api_contract_registry()
+                .expect("host API contracts"),
         )
         .await
         .expect("filesystem installation store"),
@@ -231,7 +232,7 @@ app_id = "/app_id"
         ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
         None,
-        &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+        &ironclaw_extension_registry::default_host_api_contract_registry().expect("contracts"),
         None,
     )
     .expect("fixture manifest parses");
@@ -246,7 +247,7 @@ app_id = "/app_id"
                 ExtensionManifestRef::new(extension_id.clone(), None),
                 Vec::new(),
                 chrono::Utc::now(),
-                ironclaw_extensions::InstallationOwner::Tenant,
+                ironclaw_extension_registry::InstallationOwner::Tenant,
             )
             .expect("installation"),
         )
@@ -283,7 +284,7 @@ app_id = "/app_id"
     admin
         .replace(
             &admin_scope,
-            &ironclaw_extensions::AdminConfigurationGroupId::new("extension.acmechat")
+            &ironclaw_extension_registry::AdminConfigurationGroupId::new("extension.acmechat")
                 .expect("admin group id"),
             &AdminConfigurationIdempotencyKey::new("oauth-popup-channel-scope")
                 .expect("idempotency key"),

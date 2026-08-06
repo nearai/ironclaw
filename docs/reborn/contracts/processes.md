@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-28
 **Status:** Row-native journal contract
-**Owner:** `crates/ironclaw_processes`
+**Owner:** `crates/kernel/ironclaw_processes`
 
 ## Purpose and authority
 
