@@ -4257,7 +4257,7 @@ fn doctor_binary_reports_only_recognized_ambient_proxy_presence_without_values()
 
     let empty_but_set =
         run_doctor_with_child_env(&home, &reborn_home, false, &[("HTTP_PROXY", "")]);
-    assert_host_mediated_proxy_diagnostic(&empty_but_set, false, &[]);
+    assert_no_host_mediated_proxy_diagnostic(&empty_but_set, false);
 }
 
 // ─── Boot-config TOML + provider catalog (epic #3036 prep) ───────────────────
