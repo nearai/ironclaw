@@ -82,8 +82,12 @@ boundary. The current rule is codified in
   `/memory/...`, `/engine/threads/...`) live in the consumer crates.
 - Hold raw host paths in public types. `HostPath` stays backend-internal
   and is not serializable.
-- Depend on `ironclaw_*` system-service or runtime crates other than
-  `ironclaw_host_api` and `ironclaw_safety`.
+- Depend on `ironclaw_*` domain or system-service crates. The full workspace
+  dependency set is `ironclaw_host_api`, `ironclaw_safety` (one
+  sensitive-path redaction predicate), `ironclaw_libsql_runtime` (connection
+  admission — this crate never builds its own pool), and
+  `ironclaw_observability`; anything beyond that set is a boundary
+  violation.
 
 ## Invariants new code must preserve
 

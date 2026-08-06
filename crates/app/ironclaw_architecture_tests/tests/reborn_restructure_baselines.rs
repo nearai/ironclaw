@@ -52,7 +52,7 @@ const WS0_MEASURED_FROM: &str = "origin/main @ ae0989c37 (2026-07-30)";
 /// Composition mass, from `bash scripts/ci/check-composition-budget.sh --print`:
 /// "composition share: 6.58% (658 bp) — 43936 / 667978 LOC".
 ///
-/// The metric is production `.rs` LOC of `crates/ironclaw_composition/src`
+/// The metric is production `.rs` LOC of `crates/app/ironclaw_composition/src`
 /// over the same measure of every `crates/*/src` tree (test-only files excluded
 /// from both sides — see `scripts/ci/composition-budget.toml` for the full
 /// definition). CHECKLIST WS6 re-baselines the gate's ceiling once the eviction

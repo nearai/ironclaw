@@ -347,7 +347,7 @@ async fn legacy_tenant_owned_installation_migrates_to_operator_private_state() {
 // `activation_error` below vs. a plain "active" phase in the sibling test);
 // the exact root-selection values themselves (which root wins, and the
 // fabricated fallback shape) are pinned directly by the `resolve_package_root`
-// unit tests in `crates/ironclaw_extension_host/src/generic_host.rs`.
+// unit tests in `crates/extensions/ironclaw_extension_host/src/generic_host.rs`.
 //
 // A root that disagrees with the manifest's own id is illegal by
 // construction (`ExtensionPackage::from_manifest` /
@@ -458,7 +458,7 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
     // activation fails loud (surfaced as `setup_needed` + a populated
     // `activation_error` naming the mismatch — durable `InstallationState`
     // stays `Failed`, but the wire never exposes a third state; see
-    // `crates/ironclaw_assistant/src/reborn_services/types.rs`) and no adapter
+    // `crates/product/ironclaw_assistant/src/reborn_services/types.rs`) and no adapter
     // ever binds.
     let (status, body) = get_json(
         rebuilt.member_router(rebuilt.operator()),
@@ -495,7 +495,7 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
 // outcome (this test reaches "active"; the sibling reaches "setup_needed" +
 // `activation_error`) — the exact fabricated-root value is pinned by the
 // `resolve_package_root` unit tests in
-// `crates/ironclaw_extension_host/src/generic_host.rs`.
+// `crates/extensions/ironclaw_extension_host/src/generic_host.rs`.
 #[tokio::test]
 async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root() {
     let fixture = LifecycleIsolationFixture::new("root-fallback").await;

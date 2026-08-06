@@ -10,7 +10,7 @@ All product work belongs in the Reborn workspace under `crates/`; the shipping b
 
 ```bash
 cargo fmt                                                       # format
-cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
+cargo clippy --all --benches --tests --examples --all-features -- -D warnings  # lint (zero warnings; CI denies warnings — an unflagged run exits 0 with them)
 cargo test                                                      # unit + integration suites (Postgres legs self-provision testcontainers; skipped without Docker)
 RUST_LOG=ironclaw=debug cargo run -p ironclaw -- serve          # run the serve binary (add tower_http=debug for HTTP logging)
 ```
@@ -67,7 +67,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 
 ## Coding and contract rules
 
-- No `.unwrap()` or `.expect()` in production code (tests are fine); propagate errors with context — `.map_err(|e| SomeError::Variant { reason: e.to_string() })?` — and use `thiserror` for error types in `error.rs`.
+- No `.unwrap()` or `.expect()` in production code (tests are fine); propagate errors with context — `.map_err(|e| SomeError::Variant { reason: e.to_string() })?` — and use `thiserror` for error types in `error.rs`. Cause-preserving constructors, the `map_err(|_| …)` ban, and the other silent-failure anti-patterns: `.claude/rules/error-handling.md`.
 - Keep clippy clean with zero warnings. Prefer `crate::` imports for cross-module references.
 - Use strong types and enums for known domain shapes; raw strings belong at external boundaries. Shared types live with the contract owner — no mirror DTOs, and `ironclaw_common` is not a dumping ground.
 - No `pub use` re-exports unless exposing to downstream consumers.

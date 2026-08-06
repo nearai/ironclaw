@@ -81,7 +81,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
 /// names `cargo metadata` reports, which are package names. A crate whose
 /// directory and package disagree therefore has one spelling that guards and
 /// one that is inert — and the inert one fails *silently*, because a forbidden
-/// entry that matches nothing simply never fires. `crates/ironclaw_cli/`
+/// entry that matches nothing simply never fires. `crates/app/ironclaw_cli/`
 /// declaring `name = "ironclaw"` is the only such crate in the tree today, and
 /// it is exactly the one an author reaches for by directory name.
 ///
@@ -1798,7 +1798,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
 /// (`ironclaw_turn_runner::driver_registry::DriverRegistry`, etc.). The wall was
 /// pure speculative public API.
 ///
-/// This test pins the cleanup: `crates/ironclaw_turn_runner/src/lib.rs` must be a
+/// This test pins the cleanup: `crates/loop/ironclaw_turn_runner/src/lib.rs` must be a
 /// directory of `pub mod` declarations and nothing else. A future contributor
 /// who tries to re-add the convenience `pub use` block fails this test
 /// alongside the boundary rule that forbids any non-composition crate from
@@ -3167,7 +3167,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     //
     // KNOWN GAP, deliberately not closed here: the trailing comment below
     // describes a WebChat v2 route-surface entry that is absent, so the rule
-    // does not cover `crates/ironclaw_webui/src` at all. Adding it turns this
+    // does not cover `crates/product/ironclaw_webui/src` at all. Adding it turns this
     // gate red (that tree carries `axum::serve` and `TcpListener::bind` hits),
     // which is an architecture decision — either webui owns server lifecycle it
     // should not, or the rule owes it an `exempt`. Not a gate repoint; recorded
@@ -4257,7 +4257,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_host_ingress",
                 "ironclaw_operator",
-                // The CLI, by its PACKAGE name. `crates/ironclaw_cli/`
+                // The CLI, by its PACKAGE name. `crates/app/ironclaw_cli/`
                 // is only the directory; `forbidden` is matched against
                 // `cargo metadata` package names, so the directory spelling
                 // is an entry that can never fire. Pinned by
@@ -4942,7 +4942,7 @@ struct LayerMatrixException {
 ///
 /// ```text
 /// rg -c "^    LayerMatrixException \{" \
-///   crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
+///   crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
 /// ```
 ///
 /// The target is the empty list (PROPOSAL §11.2.2, CHECKLIST WS12). This

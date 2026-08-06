@@ -2,7 +2,7 @@
 //!
 //! Production wires `attachment_read_port` from the local-dev workspace
 //! filesystem (`ProjectScopedAttachmentReader`,
-//! `crates/ironclaw_composition/src/runtime.rs:3328-3334`) so the loop
+//! `crates/app/ironclaw_composition/src/runtime.rs:3641`) so the loop
 //! model port reads landed attachment bytes back for the gateway
 //! (`convert_messages`) to build a `ContentPart::ImageUrl` for vision-capable
 //! models. Regression: this port was `None` everywhere pre-fix, so images

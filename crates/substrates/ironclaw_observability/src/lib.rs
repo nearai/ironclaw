@@ -5,7 +5,7 @@
 //! that wants to time an operation can take this without acquiring anything
 //! else. Nothing that merely *produces a value a trace happens to record*
 //! belongs here — that measurement belongs to whoever produces the thing being
-//! measured (see `crates/ironclaw_observability/AGENTS.md`).
+//! measured (see `crates/substrates/ironclaw_observability/AGENTS.md`).
 #![warn(unreachable_pub)]
 
 use std::time::Instant;

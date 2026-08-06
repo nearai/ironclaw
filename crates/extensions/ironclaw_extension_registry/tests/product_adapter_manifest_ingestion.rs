@@ -141,7 +141,7 @@ secret_value = "123456789:AABBccDDeeFFgg"
 /// The sibling disposition, same shape and same reason, is
 /// `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`
 /// in `ironclaw_trace_commons`. The `PATH_TERM_COLLISIONS` carve-out in
-/// `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`
+/// `crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`
 /// records why the names stay here.
 #[test]
 fn inline_secret_guard_is_a_safety_denylist_not_package_inventory() {

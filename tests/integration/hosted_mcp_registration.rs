@@ -2803,6 +2803,6 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
 // regression test. The deterministic replacement — which pauses `register`
 // mid-flight via a controllable installation-store double to force the
 // actual AB-BA contention — lives at the crate tier:
-// `crates/ironclaw_extension_host/src/product_lifecycle.rs`'s
+// `crates/extensions/ironclaw_extension_host/src/product_lifecycle.rs`'s
 // `concurrent_register_and_import_bundle_do_not_deadlock` test, which can
 // construct `ExtensionLifecycleManager` directly with that double.

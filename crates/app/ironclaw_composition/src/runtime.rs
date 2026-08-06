@@ -17,7 +17,7 @@
 //! They never name the underlying `TurnCoordinator`, `SessionThreadService`,
 //! `LoopExitApplier`, `HostManagedModelGateway`, etc. directly. That is the
 //! property that satisfies the "narrow Reborn public surface" requirement
-//! pinned by `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
+//! pinned by `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -20,7 +20,7 @@
 //! - [`PackageIdentity`] is the trust-policy-side identity for any
 //!   manifest-bearing package: installed extensions (WASM / Script / MCP),
 //!   bundled extensions / loops / skills, operator-declared packages, and
-//!   eventual built-in tools (see `crates/ironclaw_trust/CONTRACT.md` §9 for
+//!   eventual built-in tools (see `crates/kernel/ironclaw_trust/CONTRACT.md` §9 for
 //!   the migration path).
 //! - The `package_id: PackageId` field on [`PackageIdentity`] is the same
 //!   value as `ExtensionId` at other layers — `ExtensionId` when the
@@ -36,7 +36,7 @@
 //!   [`crate::scope::ExecutionContext::trust`] at dispatch time.
 //!
 //! See `ironclaw_trust::TrustPolicy` for the engine that bridges request to
-//! effective trust, `crates/ironclaw_trust/CONTRACT.md` for the full
+//! effective trust, `crates/kernel/ironclaw_trust/CONTRACT.md` for the full
 //! evaluation matrix, and `docs/reborn/contracts/host-api.md` (in the
 //! staging-track docs) for the broader Reborn vocabulary.
 
@@ -152,7 +152,7 @@ pub enum PackageSource {
 /// | Installed extensions (WASM / Script / MCP) | `LocalManifest` or `Registry` | Manifest declares `trust = "..."` |
 /// | Bundled extensions / loops / skills | `Bundled` | Compiled with the host; matched by `BundledRegistry` |
 /// | Operator declarations | `Admin` | `AdminConfig` out-of-band trust assertion |
-/// | Built-in tools (eventual) | `Bundled` | See `crates/ironclaw_trust/CONTRACT.md` §9 for migration |
+/// | Built-in tools (eventual) | `Bundled` | See `crates/kernel/ironclaw_trust/CONTRACT.md` §9 for migration |
 ///
 /// `package_id: PackageId` is the same value as `ExtensionId` at the extension
 /// registry / `CapabilityDescriptor.provider` layer. The two names describe

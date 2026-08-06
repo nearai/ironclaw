@@ -3,7 +3,7 @@
 //!
 //! Lives outside `src/` on purpose: the architecture boundary test
 //! `reborn_product_api_crates_do_not_bind_http_ingress`
-//! (`crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`)
+//! (`crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`)
 //! greps every `.rs` file under this crate's `src/` for
 //! `TcpListener::bind` with no `#[cfg(test)]` awareness — a text scan, not
 //! a compile-aware check, by design. A stub server that never runs in

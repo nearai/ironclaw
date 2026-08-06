@@ -280,6 +280,28 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("grandfathered dangling reference", output)
         self.assertIn("src/myprovider.rs", output)
 
+    def test_duplicate_known_missing_rows_fail(self) -> None:
+        """Two rows excusing the same reference is a table bug: one debt, one
+        row. The dedup guard must fail rather than silently collapsing them."""
+        self.build_fixture()
+        self.write(
+            "crates/core/ironclaw_alpha/README.md",
+            "Entry point `src/lib.rs`; create `src/myprovider.rs` to extend.\n",
+        )
+        row = GATE.Suppression(
+            doc="crates/core/ironclaw_alpha/README.md",
+            token="src/myprovider.rs",
+            reason="instructional example",
+        )
+        twin = GATE.Suppression(
+            doc="crates/core/ironclaw_alpha/README.md",
+            token="src/myprovider.rs",
+            reason="same debt, second row",
+        )
+        code, output = self.run_gate(known_missing=(row, twin))
+        self.assertEqual(code, 1)
+        self.assertIn("one debt, one row", output)
+
     # -- check 2: rule triggers must be live -------------------------------
     def test_rule_glob_matching_nothing_fails_naming_rule_and_glob(self) -> None:
         """The `.claude/rules/skills.md` failure: a trigger naming a file
@@ -294,6 +316,17 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn(".claude/rules/alpha.md", output)
         self.assertIn("bundled_skills.rs", output)
         self.assertIn("never fires", output)
+
+    def test_brace_alternation_trigger_counts_as_live(self) -> None:
+        """A `{rs,toml}` trigger matching real tracked files passes check 2
+        end-to-end — the false-dead-rule shape the translator fix closes."""
+        self.build_fixture()
+        self.write(
+            ".claude/rules/alpha.md",
+            '---\npaths:\n  - "crates/**/*.{rs,toml}"\n---\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
 
     def test_skill_frontmatter_paths_are_checked_too(self) -> None:
         self.build_fixture()
@@ -338,6 +371,19 @@ class GuidanceGateTests(unittest.TestCase):
             ("crates/core/ironclaw_alpha/**", "crates/core/ironclaw_alpha"): False,
             ("skills/**", "skills/demo/SKILL.md"): True,
             ("crates/core/ironclaw_alpha/src/lib.rs", "crates/core/ironclaw_alpha/src/lib.rs"): True,
+            # Brace alternation: a legitimate `{rs,toml}` trigger is live, not
+            # a dead literal (#7306 review).
+            ("crates/**/*.{rs,toml}", "crates/core/ironclaw_alpha/src/lib.rs"): True,
+            ("crates/**/*.{rs,toml}", "crates/core/ironclaw_alpha/Cargo.toml"): True,
+            ("crates/**/*.{rs,toml}", "crates/core/ironclaw_alpha/README.md"): False,
+            ("{crates,tests}/**", "tests/lib.rs"): True,
+            ("{crates,tests}/**", "docs/lib.rs"): False,
+            ("crates/{core/**,README.md}", "crates/core/ironclaw_alpha/src/lib.rs"): True,
+            ("crates/{core/**,README.md}", "crates/README.md"): True,
+            ("src/{a,{b,c}}.rs", "src/b.rs"): True,
+            ("src/{a,{b,c}}.rs", "src/d.rs"): False,
+            # An unmatched brace stays a literal character.
+            ("src/un{matched.rs", "src/un{matched.rs"): True,
         }
         for (glob, path), expected in cases.items():
             with self.subTest(glob=glob, path=path):
@@ -358,6 +404,21 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("crates/core/ironclaw_beta", output)
         self.assertIn("crates/core/AGENTS.md", output)
         self.assertIn("family table no longer covers", output)
+
+    def test_incidental_mention_in_another_row_is_not_coverage(self) -> None:
+        """A crate whose own row is gone must fail even when another row's
+        charter prose still names it — only the identity column counts."""
+        self.build_fixture()
+        self.write(
+            "crates/core/AGENTS.md",
+            "# core family\n\n| Crate | Charter |\n| --- | --- |\n"
+            "| [`ironclaw_alpha`](./ironclaw_alpha) | records; routes to "
+            "`ironclaw_beta` for storage |\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("crates/core/ironclaw_beta", output)
+        self.assertIn("identity (first) column", output)
 
     def test_table_match_accepts_package_name_for_renamed_directories(self) -> None:
         """`beta_pkg` (the package) is in the table, `ironclaw_beta` (the
@@ -517,6 +578,16 @@ class GuidanceGateTests(unittest.TestCase):
 
     # -- happy path, against the real repository ---------------------------
     def test_real_repository_guidance_is_clean(self) -> None:
+        """Deliberately coupled to `git` and this checkout: no
+        `--tracked-files` override, so `GATE.main` shells out to
+        `git ls-files -s` against the real repository. That coupling is the
+        point — it proves the production entry path (subprocess, index
+        parsing, symlink blobs) on real data, which no fixture run exercises.
+        Consequence: outside a git checkout (a source export, a tarball) this
+        case fails with "the tracked set cannot be read" — an environment
+        failure, not guidance drift. The separate `Check guidance references
+        the tracked tree` CI step runs the same command as the gate; this
+        case exists so the self-test suite alone still covers the git leg."""
         stderr, stdout = io.StringIO(), io.StringIO()
         with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
             crate_tree.reset_inventory_cache()

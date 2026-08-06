@@ -1,5 +1,5 @@
 //! Pins `restore_extension_lifecycle_state`'s activatable-surface guard
-//! (`crates/ironclaw_extension_host/src/lifecycle_restore.rs`).
+//! (`crates/extensions/ironclaw_extension_host/src/lifecycle_restore.rs`).
 //!
 //! Drives the real production caller directly: a real `ExtensionInstallationStore`
 //! over an in-memory `RootFilesystem`, the real `ExtensionLifecycleService`, and

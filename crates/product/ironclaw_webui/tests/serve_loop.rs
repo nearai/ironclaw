@@ -4,7 +4,7 @@
 //!
 //! The v2 gateway `Router` (auth / CORS / body-limit / rate-limit) is
 //! tested separately in
-//! `crates/ironclaw_composition/tests/webui_v2_serve.rs`. This
+//! `crates/app/ironclaw_composition/tests/webui_v2_serve.rs`. This
 //! test focuses on the seam this crate owns — the listener-binding +
 //! serve-loop + graceful-shutdown behaviour — by handing the ingress a
 //! trivial axum `Router`.

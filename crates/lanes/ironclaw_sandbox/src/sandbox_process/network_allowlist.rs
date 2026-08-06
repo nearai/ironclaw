@@ -64,7 +64,7 @@ pub const SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTE
 /// that sees plaintext method/URL/headers/body and computes
 /// `estimated_bytes` for a request before sending it
 /// (`estimate_http_request_bytes`,
-/// `crates/ironclaw_network/src/egress.rs`). It is **not established** that
+/// `crates/substrates/ironclaw_network/src/egress.rs`). It is **not established** that
 /// the same model transfers to the CONNECT/forward proxy this list feeds
 /// (see the module doc above): a CONNECT proxy tunnels opaque TLS bytes
 /// after the handshake and never sees plaintext, so it cannot compute "one
@@ -78,14 +78,14 @@ pub const SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTE
 /// and workload shape in the meantime.
 ///
 /// Mirrors `MCP_NETWORK_EGRESS_LIMIT`'s shape
-/// (`crates/ironclaw_extension_host/src/mcp.rs`, `activation_transaction.rs`)
+/// (`crates/extensions/ironclaw_extension_host/src/mcp.rs`, `activation_transaction.rs`)
 /// — a named constant feeding `NetworkPolicy::max_egress_bytes` — but not
 /// its value: that one is sized for MCP tool-call JSON responses (2 MiB) and
 /// is not a template here; the sandboxed shell's legitimate payloads are
 /// orders of magnitude larger.
 // TODO(security): this value is sized and validated against
 // `PolicyNetworkHttpEgress`'s per-request `estimated_bytes` check
-// (`crates/ironclaw_network/src/egress.rs`). The CONNECT-proxy wiring PR
+// (`crates/substrates/ironclaw_network/src/egress.rs`). The CONNECT-proxy wiring PR
 // (see module doc above) must explicitly decide streaming vs. cumulative
 // byte metering for that transport before assuming `max_egress_bytes`
 // carries the same "per request" meaning there — a proxy that reuses this

@@ -44,7 +44,7 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
 // ---------------------------------------------------------------------------
 
-/// Hand-derived from `crates/ironclaw_composition/src/runtime.rs`
+/// Hand-derived from `crates/app/ironclaw_composition/src/runtime.rs`
 /// lines 3365-3459 (`build_reborn_runtime`, `Standalone`/`StandaloneUnrestricted`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
@@ -229,7 +229,7 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
 /// referenced `Standalone` literal still exists and the profile still builds.
-/// Mirrors `crates/ironclaw_composition/tests/runtime.rs:132-146`. The
+/// Mirrors `crates/app/ironclaw_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
 /// introspecting this built `RebornRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted

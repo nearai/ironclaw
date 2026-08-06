@@ -77,7 +77,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // Skip test/example/bench trees (test doubles live there), build
-            // output, and vendored frontend packages (`crates/ironclaw_webui/
+            // output, and vendored frontend packages (`crates/product/ironclaw_webui/
             // frontend/node_modules` after a pnpm install — never workspace
             // source, and it is not policed by this seal).
             if matches!(

@@ -11,7 +11,7 @@
 //!
 //! Zero production-crate changes: `DefaultPlannedRuntimeParts` is already
 //! `pub` with `pub` fields and no `#[non_exhaustive]`
-//! (`crates/ironclaw_turn_runner/src/runtime.rs:260-326`), so this file only reads
+//! (`crates/loop/ironclaw_turn_runner/src/runtime.rs:260-326`), so this file only reads
 //! it from test-tree code.
 
 use ironclaw_loop_host::HostManagedModelGateway;

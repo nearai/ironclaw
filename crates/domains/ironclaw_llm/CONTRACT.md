@@ -185,7 +185,7 @@ Closed (normal)
 
 Configure via `LlmConfig` fields: `circuit_breaker_threshold` (env: `LLM_CIRCUIT_BREAKER_THRESHOLD`, falls back to `CIRCUIT_BREAKER_THRESHOLD`; None = disabled), `circuit_breaker_recovery_secs` (env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; default: 30).
 
-The circuit breaker wraps the entire provider chain. When open, it immediately returns `LlmError::RequestFailed` with a message including remaining cooldown seconds. The `FailoverProvider` sitting outside can then try a fallback model.
+The circuit breaker wraps the retry/routing/failover chain (`apply_decorator_chain` applies `CircuitBreakerProvider` after `FailoverProvider`, so the breaker sits outside failover — see the assembly order below). When open, it immediately returns `LlmError::RequestFailed` with a message including remaining cooldown seconds; nothing beneath it runs, including the failover fallback, until the recovery window elapses and a half-open probe is admitted.
 
 ## Failover Chain
 

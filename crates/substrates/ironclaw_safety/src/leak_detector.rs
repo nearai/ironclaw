@@ -819,7 +819,7 @@ fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
         //
         // The `icsbx_` literal here must stay in sync with
         // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
-        // (crates/ironclaw_secrets/src/placeholder.rs), which is the actual
+        // (crates/substrates/ironclaw_secrets/src/placeholder.rs), which is the actual
         // owner of this prefix. `ironclaw_safety` deliberately does not take
         // `ironclaw_secrets` as a normal dependency just to share one string
         // constant — see `sandbox_credential_placeholder_prefix_matches_registry`

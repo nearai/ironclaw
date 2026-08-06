@@ -22,7 +22,7 @@
 //!
 //! Layering note: this crate must stay free of IronClaw workspace
 //! dependencies (the boundary test
-//! `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
+//! `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
 //! pins this). So we parse into **plain strings** for fields whose
 //! typed counterparts live in `ironclaw_host_api` (TenantId, AgentId,
 //! UserId, ProjectId, DeploymentMode, RuntimeProfile, ApprovalPolicy) or

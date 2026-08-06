@@ -234,7 +234,7 @@ async fn golden_gated_turn_approve() {
 // `state.compaction_state.force_compact_on_next_iteration`, but Reborn's
 // `DefaultPlanner` wires `PromptCompactionStep` to
 // `ActiveTaskPreservingCompactionStrategy::should_compact`
-// (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
+// (crates/loop/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
 // which never reads that flag — it only compacts on a genuine ~8,000+ token
 // accumulated tail. The force path is a dead letter under Reborn's installed
 // strategy; exercising it here needs a production fix (out of scope) or a

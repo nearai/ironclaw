@@ -4,9 +4,9 @@
 //! `RebornIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
 //! wiring uses the process-backed checkpoint projection on the group-level
 //! `ThreadCheckpointLoopExitEvidencePort` -- the de-mask fix. Without it,
-//! `verify_failure_evidence` (`crates/ironclaw_turn_runner/src/loop_exit_applier.rs`)
+//! `verify_failure_evidence` (`crates/loop/ironclaw_turn_runner/src/loop_exit_applier.rs`)
 //! short-circuits `Ok(false)` on a `None` store, so `validate_failed_exit`
-//! (`crates/ironclaw_turns/src/loop_exit.rs`) rewrites every `Failed` exit to
+//! (`crates/kernel/ironclaw_turns/src/loop_exit.rs`) rewrites every `Failed` exit to
 //! the opaque `"driver_protocol_violation"` category. With the store wired, a
 //! verified failed exit's TRUE category survives onto `TurnRunState::failure`.
 //!
@@ -55,7 +55,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Empirically confirmed: `TraceLlm` exhaustion surfaces as
     // `ModelErrorClass::Unavailable` -> category `"model_unavailable"`
-    // (`crates/ironclaw_agent_loop/src/executor/mapping.rs`). Asserting the
+    // (`crates/loop/ironclaw_agent_loop/src/executor/mapping.rs`). Asserting the
     // exact value proves the de-masked path produces the loop's REAL reason,
     // not just any non-sentinel category.
     if failure.category() != "model_unavailable" {

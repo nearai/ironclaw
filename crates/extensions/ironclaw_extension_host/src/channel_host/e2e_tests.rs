@@ -5331,7 +5331,7 @@ async fn slash_dispatcher_bare_returns_prefixed_help() {
 /// gate the JSON `shared_channel_slash_command_is_denied_with_notice`
 /// scenario pins — `post_command_feedback` addresses the rejection notice at
 /// `envelope.external_conversation_ref()` directly (verified by reading
-/// `crates/ironclaw_assistant/src/run_delivery/observer.rs`), independent of
+/// `crates/product/ironclaw_assistant/src/run_delivery/observer.rs`), independent of
 /// any shared-conversation binding/allowlist resolution, so the notice
 /// targets the invoking channel even though `C777` is never configured on
 /// `slack_allowed_channels` (only `C123` is). No command executes and no

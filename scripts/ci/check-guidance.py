@@ -26,8 +26,10 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      `skills.md` failure.
   3. **Family tables are complete.** Every crate directory (per
      `scripts/ci/lib/crate_tree.py`, the workspace's one discovery rule) must
-     appear in its family's `crates/<family>/AGENTS.md` crate table — the
-     guidance half of what `check-target-tree.py` does for PROPOSAL §5.
+     appear in the identity (first) column of a row in its family's
+     `crates/<family>/AGENTS.md` crate table — an incidental mention in
+     another row's prose does not count — the guidance half of what
+     `check-target-tree.py` does for PROPOSAL §5.
   4. **Every crate has a `README.md`.** The convention requires one per crate
      and `crates/AGENTS.md` states "Every crate has one"; measured 2026-08-06
      the tree is at 62/62, so this gates rather than warns.
@@ -184,11 +186,15 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # itself. Refuse rather than report an empty scan as clean. (Measured
 # 2026-08-06 on the shipped tree: 237 guidance files, ~2070 path references,
 # 38 rule globs, 65 AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json`
-# and re-date this comment when the numbers move materially.)
+# and re-date this comment when the numbers move materially.) Each floor sits
+# roughly half of its measured value: low enough that legitimate
+# consolidation never trips it, high enough that a parser or discovery pass
+# silently degrading to a handful of hits refuses instead of passing — a
+# floor of 1 catches only total loss, not the degraded-but-nonzero shape.
 MIN_GUIDANCE_FILES = 40
 MIN_PATH_REFERENCES = 80
-MIN_RULE_GLOBS = 1
-MIN_ALIAS_PAIRS = 10
+MIN_RULE_GLOBS = 20
+MIN_ALIAS_PAIRS = 40
 
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -726,6 +732,19 @@ def parse_frontmatter_paths(doc: str, text: str) -> list[str] | None:
 
 
 def glob_to_regex(glob: str) -> re.Pattern[str]:
+    return re.compile("^" + _glob_body(glob) + "$")
+
+
+def _glob_body(glob: str) -> str:
+    """One glob (or brace alternative) -> regex body.
+
+    `{a,b}` brace alternation becomes `(?:a|b)`, nesting supported, each
+    alternative translated recursively — a legitimate `crates/**/*.{rs,toml}`
+    trigger must count as live, not be escaped into a literal that matches
+    nothing and gets reported as a dead rule. An unmatched `{` or `}` stays a
+    literal character, preserving the pre-alternation behavior for degenerate
+    globs.
+    """
     out: list[str] = []
     i = 0
     while i < len(glob):
@@ -744,10 +763,52 @@ def glob_to_regex(glob: str) -> re.Pattern[str]:
         elif glob[i] == "?":
             out.append("[^/]")
             i += 1
+        elif glob[i] == "{":
+            closing = _matching_brace(glob, i)
+            if closing is None:
+                out.append(re.escape(glob[i]))
+                i += 1
+                continue
+            alternatives = _split_alternatives(glob[i + 1 : closing])
+            out.append(
+                "(?:" + "|".join(_glob_body(part) for part in alternatives) + ")"
+            )
+            i = closing + 1
         else:
             out.append(re.escape(glob[i]))
             i += 1
-    return re.compile("^" + "".join(out) + "$")
+    return "".join(out)
+
+
+def _matching_brace(glob: str, start: int) -> int | None:
+    depth = 0
+    for i in range(start, len(glob)):
+        if glob[i] == "{":
+            depth += 1
+        elif glob[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _split_alternatives(body: str) -> list[str]:
+    """Split a brace body on top-level commas only (`{a,{b,c}}` keeps nesting)."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in body:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return parts
 
 
 def check_rule_globs(
@@ -785,6 +846,19 @@ def _table_rows(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip().startswith("|")]
 
 
+def _row_identity_cell(row: str) -> str:
+    """The first cell of a table row — the crate-identity column.
+
+    Matching the whole row would let an *incidental* mention carry a crate:
+    delete `ironclaw_beta`'s row and, so long as another row's charter prose
+    says "routes to `ironclaw_beta`", the table still reads as covering it
+    (#7306 review). Coverage means a row whose identity column names the
+    crate, so only that cell counts.
+    """
+    cells = row.strip().strip("|").split("|")
+    return cells[0].strip() if cells else ""
+
+
 def _word_pattern(name: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
 
@@ -813,16 +887,18 @@ def check_family_tables(
         rows = rows_by_family[family]
         names = list(dict.fromkeys([crate.basename] + ([crate.package] if crate.package else [])))
         patterns = [_word_pattern(name) for name in names]
-        if rows and not any(p.search(row) for row in rows for p in patterns):
+        identity_cells = [_row_identity_cell(row) for row in rows]
+        if rows and not any(p.search(cell) for cell in identity_cells for p in patterns):
             if len(names) == 1:
-                spelled = f"`{names[0]}` appears in no table row"
+                spelled = f"`{names[0]}` appears in no row's identity (first) column"
             else:
                 joined = " nor ".join(f"`{name}`" for name in names)
-                spelled = f"neither {joined} appears in any table row"
+                spelled = f"neither {joined} appears in any row's identity (first) column"
             problems.append(
                 f"  {crate.directory} is a crate of family `{family}`, but "
                 f"{spelled} of {family_agents} — the family table no longer "
-                "covers its own crates"
+                "covers its own crates (a mention in another row's description "
+                "does not count as coverage)"
             )
         elif rows:
             tabled += 1

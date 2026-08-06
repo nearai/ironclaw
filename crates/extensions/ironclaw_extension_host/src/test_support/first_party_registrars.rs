@@ -3,7 +3,7 @@
 
 /// Test-support first-party handler registrars (GSuite + web tooling) mirroring
 /// the concrete executors the `ironclaw_cli` binary assembles in
-/// production (`crates/ironclaw_cli/src/first_party/`).
+/// production (`crates/app/ironclaw_cli/src/first_party/`).
 ///
 /// Composition names `ironclaw_extension_support` in production nowhere
 /// (extension-runtime DEL-7); the binary supplies these registrars on the build

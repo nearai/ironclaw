@@ -479,5 +479,9 @@ composition):
 
 ```bash
 cargo test -p ironclaw_webui --all-features
-cargo clippy -p ironclaw_webui --all-features --tests -- -D warnings
+cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
+# Production shape: default features, no dev-dependencies. `test-support`
+# gates public items, so the #7119 unused-import class only shows here
+# (mirrors the merge-queue `--lib --bins` lane).
+cargo clippy -p ironclaw_webui -- -D warnings
 ```

@@ -207,7 +207,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
 /// pointing each service-graph rebuild at a fresh `LibSqlRootFilesystem`
 /// opened over the same on-disk libSQL file, mirroring
 /// `libsql_root()` in
-/// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
+/// `crates/substrates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
 #[tokio::test]
 async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once() {
     let temp = tempfile::tempdir().unwrap();
@@ -573,7 +573,7 @@ async fn durable_services(
 /// proving run-state/approval CAS records actually survive a real backend
 /// reopen, not just a service-graph rebuild around a still-live store.
 /// Mirrors `libsql_root()` in
-/// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
+/// `crates/substrates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
 async fn durable_services_with_libsql_run_state(
     engine_root: &Path,
     event_root: &Path,

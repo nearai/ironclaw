@@ -3,7 +3,7 @@
 //! `ironclaw_loop_host` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
 //! but cannot depend on `ironclaw_turn_runner`, which owns the agent-specific
 //! process-dependency projection and resolver
-//! (`crates/ironclaw_turn_runner/src/subagent/await_edge/`). This module defines
+//! (`crates/loop/ironclaw_turn_runner/src/subagent/await_edge/`). This module defines
 //! the two traits that seam crosses — `AwaitEdgeWriter` (recovery admission and
 //! post-submit rollback) and `AwaitEdgeSettler` (completion-time
 //! settle/resume/drain, consumed by `ironclaw_turn_runner`'s completion path) —

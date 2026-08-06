@@ -1,7 +1,7 @@
 //! Resolver invariant tests: org-policy ceiling × yolo narrowing.
 //!
 //! Complements the in-crate resolver tests in
-//! `crates/ironclaw_runtime_policy/src/resolver.rs:435-917` by promoting
+//! `crates/kernel/ironclaw_runtime_policy/src/resolver.rs:435-917` by promoting
 //! a few high-stakes properties to the integration tier with **typed-error**
 //! pattern matches (not `is_err()`) and explicit `was_reduced()` assertions
 //! on the narrowed shape.

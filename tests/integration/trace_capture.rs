@@ -23,7 +23,7 @@
 //! This binary owns `IRONCLAW_BASE_DIR`: trace policy/queue paths resolve
 //! through `ironclaw_common`'s process-wide `LazyLock`, so the tempdir env
 //! var is set as the FIRST action, before any read (same pattern as
-//! `crates/ironclaw_host_runtime/tests/trace_commons_dispatch_e2e.rs`).
+//! `crates/kernel/ironclaw_host_runtime/tests/trace_commons_dispatch_e2e.rs`).
 //! Keep this suite a single sequenced `#[tokio::test]`: enrollment state is
 //! process-global (per scope), so concurrent tests in this binary would race.
 

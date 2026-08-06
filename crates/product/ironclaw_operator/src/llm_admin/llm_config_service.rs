@@ -2225,7 +2225,7 @@ mod tests {
 
     // ✎ WS3: `upsert_builtin_nearai_with_production_secret_store_succeeds` (the
     // #4673 system-scope write/read regression) moved to
-    // `crates/ironclaw_composition/tests/operator_llm_key_store_wiring.rs`.
+    // `crates/app/ironclaw_composition/tests/operator_llm_key_store_wiring.rs`.
     // Its whole value is wiring the secret store *exactly as production serve
     // does*, and after this crate lost its `ironclaw_secrets` edge (PROPOSAL
     // §8.2, §12.1b) "exactly as production" means the real store behind the

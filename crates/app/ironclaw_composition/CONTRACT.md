@@ -90,7 +90,7 @@ It is the native host-owned surface that enters `ProductSurface` directly
 | `RebornProjectionServices` (in `crates/product/ironclaw_assistant/src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single standalone `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
-| `webui_v2_app(product_surface, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
+| `webui_v2_app(product_surface, config) -> Result<Router, WebuiServeError>` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
 | `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
 
 ### Middleware stack composed by `webui_v2_app`
@@ -370,9 +370,12 @@ rows are inventoried here, not implemented in the current PR.
   outer `SetResponseHeaderLayer`s; default CSP is
   `default-src 'self'; object-src 'none'; frame-ancestors 'none';
   base-uri 'self'`.
-- **Connection limit (SSE)** — bounded by `ironclaw_webui`'s own
+- **Connection limit (SSE + WS)** — bounded by `ironclaw_webui`'s own
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
-  lifetime). No WS surface to bound.
+  lifetime). The WebSocket stream (`stream_events_ws`) draws from the same
+  shared `SseCapacity` pool as SSE (pinned by
+  `stream_events_ws_shares_capacity_with_sse_streams` in
+  `ironclaw_webui`'s `webui_v2_handlers_contract.rs`).
 - **Caller construction** — `ProductSurfaceCaller` is built from
   `config.tenant_id` (trusted host installation) plus the
   authenticator's verified `UserId`. The browser body cannot influence

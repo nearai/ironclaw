@@ -3473,7 +3473,7 @@ mod tests {
     /// accidentally routes it through `install_builtin_before_capability`,
     /// the dispatcher will install it as a Builtin. That trust-class ↔ source
     /// pairing is the loader's contractual responsibility — see the
-    /// "Loader responsibility" section in `crates/ironclaw_hooks/CLAUDE.md`.
+    /// "Loader responsibility" section in `crates/loop/ironclaw_hooks/CLAUDE.md`.
     ///
     /// This test is a regression guard, not a runtime check: it touches each
     /// public tier-specific installer for both `before_capability` and

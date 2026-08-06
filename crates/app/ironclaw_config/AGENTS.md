@@ -1,10 +1,9 @@
 # Agent Map — ironclaw_config
 
 Working rules for the boot-configuration leaf. Orientation lives in
-`README.md`; family rules in `crates/app/AGENTS.md`. (This crate has no
-`CLAUDE.md` by design — it is not in the root `AGENTS.md` Module Specs table;
-per `docs/reborn/guidance-conventions.md` this file is the canonical home for
-its working rules.)
+`README.md`; family rules in `crates/app/AGENTS.md`. (The `CLAUDE.md` beside
+this file is a symlink alias of it, per `docs/reborn/guidance-conventions.md`;
+this file is the canonical home for its working rules.)
 
 ## Start Here
 

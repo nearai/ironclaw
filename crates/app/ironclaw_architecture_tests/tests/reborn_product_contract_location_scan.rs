@@ -19,7 +19,7 @@
 //! DTO re-export sweep belongs with WS2/WS6, which repoint those crates for
 //! their own reasons."* WS2 and WS6 both landed and neither took it; §6.9.1's
 //! `product` narrowing row owns it, and its facade half is **executed**:
-//! `crates/ironclaw_assistant/src/lib.rs` now declares **zero** foreign
+//! `crates/product/ironclaw_assistant/src/lib.rs` now declares **zero** foreign
 //! `pub use` statements, pinned below by
 //! [`product_declares_no_foreign_re_export_facade`]. What went was the block the
 //! row names — the 148 symbols (19 `host_api::product_adapter`, 42

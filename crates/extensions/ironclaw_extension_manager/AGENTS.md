@@ -8,13 +8,14 @@ semantics** on top of it.
 
 **The manager calls the host. The host never calls the manager.**
 
-`ironclaw_extension_host` is scheduled to move from the `products` layer down
-to `loops` (§12.1c). It cannot while it holds product-facing code, because
-`products` sits above `loops` and every product symbol would become an upward
-dependency. Splitting that code out is what unblocks the flip — and only if the
-edge stays one-way. A back-edge of **any** kind, including a `[dev-dependencies]`
-entry for a test fixture, puts the two crates in a cycle the layer flip cannot
-satisfy.
+`ironclaw_extension_host` has moved from the `products` layer down to `loops`
+(§12.1c; its manifest now declares `layer = "loops"`). It could not while it
+held product-facing code, because `products` sits above `loops` and every
+product symbol would have become an upward dependency. Splitting that code out
+is what unblocked the flip — and the flip stays legal only while the edge
+stays one-way. A back-edge of **any** kind, including a `[dev-dependencies]`
+entry for a test fixture, puts the two crates in a cycle the layer matrix
+cannot satisfy.
 
 `crates/app/ironclaw_architecture_tests/tests/reborn_extension_manager_split.rs` enforces
 this at the manifest *and* the source level. If you need host code to reach

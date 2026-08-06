@@ -1709,7 +1709,7 @@ pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 
 /// Native factory for the bundled telegram package: binds the REAL
 /// `TelegramChannelAdapter` as its channel surface, exactly like the binary
-/// assembly in `crates/ironclaw_cli/src/runtime/native_extensions.rs`
+/// assembly in `crates/app/ironclaw_cli/src/runtime/native_extensions.rs`
 /// (mirrored here because the integration harness composes its own runtime
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;

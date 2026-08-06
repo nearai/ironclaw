@@ -107,7 +107,7 @@ pub enum ToolErrorClass {
 impl ToolErrorClass {
     /// The `safe_summary` prefix the executor writes for this class — see
     /// `capability_{failed,denied}_summary` in
-    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    /// `crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`.
     fn summary_prefix(self) -> &'static str {
         match self {
             Self::Failed => "capability failed with ",

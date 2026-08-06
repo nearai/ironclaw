@@ -715,7 +715,7 @@ fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger(
 /// property it is rather than as a one-off audit: `ironclaw_extension_host`'s
 /// manifest lists no `ironclaw_assistant` dependency *under any name* once the
 /// residue is gone, and the manifest is found through `cargo metadata` rather
-/// than at `crates/ironclaw_extension_host/Cargo.toml`.
+/// than at `crates/extensions/ironclaw_extension_host/Cargo.toml`.
 ///
 /// Two failure modes it closes, both of which are silent today:
 ///

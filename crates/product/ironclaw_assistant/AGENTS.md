@@ -347,8 +347,8 @@ Enable `test-support` feature for in-memory fakes:
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_assistant`
-- Lint check: `cargo clippy -p ironclaw_assistant --all-targets -- -D warnings`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
+- Lint check: `cargo clippy -p ironclaw_assistant --all-targets -- -D warnings` (the self dev-dependency unifies `test-support` on, so this lints the feature-on shape) plus the production shape with dev-dependencies off: `cargo clippy -p ironclaw_assistant -- -D warnings` (mirrors the merge-queue `--lib --bins` lane; the #7119 unused-import class is only visible here)
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`; run the full `cargo test -p ironclaw_architecture_tests` sweep when a change touches more than dependency edges (contracts, inventories, pinned guidance)
 
 ## Agent notes
 

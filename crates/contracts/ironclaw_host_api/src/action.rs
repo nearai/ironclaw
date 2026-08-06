@@ -83,7 +83,7 @@ pub struct NetworkTargetPattern {
 
 impl NetworkTargetPattern {
     /// Deliberately more permissive than `ironclaw_network::parse_host_pattern`
-    /// (`crates/ironclaw_network/src/policy.rs`), which rejects a bare `*`.
+    /// (`crates/substrates/ironclaw_network/src/policy.rs`), which rejects a bare `*`.
     /// That sibling is the chokepoint for untrusted operator-typed hostnames
     /// (e.g. `IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS`) that were never
     /// reviewed; this one validates already-reviewed declarations —
@@ -96,7 +96,7 @@ impl NetworkTargetPattern {
     /// doing so breaks `DevWildcard`'s declared full-access grant. (Extension
     /// manifest credential audiences are stricter still and already reject a
     /// wildcard host at parse time — `ManifestV3Error::WildcardAudienceHost`
-    /// in `crates/ironclaw_extension_registry/src/v3.rs` — so they are not an example
+    /// in `crates/extensions/ironclaw_extension_registry/src/v3.rs` — so they are not an example
     /// of something this permissiveness exists for.)
     pub fn validate_declaration(&self) -> Result<(), crate::error::HostApiError> {
         validate_network_host_pattern(&self.host_pattern)?;

@@ -1,5 +1,5 @@
 /// Test double substituting the production `ApprovalRequestStorePort` impl
-/// (`ApprovalRequestStore`, `crates/ironclaw_approvals/src/lib.rs`).
+/// (`ApprovalRequestStore`, `crates/kernel/ironclaw_approvals/src/lib.rs`).
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

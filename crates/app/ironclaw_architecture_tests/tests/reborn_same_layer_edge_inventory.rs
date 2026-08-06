@@ -898,7 +898,7 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
         // existed at the move; a sixth is a reviewed decision, and that review
         // is the whole point of the pin, because the widening here reaches down
         // two rungs rather than one.
-        // (`ironclaw` is the binary crate at `crates/ironclaw_cli/` —
+        // (`ironclaw` is the binary crate at `crates/app/ironclaw_cli/` —
         // the pin is keyed on package names, which is what `cargo metadata`
         // reports and what makes a row able to fire at all.)
         permitted_consumers: &[
