@@ -204,6 +204,26 @@ fn reborn_runtime_image_includes_sql_debug_clients() {
 }
 
 #[test]
+fn reborn_runtime_image_can_run_the_orchestrator_healthcheck() {
+    // Container orchestrators probe this image with an in-container HTTP
+    // healthcheck, so the probe client has to exist inside the image. The
+    // hosted CrabShack template runs
+    //   test: ["CMD-SHELL", "curl -fsS http://localhost:3000/ || exit 1"]
+    // against the worker container. `debian:bookworm-slim` ships no HTTP
+    // client, so without this package the check can never pass — the
+    // container is marked unhealthy, the deploy times out, and the instance
+    // lands in `error` while the listener itself is serving 200s. That is
+    // precisely how 1.1.0 failed on staging: the server was healthy the whole
+    // time and only the probe was impossible to run.
+    let dockerfile = read_repo_file("Dockerfile");
+
+    assert!(
+        dockerfile.contains("curl"),
+        "runtime image must include an HTTP client for orchestrator healthchecks"
+    );
+}
+
+#[test]
 fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
     let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
 
