@@ -722,16 +722,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_wit_only_change_is_owned_by_platform_and_compat(self) -> None:
         # Both the historical root location and the current crate-owned one
         # (CHECKLIST WS4 moved `wit/` inside `ironclaw_wasm`) must delegate,
-        # so a real `crates/ironclaw_wasm/wit/*.wit` change never falls
-        # through to `ironclaw_wasm`'s own production-package lane. The
-        # crate-owned prefix is resolved through the crate inventory
-        # (`_wasm_wit_prefix`), not a hardcoded literal — mirroring
-        # `test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay`.
+        # so a real `<ironclaw_wasm>/wit/*.wit` change never falls through to
+        # `ironclaw_wasm`'s own production-package lane. The crate-owned
+        # prefix is resolved through the crate inventory (`_wasm_wit_prefix`)
+        # at test-input time too, not a hardcoded literal — mirroring
+        # `test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay`,
+        # so this stays correct regardless of where `ironclaw_wasm` lives.
+        wasm_wit_prefix = planner._wasm_wit_prefix()
         for path in (
             "wit/tool.wit",
             "wit/channel.wit",
-            "crates/lanes/ironclaw_wasm/wit/tool.wit",
-            "crates/lanes/ironclaw_wasm/wit/channel.wit",
+            f"{wasm_wit_prefix}tool.wit",
+            f"{wasm_wit_prefix}channel.wit",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -817,7 +819,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             planner._wasm_wit_prefix.cache_clear()
 
     def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
-        for wit_path in ("wit/tool.wit", "crates/lanes/ironclaw_wasm/wit/tool.wit"):
+        # The crate-owned WIT path is derived from `_wasm_wit_prefix` at
+        # test-input time (not a hardcoded literal), same as
+        # `test_wit_only_change_is_owned_by_platform_and_compat`, so this
+        # stays correct regardless of where `ironclaw_wasm` lives.
+        wasm_wit_prefix = planner._wasm_wit_prefix()
+        for wit_path in ("wit/tool.wit", f"{wasm_wit_prefix}tool.wit"):
             with self.subTest(wit_path=wit_path):
                 plan = self.plan(
                     "pull_request",
