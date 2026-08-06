@@ -225,7 +225,7 @@ wire, so both the fire count and the egress count flip — verified red by
 temporarily pointing `ironclaw_turn_runner::runtime` at `with_hook_dispatcher`.
 
 ⚠ **Read the history before trusting any claim in this section.** It previously
-named `crates/loop/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests
+named ✎ `crates/loop/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests
 (`per_build_dispatcher_state_does_not_leak_across_runs`,
 `legacy_with_hook_dispatcher_shares_state_across_builds`) that **never
 existed**; #6944 corrected the false claim and #6945 tracked the real gap it

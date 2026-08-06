@@ -21,8 +21,8 @@ crate and skip the selection cascade in §1 — but still run the §1 Reborn/leg
 a legitimate Reborn target. Otherwise pick one per §1.
 
 ## 0. Environment & state
-- **Reborn-only.** All work targets the Reborn stack in `crates/` (root CLAUDE.md, "Where to Build
-  — the Reborn stack in `crates/`"). The v1 `src/` monolith and its legacy enclave
+- **Reborn-only.** All work targets the Reborn stack in `crates/` (root AGENTS.md, "Purpose and
+  precedence"). The v1 `src/` monolith and its legacy enclave
   (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`) have all been removed,
   so every crate under `crates/` that the workspace builds is a legitimate target. Two caveats you can check in the root `Cargo.toml`: `tools/ironclaw_silk_decoder`
   is in `exclude`, so workspace-wide `cargo` commands never see it; and a crate with no consumers
@@ -85,7 +85,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
   **smallest self-contained slice** (one module / one invariant / one test gap) and record the rest in
   the ledger for the next iteration. Never open a sprawling multi-thousand-line refactor PR. Prefer
   **deleting** complexity over accreting layers.
-- **Privacy & logging doctrine (root CLAUDE.md — hard blockers).**
+- **Privacy & logging doctrine (root AGENTS.md security invariants + the REPL rule in root CLAUDE.md — hard blockers).**
   - **Never add a log line that prints a prompt, completion, key material, decrypted content, secret,
     or raw bytes** — log ids/counts/sizes/durations/error-types only. Treat any such existing line you
     find as a finding and fix it.
@@ -96,7 +96,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
     most valuable data in the system. Never strip, truncate, or delete them from the database; a
     "simplification" that drops retained LLM data is a blocker, not a fix. In-memory caches may be
     evicted; the database is the source of truth.
-- **Production-code conventions (root CLAUDE.md).** No `.unwrap()`/`.expect()` outside `#[cfg(test)]`;
+- **Production-code conventions (root AGENTS.md).** No `.unwrap()`/`.expect()` outside `#[cfg(test)]`;
   errors via `thiserror` with context; `crate::` imports (not `super::`) in non-test code; multi-line
   prompt templates live in `prompts/*.md` loaded via `include_str!()`, never inline Rust constants. A
   de-slop that *introduces* any of these is a self-inflicted finding — reject it (§6 guard).

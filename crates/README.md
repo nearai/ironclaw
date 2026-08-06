@@ -98,11 +98,11 @@ rules to know before starting:
 
 - Product handlers, channels, scheduled triggers, and agent callers go
   through `ProductSurface` and the capability contracts — never around
-  authorization, approvals, or the owning domain operation (root `CLAUDE.md`,
-  "Capability dispatch").
+  authorization, approvals, or the owning domain operation (root `AGENTS.md`,
+  "Security and runtime invariants").
 - LLM data is never deleted. Durable state goes through the `RootFilesystem`
   mount catalog; in-memory maps are caches, never the source of truth (root
-  `CLAUDE.md`).
+  `AGENTS.md`).
 
 ## Quick commands
 
@@ -115,6 +115,6 @@ python3 scripts/ci/check-target-tree.py     # tree vs documented package set
 ```
 
 The full gate (`cargo fmt`, workspace clippy, workspace tests) is documented
-in the root `CLAUDE.md`. Some crates test backends conditionally (PostgreSQL,
+in the root `AGENTS.md`. Some crates test backends conditionally (PostgreSQL,
 libSQL, WASM) — read the crate's `README.md` and module spec before assuming
 a command covers them.

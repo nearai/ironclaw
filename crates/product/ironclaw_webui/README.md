@@ -64,9 +64,9 @@ alone constructs authenticated-caller evidence.
   `webui_v2_routes()` entry (`tests/webui_v2_descriptors_contract.rs`).
 - **The product residue is pinned** at 100 symbols, exact-match/shrink-only:
   `reborn_transport_product_boundary.rs` (`WEBUI_PRODUCT_SYMBOL_BASELINE`).
-- **`CLAUDE.md` here is the module spec and is gate-pinned** — the 19-owner
+- **`CONTRACT.md` here is the module spec and is gate-pinned** — the 19-owner
   `handlers.rs` charter map is enforced by
-  `tests/handlers_module_charter.rs`; the root `CLAUDE.md` Module Specs table
+  `tests/handlers_module_charter.rs`; the root `AGENTS.md` Module Specs table
   names it. Do not reflow or renumber; edit only with
   `cargo test -p ironclaw_webui` green.
 - **Only this crate binds a listener** in the product family
@@ -91,6 +91,6 @@ corepack/pnpm; `frontend/README.md` covers the JS/TS toolchain.
 ## See also
 
 Module spec (route table, streaming model, SSE caps, OAuth login security
-contract, charter map): `CLAUDE.md` — the spec is the tiebreaker · working
+contract, charter map): `CONTRACT.md` — the spec is the tiebreaker · working
 rules: `AGENTS.md` · family rules: `crates/product/AGENTS.md` · design record:
 `docs/reborn/target-architecture/families/product.md` (§6.9.4).

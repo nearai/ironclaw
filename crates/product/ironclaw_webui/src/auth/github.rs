@@ -88,7 +88,7 @@ const MAX_GITHUB_EMAILS: usize = 100;
 /// authorization-code → client binding, so CSRF protection rests
 /// *entirely* on the `state` parameter the router mints and verifies
 /// (single-use, TTL-bounded, cross-provider-replay-guarded — see
-/// `CLAUDE.md` §Security invariants). A future maintainer must NOT add
+/// `CONTRACT.md` §Security invariants). A future maintainer must NOT add
 /// PKCE here expecting it to help (GitHub will ignore or reject it),
 /// and must NOT copy this no-PKCE shape to a provider that *does*
 /// support PKCE (where dropping it would be a real downgrade).

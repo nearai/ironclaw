@@ -231,7 +231,7 @@ stack; the boundary tests still allow no new edge).
   action via `adopt_migrated_identity`, deliberately out of scope here.)
 - `update_profile` / `update_status` / `update_role` — partial mutations through
   the shared `ironclaw_filesystem::cas_update` helper (never a per-record mutex;
-  `ironclaw_filesystem/CLAUDE.md` invariant 2). Each bumps `updated_at`.
+  `ironclaw_filesystem/CONTRACT.md` invariant 2). Each bumps `updated_at`.
 - `record_last_login` — sets `last_login_at` only; deliberately does **not** bump
   `updated_at`, which tracks profile edits rather than login activity.
 - `delete_user` — **cascades** (see invariant 5 below).

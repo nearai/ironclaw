@@ -518,7 +518,7 @@ async fn callback_with_unknown_state_redirects_with_invalid_state_error() {
 #[tokio::test]
 async fn callback_with_state_replay_fails_closed() {
     // The pending-flow store's single-use `take` is a documented
-    // security property (CLAUDE.md §Security invariants). A state token
+    // security property (CONTRACT.md §Security invariants). A state token
     // consumed by a successful callback must not mint a second session
     // when replayed against the same router.
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;

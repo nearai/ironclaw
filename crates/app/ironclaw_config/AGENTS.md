@@ -2,7 +2,7 @@
 
 Working rules for the boot-configuration leaf. Orientation lives in
 `README.md`; family rules in `crates/app/AGENTS.md`. (This crate has no
-`CLAUDE.md` by design — it is not in the root `CLAUDE.md` Module Specs table;
+`CLAUDE.md` by design — it is not in the root `AGENTS.md` Module Specs table;
 per `docs/reborn/guidance-conventions.md` this file is the canonical home for
 its working rules.)
 

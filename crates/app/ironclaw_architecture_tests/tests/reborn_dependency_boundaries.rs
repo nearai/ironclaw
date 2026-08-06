@@ -2969,7 +2969,7 @@ fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
         "shared WASM sandbox core should stay as a module inside ironclaw_wasm after W2.3"
     );
     let guardrails =
-        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/CLAUDE.md"))
+        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/AGENTS.md"))
             .expect("ironclaw_wasm guardrails must be readable");
     assert!(
         guardrails.contains("wasm_sandbox_core")

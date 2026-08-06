@@ -56,10 +56,14 @@ One production implementation of each store, built on the filesystem fabric.
 - **One-shot consumption:** a secret's raw material is readable exactly once
   per lease — `SecretStore::consume` after an explicit scoped lease.
 - **No raw material in any output:** metadata, errors, debug, events,
-  snapshots, and docs never carry secret values (crate guardrails,
-  `CLAUDE.md`).
+  snapshots, and docs never carry secret values.
 - **`put` is a trusted primitive** for setup/composition/storage code, not a
   runtime/plugin API.
+- **Isolation is scoped:** tenant/user/agent/project isolation is preserved;
+  no global handle lookup unless an explicit admin-scoped API is introduced
+  later.
+- **Custody only:** no authorization, approval, run-state, runtime injection,
+  network access, process lifecycle, or product workflow semantics here.
 - **Upward edges forbidden by name:** the `ironclaw_secrets` `BoundaryRule` in
   `reborn_dependency_boundaries.rs` (`reborn_crate_dependency_boundaries_hold`);
   the `secrets → filesystem` same-layer edge is inventoried in
@@ -74,8 +78,9 @@ cargo test -p ironclaw_architecture_tests   # boundary rules
 
 ## See also
 
-Working rules: [`CLAUDE.md`](./CLAUDE.md) (canonical crate guardrails). Family
-boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
+Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
 `docs/reborn/contracts/secrets.md`,
 `docs/reborn/contracts/storage-placement.md`,
-`docs/reborn/contracts/kernel-boundary.md`.
+`docs/reborn/contracts/kernel-boundary.md`. (The crate's working rules were
+folded into the Invariants above on 2026-08-06; this README is the crate-local
+home.)

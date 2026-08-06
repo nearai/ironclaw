@@ -71,7 +71,7 @@ source):
 - `ironclaw_sandbox/src/script.rs` still shells out directly
   (`Command::new("docker")`) instead of routing through
   `SandboxCommandTransport` — carried as **Known debt** in
-  [`ironclaw_sandbox/CLAUDE.md`](./ironclaw_sandbox/CLAUDE.md), open on
+  [`ironclaw_sandbox/AGENTS.md`](./ironclaw_sandbox/AGENTS.md), open on
   CHECKLIST's WS3 sandbox row.
 
 ## The rules, and what enforces them
@@ -92,7 +92,7 @@ All in `crates/app/ironclaw_architecture_tests` unless noted; run
   `wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel` asserts
   `ironclaw_wasm_limiter` has **zero workspace dependencies**, and pins the
   `wasm_sandbox_core` module's domain-free rule (including two literal phrases
-  in `ironclaw_wasm/CLAUDE.md` — edit that file with the gate in mind). No
+  in `ironclaw_wasm/AGENTS.md` — edit that file with the gate in mind). No
   `BoundaryRule` names `ironclaw_wasm_limiter` as its `crate_name`: the
   limiter's inbound edges are governed by the layer ladder and the same-layer
   inventory alone.
@@ -104,7 +104,7 @@ All in `crates/app/ironclaw_architecture_tests` unless noted; run
 - **The MCP lane's failure-token charter is armed.**
   `crates/lanes/ironclaw_mcp/tests/module_charter.rs` (run
   `cargo test -p ironclaw_mcp`) fails any module outside `diagnostics` that
-  mints a failure string, and requires the crate's `CLAUDE.md` to keep naming
+  mints a failure string, and requires the crate's `AGENTS.md` to keep naming
   the rule and the gate.
 - **A family directory is never a compilation or trust unit.** The enforced
   truth is each crate's declared layer; family placement is ownership and

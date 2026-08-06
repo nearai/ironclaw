@@ -91,14 +91,14 @@ Resolution order for an existing mirror:
    boundary and MUST stay manual so new sensitive fields do not auto-flow.
 4. `pub use` is legitimate only at an architecture-mandated contract facade;
    never use it as a path-preservation shim or dependency dodge.
-   This is the same exception CLAUDE.md's "no `pub use` re-exports unless
-   exposing to downstream consumers" already draws.
+   This is the same exception the root AGENTS.md's "no `pub use` re-exports
+   unless exposing to downstream consumers" already draws.
 
 ## Relocating a shared module — update imports, don't leave a re-export
 
 When a type or module used by several crates has to move to a lower crate so
 they can all reach it (the canonical case: a pure primitive shared across
-layers moves into `ironclaw_common`, and CLAUDE.md already permits *depending on
+layers moves into `ironclaw_common`, and the root AGENTS.md already permits *depending on
 `common`* from anywhere), **move it and update every consumer's import to the
 new path**. Do NOT leave a `pub use old_path::* ` shim in the original crate to
 preserve `old_crate::thing` call sites — that shim is exactly the

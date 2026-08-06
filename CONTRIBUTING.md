@@ -133,7 +133,7 @@ Select the appropriate track in the PR template based on what your changes touch
 
 ## Database Changes
 
-IronClaw uses dual-backend persistence (PostgreSQL + libSQL) behind the `RootFilesystem` mount catalog. All new persistence features must support both backends. See `crates/substrates/ironclaw_filesystem/CLAUDE.md` and `.claude/rules/database.md`.
+IronClaw uses dual-backend persistence (PostgreSQL + libSQL) behind the `RootFilesystem` mount catalog. All new persistence features must support both backends. See `crates/substrates/ironclaw_filesystem/CONTRACT.md` and `.claude/rules/database.md`.
 
 ## Adding Dependencies
 

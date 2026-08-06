@@ -49,14 +49,14 @@ authorization decision.
 
 ## Invariants
 
-- **The sub-owner map in [`CLAUDE.md`](./CLAUDE.md) is enforced**, not
+- **The sub-owner map in [`AGENTS.md`](./AGENTS.md) is enforced**, not
   documentation: `cargo test -p ironclaw_auth --test module_charter` asserts
   every `src/**/*.rs` file has exactly one of the four owners (`engine`,
   `product-auth`, `vocabulary`, `test-support`) and that the two engines never
   name each other.
 - No raw OAuth codes, PKCE verifiers, tokens, provider bodies, host paths, or
   secret values in any serializable shape — the redaction rules in
-  `CLAUDE.md`; tests use sentinels only to prove redaction.
+  `AGENTS.md`; tests use sentinels only to prove redaction.
 - No turn-kernel dependency (the gate-prompt vocabulary arrives via
   `ironclaw_host_api`); the `BoundaryRule { crate_name: "ironclaw_auth" }` in
   `reborn_dependency_boundaries.rs` forbids kernel/loop/product/app crates and
@@ -76,7 +76,7 @@ cargo test -p ironclaw_auth --test auth_product_contract
 
 ## See also
 
-- Working rules and the enforced sub-owner map: [`CLAUDE.md`](./CLAUDE.md)
+- Working rules and the enforced sub-owner map: [`AGENTS.md`](./AGENTS.md)
   (canonical crate guidance).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Contract doc: `docs/reborn/contracts/auth-product.md`; design record:

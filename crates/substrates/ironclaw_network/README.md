@@ -50,9 +50,14 @@ crate that needed even the policy types.
 ## Invariants
 
 - **Fail closed:** no matching target pattern, or no allowed targets configured,
-  means deny (crate guardrails, `CLAUDE.md`).
+  means deny.
 - **Host matching stays simple:** exact host or one leading wildcard label
   (`*.example.com`), never regex.
+- **Scope travels intact:** tenant/user/agent/project scope is preserved in
+  requests, permits, and errors.
+- **Mechanism only:** no secret injection, resource reservation, audit/event
+  emission, authorization/approval decisions, or product workflow here — those
+  belong to the kernel and the owning domains.
 - **No upward edges:** the `ironclaw_network` `BoundaryRule` in
   `reborn_dependency_boundaries.rs` (`reborn_crate_dependency_boundaries_hold`)
   forbids runtime/workflow/secret/filesystem/resource/event/approval/
@@ -71,7 +76,7 @@ cargo test -p ironclaw_architecture_tests   # boundary + single-egress gates
 
 ## See also
 
-Working rules: [`CLAUDE.md`](./CLAUDE.md) (canonical crate guardrails). Family
-boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
+Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
 `docs/reborn/contracts/network.md`, `docs/reborn/contracts/kernel-boundary.md`,
-`docs/reborn/contracts/resources.md`.
+`docs/reborn/contracts/resources.md`. (The crate's working rules were folded
+into the Invariants above on 2026-08-06; this README is the crate-local home.)

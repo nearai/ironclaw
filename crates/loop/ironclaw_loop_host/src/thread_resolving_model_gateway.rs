@@ -48,8 +48,8 @@ where
 /// this port implementation out of `ironclaw_turn_runner`, and turning its
 /// `pub(super)` fields into `pub` ones to keep the caller's struct literal
 /// working would have let any downstream crate assemble a gateway with no
-/// host-owned construction path (root `CLAUDE.md`: "module-specific
-/// initialization must live in the owning crate as a public factory").
+/// host-owned construction path (root `AGENTS.md`: "module-specific
+/// initialization stays behind factories or builders in the owning crate").
 pub struct ThreadResolvingLoopModelGateway<S, G>
 where
     S: SessionThreadService + ?Sized,

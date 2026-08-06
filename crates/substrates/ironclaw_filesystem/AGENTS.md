@@ -2,8 +2,8 @@
 
 Canonical guidance for this crate lives in:
 
-- [`CLAUDE.md`](./CLAUDE.md) — the crate's **module spec** (this crate is in
-  the root `CLAUDE.md` Module Specs table; code follows spec, spec is the
+- [`CONTRACT.md`](./CONTRACT.md) — the crate's **module spec** (this crate is
+  in the root `AGENTS.md` Module Specs table; code follows spec, spec is the
   tiebreaker).
 - [`README.md`](./README.md) — orientation: what the crate is, public surface,
   measured edges, tests.

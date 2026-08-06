@@ -4,7 +4,7 @@
 //! (non-tenant-partitioned) users directory and filters by the record's own
 //! `tenant_id`; mutations go through the shared, lock-free
 //! [`cas_update`](ironclaw_filesystem::cas_update) helper (never a per-record
-//! mutex — `ironclaw_filesystem/CLAUDE.md` invariant 2); delete cascades over
+//! mutex — `ironclaw_filesystem/CONTRACT.md` invariant 2); delete cascades over
 //! the tenant's external-identity subtree and the verified-email index.
 
 use async_trait::async_trait;

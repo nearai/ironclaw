@@ -1709,7 +1709,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     // Synchronization primitive, not an I/O fault — cannot move to
     // ironclaw_filesystem::FaultInjecting: FaultInjecting injects errors + records
     // ops but is explicitly NOT a read/write-interleaving barrier (see
-    // ironclaw_filesystem/CLAUDE.md). The Barrier(2) interleave is the whole test.
+    // ironclaw_filesystem/CONTRACT.md). The Barrier(2) interleave is the whole test.
     struct BarrierLeaseStore {
         inner: CapabilityLeaseStore<InMemoryBackend>,
         /// Both concurrent auth_resume_json callers rendezvous here after

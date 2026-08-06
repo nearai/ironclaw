@@ -41,7 +41,7 @@ turned each into a compile error.
 
 ## Extension/Auth identity invariant
 
-See `CLAUDE.md` → "Extension/Auth Invariants" for routing rules. The
+See `AGENTS.md` → "Extension/Auth Invariants" for routing rules. The
 types live in `crates/contracts/ironclaw_common/src/identity.rs`:
 
 - [`CredentialName`] — backend secret identity (e.g.

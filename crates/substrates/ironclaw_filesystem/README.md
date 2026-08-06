@@ -79,8 +79,8 @@ from the workspace root via `cargo test --features integration`.
 
 ## See also
 
-**Module spec:** [`CLAUDE.md`](./CLAUDE.md) — this crate is in the root
-`CLAUDE.md` Module Specs table; the spec is the tiebreaker and this README does
+**Module spec:** [`CONTRACT.md`](./CONTRACT.md) — this crate is in the root
+`AGENTS.md` Module Specs table; the spec is the tiebreaker and this README does
 not restate it. Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md).
 Contracts: `docs/reborn/contracts/filesystem.md`,
 `docs/reborn/contracts/storage-placement.md`,

@@ -47,7 +47,7 @@ tracing/observability subsystem — that is `ironclaw_observability`
 - **Deterministic redaction before anything leaves the process** — a change
   that widens what an envelope carries needs a test pinning the *absence* of
   the raw value, not just the presence of the redacted one (see
-  [`CLAUDE.md`](./CLAUDE.md)).
+  [`AGENTS.md`](./AGENTS.md)).
 - The vendor **denylists** in `contribution/tool_payloads.rs` and
   `contribution/classification.rs` are deliberate carve-outs of
   `reborn_extension_specificity.rs` and must stay supersets of the bundled
@@ -69,11 +69,11 @@ cargo test -p ironclaw_trace_commons --test trace_channel_wire_compat
 
 `src/contribution/tests/` mirrors the production charter one module per owner
 — put a new test in the module whose production owner it pins (two named
-exceptions in `CLAUDE.md`).
+exceptions in `AGENTS.md`).
 
 ## See also
 
-- Working rules: [`CLAUDE.md`](./CLAUDE.md) (canonical crate guidance —
+- Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance —
   module map, test-placement rules, gap ledger).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: `families/domains.md`, PROPOSAL §6.4.14.

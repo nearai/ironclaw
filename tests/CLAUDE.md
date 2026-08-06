@@ -452,7 +452,7 @@ verify it.
 | **Sub-agents** have no group scenario | `reborn_subagent_spawn_e2e.rs` + `subagent_await_edge.rs` only. |
 | **Python E2E skip/xfail debt** | Tracked separately in `tests/e2e/E2E_DEBT.md` (ClawHub skills, legacy Gmail/MCP OAuth prerequisites, Telegram OAuth placeholders, portfolio widget, v2 auth/OAuth xfails). Do not silently un-xfail. |
 | **Live-model tool-misuse patterns** are documented but not gated | `tests/e2e/LIVE_TOOL_FAILURES.md` — the assistant claiming a write it never made, etc. No test fails on these today. |
-| **Observability** has no scenario coverage | Only `log` and `noop` backends ship (root `CLAUDE.md` → Current Limitations). |
+| **Observability** has no scenario coverage | `crates/substrates/ironclaw_observability` is latency-trace macros over `tracing` only — there is no exporter backend to exercise. |
 
 ---
 

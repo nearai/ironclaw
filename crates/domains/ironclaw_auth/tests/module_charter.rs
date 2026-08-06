@@ -1,4 +1,4 @@
-//! The sub-owner map in `CLAUDE.md` is a contract, not a comment — and the
+//! The sub-owner map in `AGENTS.md` is a contract, not a comment — and the
 //! two-engine severance it describes is an invariant, not an observation.
 //!
 //! PROPOSAL §6.4.8 asks this crate for the `engine`-vs-`product_auth` split to
@@ -55,18 +55,18 @@ fn source_files() -> Vec<String> {
 /// A file listed under two sub-owners keeps both entries so the caller can
 /// report the ambiguity rather than silently taking the last one.
 fn charter_assignments() -> BTreeMap<String, Vec<String>> {
-    let doc = std::fs::read_to_string(crate_root().join("CLAUDE.md")).expect("read CLAUDE.md");
+    let doc = std::fs::read_to_string(crate_root().join("AGENTS.md")).expect("read AGENTS.md");
     let section = doc
         .split("## Sub-owner map")
         .nth(1)
-        .expect("CLAUDE.md must contain a '## Sub-owner map' section");
+        .expect("AGENTS.md must contain a '## Sub-owner map' section");
     // Stop at the next top-level heading so neighbouring tables are not read.
     let section = section.split("\n## ").next().unwrap_or(section);
     parse_sub_owner_table(section)
 }
 
 /// The table parser, split out from the file read so a fixture can exercise
-/// separator shapes the checked-in `CLAUDE.md` does not currently use.
+/// separator shapes the checked-in `AGENTS.md` does not currently use.
 fn parse_sub_owner_table(section: &str) -> BTreeMap<String, Vec<String>> {
     let mut assignments: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut saw_row = false;
@@ -123,7 +123,7 @@ fn every_source_file_has_exactly_one_sub_owner() {
         .collect();
     assert!(
         unassigned.is_empty(),
-        "{} source file(s) have no sub-owner in CLAUDE.md's '## Sub-owner map'.\n\
+        "{} source file(s) have no sub-owner in AGENTS.md's '## Sub-owner map'.\n\
          Add each to the row of the concern it belongs to (see PROPOSAL §6.4.8).\n\
          A file that is neither engine's belongs to `vocabulary` only if BOTH \
          engines name it; if only one does, it belongs to that engine:\n{}",
@@ -291,7 +291,7 @@ fn module_code(module: &str) -> String {
     assert!(
         dir.is_dir(),
         "expected a top-level `src/{module}/` module; the two-engine split \
-         described in CLAUDE.md and PROPOSAL §6.4.8 no longer matches the tree"
+         described in AGENTS.md and PROPOSAL §6.4.8 no longer matches the tree"
     );
     let mut out = String::new();
     walk(&dir, &mut out);
@@ -405,7 +405,7 @@ fn the_two_engines_do_not_name_each_other() {
 /// goes true, so the zero-rows shape guard stays quiet and the gate reports
 /// `:---` as a stale entry instead of diagnosing anything real.
 ///
-/// The checked-in `CLAUDE.md` uses `|---|`, so without this fixture a reversion
+/// The checked-in `AGENTS.md` uses `|---|`, so without this fixture a reversion
 /// of the `trim_matches(':')` guard would still pass.
 #[test]
 fn an_aligned_separator_row_is_not_parsed_as_data() {

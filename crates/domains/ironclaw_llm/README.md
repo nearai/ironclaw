@@ -44,7 +44,7 @@ isolated here so no non-LLM consumer inherits them.
 
 ## Invariants
 
-- **The sub-owner map in [`CLAUDE.md`](./CLAUDE.md) is enforced:** `cargo test
+- **The sub-owner map in [`CONTRACT.md`](./CONTRACT.md) is enforced:** `cargo test
   -p ironclaw_llm --test module_charter` asserts every `src/**/*.rs` file has
   exactly one of the ten owners; a new file fails until charted.
 - Vendor names are legal **here only** within the family —
@@ -66,8 +66,8 @@ cargo clippy -p ironclaw_llm --all-targets --all-features -- -D warnings
 
 ## See also
 
-- **The module spec is [`CLAUDE.md`](./CLAUDE.md)** (named in the root
-  `CLAUDE.md` Module Specs table): provider selection env vars, per-provider
+- **The module spec is [`CONTRACT.md`](./CONTRACT.md)** (named in the root
+  `AGENTS.md` Module Specs table): provider selection env vars, per-provider
   gotchas, decorator chain order, host trait surface. This README only
   orients — the spec is canonical.
 - Orientation for agents: [`AGENTS.md`](./AGENTS.md) (pointer + reading aid).

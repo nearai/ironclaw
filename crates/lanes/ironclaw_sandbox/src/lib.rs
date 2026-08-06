@@ -29,7 +29,7 @@
 //! saved-output directory through `RebornSandboxScopeKey`'s digest.
 //! There is still no production backend for
 //! `system.process_sandbox.run` — the Docker/CA machinery and the script lane
-//! have no production constructor. See this crate's `CLAUDE.md`.
+//! have no production constructor. See this crate's `AGENTS.md`.
 
 pub mod plan;
 pub mod sandbox_process;

@@ -46,7 +46,7 @@
 //! measured at zero references in both directions and pinned by
 //! `tests/module_charter.rs::the_two_engines_do_not_name_each_other`. The two
 //! engines meet only through the shared vocabulary re-exported from the crate
-//! root, which is a **third** owner in `CLAUDE.md`'s sub-owner map rather than
+//! root, which is a **third** owner in `AGENTS.md`'s sub-owner map rather than
 //! being charged to either engine.
 
 pub mod admission;

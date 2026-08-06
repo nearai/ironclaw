@@ -1,7 +1,7 @@
 # ironclaw_llm
 
-Canonical crate guidance lives in [`CLAUDE.md`](./CLAUDE.md) — the module spec
-named in the root `CLAUDE.md` Module Specs table, carrying the file map, the
+Canonical crate guidance lives in [`CONTRACT.md`](./CONTRACT.md) — the module
+spec named in the root `AGENTS.md` Module Specs table, carrying the file map, the
 **enforced sub-owner map** (`cargo test -p ironclaw_llm --test module_charter`
 reads that file's `## Sub-owner map` section), provider selection, per-provider
 gotchas, and the decorator chain. Orientation, measured surface/deps, and test

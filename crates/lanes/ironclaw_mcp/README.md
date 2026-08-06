@@ -53,14 +53,14 @@ single import path and a module rename is never a breaking change. Highlights:
   which reads this crate's whole `src/` tree with a non-vacuity assertion.
 - **No module builds a failure string of its own:** reasons come from
   `diagnostics`' cause enums — armed by `tests/module_charter.rs` (which also
-  pins that `CLAUDE.md` keeps naming the rule and the gate, and keeps
+  pins that `AGENTS.md` keeps naming the rule and the gate, and keeps
   `impl From<String> for McpClientError` deleted).
 - **No budget authority (#7067):** the lane takes
   `ironclaw_host_api::resource::RuntimeResourceBudget`
   (reserve/reconcile/release) — never `ResourceGovernor`; reservations
   reconcile or release exactly once.
 - **Session isolation** by scope/provider/url; session ids validated before
-  reuse (guardrails, `CLAUDE.md`).
+  reuse (guardrails, `AGENTS.md`).
 
 ## Tests
 
@@ -71,7 +71,7 @@ cargo test -p ironclaw_architecture_tests   # egress scan + layer matrix
 
 ## See also
 
-Working rules: [`CLAUDE.md`](./CLAUDE.md) (canonical crate guardrails —
+Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guardrails —
 gate-pinned by `tests/module_charter.rs`). Family boundary:
 [`crates/lanes/AGENTS.md`](../AGENTS.md). Contracts:
 `docs/reborn/contracts/mcp.md`, `docs/reborn/contracts/runtime-workflows.md`,

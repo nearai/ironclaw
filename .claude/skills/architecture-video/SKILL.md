@@ -20,11 +20,11 @@ Generates and maintains the animated architecture overview video in `docs/archit
 
 Read these files to understand the current system architecture:
 
-- `CLAUDE.md` — top-level project structure, module specs, key traits, principles
+- `AGENTS.md` — top-level commands, invariants, tree map, module specs table
 - `crates/Architecture.md` — **the Reborn stack thesis and component map (the current architecture; lead the video with this)**
 - `crates/AGENTS.md` — the Reborn crate routing map
-- `crates/domains/ironclaw_llm/CLAUDE.md` — canonical LLM provider architecture
-- `src/db/CLAUDE.md` — database dual-backend architecture
+- `crates/domains/ironclaw_llm/CONTRACT.md` — canonical LLM provider architecture
+- `crates/substrates/ironclaw_filesystem/CONTRACT.md` — storage fabric / dual-backend architecture
 - `src/tools/README.md` — v1 tool system architecture
 - `src/workspace/README.md` — v1 workspace/memory architecture
 

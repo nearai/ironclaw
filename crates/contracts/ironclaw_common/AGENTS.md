@@ -11,7 +11,7 @@ in the root module-spec table). Orientation and public surface:
   dependencies and feature shape.
 - Use these sources of truth before changing shared types:
 - `.claude/rules/types.md` (the newtype template contract is anchored here)
-- the repo root `CLAUDE.md`
+- the repo root `AGENTS.md`
 
 ## What This Crate Owns
 

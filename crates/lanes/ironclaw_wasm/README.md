@@ -61,7 +61,7 @@ permitted to hold one.
   references; scanned by
   `wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel`
   (`reborn_dependency_boundaries.rs`), which also pins two literal phrases in
-  this crate's `CLAUDE.md` — keep that file's wording intact.
+  this crate's `AGENTS.md` — keep that file's wording intact.
 - **No direct networking:** scanned by
   `reborn_runtime_http_egress_has_single_network_boundary`.
 - **Single `include_str!` owner for the ABI text**, exported as `TOOL_WIT`;
@@ -78,7 +78,7 @@ cargo test -p ironclaw_architecture_tests   # sandbox-core scan + egress scan + 
 
 ## See also
 
-Working rules and safety rules: [`CLAUDE.md`](./CLAUDE.md) (canonical —
+Working rules and safety rules: [`AGENTS.md`](./AGENTS.md) (canonical —
 gate-pinned wording). Family boundary:
 [`crates/lanes/AGENTS.md`](../AGENTS.md), including why `wit/` living here is
 load-bearing. Contracts: `docs/reborn/contracts/wasm.md`,

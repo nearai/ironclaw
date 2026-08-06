@@ -98,5 +98,5 @@ Contract suites live in `tests/`: `lifecycle_contract.rs` (requires
 
 `crates/extensions/AGENTS.md` (the family rules and the unified extension
 model); `docs/reborn/target-architecture/families/extensions.md` §"ironclaw_extension_host";
-`crates/extensions/ironclaw_extension_manager/CLAUDE.md` for what deliberately
+`crates/extensions/ironclaw_extension_manager/AGENTS.md` for what deliberately
 stayed here and why.

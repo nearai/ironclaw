@@ -31,7 +31,7 @@
 //!
 //! Encryption-at-rest currently lives **inside this store** rather than as a
 //! generic [`EncryptedBackend`] backend decorator. The
-//! [`ironclaw_filesystem::CLAUDE.md`](../ironclaw_filesystem/CLAUDE.md) invariant
+//! [`ironclaw_filesystem::CONTRACT.md`](../ironclaw_filesystem/CONTRACT.md) invariant
 //! `5` describes the eventual destination: a backend wrapper that encrypts
 //! `Entry::body` plus any `IndexValue::Bytes` projection. Until that decorator
 //! lands, the same [`SecretsCrypto`] used by the libSQL/Postgres backends is
