@@ -525,13 +525,20 @@ mod tests {
             CapabilityDescriptionTrust::VerifiedCatalog,
         );
         let authorized = [&first, &second];
-        let before = AuthorizedToolSearchIndex::new(authorized).search("assignee", 10);
-        let effective_after_denied_schema_change =
-            AuthorizedToolSearchIndex::new(authorized).search("assignee", 10);
+        let authorized_index = AuthorizedToolSearchIndex::new(authorized);
+        let unfiltered_index = AuthorizedToolSearchIndex::new([&first, &second, &denied]);
 
-        assert_eq!(before, effective_after_denied_schema_change);
-        assert_eq!(before.names, vec!["allowed__first", "allowed__second"]);
-        assert!(!before.names.contains(&denied.name.to_string()));
+        assert_eq!(authorized_index.document_frequencies["assignee"], 2);
+        assert_eq!(unfiltered_index.document_frequencies["assignee"], 3);
+        assert_eq!(
+            unfiltered_index.search("assignee", 10).names,
+            vec!["denied__stuffed", "allowed__first", "allowed__second"],
+            "a denied document would change corpus statistics, ordering, and result count if admitted"
+        );
+        assert_eq!(
+            authorized_index.search("assignee", 10).names,
+            vec!["allowed__first", "allowed__second"]
+        );
     }
 
     #[test]
