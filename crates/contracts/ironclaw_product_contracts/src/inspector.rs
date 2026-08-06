@@ -599,6 +599,17 @@ impl ModelCallDiagnostic {
             failure_summary: failure_summary.map(BoundedDiagnosticText::summary),
         }
     }
+
+    pub fn into_bounded(mut self) -> Self {
+        self.requested_model = self.requested_model.rebound(DIAGNOSTIC_LABEL_MAX_BYTES);
+        self.effective_model = self
+            .effective_model
+            .map(|model| model.rebound(DIAGNOSTIC_LABEL_MAX_BYTES));
+        self.failure_summary = self
+            .failure_summary
+            .map(|summary| summary.rebound(DIAGNOSTIC_SUMMARY_MAX_BYTES));
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -704,6 +715,26 @@ impl ToolExecutionDiagnostic {
         }
     }
 
+    pub fn into_bounded(mut self) -> Self {
+        self.capability_name = self.capability_name.rebound(DIAGNOSTIC_LABEL_MAX_BYTES);
+        self.arguments = self
+            .arguments
+            .map(|arguments| arguments.rebound(TOOL_ARGUMENTS_MAX_BYTES));
+        self.result = self
+            .result
+            .map(|result| result.rebound(TOOL_RESULT_MAX_BYTES));
+        if let Some(result) = self.result.as_ref() {
+            self.output_bytes = Some(result.original_bytes());
+        }
+        self.failure_category = self
+            .failure_category
+            .map(|category| category.rebound(DIAGNOSTIC_LABEL_MAX_BYTES));
+        self.failure_summary = self
+            .failure_summary
+            .map(|summary| summary.rebound(DIAGNOSTIC_SUMMARY_MAX_BYTES));
+        self
+    }
+
     pub fn result_truncated(&self) -> bool {
         self.result
             .as_ref()
@@ -758,6 +789,13 @@ impl DiagnosticActivityEvent {
             summary: summary.map(BoundedDiagnosticText::summary),
         }
     }
+
+    pub fn into_bounded(mut self) -> Self {
+        self.summary = self
+            .summary
+            .map(|summary| summary.rebound(DIAGNOSTIC_SUMMARY_MAX_BYTES));
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -786,6 +824,11 @@ impl DiagnosticModelCount {
             calls,
         }
     }
+
+    pub fn into_bounded(mut self) -> Self {
+        self.model = self.model.rebound(DIAGNOSTIC_LABEL_MAX_BYTES);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -810,6 +853,11 @@ impl SessionDiagnosticStats {
             self.calls_per_model.truncate(MAX_MODELS_IN_STATS);
             self.calls_per_model_truncated = true;
         }
+        self.calls_per_model = self
+            .calls_per_model
+            .into_iter()
+            .map(DiagnosticModelCount::into_bounded)
+            .collect();
         self
     }
 }

@@ -336,6 +336,7 @@ impl InMemoryDiagnosticStore {
         scope: DiagnosticScope,
         model_call: ModelCallDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        let model_call = model_call.into_bounded();
         let update = DiagnosticUpdateKind::ModelCall(model_call.clone());
         let cap = self.limits.max_model_calls_per_run;
         self.record(scope, update, move |run, _| {
@@ -353,6 +354,7 @@ impl InMemoryDiagnosticStore {
         scope: DiagnosticScope,
         tool: ToolExecutionDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        let tool = tool.into_bounded();
         let update = DiagnosticUpdateKind::ToolExecutionUpdated {
             activity_id: tool.activity_id,
             model_call_id: tool.model_call_id,
@@ -375,6 +377,7 @@ impl InMemoryDiagnosticStore {
         scope: DiagnosticScope,
         event: DiagnosticActivityEvent,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        let event = event.into_bounded();
         let update = DiagnosticUpdateKind::Activity(event.clone());
         let cap = self.limits.max_activity_entries_per_run;
         self.record(scope, update, move |run, sequence| {
@@ -578,12 +581,13 @@ mod tests {
         turn::TurnRunId,
     };
     use ironclaw_product_contracts::inspector::{
-        BoundedDiagnosticText, DIAGNOSTIC_LABEL_MAX_BYTES, DiagnosticActivityEvent,
-        DiagnosticActivityKind, DiagnosticModelCallId, DiagnosticScope, InspectorModelCallStatus,
-        MAX_ACTIVE_SKILLS, MAX_PROMPT_COMPONENTS, ModelCallDiagnostic,
+        BoundedDiagnosticText, DIAGNOSTIC_LABEL_MAX_BYTES, DIAGNOSTIC_SUMMARY_MAX_BYTES,
+        DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticModelCallId,
+        DiagnosticModelCount, DiagnosticScope, InspectorModelCallStatus, MAX_ACTIVE_SKILLS,
+        MAX_MODELS_IN_STATS, MAX_PROMPT_COMPONENTS, ModelCallDiagnostic,
         PROMPT_COMPONENT_CONTENT_MAX_BYTES, PROMPT_COMPONENT_TOTAL_MAX_BYTES,
-        PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, ToolExecutionDiagnostic,
-        ToolExecutionStatus,
+        PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, TOOL_ARGUMENTS_MAX_BYTES,
+        TOOL_RESULT_MAX_BYTES, ToolExecutionDiagnostic, ToolExecutionStatus,
     };
 
     use super::*;
@@ -883,6 +887,147 @@ mod tests {
                 .effective_model
                 .as_ref()
                 .is_some_and(|model| model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn record_boundaries_reapply_limits_to_literal_dtos() {
+        let mut limits = tiny_limits();
+        limits.max_updates_per_run = 8;
+        let store = InMemoryDiagnosticStore::new(limits).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let model_call_id = DiagnosticModelCallId::new();
+        let activity_id = ironclaw_host_api::turn::CapabilityActivityId::new();
+        let oversized_label =
+            BoundedDiagnosticText::reconstructed_prompt("l".repeat(DIAGNOSTIC_LABEL_MAX_BYTES + 1));
+        let oversized_summary = BoundedDiagnosticText::reconstructed_prompt(
+            "s".repeat(DIAGNOSTIC_SUMMARY_MAX_BYTES + 1),
+        );
+        let oversized_tool_text =
+            BoundedDiagnosticText::reconstructed_prompt("x".repeat(TOOL_ARGUMENTS_MAX_BYTES + 1));
+
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic {
+                    call_id: model_call_id,
+                    iteration: 1,
+                    requested_model: oversized_label.clone(),
+                    effective_model: Some(oversized_label.clone()),
+                    started_at: Utc::now(),
+                    completed_at: None,
+                    duration_ms: None,
+                    status: InspectorModelCallStatus::Failed,
+                    usage: None,
+                    failure_summary: Some(oversized_summary.clone()),
+                },
+            )
+            .expect("model call");
+        store
+            .record_tool_execution(
+                scope.clone(),
+                ToolExecutionDiagnostic {
+                    activity_id,
+                    model_call_id: Some(model_call_id),
+                    capability_name: oversized_label.clone(),
+                    arguments: Some(oversized_tool_text.clone()),
+                    result: Some(oversized_tool_text.clone()),
+                    status: ToolExecutionStatus::Failed,
+                    duration_ms: None,
+                    output_bytes: Some(1),
+                    failure_category: Some(oversized_label.clone()),
+                    failure_summary: Some(oversized_summary.clone()),
+                },
+            )
+            .expect("tool execution");
+        store
+            .record_activity(
+                scope.clone(),
+                DiagnosticActivityEvent {
+                    occurred_at: Utc::now(),
+                    kind: DiagnosticActivityKind::ToolFailed,
+                    iteration: Some(1),
+                    activity_id: Some(activity_id),
+                    model_call_id: Some(model_call_id),
+                    summary: Some(oversized_summary),
+                },
+            )
+            .expect("activity");
+        store
+            .record_stats(
+                scope.clone(),
+                SessionDiagnosticStats {
+                    calls_per_model: (0..=MAX_MODELS_IN_STATS)
+                        .map(|_| DiagnosticModelCount {
+                            model: oversized_label.clone(),
+                            calls: 1,
+                        })
+                        .collect(),
+                    ..SessionDiagnosticStats::default()
+                },
+            )
+            .expect("stats");
+
+        let snapshot = store.snapshot(&scope).expect("snapshot").expect("run");
+        let model_call = snapshot.model_calls.first().expect("model call");
+        assert!(model_call.requested_model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES);
+        assert!(
+            model_call
+                .effective_model
+                .as_ref()
+                .is_some_and(|model| model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+        assert!(
+            model_call
+                .failure_summary
+                .as_ref()
+                .is_some_and(|summary| summary.content().len() <= DIAGNOSTIC_SUMMARY_MAX_BYTES)
+        );
+
+        let tool = snapshot.tool_executions.first().expect("tool execution");
+        assert!(tool.capability_name.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES);
+        assert!(
+            tool.arguments
+                .as_ref()
+                .is_some_and(|arguments| arguments.content().len() <= TOOL_ARGUMENTS_MAX_BYTES)
+        );
+        assert!(
+            tool.result
+                .as_ref()
+                .is_some_and(|result| result.content().len() <= TOOL_RESULT_MAX_BYTES)
+        );
+        assert_eq!(
+            tool.output_bytes,
+            tool.result
+                .as_ref()
+                .map(BoundedDiagnosticText::original_bytes)
+        );
+        assert!(
+            tool.failure_category
+                .as_ref()
+                .is_some_and(|category| category.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+        assert!(
+            tool.failure_summary
+                .as_ref()
+                .is_some_and(|summary| summary.content().len() <= DIAGNOSTIC_SUMMARY_MAX_BYTES)
+        );
+
+        let event = &snapshot.activity.first().expect("activity").event;
+        assert!(
+            event
+                .summary
+                .as_ref()
+                .is_some_and(|summary| summary.content().len() <= DIAGNOSTIC_SUMMARY_MAX_BYTES)
+        );
+        assert!(snapshot.stats.calls_per_model_truncated);
+        assert_eq!(snapshot.stats.calls_per_model.len(), MAX_MODELS_IN_STATS);
+        assert!(
+            snapshot
+                .stats
+                .calls_per_model
+                .iter()
+                .all(|count| count.model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
         );
     }
 
