@@ -27,6 +27,14 @@ use super::{
 
 const CAPABILITY_SURFACE_USAGE_POLICY: &str =
     include_str!("../prompts/capability_surface_usage_policy.md");
+/// Single delivery-guidance block: how to route content off the current
+/// conversation (`builtin__outbound_deliver`/`builtin__outbound_delivery_targets_list`)
+/// versus act-as-user integration messaging tools. Rendered by
+/// `runtime_context::LoopRuntimeContext::render_model_content` only when the
+/// communication slice's `delivery_tools_visible` flag is true — visible here
+/// (`pub(super)`) so that sibling module can reach it without re-deriving
+/// visibility itself.
+pub(super) const DELIVERY_GUIDANCE: &str = include_str!("../prompts/delivery.md");
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);

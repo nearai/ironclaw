@@ -350,7 +350,7 @@ fn delivery_run_services(
     services: &RebornRuntime,
     extension_id: &str,
 ) -> RunDeliveryServices {
-    let (outbound_store, route_store, communication_preferences, _) = services
+    let (outbound_store, route_store, communication_preferences, _, delivery_targets) = services
         .outbound_delivery_stores_for_test()
         .expect("composed runtime exposes the coordinator's outbound stores");
     let coordinator = services
@@ -376,6 +376,7 @@ fn delivery_run_services(
         route_store,
         communication_preferences,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        delivery_targets,
         coordinator,
         extension_id: extension_id.to_string(),
         fallback_notice_scope,
@@ -600,7 +601,7 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
 /// terminal `Delivered`, and none is stranded mid-lifecycle
 /// (`Prepared`/`Sending` — persist-before-egress must settle terminally).
 async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
-    let (outbound_store, _, _, _) = services
+    let (outbound_store, _, _, _, _) = services
         .outbound_delivery_stores_for_test()
         .expect("outbound stores");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);

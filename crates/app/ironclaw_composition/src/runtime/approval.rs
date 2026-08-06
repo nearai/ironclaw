@@ -13,8 +13,8 @@ use crate::builtin_capability_policy::{
     BuiltinApprovalPolicyAction, BuiltinCapabilityPolicy, BuiltinCapabilityPolicyError,
     builtin_one_shot_lease_approval,
 };
-use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 use crate::runtime_mounts::WorkspaceMountPolicy;
+use ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID;
 
 use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
 
@@ -200,7 +200,7 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             });
         }
-        if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+        if action.capability_id().as_str() == OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID {
             let workspace_mounts = self.workspace_mounts_for(gate)?;
             match self.policy.lease_approval_for(
                 action,
@@ -473,10 +473,20 @@ mod tests {
             .expect("active extension default ask should allow explicit persistent approval");
     }
 
+    /// Regression pin for the `builtin.notification_channels_set`
+    /// `[[grants]]` entry in `builtin_capability_policy.toml`: this is the
+    /// ONE path that actually depends on that grant being present (the
+    /// `persistent_approval_allowed` special case — see
+    /// `PolicyApprovalLeaseTermsProvider::persistent_approval_allowed`'s
+    /// `OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID` check). Distinct
+    /// from the ordinary approval-gate raise/approve/resume dance in
+    /// `local_dev::notification_channels_set`, which does not consult this
+    /// terms provider at all — deleting the grant would not fail that path,
+    /// only this "Always Allow" persistent-approval one.
     #[tokio::test]
-    async fn outbound_delivery_target_set_allows_persistent_approval() {
-        let capability =
-            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
+    async fn notification_channels_set_allows_persistent_approval() {
+        let capability = CapabilityId::new(OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID)
+            .expect("capability id");
         let caller = ExtensionId::new("loop-driver").expect("caller id");
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
@@ -499,7 +509,7 @@ mod tests {
         terms_provider
             .persistent_approval_allowed(&gate)
             .await
-            .expect("outbound delivery target set should allow persistent approval");
+            .expect("notification channels set should allow persistent approval");
     }
 
     #[tokio::test]

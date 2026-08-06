@@ -279,8 +279,8 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     ),
     (
         "outbound",
-        "OUTBOUND_DELIVERY_TARGETS_LIST/TARGET_SET_CAPABILITY_ID (harness/profiles/outbound.rs) \
-         are local-dev synthetic capabilities (C-SYNTH outbound, \
+        "OUTBOUND_DELIVERY_TARGETS_LIST/NOTIFICATION_CHANNELS_SET_CAPABILITY_ID \
+         (harness/profiles/outbound.rs) are local-dev synthetic capabilities (C-SYNTH outbound, \
          ironclaw_composition::test_support), not part of builtin_first_party_package()",
     ),
     (

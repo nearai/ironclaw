@@ -35,6 +35,7 @@ pub(super) enum ProductCommandHandler {
     AutomationResume,
     AutomationRename,
     AutomationDelete,
+    NotificationChannelsSet,
 }
 
 impl ProductCommandHandler {
@@ -72,6 +73,7 @@ impl ProductCommandHandler {
             AUTOMATION_RESUME_COMMAND_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
+            NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
             _ => None,
         }
     }
@@ -305,6 +307,10 @@ impl ProductCommandHandler {
                         .delete_automation(caller, request.automation_id)
                         .await?,
                 )
+            }
+            Self::NotificationChannelsSet => {
+                let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
+                command_output(services.set_notification_channels(caller, request).await?)
             }
         }
     }

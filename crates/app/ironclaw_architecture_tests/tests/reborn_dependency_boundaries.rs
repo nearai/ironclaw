@@ -617,7 +617,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     /// failure message. Never counted by eye.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
-        ("ironclaw_extension_contracts", 7_727),
+        // 7_727 -> 7_748 (2026-08-05, #7157): +21 lines for the
+        // `ActivePreferenceTargetCodecs` port beside its sibling
+        // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
+        // no logic. Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 7_748),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -625,7 +629,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // only; executable validation stays in ironclaw_host_runtime. Rationale
         // reviewed in the PR body's architecture-audit section.
         ("ironclaw_host_api", 18_570),
-        ("ironclaw_loop_contracts", 14_479),
+        // 14_479 -> 13_850 (2026-08-05, #7157): downward re-capture after the
+        // delivery-heuristic vocabulary (stored trigger delivery targets and
+        // their run-profile plumbing) left this crate with the two-lane
+        // delivery model. Count read from this test's own banked-slack
+        // failure message.
+        ("ironclaw_loop_contracts", 13_850),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

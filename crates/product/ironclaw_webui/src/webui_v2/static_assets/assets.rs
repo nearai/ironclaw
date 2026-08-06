@@ -445,15 +445,16 @@ mod tests {
         assert!(api.contains("/pause"));
         assert!(api.contains("/resume"));
         assert!(api.contains(r#"method: "DELETE""#));
-        assert!(api.contains("getOutboundPreferences"));
-        assert!(api.contains("setOutboundPreferences"));
-        assert!(api.contains("/outbound/preferences"));
+        assert!(api.contains("listOutboundDeliveryTargets"));
         assert!(api.contains("/outbound/targets"));
+        assert!(api.contains("getNotificationChannels"));
+        assert!(api.contains("setNotificationChannels"));
+        assert!(api.contains("/outbound/notification-channels"));
 
         let page = source_text("pages/automations/automations-page.tsx");
         assert!(page.contains("AutomationsSummaryStrip"));
-        assert!(page.contains("AutomationDeliveryDefaultsPanel"));
-        assert!(page.contains("useOutboundDeliveryDefaults"));
+        assert!(page.contains("NotificationChannelsPanel"));
+        assert!(page.contains("useNotificationChannels"));
         assert!(page.contains("AutomationsList"));
 
         let automations_hook = source_text("pages/automations/hooks/useAutomations.ts");
@@ -502,29 +503,45 @@ mod tests {
             "served WebUI bundle must include the automation delete endpoint; run the frontend build after editing frontend/src/**"
         );
 
-        let defaults_panel =
-            source_text("pages/automations/components/automation-delivery-defaults-panel.tsx");
-        assert!(defaults_panel.contains("finalReplyTargets"));
-        assert!(defaults_panel.contains("saveFinalReplyTarget"));
-        // Badge label must branch on optStatus — unavailable targets must not
-        // display the "ready" label.
+        let channels_panel =
+            source_text("pages/automations/components/notification-channels-panel.tsx");
+        assert!(channels_panel.contains(r#"type="checkbox""#));
+        assert!(channels_panel.contains("saveNotificationChannels"));
+        assert!(channels_panel.contains("automations.notificationChannels.webOnlyHelper"));
+        // Badge label must branch on row status — an unavailable (stored but
+        // no-longer-resolving) channel must not display the "ready" label.
         assert!(
-            defaults_panel.contains("automations.delivery.pill.unavailable"),
-            "unavailable badge label key must be used in the target option rows"
+            channels_panel.contains("automations.notificationChannels.pill.unavailable"),
+            "unavailable badge label key must be used in the channel rows"
         );
         assert!(
-            !defaults_panel.contains(r#"label={t("automations.delivery.pill.ready")}"#),
-            "target option badge label must not be unconditionally hardcoded to .pill.ready"
+            !channels_panel.contains(r#"label={t("automations.notificationChannels.pill.ready")}"#),
+            "channel row badge label must not be unconditionally hardcoded to .pill.ready"
         );
 
-        let defaults_hook = source_text("pages/automations/hooks/useOutboundDeliveryDefaults.ts");
-        assert!(defaults_hook.contains("listOutboundDeliveryTargets"));
-        assert!(defaults_hook.contains("setOutboundPreferences"));
+        let channels_hook = source_text("pages/automations/hooks/useNotificationChannels.ts");
+        assert!(channels_hook.contains("listOutboundDeliveryTargets"));
+        assert!(channels_hook.contains("getNotificationChannels"));
+        assert!(channels_hook.contains("setNotificationChannels"));
+        // A stored id absent from the live catalog must still produce a row
+        // (Task 8's `RebornNotificationChannel`: unavailable, not dropped).
+        assert!(channels_hook.contains("orphanRows"));
 
         let presenter = source_text("pages/automations/lib/automations-presenters.ts");
         assert!(presenter.contains("source?.type === \"schedule\""));
         assert!(presenter.contains("Custom schedule"));
         assert!(!presenter.contains("Webhook"));
+
+        for deleted in [
+            "pages/automations/components/automation-delivery-defaults-panel.tsx",
+            "pages/automations/hooks/useOutboundDeliveryDefaults.ts",
+        ] {
+            let full = format!("{}/frontend/src/{deleted}", env!("CARGO_MANIFEST_DIR"));
+            assert!(
+                !std::path::Path::new(&full).exists(),
+                "{deleted} was renamed to the notification-channels panel/hook and must not return"
+            );
+        }
     }
 
     #[test]

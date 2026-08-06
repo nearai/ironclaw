@@ -159,6 +159,7 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 #
 # `scripts/ci/test_reborn_pr_test_plan.py` pins both halves: that the mapping
 # routes (not ignores), and that every prefix and owner below still exists.
+BUNDLED_SKILLS_PREFIX = "skills/"
 EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # manifests, prompts, schemas and built `wasm/*.wasm` for the first-party
     # extension packages -> `ironclaw_extension_support`
@@ -173,6 +174,16 @@ EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # whole tree to the embedding crate over-schedules those rather than
     # letting a fixture change select nothing at all.
     ("test-tools/", "ironclaw_extension_host"),
+    # the bundled Reborn product skills. `ironclaw_extension_host`'s build
+    # script (`build.rs`, `embed_reborn_skills`) walks this repo-root tree,
+    # parses every `skills/<name>/SKILL.md`, and embeds each skill's complete
+    # file set byte-for-byte into the binary (`src/bundled_skills.rs`), with
+    # `cargo:rerun-if-changed` on every file. Unlike the two trees above,
+    # *every* file here is shipped product output — Markdown included, which
+    # is why `_is_shipped_asset_markdown` special-cases this prefix instead of
+    # keying on a `prompts/` segment. Unclassified until 2026-08-05, when the
+    # fail-closed arm rejected #7157 on `skills/delegation/SKILL.md`.
+    (BUNDLED_SKILLS_PREFIX, "ironclaw_extension_host"),
 )
 EMBEDDED_ASSET_PREFIXES: tuple[str, ...] = tuple(
     prefix for prefix, _ in EMBEDDED_ASSET_OWNERS
@@ -183,18 +194,26 @@ CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
 )
 
 
-def _is_package_prompt(path: str) -> bool:
-    """True for a shipped prompt inside an asset tree owned by the table above.
+def _is_shipped_asset_markdown(path: str) -> bool:
+    """True for Markdown that is itself a shipped asset in a table-owned tree.
 
-    Prompts are the one Markdown *asset* kind: the table owns "manifests,
-    prompts, schemas and built `wasm/*.wasm`", and the other three are `.toml`,
-    `.json` and `.wasm`. Everything else ending in `.md` under those trees is
-    documentation — `test-tools/README.md`, a package `AGENTS.md` — and stays
-    prose. Keyed on the directory segment so it holds at any depth
-    (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    Two Markdown *asset* kinds exist, and everything else ending in `.md`
+    under the asset trees is documentation — `test-tools/README.md`, a package
+    `AGENTS.md` — and stays prose:
+
+    * **Prompts** in the package and fixture trees: the table owns "manifests,
+      prompts, schemas and built `wasm/*.wasm`", and of those kinds only a
+      prompt is Markdown (the other three are `.toml`, `.json` and `.wasm`).
+      Keyed on the directory segment so it holds at any depth
+      (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    * **Bundled skills**: under `skills/` every file is the shipped artifact —
+      `build.rs` parses each `SKILL.md` and embeds each skill's complete file
+      set — so all Markdown there is product output, keyed on the tree itself.
     """
     if not path.startswith(EMBEDDED_ASSET_PREFIXES):
         return False
+    if path.startswith(BUNDLED_SKILLS_PREFIX):
+        return True
     return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
     "tests/fixtures/extensions/acme-messenger/manifest.toml": (
@@ -741,24 +760,27 @@ def build_plan(
             # after the WS7 family move. A crate-resident doc still resolves to
             # its package below and keeps selecting that package's lane.
             #
-            # The carve-out yields to a shipped *prompt*, and must. The asset
-            # table declares it owns "manifests, prompts, schemas and built
-            # `wasm/*.wasm`"; of those kinds only a prompt is Markdown
-            # (manifests are `.toml`, schemas `.json`, wasm `.wasm`), so
-            # `.md` under a `prompts/` directory is an asset and every other
-            # `.md` is prose. Without this clause the prose arm fired first and
-            # a change to a shipped prompt — production output that
-            # `ironclaw_extension_support` compiles in — planned `mode=none`,
-            # selecting no lane at all, while its sibling `manifest.toml` in the
-            # same package correctly selected two. That is exactly the "silent
-            # under-schedule of a change to production output" the comment above
-            # `EMBEDDED_ASSET_OWNERS` forbids.
+            # The carve-out yields to shipped Markdown *assets*, and must.
+            # Prompts: the asset table declares it owns "manifests, prompts,
+            # schemas and built `wasm/*.wasm`"; of those kinds only a prompt is
+            # Markdown (manifests are `.toml`, schemas `.json`, wasm `.wasm`),
+            # so `.md` under a `prompts/` directory is an asset. Bundled
+            # skills: under `skills/` every file is embedded product output,
+            # `SKILL.md` first among them, so all its Markdown is an asset.
+            # Every other `.md` is prose. Without this clause the prose arm
+            # fired first and a change to a shipped prompt — production output
+            # that `ironclaw_extension_support` compiles in — planned
+            # `mode=none`, selecting no lane at all, while its sibling
+            # `manifest.toml` in the same package correctly selected two. That
+            # is exactly the "silent under-schedule of a change to production
+            # output" the comment above `EMBEDDED_ASSET_OWNERS` forbids.
             #
-            # Keyed on the `prompts/` segment rather than on the asset prefixes
-            # themselves, because those prefixes also cover genuine prose:
-            # `test-tools/README.md` is documentation of the fixture bundles and
-            # stays prose, as its own test pins.
-            if Path(path).suffix == ".md" and not _is_package_prompt(path):
+            # Keyed on the `prompts/` segment (or the `skills/` tree) rather
+            # than on the asset prefixes themselves, because the package and
+            # fixture prefixes also cover genuine prose: `test-tools/README.md`
+            # is documentation of the fixture bundles and stays prose, as its
+            # own test pins.
+            if Path(path).suffix == ".md" and not _is_shipped_asset_markdown(path):
                 if not any(
                     path.startswith(f"{directory}/")
                     for directory in package_directories

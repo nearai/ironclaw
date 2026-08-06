@@ -111,9 +111,8 @@ async fn golden_multi_turn_history() {
 /// a substring check like `assert_model_request_contains` cannot see.
 #[tokio::test]
 async fn golden_context_surfacing() {
-    let provider = RecordingCommunicationContextProvider::with_target_and_channel(
-        "reborn-golden-target",
-        "slack",
+    let provider = RecordingCommunicationContextProvider::with_notification_count_and_channel(
+        1,
         "reborn-golden-channel",
     );
     let h = RebornIntegrationHarness::test_default()

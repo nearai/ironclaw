@@ -19,6 +19,7 @@ pub enum OutboundPushKind {
     GateRequired,
     AuthPrompt,
     DeliveryStatus,
+    ModelDelivery,
 }
 
 impl From<CommunicationDeliveryKind> for OutboundPushKind {
@@ -29,6 +30,7 @@ impl From<CommunicationDeliveryKind> for OutboundPushKind {
             CommunicationDeliveryKind::ApprovalPrompt => Self::GateRequired,
             CommunicationDeliveryKind::AuthPrompt => Self::AuthPrompt,
             CommunicationDeliveryKind::DeliveryStatus => Self::DeliveryStatus,
+            CommunicationDeliveryKind::ModelDelivery => Self::ModelDelivery,
         }
     }
 }
@@ -42,6 +44,7 @@ impl OutboundPushKind {
             Self::GateRequired => "gate_required",
             Self::AuthPrompt => "auth_prompt",
             Self::DeliveryStatus => "delivery_status",
+            Self::ModelDelivery => "model_delivery",
         }
     }
 }

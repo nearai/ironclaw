@@ -166,11 +166,18 @@ impl HarnessCapabilityMode {
                         trajectory_observer.clone(),
                     );
                 }
-                if harness
-                    .capability_ids
-                    .iter()
-                    .any(|id| id.as_str() == ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID)
-                    && harness.reborn_services_for_test().is_some()
+                // Every capability that looks up "the run this call belongs
+                // to" reads composition's ONE source-turn-state slot:
+                // `trigger_create` (source-conversation inheritance) and
+                // `outbound_deliver` (same-origin check). Repoint it at the
+                // group's store whenever either is on this profile's surface.
+                if harness.capability_ids.iter().any(|id| {
+                    matches!(
+                        id.as_str(),
+                        ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID
+                            | ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID
+                    )
+                }) && harness.reborn_services_for_test().is_some()
                 {
                     harness.install_trigger_source_processes_for_test(&process_system)?;
                 }
@@ -1403,8 +1410,9 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// C-SYNTH outbound: the injected service double, for read-back that a
-    /// `target_set` actually reached the service seam
-    /// (`recorded_set_target_ids`). `Some` only for `outbound_target_tools()`.
+    /// notification-channel set actually reached the service seam
+    /// (`recorded_notification_channel_ids`). `Some` only for
+    /// `outbound_target_tools()`.
     pub(crate) fn outbound_preferences_service_for_test(
         &self,
     ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesService>> {
@@ -1414,14 +1422,14 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// C-SYNTH outbound: persist a `Disabled` per-tool permission override for
-    /// `outbound_delivery_target_set` under `(tenant, user)`, driving the
+    /// `notification_channels_set` under `(tenant, user)`, driving the
     /// handler's settings decision to `Deny` → `Failed{policy_denied}`. The
     /// scope must be the run's EFFECTIVE dispatch user (the thread binding actor,
     /// `harness.binding.actor_user_id`) — the same `(tenant, user)`
     /// `StoreApprovalSettingsProvider::tool_override` reads it back under
     /// (`PersistentApprovalScope` = tenant+user, invocation-independent). `Some`
     /// only for `outbound_target_tools()`.
-    pub(crate) async fn disable_outbound_target_set_tool(
+    pub(crate) async fn disable_notification_channels_set_tool(
         &self,
         tenant_id: TenantId,
         user_id: UserId,
@@ -1444,7 +1452,7 @@ impl HostRuntimeCapabilityHarness {
             .set(ironclaw_approvals::CapabilityPermissionOverrideInput {
                 scope,
                 capability_id: CapabilityId::new(
-                    ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+                    ironclaw_composition::test_support::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
                 )?,
                 state: ironclaw_approvals::CapabilityPermissionOverride::Disabled,
                 updated_by: Principal::User(user_id),
@@ -1726,7 +1734,7 @@ impl HostRuntimeCapabilityHarness {
             .clone()
             .unwrap_or_else(|| Arc::new(super::doubles::UnavailableProjectService));
         // Wrapped in `RecordingApprovalRequestStore`: port-level synthetic
-        // capabilities (e.g. `outbound_delivery_target_set`) persist approval
+        // capabilities (e.g. `notification_channels_set`) persist approval
         // requests directly to this store rather than through the host
         // runtime, so `RecordingHostRuntime` never sees their scope — the
         // wrapper restores the `pending_approval_scopes` bookkeeping
@@ -1795,7 +1803,7 @@ impl HostRuntimeCapabilityHarness {
             Arc::clone(&parts.service)
                 as Arc<dyn ironclaw_assistant::OutboundPreferencesProductService>
         });
-        let outbound_delivery_target_set_requires_approval = self
+        let outbound_preference_write_requires_approval = self
             .outbound_target_tools
             .as_ref()
             .map(|parts| parts.requires_approval)
@@ -1861,12 +1869,11 @@ impl HostRuntimeCapabilityHarness {
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
         // builtin/extension grant otherwise). Excludes only capabilities still
-        // surfaced by wrapping the port directly; route-current deliberately
-        // remains a normal first-party capability and receives a real grant.
+        // surfaced by wrapping the port directly.
         let synthetic_capability_ids: std::collections::HashSet<&str> = [
             ironclaw_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
             ironclaw_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
-            ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+            ironclaw_composition::test_support::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
             ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
         ]
         .into_iter()
@@ -1953,7 +1960,7 @@ impl HostRuntimeCapabilityHarness {
                 ironclaw_composition::test_support::build_extension_management_for_test(services)
             }),
             outbound_preferences_service,
-            outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval,
             tool_permission_overrides,
             auto_approve_settings,
             persistent_approval_policies,

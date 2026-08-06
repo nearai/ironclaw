@@ -9,7 +9,7 @@ pub use ironclaw_host_api::outbound::OutboundDeliveryTargetId;
 use ironclaw_host_api::turn::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
-use crate::{DeliveryTargetCapabilities, OutboundError, RunFinalReplyDestination};
+use crate::{DeliveryTargetCapabilities, OutboundError};
 
 const OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES: usize = 64;
 const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 128;
@@ -171,50 +171,18 @@ bounded_outbound_text!(
     false
 );
 
+/// One catalog entry: a channel destination the owning caller may be offered.
+///
+/// `destination` is the provider-minted reply-target binding the delivery path
+/// drives. Every catalog entry has one — there is no host-owned "in-app"
+/// pseudo-target: the web app is where a run's reply already lands, never a
+/// destination something is delivered *to*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundDeliveryTargetEntry {
     pub summary: OutboundDeliveryTargetSummary,
     pub capabilities: DeliveryTargetCapabilities,
-    pub destination: RunFinalReplyDestination,
+    pub destination: ReplyTargetBindingRef,
     pub owner: OutboundDeliveryTargetOwner,
-}
-
-/// Generic provider for a host-owned target such as WebApp. The destination
-/// is product-neutral outbound domain data; composition only registers the
-/// provider and never re-declares its policy.
-pub struct HostOwnedOutboundDeliveryTargetProvider {
-    summary: OutboundDeliveryTargetSummary,
-    capabilities: DeliveryTargetCapabilities,
-    destination: RunFinalReplyDestination,
-}
-
-impl HostOwnedOutboundDeliveryTargetProvider {
-    pub fn new(
-        summary: OutboundDeliveryTargetSummary,
-        capabilities: DeliveryTargetCapabilities,
-        destination: RunFinalReplyDestination,
-    ) -> Self {
-        Self {
-            summary,
-            capabilities,
-            destination,
-        }
-    }
-}
-
-#[async_trait]
-impl OutboundDeliveryTargetProvider for HostOwnedOutboundDeliveryTargetProvider {
-    async fn list_outbound_delivery_targets(
-        &self,
-        scope: &OutboundDeliveryTargetScope,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
-        Ok(vec![OutboundDeliveryTargetEntry {
-            summary: self.summary.clone(),
-            capabilities: self.capabilities.clone(),
-            destination: self.destination.clone(),
-            owner: OutboundDeliveryTargetOwner::for_scope(scope),
-        }])
-    }
 }
 
 #[async_trait]
@@ -249,12 +217,7 @@ pub trait OutboundDeliveryTargetProvider: Send + Sync {
             .await?
             .into_iter()
             .find(|entry| {
-                entry.capabilities.final_replies
-                    && matches!(
-                        &entry.destination,
-                        RunFinalReplyDestination::External { reply_target_binding_ref }
-                            if reply_target_binding_ref.as_str() == target.as_str()
-                    )
+                entry.capabilities.final_replies && entry.destination.as_str() == target.as_str()
             }))
     }
 }
@@ -574,12 +537,38 @@ mod tests {
 
     #[test]
     fn target_id_rejects_ambiguous_display_values() {
-        for value in ["", " target", "target ", "bad\nid", "\u{202e}target"] {
+        for value in [
+            "",
+            " target",
+            "target ",
+            "bad\nid",
+            "\u{202e}target",
+            "target:\u{200b}hidden",
+        ] {
             assert!(
                 OutboundDeliveryTargetId::new(value).is_err(),
                 "target id should reject {value:?}"
             );
         }
+        let error = OutboundDeliveryTargetId::new("target:\u{200b}hidden")
+            .expect_err("invisible formatting must be rejected");
+        assert!(error.contains("unsafe Unicode formatting"));
+    }
+
+    /// The crate re-exports `OutboundDeliveryTargetId` from `host_api`; the
+    /// re-export must keep the owner's neutral serde shape and 512-byte bound.
+    #[test]
+    fn target_id_reexport_keeps_neutral_serde_and_length_contract() {
+        let value = format!("provider:{}", "x".repeat(503));
+        let target = OutboundDeliveryTargetId::new(value.clone()).expect("512-byte target");
+        let encoded = serde_json::to_value(&target).expect("serialize target");
+        assert_eq!(
+            serde_json::from_value::<OutboundDeliveryTargetId>(encoded)
+                .expect("deserialize target"),
+            target
+        );
+        assert_eq!(target.as_str(), value);
+        assert!(OutboundDeliveryTargetId::new("x".repeat(513)).is_err());
     }
 
     fn target_entry(
@@ -603,9 +592,7 @@ mod tests {
                 auth_prompts: true,
                 modalities: Vec::new(),
             },
-            destination: RunFinalReplyDestination::External {
-                reply_target_binding_ref: reply_ref(format!("reply:{target_id_value}")),
-            },
+            destination: reply_ref(format!("reply:{target_id_value}")),
             owner: OutboundDeliveryTargetOwner::new(tenant(owner_tenant), user(owner_user)),
         }
     }

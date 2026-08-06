@@ -103,6 +103,14 @@ impl RebornIntegrationGroup {
         Self::builder().extension_delivery().await
     }
 
+    /// [`Self::extension_delivery`] plus `builtin.write_file`, so a background
+    /// run can park on a REAL approval gate while its notification channels
+    /// stay deliverable. Auto-approve is ON; gate the write per-scenario with
+    /// `set_ask_each_time_override_for_test`.
+    pub async fn extension_delivery_with_gated_write() -> HarnessResult<Self> {
+        Self::builder().extension_delivery_with_gated_write().await
+    }
+
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
     /// backend configured at composition time. Proves the
     /// provider-instance readiness check does not false-positive once an
@@ -474,6 +482,40 @@ impl RebornIntegrationGroupBuilder {
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a delivery-plus-gated-write group. See
+    /// [`RebornIntegrationGroup::extension_delivery_with_gated_write`]. Mirrors
+    /// [`Self::extension_delivery`] exactly (same base, same run-owner-scoped
+    /// dispatch, same channel connection) — only the tools profile differs.
+    pub async fn extension_delivery_with_gated_write(
+        mut self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::extension::extension_delivery_with_gated_write_tools_profile()?,
+            &base,
+        )
+        .await?
+        .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime.reborn_services_for_test().ok_or(
+                    "extension_delivery_with_gated_write harness is missing its RebornServices bundle",
+                )?,
                 ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope

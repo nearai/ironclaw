@@ -314,17 +314,12 @@ async fn communication_delivery_requested_outbound_validates_requested_target() 
         requested_outbound_request("reply:requested", RequestedOutboundKind::ProductMessage);
     validator.allow(reply_ref("reply:requested"));
     store
-        .put_communication_preference(preference_record(
-            Some("reply:preferred"),
-            Some("reply:progress"),
-            None,
-            None,
-        ))
+        .put_communication_preference(preference_record(Some("reply:preferred")))
         .await
         .expect("seed preference");
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("requested outbound resolves and prepares")
         .expect("requested outbound has a delivery target");
@@ -356,17 +351,12 @@ async fn communication_delivery_live_source_route_final_reply_validates_source_t
     );
     validator.allow(reply_ref("reply:source-route"));
     store
-        .put_communication_preference(preference_record(
-            Some("reply:preferred"),
-            Some("reply:progress"),
-            None,
-            None,
-        ))
+        .put_communication_preference(preference_record(Some("reply:preferred")))
         .await
         .expect("seed preference");
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("live source route resolves and prepares")
         .expect("live source route has a delivery target");
@@ -379,98 +369,34 @@ async fn communication_delivery_live_source_route_final_reply_validates_source_t
     assert_eq!(validator.calls(), 1);
 }
 
+/// A run-scoped target still goes through reply-target validation before it
+/// can be delivered: naming the binding does not exempt it from policy.
 #[tokio::test]
-async fn communication_delivery_triggered_default_target_validates_preference_target() {
+async fn communication_delivery_run_scoped_target_is_validated_before_delivery() {
     let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
     let request = run_notification_request(
         RunNotificationEventKind::FinalReplyReady,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
+        RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
         },
     );
-    validator.allow(reply_ref("reply:triggered-default"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:triggered-default"),
-            Some("reply:progress"),
-            None,
-            None,
-        ))
-        .await
-        .expect("seed preference");
+    validator.allow(reply_ref("reply:run-scoped"));
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
-        .expect("triggered default resolves and prepares")
-        .expect("triggered default has a delivery target");
+        .expect("run-scoped target resolves and prepares")
+        .expect("run-scoped target has a delivery target");
 
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(target.target(), &reply_ref("reply:triggered-default"));
+    assert_eq!(target.target(), &reply_ref("reply:run-scoped"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
     assert_eq!(validator.calls(), 1);
-}
-
-#[tokio::test]
-async fn communication_delivery_triggered_shared_agent_scope_validates_shared_preference_target() {
-    let store = in_memory_outbound_store();
-    let access_policy = FakeThreadProjectionAccessPolicy::default();
-    let validator = FakeReplyTargetBindingValidator::default();
-    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
-    let scope = ownerless_agent_scope("thread-1");
-    let request = run_notification_request_with_scope(
-        scope.clone(),
-        RunNotificationEventKind::FinalReplyReady,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
-        },
-    );
-    validator.allow(reply_ref("reply:shared-default"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:personal-default"),
-            Some("reply:personal-progress"),
-            None,
-            None,
-        ))
-        .await
-        .expect("seed personal preference");
-    store
-        .put_communication_preference(shared_agent_preference_record(
-            Some("reply:shared-default"),
-            Some("reply:shared-progress"),
-            None,
-            None,
-        ))
-        .await
-        .expect("seed shared-agent preference");
-
-    let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
-        .await
-        .expect("shared-agent triggered default resolves and prepares")
-        .expect("shared-agent triggered default has a delivery target");
-
-    let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
-        panic!("expected authorized delivery");
-    };
-    assert_eq!(target.target(), &reply_ref("reply:shared-default"));
-    assert_eq!(attempt.candidate.target, reply_ref("reply:shared-default"));
-    assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
-    assert_eq!(validator.calls(), 1);
-    assert_eq!(
-        store
-            .list_delivery_attempts(scope)
-            .await
-            .expect("list delivery attempts")
-            .as_slice(),
-        std::slice::from_ref(&attempt)
-    );
 }
 
 #[tokio::test]
@@ -481,23 +407,14 @@ async fn communication_delivery_lowers_progress_update_to_progress_push_kind() {
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
     let request = run_notification_request(
         RunNotificationEventKind::ProgressUpdate,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
+        RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
         },
     );
-    validator.allow(reply_ref("reply:progress"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:final"),
-            Some("reply:progress"),
-            None,
-            None,
-        ))
-        .await
-        .expect("seed preference");
+    validator.allow(reply_ref("reply:run-scoped"));
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("progress update resolves and prepares")
         .expect("progress update has a delivery target");
@@ -505,7 +422,7 @@ async fn communication_delivery_lowers_progress_update_to_progress_push_kind() {
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(target.target(), &reply_ref("reply:progress"));
+    assert_eq!(target.target(), &reply_ref("reply:run-scoped"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::Progress);
     assert_eq!(validator.calls(), 1);
 }
@@ -520,7 +437,7 @@ async fn communication_delivery_lowers_delivery_status_to_delivery_status_push_k
     validator.allow(reply_ref("reply:status"));
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("delivery status resolves and prepares")
         .expect("delivery status has a delivery target");
@@ -543,23 +460,14 @@ async fn communication_delivery_auth_prompt_lowers_to_distinct_push_kind() {
     let request = run_notification_request_with_scope(
         scope.clone(),
         RunNotificationEventKind::AuthRequired,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
+        RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
         },
     );
-    validator.allow(reply_ref("reply:auth"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:final"),
-            Some("reply:progress"),
-            None,
-            Some("reply:auth"),
-        ))
-        .await
-        .expect("seed preference");
+    validator.allow(reply_ref("reply:run-scoped"));
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("auth prompt resolves and prepares")
         .expect("auth prompt has a delivery target");
@@ -567,7 +475,7 @@ async fn communication_delivery_auth_prompt_lowers_to_distinct_push_kind() {
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(target.target(), &reply_ref("reply:auth"));
+    assert_eq!(target.target(), &reply_ref("reply:run-scoped"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::AuthPrompt);
     assert_eq!(validator.calls(), 1);
     assert_eq!(
@@ -578,81 +486,6 @@ async fn communication_delivery_auth_prompt_lowers_to_distinct_push_kind() {
             .as_slice(),
         std::slice::from_ref(&attempt)
     );
-}
-
-#[tokio::test]
-async fn communication_delivery_propagates_preference_repository_errors() {
-    let store = in_memory_outbound_store();
-    let access_policy = FakeThreadProjectionAccessPolicy::default();
-    let validator = FakeReplyTargetBindingValidator::default();
-    let preferences = BackendErrorPreferenceRepository;
-    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
-    let scope = turn_scope("thread-1");
-    let request = run_notification_request_with_scope(
-        scope.clone(),
-        RunNotificationEventKind::FinalReplyReady,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
-        },
-    );
-
-    let err = service
-        .prepare_communication_delivery_attempt(
-            prepare_communication_request(request),
-            &preferences,
-        )
-        .await
-        .expect_err("preference backend errors propagate through the public seam");
-
-    assert!(matches!(err, OutboundError::Backend));
-    assert_eq!(validator.calls(), 0);
-    assert!(
-        store
-            .list_delivery_attempts(scope)
-            .await
-            .expect("list delivery attempts")
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn communication_delivery_triggered_from_source_route_final_reply_prefers_source_target() {
-    let store = in_memory_outbound_store();
-    let access_policy = FakeThreadProjectionAccessPolicy::default();
-    let validator = FakeReplyTargetBindingValidator::default();
-    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
-    let request = run_notification_request(
-        RunNotificationEventKind::FinalReplyReady,
-        RunNotificationOrigin::TriggeredFromSourceRoute {
-            trigger: trigger_context(),
-            source_route: SourceRouteContext {
-                reply_target_binding_ref: reply_ref("reply:source-route"),
-            },
-        },
-    );
-    validator.allow(reply_ref("reply:source-route"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:triggered-default"),
-            Some("reply:progress"),
-            None,
-            None,
-        ))
-        .await
-        .expect("seed preference");
-
-    let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
-        .await
-        .expect("triggered source-route resolves and prepares")
-        .expect("triggered source-route has a delivery target");
-
-    let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
-        panic!("expected authorized delivery");
-    };
-    assert_eq!(target.target(), &reply_ref("reply:source-route"));
-    assert_eq!(attempt.candidate.target, reply_ref("reply:source-route"));
-    assert_eq!(validator.calls(), 1);
 }
 
 #[tokio::test]
@@ -671,7 +504,7 @@ async fn communication_delivery_system_event_returns_no_delivery_without_records
     );
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("system event resolves");
 
@@ -698,7 +531,7 @@ async fn communication_delivery_revoked_target_records_sanitized_failure_without
     validator.deny(reply_ref("reply:revoked"));
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("revocation is recorded as rejected")
         .expect("requested outbound has a delivery target");
@@ -730,23 +563,14 @@ async fn communication_delivery_exact_owner_validation_rejects_target_substituti
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
     let request = run_notification_request(
         RunNotificationEventKind::ApprovalNeeded,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
+        RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
         },
     );
-    validator.redirect(reply_ref("reply:approval-target"), reply_ref("reply:other"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:final"),
-            Some("reply:progress"),
-            Some("reply:approval-target"),
-            Some("reply:auth"),
-        ))
-        .await
-        .expect("seed preference");
+    validator.redirect(reply_ref("reply:run-scoped"), reply_ref("reply:other"));
 
     let err = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect_err("validator must not substitute a different prompt target");
 
@@ -771,24 +595,18 @@ async fn communication_delivery_validator_can_enforce_prompt_actor_context() {
     let request = run_notification_request_with_scope(
         scope.clone(),
         RunNotificationEventKind::ApprovalNeeded,
-        RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
+        RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
         },
     );
-    validator.allow(reply_ref("reply:approval-target"));
+    // The allowed target MUST be the one the origin names, or the rejection
+    // below would come from "target not allowed" and this test would stop
+    // exercising the prompt-actor-context rule it is named for.
+    validator.allow(reply_ref("reply:run-scoped"));
     validator.require_actor(actor("exact-owner"));
-    store
-        .put_communication_preference(preference_record(
-            Some("reply:final"),
-            Some("reply:progress"),
-            Some("reply:approval-target"),
-            Some("reply:auth"),
-        ))
-        .await
-        .expect("seed preference");
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("actor mismatch is a validator rejection, not a service error")
         .expect("approval prompt has a delivery target");
@@ -833,7 +651,7 @@ async fn communication_delivery_actor_and_modality_forwarded_through_lowering() 
     validator.require_modality(expected_modality);
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("matching actor and modality authorize")
         .expect("requested outbound has a delivery target");
@@ -871,7 +689,7 @@ async fn communication_delivery_validator_can_enforce_requested_modality() {
     validator.require_modality(CommunicationModality::Text);
 
     let decision = service
-        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .prepare_communication_delivery_attempt(prepare_communication_request(request))
         .await
         .expect("modality mismatch is a validator rejection, not a service error")
         .expect("requested outbound has a delivery target");
@@ -940,25 +758,6 @@ impl ReplyTargetBindingValidator for InvalidRequestValidator {
         Err(OutboundError::InvalidRequest {
             reason: "validator received bad input",
         })
-    }
-}
-
-struct BackendErrorPreferenceRepository;
-
-#[async_trait]
-impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
-    async fn load_communication_preference(
-        &self,
-        _key: CommunicationPreferenceKey,
-    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn write_communication_preference(
-        &self,
-        _request: WriteCommunicationPreferenceRequest,
-    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
-        Err(OutboundError::Backend)
     }
 }
 
@@ -1206,55 +1005,21 @@ fn run_notification_request_with_scope(
     }
 }
 
-fn preference_record(
-    final_reply_target: Option<&str>,
-    progress_target: Option<&str>,
-    approval_prompt_target: Option<&str>,
-    auth_prompt_target: Option<&str>,
-) -> CommunicationPreferenceRecord {
+/// Seeds a stored target for the scope under test. Nothing in the resolution
+/// path reads it any more; it stays so these tests keep proving that an
+/// explicit or source-route target is used verbatim rather than being replaced
+/// by whatever the caller happens to have stored.
+fn preference_record(legacy_notification_target: Option<&str>) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(
             TenantId::new("tenant-a").expect("valid tenant"),
             UserId::new("user-a").expect("valid user"),
         ),
-        final_reply_target: final_reply_target.map(reply_ref),
-        progress_target: progress_target.map(reply_ref),
-        approval_prompt_target: approval_prompt_target.map(reply_ref),
-        auth_prompt_target: auth_prompt_target.map(reply_ref),
+        legacy_notification_target: legacy_notification_target.map(reply_ref),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("user-a").expect("valid user"),
-    }
-}
-
-fn shared_agent_preference_record(
-    final_reply_target: Option<&str>,
-    progress_target: Option<&str>,
-    approval_prompt_target: Option<&str>,
-    auth_prompt_target: Option<&str>,
-) -> CommunicationPreferenceRecord {
-    CommunicationPreferenceRecord {
-        scope: DeliveryDefaultScope::shared_agent(
-            TenantId::new("tenant-a").expect("valid tenant"),
-            AgentId::new("agent-a").expect("valid agent"),
-            Some(ProjectId::new("project-a").expect("valid project")),
-        ),
-        final_reply_target: final_reply_target.map(reply_ref),
-        progress_target: progress_target.map(reply_ref),
-        approval_prompt_target: approval_prompt_target.map(reply_ref),
-        auth_prompt_target: auth_prompt_target.map(reply_ref),
-        default_modality: Some(CommunicationModality::Text),
-        updated_at: now(),
-        updated_by: UserId::new("tenant-admin").expect("valid updater"),
-    }
-}
-
-fn trigger_context() -> TriggerCommunicationContext {
-    TriggerCommunicationContext {
-        trigger_origin_ref: TriggerOriginRef::new("trigger:daily")
-            .expect("valid trigger origin ref"),
-        trigger_source_kind: TriggerSourceKind::Schedule,
-        fire_slot: TriggerFireSlot::new("2026-05-29T09:00:00Z").expect("valid fire slot"),
     }
 }
 
@@ -1269,16 +1034,6 @@ fn turn_scope(thread: &str) -> TurnScope {
         Some(ProjectId::new("project-a").expect("valid project")),
         thread_id(thread),
         Some(UserId::new("user-a").expect("valid user")),
-    )
-}
-
-fn ownerless_agent_scope(thread: &str) -> TurnScope {
-    TurnScope::new_with_owner(
-        TenantId::new("tenant-a").expect("valid tenant"),
-        Some(AgentId::new("agent-a").expect("valid agent")),
-        Some(ProjectId::new("project-a").expect("valid project")),
-        thread_id(thread),
-        None,
     )
 }
 

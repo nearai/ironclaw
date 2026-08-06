@@ -8,6 +8,8 @@
 
 // arch-exempt: large_file, one descriptor function per WebUI v2 route mirrors the handler/router split tracked for this whole module family, plan #5985
 
+// arch-exempt: large_file, this is the 1:1 descriptor counterpart to the handler table's own large_file exemption — both stay flat until the same WebUI route split lands, plan #5985
+
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
@@ -48,10 +50,10 @@ pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK: &str = "webui.v2.trace_account_login_link";
-pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
-pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
 pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
     "webui.v2.list_outbound_delivery_targets";
+pub const WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS: &str = "webui.v2.get_notification_channels";
+pub const WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS: &str = "webui.v2.set_notification_channels";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
@@ -162,8 +164,9 @@ pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK: &str =
     "/api/webchat/v2/traces/account-login-link";
-pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS: &str =
+    "/api/webchat/v2/outbound/notification-channels";
 pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
 pub const WEBUI_V2_PATTERN_ADMIN_USER: &str = "/api/webchat/v2/admin/users/{user_id}";
 pub const WEBUI_V2_PATTERN_ADMIN_USER_STATUS: &str = "/api/webchat/v2/admin/users/{user_id}/status";
@@ -286,9 +289,9 @@ pub fn webui_v2_routes_with_regression_artifact_export(
         trace_account_traces_descriptor(),
         trace_account_login_link_descriptor(),
         authorize_trace_hold_descriptor(),
-        get_outbound_preferences_descriptor(),
-        set_outbound_preferences_descriptor(),
         list_outbound_delivery_targets_descriptor(),
+        get_notification_channels_descriptor(),
+        set_notification_channels_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
@@ -1090,34 +1093,6 @@ fn trace_account_login_link_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn get_outbound_preferences_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
-        read_policy(
-            read_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductSurface,
-            StreamingMode::None,
-        ),
-    )
-}
-
-fn set_outbound_preferences_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
-        mutation_policy(
-            body_limit_kib(4),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductSurface,
-        ),
-    )
-}
-
 fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS,
@@ -1128,6 +1103,34 @@ fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn get_notification_channels_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_notification_channels_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }

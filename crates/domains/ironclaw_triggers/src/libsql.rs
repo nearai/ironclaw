@@ -1363,7 +1363,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
     let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
-        .map(crate::parse_trigger_delivery_target_id)
+        .map(crate::decode_legacy_delivery_target)
         .transpose()?;
 
     let record = TriggerRecord {
@@ -1504,6 +1504,12 @@ async fn write_record(
             record.active_run_ref.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
             libsql::Value::Text(fmt_ts(&record.created_at)),
             schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
+            // Retired routing column: no create path produces a non-null value
+            // any more. The binding stays because composition's boot migration
+            // clears pre-removal rows by upserting the record with
+            // `delivery_target: None` — dropping the write would strand those
+            // values forever and make the migration re-append its prompt step
+            // on every boot.
             record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
         ]),
     )

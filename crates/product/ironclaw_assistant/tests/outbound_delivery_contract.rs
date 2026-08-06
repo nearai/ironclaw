@@ -25,8 +25,8 @@ use ironclaw_outbound::{
     OutboundPolicyService, OutboundStateStore, OutboundStateStorePort, ReplyTargetBindingClaim,
     ReplyTargetBindingValidator, RunNotificationContext, RunNotificationEventKind,
     RunNotificationOrigin, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
-    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    ThreadProjectionAccessRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_threads::{AttachmentKind, AttachmentRef, ThreadScope};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
@@ -199,8 +199,8 @@ fn delivery_request(scope: TurnScope) -> ironclaw_outbound::PrepareCommunication
             modality: CommunicationModality::Text,
             intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                 event_kind: RunNotificationEventKind::FinalReplyReady,
-                origin: RunNotificationOrigin::Triggered {
-                    trigger: trigger_context(),
+                origin: RunNotificationOrigin::RunScopedTarget {
+                    target: validated_reply_target(),
                 },
             }),
         },
@@ -208,16 +208,6 @@ fn delivery_request(scope: TurnScope) -> ironclaw_outbound::PrepareCommunication
         projection_ref: ironclaw_outbound::ProjectionUpdateRef::new("projection:update:1")
             .expect("valid projection ref"),
         attempted_at: Utc::now(),
-    }
-}
-
-fn trigger_context() -> ironclaw_outbound::TriggerCommunicationContext {
-    ironclaw_outbound::TriggerCommunicationContext {
-        trigger_origin_ref: TriggerOriginRef::new("trigger-origin:product-outbound")
-            .expect("valid trigger origin ref"),
-        trigger_source_kind: TriggerSourceKind::Schedule,
-        fire_slot: TriggerFireSlot::new("fire-slot:product-outbound")
-            .expect("valid trigger fire slot"),
     }
 }
 
@@ -235,11 +225,9 @@ fn seed_preference(repo: &FakePreferenceRepository, scope: &TurnScope) {
 fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), actor().user_id.clone()),
-        final_reply_target: Some(validated_reply_target()),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(validated_reply_target()),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: Utc::now(),
         updated_by: UserId::new("pref-updater").expect("valid updater"),
     }
@@ -725,13 +713,7 @@ async fn coordinate_workspace_reply(
         vec![ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(text.to_string())];
     request.attachments = attachments;
     let result = coordinator
-        .deliver(
-            &policy,
-            &preferences,
-            &resolver,
-            project_filesystem,
-            request,
-        )
+        .deliver(&policy, &resolver, project_filesystem, request)
         .await;
     (result, adapter, store, scope)
 }
@@ -776,7 +758,6 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
     let outcome = coordinator
         .deliver(
             &policy,
-            &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
             coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
@@ -878,13 +859,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
         thread_scope: &thread_scope,
     };
     let error = coordinator
-        .deliver(
-            &policy,
-            &preferences,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            request,
-        )
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
         .await
         .expect_err("require_direct_message=true against a non-DM target must reject");
     assert!(
@@ -939,7 +914,6 @@ async fn coordinator_rejected_policy_decision_does_not_reach_the_adapter() {
     let outcome = coordinator
         .deliver(
             &policy,
-            &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
             coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
@@ -984,7 +958,6 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
     let outcome = coordinator
         .deliver(
             &policy,
-            &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
             coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
@@ -1026,7 +999,6 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
     let outcome = coordinator
         .deliver(
             &policy,
-            &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
             coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
@@ -1230,7 +1202,7 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
     )];
 
     let outcome = coordinator
-        .deliver(&policy, &preferences, &target_resolver, &files, request)
+        .deliver(&policy, &target_resolver, &files, request)
         .await
         .expect("delivery succeeds in the required order");
 
@@ -1269,13 +1241,7 @@ async fn coordinator_rejects_caller_supplied_file_parts_before_policy_or_egress(
     );
 
     let error = coordinator
-        .deliver(
-            &policy,
-            &preferences,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            request,
-        )
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
         .await
         .expect_err("caller-supplied file values must fail closed");
 
@@ -1558,6 +1524,176 @@ async fn coordinator_rejects_stat_and_read_path_mismatches() {
     assert_eq!(adapter.deliver_calls(), 0);
 }
 
+/// Delegating store whose terminal `Delivered` status write fails — the
+/// durable shape behind theredspoon's #7157 flag (and #7029's fix on main):
+/// vendor egress succeeded, but the confirmation row never committed.
+struct TerminalDeliveredWriteFailingStore {
+    inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ironclaw_outbound::ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+    async fn load_thread_notification_policy(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<ironclaw_outbound::ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+    async fn upsert_subscription(
+        &self,
+        record: ironclaw_outbound::ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+    async fn load_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+    async fn advance_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.advance_subscription_cursor(request).await
+    }
+    async fn record_delivery_attempt(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+    async fn update_delivery_status(
+        &self,
+        request: ironclaw_outbound::UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        if matches!(
+            request.status,
+            ironclaw_outbound::OutboundDeliveryStatus::Delivered
+        ) {
+            return Err(OutboundError::Backend);
+        }
+        self.inner.update_delivery_status(request).await
+    }
+    async fn list_delivery_attempts(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        self.inner.list_delivery_attempts(scope).await
+    }
+}
+
+/// theredspoon's #7157 flag: `mark_terminal` used to swallow a failed durable
+/// `Delivered` write and the coordinator still reported `Delivered` — a
+/// fabricated success contradicting the durability guarantee. The vendor send
+/// DID happen, so the honest outcome keeps the provider refs but reports the
+/// confirmation as unconfirmed (never an error: an error would invite a
+/// duplicate resend).
+#[tokio::test]
+async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-777")],
+        })],
+    ));
+    let reply_context = Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::new(TerminalDeliveredWriteFailingStore {
+            inner: Arc::clone(&store),
+        }) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+        }),
+        reply_context as Arc<dyn DeliveryReplyContextSource>,
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("delivery drives");
+
+    match outcome {
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+            vendor_message_refs,
+            ..
+        } => {
+            assert_eq!(vendor_message_refs, vec!["ts-777".to_string()]);
+        }
+        other => panic!(
+            "a failed terminal Delivered write must yield DeliveredUnconfirmed, got {other:?}"
+        ),
+    }
+    // The durable row never reached Delivered — it must not read as confirmed.
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert!(
+        !matches!(
+            attempts[0].status,
+            ironclaw_outbound::OutboundDeliveryStatus::Delivered
+        ),
+        "durable status must not be Delivered when the confirmation write failed: {:?}",
+        attempts[0].status
+    );
+}
+
 #[tokio::test]
 async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
     let scope = scope();
@@ -1579,7 +1715,6 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
     coordinator
         .deliver(
             &policy,
-            &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
             coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
@@ -1642,7 +1777,6 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
     let error = coordinator
         .deliver(
             &policy,
-            &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
             coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
@@ -1769,16 +1903,18 @@ async fn coordinator_notice_rejects_policy_class_intents() {
     ));
     let coordinator = coordinator_over(&store, &adapter);
 
-    let mut request = working_notice(scope.clone(), "vendorx");
-    request.intent = DeliveryIntent::FinalReply;
-    let error = coordinator
-        .deliver_notice(request)
-        .await
-        .expect_err("policy-class intents must use the policy path");
-    assert!(matches!(
-        error,
-        CoordinatedDeliveryError::IntentClassMismatch { .. }
-    ));
+    for intent in [DeliveryIntent::FinalReply, DeliveryIntent::ModelDelivery] {
+        let mut request = working_notice(scope.clone(), "vendorx");
+        request.intent = intent;
+        let error = coordinator
+            .deliver_notice(request)
+            .await
+            .expect_err("policy-class intents must use the policy path");
+        assert!(matches!(
+            error,
+            CoordinatedDeliveryError::IntentClassMismatch { .. }
+        ));
+    }
     assert_eq!(adapter.deliver_calls(), 0);
     assert!(
         store
@@ -1810,13 +1946,7 @@ async fn coordinator_deliver_rejects_notice_class_intents() {
     let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
     request.intent = DeliveryIntent::Working;
     let error = coordinator
-        .deliver(
-            &policy,
-            &preferences,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            request,
-        )
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
         .await
         .expect_err("notice-class intents must use the notice path");
     assert!(matches!(
@@ -1824,6 +1954,13 @@ async fn coordinator_deliver_rejects_notice_class_intents() {
         CoordinatedDeliveryError::IntentClassMismatch { .. }
     ));
     assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[test]
+fn model_delivery_is_policy_class() {
+    use ironclaw_assistant::DeliveryIntent;
+    assert!(DeliveryIntent::ModelDelivery.runs_outbound_policy());
+    assert!(!DeliveryIntent::ModelDelivery.is_notice_class());
 }
 
 #[tokio::test]

@@ -470,7 +470,8 @@ pub(super) async fn build_backend_production(
         approval_settings_provider,
     );
     let outbound_stores = build_outbound_stores(Arc::clone(&stores.filesystem));
-    let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
+    let outbound_delivery_targets =
+        Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
     let extension_registry =
@@ -500,15 +501,15 @@ pub(super) async fn build_backend_production(
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
     let process_turn_state = Arc::new(processes.agent_turn_runtime());
-    let trigger_source_reply_target: Arc<std::sync::RwLock<Arc<dyn TriggerSourceReplyTarget>>> =
-        Arc::new(std::sync::RwLock::new(Arc::new(
-            TurnStateTriggerSourceReplyTarget::new(
-                Arc::clone(&process_turn_state) as Arc<dyn AgentTurnRuntimePort>
-            ),
-        )));
+    // The run-state source every caller-initiated lookup of "the run this
+    // call belongs to" reads — today `builtin.outbound_deliver`'s same-origin
+    // check. One late-bindable handle so every such lookup agrees on which
+    // runs exist; production installs the runtime's own turn state and never
+    // repoints it, a `test-support` harness repoints it.
+    let trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>> = Arc::new(
+        std::sync::RwLock::new(Arc::clone(&process_turn_state) as Arc<dyn AgentTurnRuntimePort>),
+    );
     let trigger_create_hook = Arc::new(TriggerCreatorPairingHook {
-        outbound_delivery_targets: Arc::clone(&outbound_delivery_targets),
-        source_reply_target: Arc::clone(&trigger_source_reply_target),
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         conversations: tokio::sync::OnceCell::new(),
     });
@@ -545,7 +546,7 @@ pub(super) async fn build_backend_production(
         ironclaw_identity::projects::FilesystemProjectRepository::new(
             Arc::clone(&stores.scoped_filesystem),
             owner_user_id.clone(),
-            project_agent_id,
+            project_agent_id.clone(),
         ),
     );
     let project_service: Arc<dyn ProjectService> =
@@ -1086,9 +1087,9 @@ pub(super) async fn build_backend_production(
             }
         })?;
         vec![
-            outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+            notification_channels_set_operator_tool_info(provider).map_err(|error| {
                 RebornBuildError::InvalidConfig {
-                    reason: format!("outbound delivery operator tool is invalid: {error}"),
+                    reason: format!("notification channels operator tool is invalid: {error}"),
                 }
             })?,
         ]
@@ -1109,17 +1110,6 @@ pub(super) async fn build_backend_production(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("operator configuration handler is invalid: {error}"),
     })?;
-    let outbound_target_provider = Arc::clone(&outbound_delivery_targets)
-        as Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>;
-    let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductService> =
-        Arc::new(crate::outbound::RebornOutboundPreferencesService::new(
-            Arc::clone(&outbound_stores.outbound_preferences),
-            outbound_target_provider,
-        ));
-    insert_outbound_preferences_handler(&mut first_party_registry, outbound_preferences_facade)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("outbound preferences handler is invalid: {error}"),
-        })?;
     ironclaw_host_runtime::register_reply_attachment_first_party_handler(
         &mut first_party_registry,
         Arc::clone(&outbound_stores.reply_attachment_intents),
@@ -1133,6 +1123,23 @@ pub(super) async fn build_backend_production(
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("skill auto-activation handler is invalid: {error}"),
+    })?;
+    // Explicit model-initiated channel delivery (`builtin.outbound_deliver`).
+    // The handler must be inserted here, while the registry is assembled, but
+    // the delivery coordinator that backs it is only built by the channel-host
+    // wiring below (its generic host needs this very registry's tool binder).
+    // Register the deferred slot now; bind the real service the moment the
+    // coordinator exists. Unbound ⇒ the tool fails closed, exactly like the
+    // host-runtime default it replaces.
+    let model_channel_delivery_slot =
+        Arc::new(ironclaw_assistant::DeferredModelChannelDelivery::new());
+    ironclaw_host_runtime::register_outbound_deliver_first_party_handler(
+        &mut first_party_registry,
+        Arc::clone(&model_channel_delivery_slot)
+            as Arc<dyn ironclaw_outbound::ModelChannelDelivery>,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("explicit channel delivery handler is invalid: {error}"),
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     let admin_configuration_resolver_for_generic = Arc::clone(&admin_configuration_resolver);
@@ -1203,6 +1210,56 @@ pub(super) async fn build_backend_production(
             ),
         }
     };
+    // Bind the deferred `builtin.outbound_deliver` service now that the
+    // delivery coordinator exists. The behavior lives in
+    // `ironclaw_assistant::model_channel_delivery`; composition only
+    // assembles it from the handles the coordinator and the background-run
+    // notifier already share — the caller-scoped target catalog, the
+    // coordinator, the outbound state store, the binary-supplied vendor
+    // codecs, and the run-state source. Left unbound when this composition
+    // path built no coordinator: with no channel egress transport there is
+    // nothing to deliver through, and the tool stays fail-closed.
+    if let (Some(coordinator), Some(model_delivery_project_filesystem)) = (
+        channel_host_wiring.delivery_coordinator.as_ref(),
+        model_delivery_project_filesystem(&stores.filesystem, &runtime_workspace_mounts),
+    ) {
+        let target_codecs = channel_extension_bindings
+            .iter()
+            .filter_map(|binding| binding.preference_target_codec.clone())
+            .collect::<Vec<_>>();
+        let bound = model_channel_delivery_slot.bind(Arc::new(
+            ironclaw_assistant::CoordinatedModelChannelDelivery::new(
+                ironclaw_assistant::ModelChannelDeliveryDeps {
+                    registry: Arc::clone(&outbound_delivery_targets)
+                        as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
+                    coordinator: Arc::clone(coordinator),
+                    outbound_store: Arc::clone(&outbound_stores.outbound_state)
+                        as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+                    target_resolver: Arc::new(ironclaw_assistant::CodecChannelTargetResolver::new(
+                        target_codecs,
+                    )),
+                    run_state: Arc::new(crate::factory::LateBoundAgentTurnRuntime::new(
+                        Arc::clone(&trigger_source_turn_state),
+                    )),
+                    // Model deliveries never carry attachments, so nothing
+                    // materializes through this reader in practice; wired to
+                    // the same caller-scoped workspace view the channel-host
+                    // delivery services read so the contract holds if that
+                    // ever changes.
+                    project_filesystem: model_delivery_project_filesystem,
+                    fallback_agent_id: turn_state_scope
+                        .agent_id
+                        .clone()
+                        .unwrap_or(project_agent_id),
+                },
+            ),
+        ));
+        if !bound {
+            tracing::debug!(
+                "explicit channel delivery slot was already bound; keeping the first service"
+            );
+        }
+    }
     let shared_extension_registry = services.shared_extension_registry();
 
     #[cfg(test)]
@@ -1243,7 +1300,7 @@ pub(super) async fn build_backend_production(
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source,
         #[cfg(any(test, feature = "test-support"))]
-        trigger_source_reply_target,
+        trigger_source_turn_state,
         extension_management,
         admin_configuration,
         admin_configuration_uses: Arc::new(admin_configuration_uses),
@@ -1394,4 +1451,23 @@ pub(super) async fn build_postgres_production(
         ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
     )
     .await
+}
+
+/// The caller-scoped project-filesystem view `builtin.outbound_deliver`'s
+/// coordinator requests carry. Mirrors `channel_host_source`'s reader wiring;
+/// falls back to an empty-view reader when no workspace mount is composed
+/// (nothing can materialize either way — model deliveries carry no
+/// attachments).
+fn model_delivery_project_filesystem(
+    filesystem: &Arc<CompositeRootFilesystem>,
+    workspace_mounts: &crate::runtime_mounts::WorkspaceMountPolicy,
+) -> Option<Arc<dyn ironclaw_assistant::ProjectFilesystemReader>> {
+    let inbound_filesystem =
+        crate::runtime_mounts::read_write_workspace_filesystem(filesystem, workspace_mounts)?;
+    Some(Arc::new(
+        ironclaw_assistant::ProjectScopedFilesystemReader::with_max_read_bytes(
+            inbound_filesystem,
+            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+        ),
+    ))
 }

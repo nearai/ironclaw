@@ -8,23 +8,17 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_approvals::{
-        ApprovalResolver, CapabilityPermissionOverrideStorePort, PersistentApprovalAction,
-        PersistentApprovalPolicyInput, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-        ToolPermissionOverrideInput,
-    };
     use ironclaw_assistant::{
         LifecyclePackageKind, LifecyclePackageRef, OutboundPreferencesProductService,
         RebornOutboundDeliveryTargetId,
     };
-    use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::turn::{
         AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnId, TurnRunId, TurnScope,
     };
     use ironclaw_host_api::{
         action::NetworkPolicy,
-        capability::{EffectKind, GrantConstraints},
+        capability::EffectKind,
         dispatch::DispatchInputIssueCode,
         ids::{
             AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
@@ -34,7 +28,6 @@ mod tests {
         path::{MountAlias, VirtualPath},
         resolution::Resolution,
         result_meta::FailureKind,
-        scope::Principal,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -44,10 +37,10 @@ mod tests {
         SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_contracts::{
-        CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
-        CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
-        RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+        CapabilityCallCandidate, CapabilityInputIssue, CapabilityInputRef,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest,
+        RegisterProviderToolCallRequest, RunProfileResolutionRequest, RunProfileResolver,
+        VisibleCapabilityRequest,
     };
     use ironclaw_loop_host::{
         CapabilityWriteResult, DurablePersistence, HostManagedModelError,
@@ -67,9 +60,10 @@ mod tests {
 
     use crate::outbound::{
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesService,
+        OutboundDeliveryTargetRegistry,
     };
     use crate::runtime::filesystem_skill_context_source;
+    use ironclaw_assistant::RebornOutboundPreferencesService;
     use ironclaw_extension_manager::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
@@ -1597,7 +1591,7 @@ mod tests {
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
@@ -1911,7 +1905,7 @@ mod tests {
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
@@ -2469,7 +2463,7 @@ mod tests {
             skill_activation_source: Some(Arc::clone(&activation_source)),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
@@ -2718,7 +2712,7 @@ mod tests {
             skill_activation_source: None,
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
@@ -2803,7 +2797,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
@@ -3004,7 +2998,7 @@ mod tests {
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
@@ -3343,7 +3337,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
@@ -3772,7 +3766,7 @@ mod tests {
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
@@ -3823,7 +3817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_outbound_delivery_targets_list_and_target_set_use_provider() {
+    async fn standalone_outbound_delivery_targets_list_uses_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
@@ -3859,9 +3853,7 @@ mod tests {
             OutboundDeliveryTargetEntry {
                 summary: slack_target_summary,
                 capabilities: slack_target_capabilities,
-                destination: ironclaw_outbound::RunFinalReplyDestination::External {
-                    reply_target_binding_ref: slack_reply_target.clone(),
-                },
+                destination: slack_reply_target.clone(),
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -3901,11 +3893,11 @@ mod tests {
                     .clone(),
             ),
         );
-        // A durable gate-record store shared with the assertion below: the
-        // standalone approval producer persists a `GateRecord` at the gate raise
-        // (§5.3 Stage 0), keyed by the canonical `GateRef::for_approval_request`
-        // that the product read model re-derives, so a host-persisted gate is
-        // findable.
+        // The durable gate-record store this factory wires. Its raise-path save
+        // (§5.3 Stage 0, keyed by the canonical `GateRef::for_approval_request`)
+        // is asserted at the integration tier by
+        // `notification_channels_set_approval_gate_approve_applies_channels`;
+        // this test only needs the store present so the port builds.
         let gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort> =
             Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
@@ -3926,7 +3918,7 @@ mod tests {
             skill_activation_source: None,
             trajectory_observer: None,
             outbound_preferences_service: Some(outbound_preferences_service),
-            outbound_delivery_target_set_requires_approval: true,
+            outbound_preference_write_requires_approval: true,
             approval_settings,
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
@@ -3969,7 +3961,7 @@ mod tests {
             .map(|descriptor| descriptor.capability_id.as_str())
             .collect::<Vec<_>>();
         assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID));
-        assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID));
+        assert!(descriptor_ids.contains(&OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID));
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let tool_definition_names = tool_definitions
             .iter()
@@ -3978,9 +3970,7 @@ mod tests {
         assert!(
             tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
         );
-        assert!(
-            tool_definition_names.contains(&"builtin__outbound_delivery_target_set".to_string())
-        );
+        assert!(tool_definition_names.contains(&"builtin__notification_channels_set".to_string()));
         let list_tool = tool_definitions
             .iter()
             .find(|definition| {
@@ -3990,8 +3980,8 @@ mod tests {
         assert!(
             list_tool
                 .description
-                .contains("before builtin__trigger_create"),
-            "list tool description should steer delivery requests before trigger creation"
+                .contains("before builtin__outbound_deliver"),
+            "list tool description should steer delivery requests before delivering"
         );
         assert!(
             list_tool.description.contains("cannot read conversations"),
@@ -4003,21 +3993,6 @@ mod tests {
                 .contains("corresponding integration's read capabilities"),
             "list tool description must route reads through the owning integration"
         );
-        let set_tool = tool_definitions
-            .iter()
-            .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
-            .expect("set tool definition should exist");
-        assert!(
-            set_tool.description.contains("FALLBACK"),
-            "set tool description should frame the preference as the source-route fallback"
-        );
-        assert!(
-            set_tool
-                .description
-                .contains("pass delivery_target_id to builtin__trigger_create"),
-            "set tool description should steer per-trigger routing to trigger_create"
-        );
-
         let malformed_list = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
@@ -4063,488 +4038,6 @@ mod tests {
             vec![expected_provider_caller.clone()]
         );
 
-        let malformed_set = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": "bad\nid" }),
-                ),
-            ))
-            .await
-            .expect_err("malformed set input should fail validation");
-        assert_eq!(
-            malformed_set.kind,
-            AgentLoopHostErrorKind::InvalidInvocation
-        );
-
-        let owner_preference_key = CommunicationPreferenceKey::personal(
-            run_context.scope.tenant_id.clone(),
-            owner_user_id.clone(),
-        );
-        let actor_preference_key = CommunicationPreferenceKey::personal(
-            run_context.scope.tenant_id.clone(),
-            actor_user_id.clone(),
-        );
-        // Global auto-approve now defaults ON, so disable it for the owner scope
-        // (the scope the set dispatch authorizes against) to exercise the
-        // gate -> approve -> resume path this test verifies.
-        {
-            let mut disable_scope = run_context.scope.to_resource_scope();
-            disable_scope.user_id = owner_user_id.clone();
-            ironclaw_approvals::AutoApproveSettingStorePort::set(
-                runtime_surfaces.auto_approve_settings_for_test().as_ref(),
-                ironclaw_approvals::AutoApproveSettingInput {
-                    updated_by: ironclaw_host_api::scope::Principal::User(owner_user_id.clone()),
-                    scope: disable_scope,
-                    enabled: false,
-                },
-            )
-            .await
-            .expect("disable global auto-approve"); // safety: test-only gating precondition
-        }
-        let set_capability_id =
-            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
-
-        let missing_target_id =
-            RebornOutboundDeliveryTargetId::new("slack:missing-approved-dm").expect("target id");
-        let missing_set_candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": missing_target_id.as_str() }),
-                ),
-            ))
-            .await
-            .expect("missing-target set call stages");
-        let missing_set_activity_id = missing_set_candidate.activity_id;
-        let missing_set_surface_version = missing_set_candidate.surface_version.clone();
-        let missing_set_capability_id_from_candidate = missing_set_candidate.capability_id.clone();
-        let missing_blocked_outcome = port
-            .invoke_capability(invocation_for_candidate(&missing_set_candidate))
-            .await
-            .expect("missing-target set call reaches approval gate");
-        let (missing_resume_token, missing_gate_origin) = match missing_blocked_outcome {
-            Resolution::Blocked(blocked) => {
-                assert_eq!(blocked.kind(), "approval");
-                let origin = blocked
-                    .origin()
-                    .expect("approval gate preserves the originating loop gate ref")
-                    .clone();
-                assert!(origin.as_str().starts_with("gate:approval-"));
-                let resume_token = CapabilityResumeToken::new(
-                    blocked
-                        .resume_token()
-                        .expect("approval gate carries a resume token")
-                        .as_str(),
-                )
-                .expect("resume token round-trips to the loop-facing type");
-                (resume_token, origin)
-            }
-            outcome => panic!("missing-target set should require approval, got {outcome:?}"),
-        };
-        // Flip resume-reconstruction (§5.3, confirmed): the loop-facing `CapabilityApprovalResume` no longer rides the
-        // (now `Resolution`) result. This reconstructs it from the preserved gate
-        // ref (encodes the approval id), the resume token (encodes the invocation
-        // id), and the durable approval record (correlation id) — the same inputs
-        // the runner rebuilds a resume from on the post-flip resume path. Confirm
-        // this matches the intended resume-reconstruction contract.
-        let missing_invocation_id = InvocationId::parse(missing_resume_token.as_str())
-            .expect("missing-target resume token carries invocation id");
-        let missing_approval_request_id = {
-            let routing_ref =
-                ironclaw_host_api::turn::TurnGateRef::new(missing_gate_origin.as_str())
-                    .expect("routing gate ref is valid");
-            ironclaw_assistant::approval_request_id_from_gate_ref(&routing_ref)
-                .expect("read model recovers the approval request id from the routing ref")
-        };
-        let mut missing_approval_scope = run_context.scope.to_resource_scope();
-        missing_approval_scope.user_id = owner_user_id.clone();
-        missing_approval_scope.invocation_id = missing_invocation_id;
-        let missing_correlation_id = ironclaw_approvals::ApprovalRequestStorePort::get(
-            runtime_surfaces.approval_requests_for_test().as_ref(),
-            &missing_approval_scope,
-            missing_approval_request_id,
-        )
-        .await
-        .expect("missing-target approval record loads")
-        .expect("missing-target approval record exists")
-        .request
-        .correlation_id;
-        let missing_approval_resume = CapabilityApprovalResume {
-            approval_request_id: missing_approval_request_id,
-            resume_token: missing_resume_token,
-            correlation_id: missing_correlation_id,
-            input_ref: missing_set_candidate.input_ref.clone(),
-        };
-        let missing_approval = runtime_surfaces
-            .capability_policy_for_test()
-            .lease_approval_for(
-                crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
-                    capability: &set_capability_id,
-                },
-                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
-                runtime_surfaces.skill_mounts_for_test(),
-                runtime_surfaces.memory_mounts_for_test(),
-                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
-            )
-            .expect("missing-target outbound delivery approval lease terms");
-        ApprovalResolver::new(
-            runtime_surfaces.approval_requests_for_test().as_ref(),
-            runtime_surfaces.capability_leases_for_test().as_ref(),
-        )
-        .approve_dispatch(
-            &missing_approval_scope,
-            missing_approval_resume.approval_request_id,
-            missing_approval,
-        )
-        .await
-        .expect("missing-target approval issues dispatch lease");
-        let missing_lease_id = runtime_surfaces
-            .capability_leases_for_test()
-            .leases_for_scope(&missing_approval_scope)
-            .await
-            .into_iter()
-            .find(|lease| lease.grant.capability == set_capability_id)
-            .expect("missing-target approval lease exists")
-            .grant
-            .id;
-
-        let missing_set_outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: missing_set_activity_id,
-                surface_version: missing_set_surface_version,
-                capability_id: missing_set_capability_id_from_candidate,
-                input_ref: CapabilityInputRef::new("input:missing-target-approval-resume")
-                    .expect("missing-target input ref"),
-                approval_resume: Some(missing_approval_resume),
-                auth_resume: None,
-            })
-            .await
-            .expect("approved missing-target set call returns a capability outcome");
-        match missing_set_outcome {
-            Resolution::Done(failure) => {
-                // Missing target routes through `outbound_delivery_outcome`
-                // (recoverable, model-visible InvalidInput) rather than the
-                // former host-error special-case; the disposition function
-                // gives a fixed, host-authored summary.
-                assert_eq!(
-                    failure.verdict.error_kind(),
-                    Some(&FailureKind::InputEncode)
-                );
-                assert_eq!(
-                    failure.summary.as_str(),
-                    "invalid outbound delivery request"
-                );
-            }
-            other => {
-                panic!("approved missing target should fail non-terminally, got {other:?}")
-            }
-        }
-        assert!(
-            runtime_surfaces
-                .outbound_preferences_for_test()
-                .load_communication_preference(owner_preference_key.clone())
-                .await
-                .expect("owner preference read after approved missing-target set")
-                .is_none()
-        );
-        let missing_leases = runtime_surfaces
-            .capability_leases_for_test()
-            .leases_for_scope(&missing_approval_scope)
-            .await;
-        let missing_lease = missing_leases
-            .iter()
-            .find(|lease| lease.grant.id == missing_lease_id)
-            .expect("missing-target approval lease remains");
-        assert_eq!(missing_lease.status, CapabilityLeaseStatus::Claimed);
-
-        let set_candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
-                ),
-            ))
-            .await
-            .expect("set call stages");
-        let set_activity_id = set_candidate.activity_id;
-        let set_surface_version = set_candidate.surface_version.clone();
-        let set_capability_id_from_candidate = set_candidate.capability_id.clone();
-        let blocked_outcome = port
-            .invoke_capability(invocation_for_candidate(&set_candidate))
-            .await
-            .expect("set call reaches approval gate");
-        let (set_resume_token, set_gate_origin) = match blocked_outcome {
-            Resolution::Blocked(blocked) => {
-                assert_eq!(blocked.kind(), "approval");
-                let origin = blocked
-                    .origin()
-                    .expect("approval gate preserves the originating loop gate ref")
-                    .clone();
-                assert!(origin.as_str().starts_with("gate:approval-"));
-                let resume_token = CapabilityResumeToken::new(
-                    blocked
-                        .resume_token()
-                        .expect("approval gate carries a resume token")
-                        .as_str(),
-                )
-                .expect("resume token round-trips to the loop-facing type");
-                (resume_token, origin)
-            }
-            outcome => panic!("set should require approval, got {outcome:?}"),
-        };
-        // Flip resume-reconstruction (§5.3, confirmed): reconstruct the loop-facing `CapabilityApprovalResume` from the
-        // preserved gate ref (approval id), resume token (invocation id), and the
-        // durable approval record (correlation id) — see the missing-target
-        // reconstruction above; confirm against the post-flip resume contract.
-        let approval_request_id = {
-            let routing_ref = ironclaw_host_api::turn::TurnGateRef::new(set_gate_origin.as_str())
-                .expect("routing gate ref is valid");
-            ironclaw_assistant::approval_request_id_from_gate_ref(&routing_ref)
-                .expect("read model recovers the approval request id from the routing ref")
-        };
-        let set_invocation_id = InvocationId::parse(set_resume_token.as_str())
-            .expect("set resume token carries invocation id");
-        let approval_resume = {
-            let mut correlation_scope = run_context.scope.to_resource_scope();
-            correlation_scope.user_id = owner_user_id.clone();
-            correlation_scope.invocation_id = set_invocation_id;
-            let correlation_id = ironclaw_approvals::ApprovalRequestStorePort::get(
-                runtime_surfaces.approval_requests_for_test().as_ref(),
-                &correlation_scope,
-                approval_request_id,
-            )
-            .await
-            .expect("set approval record loads")
-            .expect("set approval record exists")
-            .request
-            .correlation_id;
-            CapabilityApprovalResume {
-                approval_request_id,
-                resume_token: set_resume_token,
-                correlation_id,
-                input_ref: set_candidate.input_ref.clone(),
-            }
-        };
-        // Fix 2 (§5.3 Stage 0): the capability-host synthetic approval producer persists
-        // a durable `GateRecord` at the gate raise. Fix 3: it is keyed by the
-        // canonical `GateRef::for_approval_request`, which the product read model
-        // re-derives from the routing `gate:approval-{id}` ref — so a
-        // host-persisted approval gate resolves through the read model.
-        {
-            use ironclaw_assistant::approval_request_id_from_gate_ref;
-            // The routing ref the loop carries is `gate:approval-{id}`; the product
-            // read model recovers the approval id from it, agreeing with the id the
-            // gate was raised under.
-            let routing_ref = ironclaw_host_api::turn::TurnGateRef::new(set_gate_origin.as_str())
-                .expect("routing gate ref is valid");
-            let recovered_id = approval_request_id_from_gate_ref(&routing_ref)
-                .expect("read model recovers the approval request id from the routing ref");
-            assert_eq!(
-                recovered_id, approval_request_id,
-                "routing ref must encode the same approval id the gate was raised under"
-            );
-            // The host persists the GateRecord under `GateRef::for_approval_request`
-            // (a host_api::GateRef), the canonical key the read model derives from
-            // the recovered id — proving both encodings agree.
-            let record_key = ironclaw_host_api::ids::GateRef::for_approval_request(recovered_id);
-            let record_scope = crate::runtime::capability_host::resource_scope_for_run(
-                &run_context,
-                &fallback_user_id,
-            );
-            let persisted = gate_record_store
-                .load(&record_scope, record_key)
-                .await
-                .expect("gate record load succeeds")
-                .expect("standalone approval gate persisted a durable gate record");
-            assert!(
-                matches!(
-                    persisted,
-                    ironclaw_host_api::gate_record::GateRecord::Approval { .. }
-                ),
-                "persisted gate record is an approval record, got {persisted:?}"
-            );
-        }
-        assert!(
-            runtime_surfaces
-                .outbound_preferences_for_test()
-                .load_communication_preference(owner_preference_key.clone())
-                .await
-                .expect("owner preference read before approval")
-                .is_none()
-        );
-        assert!(
-            runtime_surfaces
-                .outbound_preferences_for_test()
-                .load_communication_preference(actor_preference_key.clone())
-                .await
-                .expect("actor preference read before approval")
-                .is_none()
-        );
-
-        let invocation_id = InvocationId::parse(approval_resume.resume_token.as_str())
-            .expect("resume token carries invocation id");
-        let mut approval_scope = run_context.scope.to_resource_scope();
-        approval_scope.user_id = owner_user_id.clone();
-        approval_scope.invocation_id = invocation_id;
-        let approval = runtime_surfaces
-            .capability_policy_for_test()
-            .lease_approval_for(
-                crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
-                    capability: &set_capability_id,
-                },
-                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
-                runtime_surfaces.skill_mounts_for_test(),
-                runtime_surfaces.memory_mounts_for_test(),
-                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
-            )
-            .expect("outbound delivery approval lease terms");
-        let persistent_terms = approval.clone();
-        ApprovalResolver::new(
-            runtime_surfaces.approval_requests_for_test().as_ref(),
-            runtime_surfaces.capability_leases_for_test().as_ref(),
-        )
-        .approve_dispatch(
-            &approval_scope,
-            approval_resume.approval_request_id,
-            approval,
-        )
-        .await
-        .expect("approval issues dispatch lease");
-
-        let set_outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: set_activity_id,
-                surface_version: set_surface_version,
-                capability_id: set_capability_id_from_candidate,
-                input_ref: CapabilityInputRef::new("input:stale-approval-resume")
-                    .expect("stale input ref"),
-                approval_resume: Some(approval_resume),
-                auth_resume: None,
-            })
-            .await
-            .expect("approved set call invokes");
-        let set_result_ref = match set_outcome {
-            Resolution::Done(done) => completed_loop_result_ref(&done),
-            other => panic!("approved set should complete, got {other:?}"),
-        };
-        let set_output = capability_io
-            .result_output(set_result_ref.as_str())
-            .expect("set result read succeeds")
-            .expect("set result output exists");
-        assert_eq!(
-            set_output["final_reply_target"]["target_id"],
-            slack_target_id.as_str()
-        );
-        let owner_preference = runtime_surfaces
-            .outbound_preferences_for_test()
-            .load_communication_preference(owner_preference_key)
-            .await
-            .expect("owner preference read after approval")
-            .expect("owner preference persisted");
-        assert_eq!(
-            owner_preference
-                .record
-                .final_reply_target
-                .as_ref()
-                .map(|target| target.as_str()),
-            Some(slack_reply_target.as_str())
-        );
-        assert!(
-            runtime_surfaces
-                .outbound_preferences_for_test()
-                .load_communication_preference(actor_preference_key)
-                .await
-                .expect("actor preference read after approval")
-                .is_none()
-        );
-        let leases = runtime_surfaces
-            .capability_leases_for_test()
-            .leases_for_scope(&approval_scope)
-            .await;
-        assert!(leases.iter().any(|lease| {
-            lease.status == CapabilityLeaseStatus::Consumed
-                && lease.grant.capability == set_capability_id
-        }));
-
-        let mut persistent_scope = approval_scope.clone();
-        persistent_scope.agent_id = None;
-        persistent_scope.project_id = None;
-        persistent_scope.mission_id = None;
-        persistent_scope.thread_id = None;
-        runtime_surfaces
-            .persistent_approval_policies_for_test()
-            .allow(PersistentApprovalPolicyInput {
-                scope: persistent_scope,
-                action: PersistentApprovalAction::Dispatch,
-                capability_id: set_capability_id.clone(),
-                grantee: Principal::Extension(
-                    crate::outbound::outbound_delivery_synthetic_provider()
-                        .expect("outbound delivery synthetic provider id"),
-                ),
-                approved_by: Principal::User(actor_user_id.clone()),
-                constraints: GrantConstraints {
-                    max_invocations: None,
-                    ..persistent_terms.constraints
-                },
-                source_approval_request_id: Some(approval_request_id),
-            })
-            .await
-            .expect("persistent outbound delivery approval is stored");
-
-        let second_set_candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
-                ),
-            ))
-            .await
-            .expect("second set call stages");
-        let second_set_outcome = port
-            .invoke_capability(invocation_for_candidate(&second_set_candidate))
-            .await
-            .expect("persistent always-allow set call invokes");
-        match second_set_outcome {
-            Resolution::Done(_) => {}
-            other => panic!("persistent always-allow set should complete, got {other:?}"),
-        }
-        runtime_surfaces
-            .tool_permission_overrides_for_test()
-            .set(ToolPermissionOverrideInput {
-                scope: {
-                    let mut scope = run_context.scope.to_resource_scope();
-                    scope.user_id = owner_user_id.clone();
-                    scope.tenant_user_settings_scope()
-                },
-                capability_id: set_capability_id,
-                state: ToolPermissionOverride::Disabled,
-                updated_by: Principal::User(actor_user_id),
-            })
-            .await
-            .expect("disabled override is stored");
-        let disabled_set_candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
-                ),
-            ))
-            .await
-            .expect("disabled set call stages");
-        let disabled_set_outcome = port
-            .invoke_capability(invocation_for_candidate(&disabled_set_candidate))
-            .await
-            .expect("disabled set call returns a capability outcome");
-        match disabled_set_outcome {
-            Resolution::Done(failure) => {
-                assert_eq!(
-                    failure.verdict.error_kind(),
-                    Some(&FailureKind::PolicyDenied)
-                );
-            }
-            other => panic!("disabled set should fail non-terminally, got {other:?}"),
-        }
         let observed_provider_callers = slack_provider.observed_callers();
         assert!(
             observed_provider_callers
@@ -4553,13 +4046,13 @@ mod tests {
             "outbound target provider should be scoped to owner caller: {observed_provider_callers:?}"
         );
         assert!(
-            observed_provider_callers.len() >= 2,
-            "list and set target resolution should call the outbound target provider"
+            !observed_provider_callers.is_empty(),
+            "list target resolution should call the outbound target provider"
         );
     }
 
     #[tokio::test]
-    async fn standalone_yolo_outbound_delivery_target_set_bypasses_approval_gate() {
+    async fn standalone_yolo_notification_channels_set_bypasses_approval_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
@@ -4594,9 +4087,7 @@ mod tests {
                     auth_prompts: false,
                     modalities: Vec::new(),
                 },
-                destination: ironclaw_outbound::RunFinalReplyDestination::External {
-                    reply_target_binding_ref: slack_reply_target.clone(),
-                },
+                destination: slack_reply_target.clone(),
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -4663,8 +4154,8 @@ mod tests {
         let missing_set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": missing_target_id.as_str() }),
+                    "builtin__notification_channels_set",
+                    serde_json::json!({ "target_ids": [missing_target_id.as_str()] }),
                 ),
             ))
             .await
@@ -4701,8 +4192,8 @@ mod tests {
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
-                    "builtin__outbound_delivery_target_set",
-                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                    "builtin__notification_channels_set",
+                    serde_json::json!({ "target_ids": [slack_target_id.as_str()] }),
                 ),
             ))
             .await
@@ -4732,13 +4223,16 @@ mod tests {
             .await
             .expect("owner preference read after direct set")
             .expect("owner preference persisted");
+        // The bypassed-gate dispatch writes the notification-channel set, not a
+        // final-reply route: `notification_channels_set` replaces the whole set.
         assert_eq!(
             owner_preference
                 .record
-                .final_reply_target
-                .as_ref()
-                .map(|target| target.as_str()),
-            Some(slack_reply_target.as_str())
+                .notification_targets
+                .iter()
+                .map(|target| target.as_str())
+                .collect::<Vec<_>>(),
+            vec![slack_target_id.as_str()]
         );
         assert!(
             runtime_surfaces
@@ -4787,7 +4281,7 @@ mod tests {
             skill_activation_source: None,
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
@@ -4823,7 +4317,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID));
-        assert!(!descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID));
+        assert!(!descriptor_ids.contains(&OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID));
         let tool_definition_names = port
             .tool_definitions()
             .expect("tool definitions")
@@ -4833,9 +4327,7 @@ mod tests {
         assert!(
             !tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
         );
-        assert!(
-            !tool_definition_names.contains(&"builtin__outbound_delivery_target_set".to_string())
-        );
+        assert!(!tool_definition_names.contains(&"builtin__notification_channels_set".to_string()));
     }
 
     #[tokio::test]
@@ -4902,7 +4394,7 @@ mod tests {
             skill_activation_source: None,
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
@@ -5150,7 +4642,7 @@ mod tests {
             skill_activation_source: None,
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
@@ -5270,7 +4762,7 @@ mod tests {
             skill_activation_source: None,
             trajectory_observer: None,
             outbound_preferences_service: None,
-            outbound_delivery_target_set_requires_approval: false,
+            outbound_preference_write_requires_approval: false,
             approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),

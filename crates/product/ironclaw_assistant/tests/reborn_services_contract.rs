@@ -52,12 +52,10 @@ use ironclaw_assistant::{
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, OutboundPreferencesProductService,
-    PRODUCT_COMMAND_EXECUTE_COMMAND_ID, PRODUCT_COMMAND_LIST_COMMAND_ID,
-    PRODUCT_NEW_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    OutboundPreferencesProductService, PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
+    PRODUCT_COMMAND_LIST_COMMAND_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
@@ -78,17 +76,16 @@ use ironclaw_assistant::{
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
     RebornProductCommandListResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
     RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
     RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServices,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
@@ -1611,83 +1608,17 @@ impl AutomationProductService for ErroringAutomationService {
 
 #[derive(Default)]
 struct RecordingOutboundPreferencesService {
-    get_calls: Mutex<Vec<ProductSurfaceCaller>>,
-    set_calls: Mutex<usize>,
     list_calls: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
 impl RecordingOutboundPreferencesService {
-    fn get_calls(&self) -> Vec<ProductSurfaceCaller> {
-        self.get_calls.lock().expect("lock").clone()
-    }
-
-    fn set_calls(&self) -> usize {
-        *self.set_calls.lock().expect("lock")
-    }
-
     fn list_calls(&self) -> Vec<ProductSurfaceCaller> {
         self.list_calls.lock().expect("lock").clone()
     }
 }
 
-type OutboundPreferencesInvokeCall = (ProductSurfaceCaller, CapabilityId, serde_json::Value);
-
-#[derive(Default, Clone)]
-struct RecordingOutboundPreferencesInvoker {
-    calls: Arc<Mutex<Vec<OutboundPreferencesInvokeCall>>>,
-}
-
-impl RecordingOutboundPreferencesInvoker {
-    fn calls(&self) -> Vec<OutboundPreferencesInvokeCall> {
-        self.calls.lock().expect("lock").clone()
-    }
-}
-
-#[async_trait]
-impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
-    async fn invoke(
-        &self,
-        caller: ProductSurfaceCaller,
-        capability: CapabilityId,
-        input: serde_json::Value,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push((caller, capability, input));
-        Ok(operator_config_success_resolution(activity_id))
-    }
-}
-
 #[async_trait]
 impl OutboundPreferencesProductService for RecordingOutboundPreferencesService {
-    async fn get_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        self.get_calls.lock().expect("lock").push(caller);
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-            default_modality: RebornOutboundDeliveryModality::Text,
-        })
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        *self.set_calls.lock().expect("lock") += 1;
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: Some(outbound_target_summary("slack-dm-beta")),
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-            default_modality: RebornOutboundDeliveryModality::Text,
-        })
-    }
-
     async fn list_outbound_delivery_targets(
         &self,
         caller: ProductSurfaceCaller,
@@ -3653,14 +3584,6 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
 
     assert!(response.threads.is_empty());
     assert_eq!(response.next_cursor.as_deref(), Some("cursor-2"));
-
-    assert_eq!(
-        OUTBOUND_PREFERENCES_SET_CAPABILITY
-            .capability_id()
-            .expect("capability id")
-            .as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
 }
 
 #[test]
@@ -7043,164 +6966,6 @@ fn channel_connect_action_serializes_neutral_input_placeholder() {
     assert_eq!(serialized["input_placeholder"], "C0123456789");
 }
 
-#[tokio::test]
-async fn get_outbound_preferences_unwired_returns_empty_projection() {
-    // arch-exempt: large_file, outbound pref tests belong at API seam, plan docs/internal/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-    );
-
-    let page = services
-        .query(
-            caller(),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("default outbound preferences");
-    let response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(page.payload).expect("outbound preferences payload");
-
-    assert!(response.final_reply_target.is_none());
-    assert_eq!(
-        response.default_modality,
-        RebornOutboundDeliveryModality::Text
-    );
-}
-
-#[test]
-fn outbound_delivery_modality_text_round_trips_as_text() {
-    let serialized = serde_json::to_value(RebornOutboundDeliveryModality::Text)
-        .expect("serialize text modality");
-    assert_eq!(serialized, json!("text"));
-
-    let deserialized: RebornOutboundDeliveryModality =
-        serde_json::from_value(serialized).expect("deserialize text modality");
-    assert_eq!(deserialized, RebornOutboundDeliveryModality::Text);
-}
-
-#[test]
-fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
-    let request: RebornSetOutboundPreferencesRequest =
-        serde_json::from_value(json!({})).expect("deserialize empty preferences request");
-
-    assert!(request.final_reply_target_id.is_none());
-}
-
-#[test]
-fn outbound_preferences_response_preserves_client_json_shape() {
-    let response = RebornOutboundPreferencesResponse {
-        final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-        default_modality: RebornOutboundDeliveryModality::Text,
-    };
-
-    let serialized = serde_json::to_value(&response).expect("serialize preferences response");
-    assert_eq!(
-        serialized,
-        json!({
-            "final_reply_target": {
-                "target_id": "slack-dm-alpha",
-                "channel": "slack",
-                "display_name": "Slack DM",
-                "description": "Slack direct message",
-            },
-            "final_reply_target_status": "available",
-            "default_modality": "text",
-        })
-    );
-
-    let deserialized: RebornOutboundPreferencesResponse =
-        serde_json::from_value(serialized).expect("deserialize preferences response");
-    assert_eq!(deserialized, response);
-}
-
-#[test]
-fn outbound_preferences_response_empty_json_defaults_to_text_without_target() {
-    let response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(json!({})).expect("deserialize empty preferences response");
-
-    assert!(response.final_reply_target.is_none());
-    assert_eq!(
-        response.final_reply_target_status,
-        RebornOutboundDeliveryTargetStatus::NoneConfigured
-    );
-    assert_eq!(
-        response.default_modality,
-        RebornOutboundDeliveryModality::Text
-    );
-}
-
-#[test]
-fn outbound_preferences_response_missing_status_defaults_to_available_when_target_present() {
-    let response: RebornOutboundPreferencesResponse = serde_json::from_value(json!({
-        "final_reply_target": {
-            "target_id": "slack-dm-alpha",
-            "channel": "slack",
-            "display_name": "Slack DM",
-            "description": "Slack direct message",
-        },
-        "default_modality": "text",
-    }))
-    .expect("deserialize legacy preferences response");
-
-    assert_eq!(
-        response.final_reply_target_status,
-        RebornOutboundDeliveryTargetStatus::Available
-    );
-    assert!(response.final_reply_target.is_some());
-    assert_eq!(
-        response.default_modality,
-        RebornOutboundDeliveryModality::Text
-    );
-}
-
-#[test]
-fn outbound_preferences_response_serializes_unavailable_status_without_target() {
-    let response = RebornOutboundPreferencesResponse {
-        final_reply_target: None,
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
-        default_modality: RebornOutboundDeliveryModality::Text,
-    };
-
-    let serialized =
-        serde_json::to_value(&response).expect("serialize unavailable preferences response");
-    assert_eq!(
-        serialized,
-        json!({
-            "final_reply_target_status": "unavailable",
-            "default_modality": "text",
-        })
-    );
-
-    let deserialized: RebornOutboundPreferencesResponse =
-        serde_json::from_value(serialized).expect("deserialize unavailable preferences response");
-    assert_eq!(deserialized, response);
-}
-
-#[test]
-fn outbound_preferences_response_serializes_none_configured_status_explicitly() {
-    let response = RebornOutboundPreferencesResponse {
-        final_reply_target: None,
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
-        default_modality: RebornOutboundDeliveryModality::Text,
-    };
-
-    let serialized =
-        serde_json::to_value(&response).expect("serialize none configured preferences response");
-    assert_eq!(
-        serialized,
-        json!({
-            "final_reply_target_status": "none_configured",
-            "default_modality": "text",
-        })
-    );
-}
-
 #[test]
 fn outbound_target_summary_preserves_client_json_shape() {
     let summary = outbound_target_summary("slack-dm-alpha");
@@ -7372,10 +7137,10 @@ fn outbound_target_id_and_display_fields_reject_unicode_line_separators() {
     ] {
         RebornOutboundDeliveryTargetId::new(target_id)
             .expect_err("target id rejects unicode line separators");
-        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-            "final_reply_target_id": target_id,
+        serde_json::from_value::<RebornSetNotificationChannelsRequest>(json!({
+            "target_ids": [target_id],
         }))
-        .expect_err("preference request rejects target id unicode line separators");
+        .expect_err("notification-channels request rejects target id unicode line separators");
     }
 
     for (field, invalid_value) in [
@@ -7409,10 +7174,10 @@ fn outbound_target_id_and_display_fields_reject_unsafe_unicode_formatting() {
     ] {
         RebornOutboundDeliveryTargetId::new(target_id)
             .expect_err("target id rejects unsafe unicode formatting characters");
-        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-            "final_reply_target_id": target_id,
+        serde_json::from_value::<RebornSetNotificationChannelsRequest>(json!({
+            "target_ids": [target_id],
         }))
-        .expect_err("preference request rejects unsafe unicode formatting characters");
+        .expect_err("notification-channels request rejects unsafe unicode formatting characters");
     }
 
     for (field, invalid_value) in [
@@ -7466,24 +7231,11 @@ fn outbound_target_empty_description_is_accepted() {
 }
 
 #[tokio::test]
-async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed() {
+async fn outbound_unwired_target_listing_fails_closed() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
-
-    let set_error = services
-        .invoke(
-            caller(),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": "slack-dm-alpha" }),
-            ActivityId::new(),
-        )
-        .await
-        .expect_err("unwired preference mutation");
-    assert_eq!(set_error.code, ProductSurfaceErrorCode::Unavailable);
-    assert_eq!(set_error.status_code, 503);
-    assert!(!set_error.retryable);
 
     let list_error = services
         .query(
@@ -7502,144 +7254,14 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
 }
 
 #[tokio::test]
-async fn outbound_preferences_service_forwards_caller_and_request() {
-    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let invoker = RecordingOutboundPreferencesInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_outbound_preferences_product_service(outbound_service.clone());
-
-    let get_page = services
-        .query(
-            caller(),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("get outbound preferences");
-    let get_response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(get_page.payload).expect("outbound preferences payload");
-    assert_eq!(
-        get_response
-            .final_reply_target
-            .as_ref()
-            .map(|target| target.target_id.as_str()),
-        Some("slack-dm-alpha")
-    );
-
-    services
-        .invoke(
-            caller_for_user_with_project("user-bravo", None),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": "slack-dm-beta" }),
-            ActivityId::new(),
-        )
-        .await
-        .expect("set outbound preferences");
-    let set_page = services
-        .query(
-            caller_for_user_with_project("user-bravo", None),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("read outbound preferences after mutation");
-    let set_response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(set_page.payload).expect("outbound preferences payload");
-    assert_eq!(
-        set_response
-            .final_reply_target
-            .as_ref()
-            .map(|target| target.target_id.as_str()),
-        Some("slack-dm-alpha")
-    );
-
-    let targets_page = services
-        .query(
-            caller_for_user("user-charlie"),
-            RebornViewQuery {
-                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("list outbound targets");
-    let targets: RebornOutboundDeliveryTargetListResponse =
-        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    assert_eq!(targets.targets.len(), 1);
-    assert_eq!(
-        targets.targets[0].target.target_id.as_str(),
-        "slack-dm-alpha"
-    );
-    assert!(targets.targets[0].capabilities.final_replies);
-
-    let get_calls = outbound_service.get_calls();
-    assert_eq!(get_calls.len(), 2);
-    assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
-    assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
-    assert_eq!(get_calls[1].user_id.as_str(), "user-bravo");
-
-    assert_eq!(outbound_service.set_calls(), 0);
-    let invoke_calls = invoker.calls();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(invoke_calls[0].0.user_id.as_str(), "user-bravo");
-    assert!(invoke_calls[0].0.agent_id.is_some());
-    assert!(invoke_calls[0].0.project_id.is_none());
-    assert_eq!(
-        invoke_calls[0].1.as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
-    assert_eq!(
-        invoke_calls[0].2,
-        json!({ "final_reply_target_id": "slack-dm-beta" })
-    );
-
-    let list_calls = outbound_service.list_calls();
-    assert_eq!(list_calls.len(), 1);
-    assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
-}
-
-#[tokio::test]
-async fn outbound_preferences_reads_are_available_as_product_views() {
+async fn outbound_delivery_targets_are_available_as_a_product_view() {
     let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_outbound_preferences_product_service(outbound_service.clone());
-    let preferences_caller = caller_for_user("user-outbound-preferences");
     let targets_caller = caller_for_user("user-outbound-targets");
-
-    let preferences_page = services
-        .query(
-            preferences_caller.clone(),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("outbound preferences view");
-    let preferences: RebornOutboundPreferencesResponse =
-        serde_json::from_value(preferences_page.payload).expect("outbound preferences payload");
-    assert_eq!(
-        preferences
-            .final_reply_target
-            .as_ref()
-            .map(|target| target.target_id.as_str()),
-        Some("slack-dm-alpha")
-    );
 
     let targets_page = services
         .query(
@@ -7655,7 +7277,6 @@ async fn outbound_preferences_reads_are_available_as_product_views() {
     let targets: RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert_eq!(targets.targets.len(), 1);
-    assert_eq!(outbound_service.get_calls(), vec![preferences_caller]);
     assert_eq!(outbound_service.list_calls(), vec![targets_caller]);
 }
 
@@ -7712,94 +7333,6 @@ async fn trace_reads_are_available_as_product_views() {
         serde_json::from_value(traces_page.payload).expect("trace account traces payload");
     assert!(!traces.enrolled);
     assert!(traces.traces.is_empty());
-}
-
-#[tokio::test]
-async fn set_outbound_preferences_can_clear_final_target() {
-    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let invoker = RecordingOutboundPreferencesInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_outbound_preferences_product_service(outbound_service.clone());
-
-    services
-        .invoke(
-            caller(),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({}),
-            ActivityId::new(),
-        )
-        .await
-        .expect("clear outbound preferences");
-
-    assert_eq!(outbound_service.set_calls(), 0);
-    let invoke_calls = invoker.calls();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0].1.as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
-    assert_eq!(invoke_calls[0].2, json!({}));
-}
-
-#[tokio::test]
-async fn set_outbound_preferences_rejects_malformed_target_id_before_service() {
-    for target_id in [
-        "",
-        " ",
-        " slack-dm-alpha",
-        "slack-dm-alpha ",
-        "slack-dm-alpha\ninjected",
-        "slack-dm-alpha\0injected",
-    ] {
-        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-            "final_reply_target_id": target_id,
-        }))
-        .expect_err("malformed target id");
-    }
-
-    let oversized_target_id = "a".repeat(513);
-    serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-        "final_reply_target_id": oversized_target_id,
-    }))
-    .expect_err("oversized target id");
-}
-
-#[tokio::test]
-async fn set_outbound_preferences_accepts_max_length_target_id_before_service() {
-    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let invoker = RecordingOutboundPreferencesInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_outbound_preferences_product_service(outbound_service.clone());
-
-    let max_length_target_id = "a".repeat(512);
-    services
-        .invoke(
-            caller(),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": max_length_target_id }),
-            ActivityId::new(),
-        )
-        .await
-        .expect("max-length target id");
-
-    assert_eq!(outbound_service.set_calls(), 0);
-    let invoke_calls = invoker.calls();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0]
-            .2
-            .get("final_reply_target_id")
-            .and_then(serde_json::Value::as_str),
-        Some(max_length_target_id.as_str())
-    );
 }
 
 #[tokio::test]

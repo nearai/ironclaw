@@ -98,7 +98,7 @@ async fn invoke_workspace_tool_as(
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_service: None,
-        outbound_delivery_target_set_requires_approval: false,
+        outbound_preference_write_requires_approval: false,
         approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
         approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
         capability_leases: runtime_surfaces.capability_leases_for_test().clone(),

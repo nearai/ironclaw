@@ -53,11 +53,15 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     store
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: key.scope.clone(),
-            final_reply_target: None,
-            progress_target: None,
-            approval_prompt_target: None,
-            auth_prompt_target: None,
+            legacy_notification_target: None,
             default_modality: Some(CommunicationModality::Voice), // distinctive, non-default
+            // Distinctive, non-default: the reopen assert below proves the
+            // stored set itself survives, not just the row (an empty vec is
+            // indistinguishable from the deserialization default).
+            notification_targets: vec![
+                ironclaw_outbound::OutboundDeliveryTargetId::new("slack:durability-dm")
+                    .expect("target id"),
+            ],
             updated_at: chrono::Utc::now(),
             updated_by: user.clone(),
         })
@@ -81,6 +85,16 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     assert_eq!(
         record.record.default_modality,
         Some(CommunicationModality::Voice)
+    );
+    assert_eq!(
+        record
+            .record
+            .notification_targets
+            .iter()
+            .map(|target| target.as_str())
+            .collect::<Vec<_>>(),
+        vec!["slack:durability-dm"],
+        "the stored notification set must survive a fresh-connection reopen"
     );
     assert_eq!(record.record.updated_by, user);
 }

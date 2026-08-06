@@ -134,13 +134,13 @@ use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
-use crate::outbound::{
-    MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-    OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
-    outbound_delivery_synthetic_provider,
-};
+use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
+use ironclaw_assistant::{
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID, RebornOutboundPreferencesService,
+    outbound_delivery_synthetic_provider,
+};
 use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
 pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
@@ -177,9 +177,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            destination: ironclaw_outbound::RunFinalReplyDestination::External {
-                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            },
+            destination: self.reply_target_binding_ref.clone(),
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
@@ -573,8 +571,8 @@ pub struct RebornRuntime {
         dead_code,
         reason = "held for test-support rebinding after runtime construction"
     )]
-    pub(crate) trigger_source_reply_target:
-        Arc<std::sync::RwLock<Arc<dyn crate::factory::TriggerSourceReplyTarget>>>,
+    pub(crate) trigger_source_turn_state:
+        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -1046,12 +1044,14 @@ impl RebornRuntime {
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
         Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+        Arc<dyn OutboundDeliveryTargetProvider>,
     )> {
         Some((
             Arc::clone(&self.outbound_state.state),
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
             Arc::clone(&self.outbound_state.reply_attachment_intents),
+            self.outbound_delivery_target_provider()?,
         ))
     }
 
@@ -1130,6 +1130,8 @@ impl RebornRuntime {
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
+            outbound_delivery_targets: Arc::clone(self.outbound_delivery_target_registry.as_ref()?)
+                as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
             identity_lookup: Arc::clone(&self.channel_identity_store)
                 as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
             deployment_channels: Arc::clone(&self.deployment_channels),
@@ -3905,6 +3907,21 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map(|started| Arc::clone(&started.workflow_factory));
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
+    // Forward-migrate pre-removal routines that still carry a stored delivery
+    // target: rewrite the route into the routine's prompt (the only place a
+    // fire can still act on it) and clear the field. Runs after the outbound
+    // target registry exists — the migration resolves each stored id through
+    // it — and before the poller starts, so no fire observes a half-migrated
+    // record. Idempotent, so every later boot is a no-op.
+    if let Some(registry) = outbound_delivery_target_registry.as_ref() {
+        crate::automation::trigger_delivery_migration::migrate_trigger_delivery_targets_at_boot(
+            &trigger_repository,
+            registry,
+            &thread_scope.tenant_id,
+        )
+        .await;
+    }
+
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
@@ -4042,31 +4059,23 @@ pub(crate) async fn build_runtime_with_resource_governor(
         local_runtime,
     ) {
         let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-        let outbound_preferences = &local_runtime.outbound_preferences;
-        // One driver per codec-bearing channel binding, built by the SAME
-        // product-side workflow factory the channel host graphs are built by
-        // (§12.11 D-A) and from the SAME binding list `register_extras` feeds
-        // the assembly, so the hook's routing set and its driver set cannot
-        // disagree. Construction is product's; routing stays in the hook.
-        let drivers: Vec<(String, Arc<dyn ironclaw_outbound::TriggeredRunDelivery>)> = services
-            .channel_extension_bindings
-            .iter()
-            .filter_map(|binding| {
-                let codec = binding.preference_target_codec.clone()?;
-                workflow_factory
-                    .triggered_run_delivery(binding.extension_id.as_str(), codec)
-                    .map(|driver| (binding.extension_id.as_str().to_owned(), driver))
-            })
-            .collect();
+        // ONE background-run notifier for every channel extension, built by
+        // the SAME product-side workflow factory the channel host graphs are
+        // built by (§12.11 D-A). It decodes each stored notification target
+        // through the assembly's LIVE codec view, so a channel activated
+        // after boot still decodes its own targets.
+        let notifier = workflow_factory.background_run_notifier(Arc::new(
+            ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
+                Arc::clone(assembly),
+            ),
+        ));
+
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
-                Arc::clone(assembly),
+                notifier,
                 Arc::clone(triggered_run_delivery),
-                Arc::clone(outbound_preferences),
-                Arc::clone(&local_runtime.outbound_delivery_targets),
-                drivers,
             ),
         );
         if slot.set(generic_trigger_hook).is_err() {
@@ -4218,7 +4227,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
         #[cfg(any(test, feature = "test-support"))]
-        trigger_source_reply_target: Arc::clone(&services.trigger_source_reply_target),
+        trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),

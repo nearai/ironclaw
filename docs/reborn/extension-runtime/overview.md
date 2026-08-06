@@ -672,8 +672,11 @@ they live in the host's built-in registry, resolve through the same lookup,
 and run the identical pipeline. An extension capability id that collides with
 a built-in fails internal publication.
 
-`slack.send_message` stays an explicit delegated side-effect tool; final
-replies never go through it.
+`slack.send_message` stays an explicit delegated side-effect tool: the model
+acting *as the user*. The host built-in counterpart for explicit delivery *as
+the assistant* is `builtin.outbound_deliver` (§5.4) — both are ordinary tool
+calls through this same pipeline; neither is how a run's own final reply
+reaches its conversation (lane 1, §5.4).
 
 ### 5.3 Inbound message
 
@@ -719,16 +722,34 @@ Sending a message decomposes into two halves, and the split is the design:
   method, threading syntax, DM provisioning, vendor error mapping. Different
   per channel → the adapter's **`deliver()`**.
 
-Every user-visible channel output is a semantic intent, not an API call:
-`FinalReply`, `Progress`, `GatePrompt`, `AuthPrompt`, `FailureNotice`,
-`ConnectRequired`, `Working`, `Cleanup` (e.g. delete the working message),
-`TriggeredDelivery` (routines/heartbeat). Emitters never know what channel the
-user is on. One delivery, end to end:
+Every user-visible channel output is a semantic [`DeliveryIntent`], not an API
+call: `FinalReply`, `GatePrompt`, `AuthPrompt`, `FailureNotice`,
+`ConnectRequired`, `ConnectionStatus`, `Working`, `Cleanup` (e.g. delete the
+working message), `BackgroundRunNotice` (a background/routine run's gate,
+auth, or failure notice, fanned out over its creator's notification-channel
+set), and `ModelDelivery` — an explicit, model-invoked delivery via the
+`builtin.outbound_deliver` tool (mid-run, up to a fixed per-run cap of 16
+calls — `MODEL_DELIVERY_PER_RUN_CAP` — further calls return a model-visible
+Failed result naming the cap,
+one catalog target per call). `DeliveryIntent` splits into **policy-class** intents
+(`FinalReply`, `GatePrompt`, `AuthPrompt`, `BackgroundRunNotice`,
+`ModelDelivery` — driven through `deliver()`, outbound-policy validated) and
+**notice-class** intents (`FailureNotice`, `ConnectRequired`,
+`ConnectionStatus`, `Working`, `Cleanup` — driven through `deliver_notice()`,
+source-routed to the originating conversation). Host-emitted intents never
+know what channel the user is on; the model does, for exactly the one target
+it named on its one call. One delivery, end to end:
 
-1. An intent is emitted ("FinalReply for run X").
+1. An intent is emitted (a host pipeline emits "`FinalReply` for run X"; the
+   `builtin.outbound_deliver` tool handler emits `ModelDelivery` for the
+   catalog target id the model chose).
 2. The coordinator resolves the target: reply where the message came from
-   (via the stored `reply_context`) or a stored preference target for
-   proactive sends. Unauthorized or unavailable targets fail closed.
+   (via the stored `reply_context`), or the run-scoped target sealed onto
+   this one delivery (a model-chosen catalog target for `ModelDelivery`, or
+   one entry of a background run's notification-channel-set fan-out for
+   `BackgroundRunNotice`). A bare system event with no requested target
+   records delivery metadata only — no external send. Unauthorized or
+   unavailable targets fail closed.
 3. It persists a delivery attempt (`Prepared` → `Sending`) **before** any
    network call.
 4. It resolves the bound channel adapter from the active snapshot
@@ -741,13 +762,18 @@ user is on. One delivery, end to end:
 7. The coordinator records the outcome, schedules retries, dedupes, and
    drains on shutdown.
 
-The **sole-writer rule** is what makes the crash story tractable: if the
-process dies after the vendor accepted a message but before the result was
+The **sole-writer rule** is what makes the crash story tractable, and it holds
+identically for every intent — a model-invoked `ModelDelivery` included: if
+the process dies after the vendor accepted a message but before the result was
 recorded, the attempt is found in `Sending` and becomes `Unknown` — never
 blindly resent (that is how users get duplicate messages) unless the vendor
 supports an idempotency key that makes a resend provably safe. This works only
 because exactly one component owns delivery truth, which is why "no direct
-product send path" is an architecture-gated rule.
+product send path" is an architecture-gated rule: `builtin.outbound_deliver`'s
+handler is not a second pipeline — it is one more caller of the same
+`DeliveryCoordinator::deliver`, authorized and persisted exactly like a
+host-emitted intent, so the tool call *is* the coordinator path, not a
+shortcut around it.
 
 The coordinator is **not folded into `ChannelAdapter`** for the same reason
 the dispatcher is not folded into `ToolAdapter` and the ingress router is not
@@ -758,14 +784,24 @@ adapter must resolve the target before an adapter can even be chosen. From an
 extension author's perspective the coordinator is invisible plumbing:
 envelope in, report out.
 
-Boundary notes: `slack.send_message` (the tool) is the *model* acting as the
-user — a job side effect through the tool pipeline — never how the
-assistant's replies are delivered. `web_app` is the explicit no-external-egress
-run target: the answer remains in canonical run/thread state for the WebUI to
-render. External targets pass through the coordinator and vendor adapter.
+Boundary notes, three-way: the **delivery tool** (`builtin.outbound_deliver`)
+is how the *model* delivers explicitly, as the assistant/bot identity, to any
+target other than the run's own conversation — synchronous and
+evidence-bearing (the coordinator's `Delivered` outcome returns
+provider-issued message refs the model can honestly report; there is no
+"queued" result). **Vendor send tools** (`slack.send_message` and its
+siblings) remain the model acting *as the user* — a job side effect through
+the ordinary tool pipeline, reaching other people or places, never how the
+assistant's own output is delivered. **Final replies** are lane 1: a run's own
+reply always lands in the conversation it belongs to, automatically, and
+rides neither tool — never sealed, redirected, or suppressed by a lane-2 call.
+There is no `web_app` pseudo-target: the WebUI already owns lane 1 for its own
+runs, so an empty notification-channel set simply means "no external
+notification; the app is the surface." External targets pass through the
+coordinator and vendor adapter exactly like any other policy-class intent.
 
 This is a promotion, not an invention: the lower layer already exists
-(`ironclaw_outbound`: target policy, preferences, attempt types, stores; plus
+(`ironclaw_outbound`: target resolution, attempt types, stores; plus
 `outbound_delivery.rs` in product-surface orchestration). The coordinator unifies those
 pieces and absorbs the generic halves of today's Slack-fused
 `slack_delivery.rs` — completing the decomposition that file's own header

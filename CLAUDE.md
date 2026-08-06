@@ -258,6 +258,15 @@ delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package
 (`crates/extensions/packages/slack/`).
 
+## Outbound delivery — two lanes
+
+A run's own final reply always lands automatically in the conversation it
+belongs to (lane 1) — never sealed, redirected, or an agent decision. Reaching
+any *other* surface is explicit: the model calls `builtin.outbound_deliver`
+(lane 2, bot identity, synchronous, provider-evidence-bearing) through the same
+generic delivery coordinator every host-emitted intent uses; there is no second
+send path. See `docs/reborn/extension-runtime/overview.md` §5.4.
+
 ## Capability dispatch
 
 Product/WebUI handlers, scheduled triggers, channels, and agent callers use

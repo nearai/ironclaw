@@ -61,16 +61,24 @@ language or inject product-specific behavior into the contract.
 5. The resolver must not encode product-specific behavior such as "Web UI can
    show approval cards" or "Telegram cannot do gate prompts". Capabilities are
    evaluated later at the outbound policy boundary.
-6. P0 rule order is fixed and deterministic.
+6. The resolution rule (§6) is fixed and deterministic.
 7. If the selected target is unavailable, revoked, unauthorized, or otherwise
    invalid, the system fails closed and does not silently fall back to another
    channel.
-8. Implicit fallback is not part of P0. A future fallback must be modeled as an
-   explicit ordered policy rule with tests.
+8. Implicit fallback is not part of the resolution rule. A future fallback
+   must be modeled as an explicit ordered policy rule with tests.
 
 ---
 
 ## 4. Resolution Input
+
+> **Rewritten 2026-08-04 (Task 17).** §§4-6 previously described a
+> preference-slot resolution model deleted by this branch's channel-delivery
+> work (Tasks 9-13): trigger-specific origin variants, a precedence chain over
+> four per-purpose preference fields, and a "P0 rule order" search. The text
+> below describes the landed model. See
+> `crates/ironclaw_outbound/src/delivery_resolution.rs` and
+> `resolution_engine.rs` for the live shape.
 
 The outbound service uses one typed resolution envelope so callers cannot smuggle
 unrelated auth, approval, or transport fields into the request while the
@@ -90,6 +98,7 @@ pub enum CommunicationDeliveryKind {
     DeliveryStatus,
     ApprovalPrompt,
     AuthPrompt,
+    ModelDelivery,
 }
 
 pub enum CommunicationDeliveryIntent {
@@ -128,31 +137,47 @@ pub struct RunNotificationContext {
     origin: RunNotificationOrigin,
 }
 
+pub enum RunNotificationEventKind {
+    FinalReplyReady,
+    ProgressUpdate,
+    ApprovalNeeded,
+    AuthRequired,
+    RunBlocked,
+    DeliveryStatus,
+    /// An explicit model-initiated delivery (`builtin.outbound_deliver`).
+    /// Carries its own `CommunicationDeliveryKind::ModelDelivery` so attempts
+    /// stay distinguishable in the durable audit trail and per-run accounting.
+    ModelDelivery,
+}
+
 pub enum RunNotificationOrigin {
     LiveSourceRoute { source_route: SourceRouteContext },
-    Triggered { trigger: TriggerCommunicationContext },
-    TriggeredWithTarget {
-        trigger: TriggerCommunicationContext,
-        target: ReplyTargetBindingRef,
-    },
-    TriggeredFromSourceRoute {
-        trigger: TriggerCommunicationContext,
-        source_route: SourceRouteContext,
-    },
+    /// One host-sealed target for this run: a model-chosen catalog target for
+    /// `ModelDelivery`, or one entry of a background run's
+    /// notification-channel-set fan-out for `ApprovalNeeded` / `AuthRequired`
+    /// / `RunBlocked` / `DeliveryStatus` when no live source route exists.
+    /// Revalidated at egress.
+    RunScopedTarget { target: ReplyTargetBindingRef },
     SystemEvent { reason: SystemEventReasonCode },
 }
 ```
 
 `SourceRouteContext` carries the validated reply target for a live inbound
-conversation. `TriggeredWithTarget` carries the creator-owned binding resolved
-at fire time from the trigger's durable opaque target id; it routes ordinary
-results without changing the creator's global default. Approval and auth prompts
-continue to use their dedicated preference fields, so an ordinary delivery
-target cannot select an authority-bearing prompt destination.
-`TriggerCommunicationContext` identifies the trigger fire without turning that
-trigger into a communication destination. The trigger reference is an
-outbound-local correlation value; the canonical trigger identity belongs to the
-future `ironclaw_triggers::TriggerId` in PR 9.
+conversation. `RunScopedTarget` is the one surviving per-target origin, and it
+resolves verbatim: no preference lookup runs at all (§5, §6). Every
+background-run notification and every explicit model delivery resolves
+through this arm. There is no dedicated trigger-communication context, no
+per-purpose preference-target field, and no precedence chain between them —
+the caller that builds the `RunNotificationContext` (the background-run
+notifier, or the `builtin.outbound_deliver` tool handler) has already decided
+the one target this notification uses; the resolver's job is only to read it
+back out, unmodified, as the candidate.
+
+`ModelDelivery` can never legitimately carry `LiveSourceRoute`: that origin
+means "reply where the inbound message came from," which is definitionally
+the run's own conversation, and an explicit delivery targeting the run's own
+conversation is denied before resolution ever runs (the tool's same-origin
+check). `ModelDelivery` always carries the model's chosen `RunScopedTarget`.
 
 `SystemEventReasonCode` is a stable, redacted enum/code. Human-readable backend
 details, raw tool input, prompt material, OAuth state, approval payloads, and
@@ -162,79 +187,94 @@ has been selected and validated.
 
 ---
 
-## 5. Preference Fields
+## 5. Notification Targets
 
-User communication preferences are owned by an
+*(Renamed from "Preference Fields." The four per-purpose preference slots this
+section used to describe — `final_reply_target`, `progress_target`,
+`approval_prompt_target`, `auth_prompt_target` — are retired. Nothing writes a
+per-purpose target any more: delivery is a model-called tool, never a stored
+implicit route.)*
+
+User communication defaults are owned by an
 `ironclaw_outbound::CommunicationPreferenceRepository` backed by a dedicated
-typed tenant/user database table. They are not stored in the generic JSON
-settings store and are not profile/tone preferences.
+typed tenant/user database table (`CommunicationPreferenceRecord`). They are
+not stored in the generic JSON settings store and are not profile/tone
+preferences.
 
-The V1 preference row is keyed by `(tenant_id, user_id)` and may contain these
-optional `ReplyTargetBindingRef` candidate fields:
+The record is keyed by scope (`DeliveryDefaultScope`, effectively
+`(tenant_id, user_id)`) and carries:
 
-- `final_reply_target`: default target for ordinary run results when no live
-  source route applies;
-- `progress_target`: target for progress updates when the live source route is
-  absent or cannot validate for progress;
-- `approval_prompt_target`: exact-owner target for approval prompts;
-- `auth_prompt_target`: exact-owner target for auth prompts;
-- `default_modality`: preferred modality when a caller does not specify a more
-  specific supported modality.
+- `notification_targets: Vec<OutboundDeliveryTargetId>` — an explicit,
+  user-configured **set** of 0..8 catalog targets (`NOTIFICATION_TARGETS_CAP`)
+  that receive gate prompts, auth prompts, and failure notices for a
+  background/routine run with no live source route. Empty means "notification
+  channels are the web app only" — there is no dedicated in-app pseudo-target
+  to configure instead.
+- `legacy_notification_target: Option<ReplyTargetBindingRef>` — read-migration
+  input only (serialized under the historical wire name `final_reply_target`
+  so a pre-migration row still deserializes). Nothing writes it.
+  `CommunicationPreferenceRecord::effective_notification_target_ids` folds it
+  into the notification set only when `notification_targets` is empty.
+- `default_modality: Option<CommunicationModality>`.
 
-Preference fields are candidates only. The outbound service must revalidate
-tenant ownership, exact owner where required, target capability, delivery kind,
-and modality before recording a delivery attempt.
+There are no `progress_target`, `approval_prompt_target`, or
+`auth_prompt_target` fields any more, and no precedence chain between them:
+`OutboundResolutionEngine` (§6) reads no stored preference at all. A run's
+final reply, progress update, approval prompt, auth prompt, and
+delivery-status notice each resolve from the live source route or an explicit
+`RunScopedTarget` the caller already picked — never from a stored per-purpose
+slot.
 
-Product-facing outbound reads are descriptor-backed ProductSurface query views:
-`outbound_preferences` for the authenticated caller's preference projection and
-`outbound_delivery_targets` for the caller-scoped target inventory. The legacy
-`get_outbound_preferences` and `list_outbound_delivery_targets` facade methods
-are compatibility wrappers over those views; ProductSurface views are the
-canonical read conduit. Preference writes remain side-effecting and
-must move through the capability path.
+Stored notification targets are candidates only. The outbound service must
+revalidate tenant ownership, target capability, delivery kind, and modality
+before recording a delivery attempt.
+
+Product-facing reads/writes are descriptor-backed ProductSurface capabilities:
+a `get_notification_channels` view projects the caller's effective
+notification-target set (folding the legacy slot per above), and
+`builtin.notification_channels_set` (model-callable, approval-gated,
+full-replace CAS write) and the WebUI notification-channels panel's product command are the only two write surfaces — both enter the same validated `set_notification_channels` service path (owner-scoped id validation, dedup, cap). There is no
+`get_outbound_preferences` / `set_outbound_preferences` facade any more — both
+were deleted along with the preference slots they served.
+`outbound_delivery_targets` remains the descriptor-backed view for the
+caller-scoped target inventory. Writes remain side-effecting and must move
+through the capability path.
 
 ---
 
-## 6. P0 Rule Order
+## 6. Resolution Rule
 
-The first matching rule yields the only candidate.
+The candidate is a direct read of the caller-supplied intent, not a search
+through stored fallbacks. `OutboundResolutionEngine::resolve` is a single
+match over `CommunicationDeliveryIntent`:
 
-1. **Authority-bearing prompts use exact-owner prompt targets.** Approval and
-   auth prompts use `approval_prompt_target` / `auth_prompt_target`
-   preferences only when outbound validation confirms the target supports the
-   requested prompt kind and belongs to the exact owner. Shared/group widening
-   is forbidden for these payloads. `RequestedOutbound` cannot choose an
-   independent approval/auth prompt target; if present for these delivery
-   kinds, it may only narrow to the same exact-owner prompt target after
-   validation.
-2. **Explicit requested outbound wins for non-authority delivery.** If a caller
-   explicitly requests an outbound target for a non-approval and non-auth
-   delivery kind, the resolver returns that typed target as the candidate.
-3. **Live source route wins for ordinary run notifications.** If the run
-   descended from a real inbound product message, final replies and supported
-   progress/status updates prefer the live source route's reply target.
-4. **Triggered-from-source-route uses the live source route.** If the run
-   descended from both a trigger and a live source route, ordinary final
-   replies, progress updates, and delivery-status notices prefer the live
-   source route over the trigger creator's preferred target.
-5. **Triggered preferred target wins for ordinary trigger results without a
-   live source route.** If the run descended from a trigger and has no live
-   source route, final replies prefer the creator user's configured
-   `final_reply_target`.
-6. **System events have no implicit external target in P0.** `SystemEvent`
-   origins require `RequestedOutbound` for external delivery. Without an
-   explicit requested target, the event is recorded as delivery metadata only
-   and no external send is attempted.
+1. **`RequestedOutbound` returns the caller's explicit target verbatim.** The
+   candidate's target is `requested_target`; its kind derives from
+   `requested_kind` (`ProductMessage` → `FinalReply`, `DeliveryStatus` →
+   `DeliveryStatus`). No other rule is consulted.
+2. **`RunNotification` reads the target straight out of `origin`:**
+   - `LiveSourceRoute` → the source route's reply target. Used whenever the
+     run descended from a real inbound product message and this event
+     supports replying where the message came from (a live conversation's
+     final reply, progress update, gate prompt, or auth prompt).
+   - `RunScopedTarget` → the sealed target verbatim, for every event kind. A
+     background run's gate/auth/failure notices, and every explicit
+     `ModelDelivery`, arrive this way — the caller already resolved the exact
+     target (a notification-channel-set entry, or the model's chosen catalog
+     target) before asking the resolver.
+   - `SystemEvent` → no candidate; the reason code is recorded as delivery
+     metadata only, and no external send is attempted.
 
-Delivery-status notifications follow the same origin rule as the delivery they
-describe. Progress updates use the source route when that route validates for
-progress; otherwise they use `progress_target` when configured. Unsupported
-progress, approval, or auth delivery is recorded as delivery metadata only; it
-must not resume work or change approval/auth state.
+There is no implicit fallback chain and no per-purpose preference lookup:
+every rule above is a direct field read, not a search. If the caller building
+the request has no target to offer for a given event, it constructs
+`SystemEvent` rather than asking the resolver to invent one.
 
-The resolver does not keep searching after a target fails validation. If the
-first eligible candidate is unavailable or revoked, the result is failure, not
-an automatic hop to some other channel.
+The resolver does not keep searching after it reads a target out this way. If
+the returned candidate later fails validation (unavailable, revoked,
+unauthorized), the result is failure, not an automatic hop to some other
+channel — the caller decides whether and how to retry with a different
+target.
 
 ---
 

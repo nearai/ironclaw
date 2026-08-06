@@ -23,8 +23,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-mod scenario_delivery_target_fail_closed;
-mod scenario_external_source_trigger_captures_delivery;
+mod scenario_trigger_create_has_no_delivery_target_field;
 mod scenario_trigger_persists_after_reopen;
 mod scenario_trigger_self_create_denied;
 mod scenario_triggered_chained_gate;
@@ -93,21 +92,13 @@ async fn triggers_group_e2e() {
         scenario_trigger_self_create_denied::run(&g).await,
     );
 
-    // Per-trigger delivery routing fails closed on a host with no outbound
-    // delivery target providers: routed create rejected, nothing persisted.
-    // Accept path is dispatch-tier + composition-tier (see scenario doc).
+    // Routines carry no stored delivery route: the model-visible create schema
+    // omits it, a create without it round-trips clean, and a stored-target-era
+    // record still reads back through the real tool surface. Independent of
+    // `verbs_lifecycle` (own trigger names/thread).
     report.record(
-        "delivery_target_fail_closed",
-        scenario_delivery_target_fail_closed::run(&g).await,
-    );
-
-    // A trigger created from an external product conversation must not be
-    // persisted with no route back to that conversation. The host owns the
-    // current sealed reply target; correctness cannot depend on the model
-    // remembering to list targets and copy an id into its arguments.
-    report.record(
-        "external_source_trigger_captures_delivery",
-        scenario_external_source_trigger_captures_delivery::run(&g).await,
+        "trigger_create_has_no_delivery_target_field",
+        scenario_trigger_create_has_no_delivery_target_field::run(&g).await,
     );
 
     report.assert_all_passed();

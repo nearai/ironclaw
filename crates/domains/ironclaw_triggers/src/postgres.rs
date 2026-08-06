@@ -103,6 +103,11 @@ impl TriggerRepository for PostgresTriggerRepository {
         let active_fire_slot = record.active_fire_slot.as_ref().map(fmt_ts);
         let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
         let created_at = fmt_ts(&record.created_at);
+        // Retired routing column: no create path produces a non-null value any
+        // more. The binding stays because composition's boot migration clears
+        // pre-removal rows by upserting the record with `delivery_target: None`
+        // — dropping the write would strand those values forever and make the
+        // migration re-append its prompt step on every boot.
         let delivery_target = record
             .delivery_target
             .as_ref()
@@ -1342,7 +1347,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
     let delivery_target = optional_text(row, "delivery_target")?
-        .map(crate::parse_trigger_delivery_target_id)
+        .map(crate::decode_legacy_delivery_target)
         .transpose()?;
 
     let record = TriggerRecord {

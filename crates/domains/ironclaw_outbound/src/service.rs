@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use crate::resolution_engine::OutboundResolutionEngine;
 use crate::validation::validate_delivery_scope_candidate;
 use crate::{
-    CommunicationDeliveryResolution, CommunicationPreferenceRepository, DeliveryFailureKind,
-    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId, OutboundDeliveryStatus,
-    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
+    CommunicationDeliveryResolution, DeliveryFailureKind, OutboundDeliveryAttempt,
+    OutboundDeliveryDecision, OutboundDeliveryId, OutboundDeliveryStatus, OutboundError,
+    OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
     PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
@@ -159,9 +159,8 @@ impl<'a> OutboundPolicyService<'a> {
     pub async fn prepare_communication_delivery_attempt(
         &self,
         request: PrepareCommunicationDeliveryRequest,
-        communication_preferences: &dyn CommunicationPreferenceRepository,
     ) -> Result<Option<OutboundDeliveryDecision>, OutboundError> {
-        let engine = OutboundResolutionEngine::new(communication_preferences);
+        let engine = OutboundResolutionEngine;
         let resolution = engine.resolve(&request.resolution_request).await?;
         self.prepare_communication_delivery_attempt_from_resolution(request, resolution)
             .await
@@ -282,8 +281,8 @@ mod tests {
     use crate::test_support::in_memory_backed_outbound_state_store;
     use crate::{
         CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-        CommunicationPreferenceRecord, OutboundPushKind, RunNotificationContext,
-        RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
+        OutboundPushKind, RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
+        SystemEventReasonCode,
     };
 
     #[tokio::test]
@@ -311,7 +310,7 @@ mod tests {
         };
 
         let decision = service
-            .prepare_communication_delivery_attempt(request, &store)
+            .prepare_communication_delivery_attempt(request)
             .await
             .expect("no-delivery resolution succeeds");
 
@@ -335,17 +334,6 @@ mod tests {
         let scope = turn_scope("thread-approval");
         let approval_target = reply_ref("reply:approval");
         validator.allow(approval_target.clone());
-        store
-            .put_communication_preference(preference_record(
-                &scope,
-                Some("reply:final"),
-                Some("reply:progress"),
-                Some("reply:approval"),
-                Some("reply:auth"),
-            ))
-            .await
-            .expect("seed preferences");
-
         let request = PrepareCommunicationDeliveryRequest {
             resolution_request: CommunicationDeliveryResolutionRequest {
                 scope: scope.clone(),
@@ -353,17 +341,8 @@ mod tests {
                 modality: CommunicationModality::Text,
                 intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
-                    origin: RunNotificationOrigin::TriggeredFromSourceRoute {
-                        trigger: crate::TriggerCommunicationContext {
-                            trigger_origin_ref: crate::TriggerOriginRef::new("trigger:approval")
-                                .expect("valid trigger id"),
-                            trigger_source_kind: crate::TriggerSourceKind::Schedule,
-                            fire_slot: crate::TriggerFireSlot::new("2026-06-08T09:00:00Z")
-                                .expect("valid fire slot"),
-                        },
-                        source_route: SourceRouteContext {
-                            reply_target_binding_ref: reply_ref("reply:source"),
-                        },
+                    origin: RunNotificationOrigin::RunScopedTarget {
+                        target: approval_target.clone(),
                     },
                 }),
             },
@@ -373,7 +352,7 @@ mod tests {
         };
 
         let decision = service
-            .prepare_communication_delivery_attempt(request, &store)
+            .prepare_communication_delivery_attempt(request)
             .await
             .expect("approval prompt resolves");
         let Some(OutboundDeliveryDecision::Authorized { attempt, target }) = decision else {
@@ -442,25 +421,6 @@ mod tests {
                 scope: request.scope,
                 thread_id: request.thread_id,
             })
-        }
-    }
-
-    fn preference_record(
-        scope: &TurnScope,
-        final_reply_target: Option<&str>,
-        progress_target: Option<&str>,
-        approval_prompt_target: Option<&str>,
-        auth_prompt_target: Option<&str>,
-    ) -> CommunicationPreferenceRecord {
-        CommunicationPreferenceRecord {
-            scope: crate::DeliveryDefaultScope::personal(scope.tenant_id.clone(), user_id("alice")),
-            final_reply_target: final_reply_target.map(reply_ref),
-            progress_target: progress_target.map(reply_ref),
-            approval_prompt_target: approval_prompt_target.map(reply_ref),
-            auth_prompt_target: auth_prompt_target.map(reply_ref),
-            default_modality: Some(CommunicationModality::Text),
-            updated_at: now(),
-            updated_by: user_id("alice"),
         }
     }
 

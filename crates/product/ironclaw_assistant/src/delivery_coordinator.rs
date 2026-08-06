@@ -34,10 +34,10 @@ use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
-    OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
-    OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
-    ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
+    OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
+    PrepareCommunicationDeliveryRequest, ReplyAttachmentIntent, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -76,8 +76,14 @@ pub enum DeliveryIntent {
     Working,
     /// Remove an earlier delivery (e.g. delete the working indicator).
     Cleanup,
-    /// A routine/heartbeat-initiated delivery to a preference target.
-    TriggeredDelivery,
+    /// A background (routine) run needs the user's attention on a
+    /// notification channel: it failed, or it is parked on an auth gate whose
+    /// authorization URL cannot be shown on this channel. Fanned out over the
+    /// creator's notification-channel set, so unlike [`Self::FailureNotice`]
+    /// (source-routed to an interactive conversation) it is policy-class.
+    BackgroundRunNotice,
+    /// A model-initiated explicit delivery via builtin.outbound_deliver.
+    ModelDelivery,
 }
 
 impl DeliveryIntent {
@@ -87,7 +93,11 @@ impl DeliveryIntent {
     pub fn runs_outbound_policy(self) -> bool {
         matches!(
             self,
-            Self::FinalReply | Self::GatePrompt | Self::AuthPrompt | Self::TriggeredDelivery
+            Self::FinalReply
+                | Self::GatePrompt
+                | Self::AuthPrompt
+                | Self::BackgroundRunNotice
+                | Self::ModelDelivery
         )
     }
 
@@ -109,7 +119,8 @@ impl DeliveryIntent {
             Self::CommandFeedback => "command-feedback",
             Self::Working => "working",
             Self::Cleanup => "cleanup",
-            Self::TriggeredDelivery => "triggered-delivery",
+            Self::BackgroundRunNotice => "background-run-notice",
+            Self::ModelDelivery => "model-delivery",
         }
     }
 }
@@ -202,6 +213,18 @@ pub enum CoordinatedDeliveryOutcome {
         attempt: OutboundDeliveryAttempt,
         /// The resolved target conversation, so emitters can record follow-up
         /// state (gate routes, cleanup targets) without vendor knowledge.
+        conversation: ExternalConversationRef,
+        vendor_message_refs: Vec<String>,
+    },
+    /// Every part was sent — the provider refs are real — but the durable
+    /// `Delivered` confirmation write failed, so the attempt row still reads
+    /// as in-flight. The explicit weaker evidence type `tool-evidence.md`
+    /// requires instead of fabricating `Delivered` (theredspoon's #7157 flag;
+    /// #7029 fixes the same swallow on main). Deliberately not an error:
+    /// an error invites a resend, and the message already reached the
+    /// provider. Recovery reconciles the row as terminal-ambiguous.
+    DeliveredUnconfirmed {
+        attempt: OutboundDeliveryAttempt,
         conversation: ExternalConversationRef,
         vendor_message_refs: Vec<String>,
     },
@@ -361,7 +384,6 @@ impl DeliveryCoordinator {
     pub async fn deliver(
         &self,
         outbound_policy: &OutboundPolicyService<'_>,
-        communication_preferences: &dyn CommunicationPreferenceRepository,
         target_resolver: &dyn ProductOutboundTargetResolver,
         project_filesystem: &dyn ProjectFilesystemReader,
         request: CoordinatedDeliveryRequest<'_>,
@@ -377,7 +399,7 @@ impl DeliveryCoordinator {
 
         // 1. Policy: authorize the candidate and persist the attempt.
         let Some(decision) = outbound_policy
-            .prepare_communication_delivery_attempt(request.delivery, communication_preferences)
+            .prepare_communication_delivery_attempt(request.delivery)
             .await?
         else {
             return Ok(CoordinatedDeliveryOutcome::NoDelivery);
@@ -684,8 +706,16 @@ impl DeliveryCoordinator {
                         .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }));
 
                     if all_sent && !report.parts.is_empty() {
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
+                        let confirmed = self
+                            .mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
                             .await;
+                        if !confirmed {
+                            return Ok(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+                                attempt,
+                                conversation,
+                                vendor_message_refs: sent_refs,
+                            });
+                        }
                         return Ok(CoordinatedDeliveryOutcome::Delivered {
                             attempt,
                             conversation,
@@ -745,13 +775,19 @@ impl DeliveryCoordinator {
         }
     }
 
+    /// Persist the terminal status; `true` only when the durable write
+    /// committed. Failure-path callers proceed regardless (the reported
+    /// outcome is already non-success and recovery reconciles the row), but
+    /// the `Delivered` caller must downgrade to
+    /// [`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`] — a success it
+    /// cannot durably confirm is not a success it may claim.
     async fn mark_terminal(
         &self,
         attempt: &OutboundDeliveryAttempt,
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
-    ) {
-        if let Err(error) = self
+    ) -> bool {
+        match self
             .store
             .update_delivery_status(UpdateDeliveryStatusRequest {
                 delivery_id: attempt.delivery_id,
@@ -762,14 +798,15 @@ impl DeliveryCoordinator {
             })
             .await
         {
-            // silent-ok: terminal-status bookkeeping must not mask the
-            // delivery outcome; the attempt stays in its prior durable state
-            // and recovery reconciles it.
-            debug!(
-                delivery_id = %attempt.delivery_id,
-                error = %error,
-                "delivery coordinator: terminal status write failed"
-            );
+            Ok(()) => true,
+            Err(error) => {
+                debug!(
+                    delivery_id = %attempt.delivery_id,
+                    error = %error,
+                    "delivery coordinator: terminal status write failed"
+                );
+                false
+            }
         }
     }
 }
@@ -785,10 +822,7 @@ async fn materialize_workspace_file_parts(
         attachments,
     } = materialization;
     reject_caller_supplied_files(&parts)?;
-    if !matches!(
-        intent,
-        DeliveryIntent::FinalReply | DeliveryIntent::TriggeredDelivery
-    ) {
+    if !matches!(intent, DeliveryIntent::FinalReply) {
         return if attachments.is_empty() {
             Ok(parts)
         } else {

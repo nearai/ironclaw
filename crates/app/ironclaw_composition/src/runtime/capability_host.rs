@@ -55,6 +55,7 @@ use ironclaw_assistant::projection::{
     CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore,
 };
 
+mod notification_channels_set;
 mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
@@ -62,12 +63,12 @@ mod shell_tests;
 #[cfg(test)]
 mod workspace_scoping_tests;
 
-#[cfg(test)]
-pub(crate) use crate::outbound::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(test)]
+pub(crate) use ironclaw_assistant::{
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+};
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
@@ -133,7 +134,7 @@ pub(super) fn capability_wiring(
             auto_approve_settings,
             services.persistent_approval_policies.clone(),
         ));
-    let outbound_delivery_target_set_requires_approval = effects_require_approval(
+    let outbound_preference_write_requires_approval = effects_require_approval(
         services.runtime_policy.as_ref(),
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
@@ -196,7 +197,7 @@ pub(super) fn capability_wiring(
             thread_service,
             trajectory_observer,
             outbound_preferences_service,
-            outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval,
             approval_settings,
             approval_requests,
             capability_leases,
@@ -232,7 +233,7 @@ struct RefreshingLoopCapabilityPortFactory {
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    outbound_delivery_target_set_requires_approval: bool,
+    outbound_preference_write_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -284,8 +285,8 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
             outbound_preferences_service: self.outbound_preferences_service.clone(),
-            outbound_delivery_target_set_requires_approval: self
-                .outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval: self
+                .outbound_preference_write_requires_approval,
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),

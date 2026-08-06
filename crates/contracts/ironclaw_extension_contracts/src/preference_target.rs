@@ -67,3 +67,24 @@ pub trait PreferenceTargetCodec: Send + Sync {
         external_actor_id: &str,
     ) -> Option<ReplyTargetBindingRef>;
 }
+
+/// Live view of the channel extensions whose preference-target codecs are
+/// currently active.
+///
+/// Read at every use, never captured. A long-lived consumer (the background-run
+/// notifier is the motivating one) outlives many activation cycles: an
+/// extension activated after that consumer was built must still be able to
+/// decode its own binding refs. Snapshotting this into a `Vec` at construction
+/// freezes the channel set and silently stops serving later activations —
+/// their targets classify as undecodable and their notifications never arrive
+/// until the process restarts.
+pub trait ActivePreferenceTargetCodecs: Send + Sync {
+    fn active_preference_target_codecs(&self) -> Vec<std::sync::Arc<dyn PreferenceTargetCodec>>;
+}
+
+/// A fixed codec set: compositions with one static channel, and tests.
+impl ActivePreferenceTargetCodecs for Vec<std::sync::Arc<dyn PreferenceTargetCodec>> {
+    fn active_preference_target_codecs(&self) -> Vec<std::sync::Arc<dyn PreferenceTargetCodec>> {
+        self.clone()
+    }
+}

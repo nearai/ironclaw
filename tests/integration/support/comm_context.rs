@@ -21,27 +21,26 @@ use std::sync::Arc;
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+    ConnectedChannelSummary, ConnectedChannelsState, NotificationChannelsState,
 };
 
 /// A [`CommunicationContextProvider`] that returns a pre-resolved
 /// [`CommunicationRuntimeContext`] regardless of scope/actor. Mirrors the
 /// loop-driver-host `StubCommunicationContextProvider` shape but with a
-/// *configured* delivery target + connected channel so the rendered slice
-/// carries distinctive sentinels a test can assert on.
+/// *configured* notification-channel count + connected channel so the
+/// rendered slice carries distinctive sentinels a test can assert on.
 pub struct RecordingCommunicationContextProvider {
     context: CommunicationRuntimeContext,
 }
 
 impl RecordingCommunicationContextProvider {
-    /// Provider that reports a single connected channel `channel_name` and a
-    /// configured outbound delivery target (`display_name` on `channel`). The
-    /// rendered model-context slice reads
+    /// Provider that reports a single connected channel `channel_name` and
+    /// `notification_channel_count` configured notification-channel targets.
+    /// The rendered model-context slice reads
     /// `Connected channels: <channel_name> (authenticated, active).` and
-    /// `Outbound delivery target: <display_name> (<channel>) — applies to ...`.
-    pub fn with_target_and_channel(
-        display_name: impl Into<String>,
-        channel: impl Into<String>,
+    /// `Background-run notifications: <notification_channel_count> channel(s) configured.`
+    pub fn with_notification_count_and_channel(
+        notification_channel_count: usize,
         channel_name: impl Into<String>,
     ) -> Arc<dyn CommunicationContextProvider> {
         Arc::new(Self {
@@ -52,10 +51,7 @@ impl RecordingCommunicationContextProvider {
                     active: true,
                     presentation: None,
                 }]),
-                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
-                    display_name: display_name.into(),
-                    channel: channel.into(),
-                }),
+                notification_channels: NotificationChannelsState::Known(notification_channel_count),
                 // Placeholder; the host stamps the surface-derived value in
                 // `CommunicationContextFetch::resolve`, mirroring production.
                 delivery_tools_visible: false,

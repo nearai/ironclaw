@@ -47,9 +47,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
-    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    DeliveredGateRouteStore, DeliveryDefaultScope, DeliveryTargetCapabilities, OutboundError,
+    OutboundStateStore, OutboundStateStorePort, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
+};
+use ironclaw_outbound::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::delivery::{
@@ -483,21 +487,76 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
     }
 }
 
-struct StaticCodec {
-    conversation: ExternalConversationRef,
-    personal_dm: bool,
+/// One entry in the scripted notification catalog: an opaque catalog id, the
+/// vendor binding ref it resolves to, the conversation that ref decodes back
+/// to, and whether the catalog entry is a personal DM.
+#[derive(Clone, Copy)]
+struct TestNotificationTarget {
+    target_id: &'static str,
+    /// The channel extension that owns this target's binding grammar — the
+    /// notifier reads it off the catalog entry to pick a delivering channel.
+    extension_id: &'static str,
+    binding_ref: &'static str,
+    conversation_id: &'static str,
+    direct_message: bool,
 }
 
-impl PreferenceTargetCodec for StaticCodec {
+/// The creator's personal DM — the only class of target an OAuth
+/// `authorization_url` may land in.
+const DM_TARGET: TestNotificationTarget = TestNotificationTarget {
+    target_id: "acme:personal-dm:user-a",
+    extension_id: EXTENSION_ID,
+    binding_ref: "reply:acme:dm",
+    conversation_id: "dm-creator",
+    direct_message: true,
+};
+
+/// A shared channel the creator picked as a notification channel.
+const SHARED_TARGET: TestNotificationTarget = TestNotificationTarget {
+    target_id: "acme:shared-channel:eng",
+    extension_id: EXTENSION_ID,
+    binding_ref: "reply:acme:eng",
+    conversation_id: "chan-eng",
+    direct_message: false,
+};
+
+/// A second channel extension's personal DM, activated only PARTWAY through
+/// `triggered_gate_prompt_reaches_a_channel_activated_after_the_first_fire`.
+const LATE_EXTENSION_ID: &str = "beta";
+const LATE_ACTIVATED_TARGET: TestNotificationTarget = TestNotificationTarget {
+    target_id: "beta:personal-dm:user-a",
+    extension_id: LATE_EXTENSION_ID,
+    binding_ref: "reply:beta:dm",
+    conversation_id: "dm-beta",
+    direct_message: true,
+};
+
+/// Codec over the scripted catalog: decodes exactly the binding refs the
+/// catalog minted, and answers the DM predicate per target (a single-bool
+/// codec cannot express a mixed DM/non-DM notification set).
+struct CatalogCodec {
+    targets: Vec<TestNotificationTarget>,
+}
+
+impl CatalogCodec {
+    fn find(&self, target: &ReplyTargetBindingRef) -> Option<&TestNotificationTarget> {
+        self.targets
+            .iter()
+            .find(|entry| entry.binding_ref == target.as_str())
+    }
+}
+
+impl PreferenceTargetCodec for CatalogCodec {
     fn conversation_for_target(
         &self,
-        _target: &ReplyTargetBindingRef,
+        target: &ReplyTargetBindingRef,
     ) -> Option<ExternalConversationRef> {
-        Some(self.conversation.clone())
+        let entry = self.find(target)?;
+        ExternalConversationRef::new(Some("space-1"), entry.conversation_id, None, None).ok()
     }
 
-    fn is_personal_direct_message(&self, _target: &ReplyTargetBindingRef) -> bool {
-        self.personal_dm
+    fn is_personal_direct_message(&self, target: &ReplyTargetBindingRef) -> bool {
+        self.find(target).is_some_and(|entry| entry.direct_message)
     }
 
     fn direct_message_actor_for_target(&self, _target: &ReplyTargetBindingRef) -> Option<String> {
@@ -517,6 +576,79 @@ impl PreferenceTargetCodec for StaticCodec {
         _external_actor_id: &str,
     ) -> Option<ReplyTargetBindingRef> {
         None
+    }
+}
+
+/// A LIVE codec source whose active set can grow mid-test — the seam that
+/// distinguishes "codecs re-read per fire" from "codecs frozen at build".
+#[derive(Default)]
+struct GrowableCodecs {
+    codecs: Mutex<Vec<Arc<dyn PreferenceTargetCodec>>>,
+}
+
+impl GrowableCodecs {
+    fn with_initial(targets: Vec<TestNotificationTarget>) -> Self {
+        Self {
+            codecs: Mutex::new(vec![
+                Arc::new(CatalogCodec { targets }) as Arc<dyn PreferenceTargetCodec>
+            ]),
+        }
+    }
+
+    /// Stand-in for a channel extension activating: its codec joins the
+    /// active set.
+    fn activate(&self, targets: Vec<TestNotificationTarget>) {
+        self.codecs
+            .lock()
+            .expect("codecs")
+            .push(Arc::new(CatalogCodec { targets }) as Arc<dyn PreferenceTargetCodec>);
+    }
+}
+
+impl ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs
+    for GrowableCodecs
+{
+    fn active_preference_target_codecs(&self) -> Vec<Arc<dyn PreferenceTargetCodec>> {
+        self.codecs.lock().expect("codecs").clone()
+    }
+}
+
+/// The owner-scoped catalog the background-run notifier resolves stored
+/// notification-target ids through. Every entry is owned by the calling
+/// scope and carries the `acme` extension id in its `channel` field, which is
+/// where the notifier reads the delivering extension from.
+struct StaticTargetCatalog {
+    targets: Vec<TestNotificationTarget>,
+}
+
+#[async_trait]
+impl OutboundDeliveryTargetProvider for StaticTargetCatalog {
+    async fn list_outbound_delivery_targets(
+        &self,
+        scope: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
+        Ok(self
+            .targets
+            .iter()
+            .map(|entry| OutboundDeliveryTargetEntry {
+                summary: OutboundDeliveryTargetSummary::new(
+                    OutboundDeliveryTargetId::new(entry.target_id).expect("target id"),
+                    entry.extension_id,
+                    entry.conversation_id,
+                    None,
+                )
+                .expect("target summary"),
+                capabilities: DeliveryTargetCapabilities {
+                    final_replies: true,
+                    progress: false,
+                    gate_prompts: true,
+                    auth_prompts: true,
+                    modalities: Vec::new(),
+                },
+                destination: ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"),
+                owner: OutboundDeliveryTargetOwner::for_scope(scope),
+            })
+            .collect())
     }
 }
 
@@ -649,13 +781,13 @@ fn accepted_ack(run_id: TurnRunId) -> ProductInboundAck {
 
 struct Harness {
     observer: Arc<RunDeliveryObserver>,
+    project_files: Arc<ScriptedProjectFilesystemReader>,
     connection_notices: ChannelConnectionNoticePolicy,
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
-    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -732,6 +864,9 @@ fn build_harness_with_settings(
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        delivery_targets: Arc::new(StaticTargetCatalog {
+            targets: Vec::new(),
+        }) as Arc<dyn OutboundDeliveryTargetProvider>,
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -754,13 +889,13 @@ fn build_harness_with_settings(
     );
     Harness {
         observer,
+        project_files,
         connection_notices,
         adapter,
         store,
         route_store,
         turns,
         threads,
-        project_files,
     }
 }
 
@@ -1822,43 +1957,46 @@ async fn observer_non_oauth_auth_block_cancels_run_and_posts_unavailable_notice(
 
 // ── Triggered rows ─────────────────────────────────────────────────────────
 
-fn trigger_context() -> TriggerCommunicationContext {
-    TriggerCommunicationContext {
-        trigger_origin_ref: TriggerOriginRef::new("trigger:test").expect("origin"),
-        trigger_source_kind: TriggerSourceKind::Schedule,
-        fire_slot: TriggerFireSlot::new("2026-07-12T09:00:00Z").expect("slot"),
-    }
-}
-
-fn triggered_request(
-    run_id: TurnRunId,
-    project_scoped: bool,
-) -> ironclaw_outbound::TriggeredRunDeliveryRequest {
-    ironclaw_outbound::TriggeredRunDeliveryRequest {
+fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDeliveryRequest {
+    TriggeredRunDeliveryRequest {
         run_id,
         scope: binding_scope(),
         creator_user_id: user(),
         project_scoped,
         prompt: "watch the deploys".to_string(),
-        delivery_target: None,
-        trigger_context: trigger_context(),
     }
 }
 
 struct TriggeredHarness {
     driver: TriggeredRunDeliveryDriver,
+    codecs: Arc<GrowableCodecs>,
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
-    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
+/// `catalog` is the creator-owned notification catalog the notifier resolves
+/// stored target ids through; the same entries back the codec, so a resolved
+/// id decodes to a conversation and answers the DM predicate consistently.
 fn build_triggered_harness(
     states: Vec<ScriptedRunState>,
     auth_url: Option<&str>,
-    personal_dm_target: bool,
+    catalog: Vec<TestNotificationTarget>,
+) -> TriggeredHarness {
+    let initially_active = catalog.clone();
+    build_triggered_harness_with_initial_codecs(states, auth_url, catalog, initially_active)
+}
+
+/// [`build_triggered_harness`] with the ACTIVE codec set narrower than the
+/// catalog, so a test can activate the rest partway through.
+fn build_triggered_harness_with_initial_codecs(
+    states: Vec<ScriptedRunState>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+    initially_active: Vec<TestNotificationTarget>,
 ) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -1869,6 +2007,7 @@ fn build_triggered_harness(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
@@ -1891,6 +2030,8 @@ fn build_triggered_harness(
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        delivery_targets: Arc::new(StaticTargetCatalog { targets: catalog })
+            as Arc<dyn OutboundDeliveryTargetProvider>,
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -1911,33 +2052,59 @@ fn build_triggered_harness(
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
         },
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
-        Arc::new(StaticCodec {
-            conversation: ExternalConversationRef::new(Some("space-1"), "dm-creator", None, None)
-                .expect("conversation"),
-            personal_dm: personal_dm_target,
-        }),
+        Arc::clone(&codecs)
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs,
+            >,
         agent(),
     );
     TriggeredHarness {
         driver,
+        codecs,
         adapter,
         store,
+        route_store,
         delivery_store,
         turns,
         threads,
-        project_files,
     }
 }
 
-async fn seed_preference(store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>) {
+/// Seed the creator's explicit notification-channel set (spec §7's new shape).
+async fn seed_notification_targets(
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    targets: &[TestNotificationTarget],
+) {
     store
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant(), user()),
-            final_reply_target: Some(ReplyTargetBindingRef::new("reply:pref").expect("ref")),
-            progress_target: None,
-            approval_prompt_target: Some(ReplyTargetBindingRef::new("reply:pref").expect("ref")),
-            auth_prompt_target: Some(ReplyTargetBindingRef::new("reply:pref").expect("ref")),
+            legacy_notification_target: None,
             default_modality: Some(CommunicationModality::Text),
+            notification_targets: targets
+                .iter()
+                .map(|entry| OutboundDeliveryTargetId::new(entry.target_id).expect("target id"))
+                .collect(),
+            updated_at: Utc::now(),
+            updated_by: user(),
+        })
+        .await
+        .expect("preference");
+}
+
+/// Seed a pre-notification-set record: only the legacy single slot, which
+/// reads back as a one-element notification set.
+async fn seed_legacy_single_slot_preference(
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    target: &TestNotificationTarget,
+) {
+    store
+        .put_communication_preference(CommunicationPreferenceRecord {
+            scope: DeliveryDefaultScope::personal(tenant(), user()),
+            legacy_notification_target: Some(
+                ReplyTargetBindingRef::new(target.binding_ref).expect("binding ref"),
+            ),
+            default_modality: Some(CommunicationModality::Text),
+            notification_targets: Vec::new(),
             updated_at: Utc::now(),
             updated_by: user(),
         })
@@ -1962,13 +2129,23 @@ async fn wait_for_outcome(
     panic!("no triggered delivery outcome recorded for {run_id}");
 }
 
+/// Conversations, in delivery order, every notification landed in.
+fn delivered_conversations(adapter: &RecordingChannelAdapter) -> Vec<String> {
+    adapter
+        .envelopes()
+        .iter()
+        .map(|envelope| envelope.target.conversation.conversation_id().to_string())
+        .collect()
+}
+
 #[tokio::test]
 async fn triggered_project_scoped_fire_is_denied_without_delivery() {
     let harness = build_triggered_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         None,
-        true,
+        vec![DM_TARGET],
     );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
     let run_id = TurnRunId::new();
     harness
         .driver
@@ -1979,20 +2156,24 @@ async fn triggered_project_scoped_fire_is_denied_without_delivery() {
     assert!(harness.adapter.texts().is_empty(), "nothing delivered");
 }
 
+/// Spec §8: the result push is gone. A background run that finishes normally
+/// records its answer in the fire's own run thread and puts NOTHING on a
+/// channel — delivery is the model's explicit `builtin.outbound_deliver`
+/// call, never an automatic push.
 #[tokio::test]
-async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
+async fn triggered_completed_run_delivers_nothing_external() {
     let harness = build_triggered_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         None,
-        true,
+        vec![DM_TARGET, SHARED_TARGET],
     );
-    // Preferences live on the outbound store; seed the creator's target and
-    // pin that the driver resolves from the SAME store handle.
+    // Preferences live on the outbound store; seed the creator's notification
+    // set and pin that the notifier resolves from the SAME store handle.
     assert!(Arc::ptr_eq(
         &(Arc::clone(&harness.store) as Arc<dyn CommunicationPreferenceRepository>),
         &harness.driver.communication_preferences()
     ));
-    seed_preference(&harness.store).await;
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
     let run_id = TurnRunId::new();
     seed_final_message(&harness.threads, run_id, "deploy watch complete").await;
 
@@ -2000,91 +2181,403 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
         .driver
         .on_trigger_submitted(triggered_request(run_id, false))
         .await;
+
     let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
-    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
-    let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 1);
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Skipped);
     assert!(
-        texts[0].starts_with("deploy watch complete"),
-        "{}",
-        texts[0]
+        harness.adapter.texts().is_empty(),
+        "a completed background run must not push its result to a channel: {:?}",
+        harness.adapter.texts()
     );
-    assert!(
-        texts[0].contains("From a triggered event: “watch the deploys”."),
-        "footer present: {}",
-        texts[0]
-    );
-    let envelopes = harness.adapter.envelopes();
-    assert_eq!(
-        envelopes[0].target.conversation.conversation_id(),
-        "dm-creator",
-        "delivered to the decoded preference target"
-    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
 }
 
+/// Spec §7: an approval gate raised by a background run reaches EVERY
+/// configured notification channel, one coordinated delivery each, so the
+/// creator can approve from whichever surface they see first.
 #[tokio::test]
-async fn triggered_final_reply_materializes_workspace_files_before_adapter_delivery() {
+async fn triggered_gate_prompt_fans_out_to_every_notification_target() {
     let harness = build_triggered_harness(
-        vec![scripted_state(TurnStatus::Completed, None)],
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000009"),
+        )],
         None,
-        true,
+        vec![DM_TARGET, SHARED_TARGET],
     );
-    seed_preference(&harness.store).await;
-    harness.project_files.insert_file(
-        "/workspace/trigger.json",
-        "application/json",
-        br#"{"ok":true}"#,
-    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
     let run_id = TurnRunId::new();
-    seed_final_message_with_attachments(
-        &harness.threads,
-        run_id,
-        "trigger complete: /workspace/trigger.json",
-        vec![AttachmentRef {
-            id: "reply-attachment-0".to_string(),
-            kind: AttachmentKind::Document,
-            mime_type: "application/json".to_string(),
-            filename: Some("trigger.json".to_string()),
-            size_bytes: Some(11),
-            storage_key: Some("/workspace/trigger.json".to_string()),
-            extracted_text: None,
-        }],
-    )
-    .await;
 
     harness
         .driver
         .on_trigger_submitted(triggered_request(run_id, false))
         .await;
+
     let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
     assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
-    let envelopes = harness.adapter.envelopes();
-    assert!(matches!(
-        &envelopes[0].parts[1],
-        OutboundPart::File(file)
-            if file.path.as_str() == "/workspace/trigger.json"
-                && file.bytes == br#"{"ok":true}"#
-    ));
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one gate prompt per target: {texts:?}");
+    assert!(
+        texts.iter().all(|text| text.contains("Approval needed")),
+        "{texts:?}"
+    );
+    assert_eq!(
+        delivered_conversations(&harness.adapter),
+        vec!["dm-creator".to_string(), "chan-eng".to_string()],
+        "fan-out follows the stored notification-channel order"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(attempts.len(), 2, "one persisted attempt per target");
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
+    );
+    // Every conversation the prompt landed in can carry a bare `approve`
+    // reply back to this gate.
+    let route = harness
+        .route_store
+        .load_delivered_gate_route(
+            &tenant(),
+            &user(),
+            "gate:approval-00000000000000000000000000000009",
+        )
+        .await
+        .expect("route lookup")
+        .expect("gate route recorded");
+    assert_eq!(route.run_id, run_id);
+    for conversation_id in ["dm-creator", "chan-eng"] {
+        let fingerprint = ironclaw_extension_contracts::external::ExternalConversationRef::new(
+            Some("space-1"),
+            conversation_id,
+            None,
+            None,
+        )
+        .expect("conversation")
+        .conversation_fingerprint();
+        assert!(
+            route
+                .delivered_conversation_fingerprints
+                .contains(&fingerprint),
+            "gate route must cover {conversation_id}: {:?}",
+            route.delivered_conversation_fingerprints
+        );
+    }
 }
 
+/// Spec §7: an OAuth `authorization_url` may only land in a personal DM.
+/// Non-DM notification channels get a redacted "needs re-auth, open the app"
+/// notice instead, and the run is NO LONGER cancelled — it parks so the user
+/// can finish the re-auth and let the routine resume.
 #[tokio::test]
-async fn triggered_final_reply_honors_per_trigger_target_without_global_default() {
+async fn triggered_auth_prompt_reaches_only_dm_targets_and_run_stays_parked() {
     let harness = build_triggered_harness(
-        vec![scripted_state(TurnStatus::Completed, None)],
-        None,
-        true,
+        vec![scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-t"))],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET, SHARED_TARGET],
     );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
     let run_id = TurnRunId::new();
-    seed_final_message(&harness.threads, run_id, "pinned route complete").await;
-    let mut request = triggered_request(run_id, false);
-    request.delivery_target =
-        Some(ReplyTargetBindingRef::new("reply:pinned-trigger").expect("target"));
 
-    harness.driver.on_trigger_submitted(request).await;
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "the run parks awaiting the user after its prompt went out"
+    );
+    assert_eq!(
+        harness.turns.cancel_call_count(),
+        0,
+        "an OAuth-blocked background run parks; it is never cancelled for lack of a DM target"
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one message per target: {texts:?}");
+    assert!(
+        texts[0].contains("Setup link: https://provider.example/oauth"),
+        "the personal DM carries the authorization URL: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[1].contains("Setup link:"),
+        "a shared channel must never carry the authorization URL: {}",
+        texts[1]
+    );
+    assert!(
+        texts[1].contains("A routine needs re-authorization"),
+        "the shared channel gets the redacted notice: {}",
+        texts[1]
+    );
+    assert_eq!(
+        delivered_conversations(&harness.adapter),
+        vec!["dm-creator".to_string(), "chan-eng".to_string()]
+    );
+}
+
+/// Spec §7: manual-token (non-OAuth) auth keeps today's cancel behavior — a
+/// secret can never be typed into a chat — and the notice fans out to every
+/// notification channel.
+#[tokio::test]
+async fn triggered_manual_token_auth_cancels_and_notifies_all_targets() {
+    // No auth-prompt source wired -> non-OAuth challenge.
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-m"))],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
 
     let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
     assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
-    assert_eq!(harness.adapter.texts().len(), 1);
+    assert_eq!(harness.turns.cancel_call_count(), 1, "run cancelled");
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one notice per target: {texts:?}");
+    assert!(
+        texts.iter().all(|text| text.contains("Ironclaw web app")),
+        "{texts:?}"
+    );
+    assert_eq!(
+        delivered_conversations(&harness.adapter),
+        vec!["dm-creator".to_string(), "chan-eng".to_string()]
+    );
+}
+
+/// Spec §7: a failed background run tells every notification channel, so a
+/// silent routine failure is never the user's first sign something broke.
+#[tokio::test]
+async fn triggered_failure_notifies_all_targets() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Failed, None)],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one failure notice per target: {texts:?}");
+    assert!(
+        texts.iter().all(|text| text.contains("routine run failed")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event: “watch the deploys”.")),
+        "the failure notice names the routine: {texts:?}"
+    );
+}
+
+/// Spec §7: with no notification channels configured, notifications live in
+/// the web app only. The blocked run is untouched (no cancel, no resume) and
+/// NOTHING is attempted externally.
+#[tokio::test]
+async fn triggered_empty_notification_set_delivers_nothing() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000010"),
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    // Catalog entries exist, but the creator selected none of them.
+    seed_notification_targets(&harness.store, &[]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+    );
+    assert!(harness.adapter.texts().is_empty(), "nothing delivered");
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+}
+
+/// Regression: the notifier reads the ACTIVE codec set at every fire.
+///
+/// The notifier is built once and lives for the process. When it captured
+/// `active_preference_codecs()` at construction, a channel extension activated
+/// afterwards could never decode its own binding refs: its notification
+/// targets classified as non-DM and then failed metadata resolution, so that
+/// channel's gate prompts silently never arrived until a restart (warn-only).
+/// Both fires here run through the SAME notifier; only the active codec set
+/// changes between them.
+#[tokio::test]
+async fn triggered_gate_prompt_reaches_a_channel_activated_after_the_first_fire() {
+    let harness = build_triggered_harness_with_initial_codecs(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000012"),
+        )],
+        None,
+        // The creator picked both channels; the catalog resolves both.
+        vec![DM_TARGET, LATE_ACTIVATED_TARGET],
+        // ...but only the first extension is active when the notifier is built.
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, LATE_ACTIVATED_TARGET]).await;
+
+    let first_run = TurnRunId::new();
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(first_run, false))
+        .await;
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, first_run).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    assert_eq!(
+        delivered_conversations(&harness.adapter),
+        vec!["dm-creator".to_string()],
+        "only the active channel can be decoded on the first fire"
+    );
+
+    // The second channel extension activates.
+    harness.codecs.activate(vec![LATE_ACTIVATED_TARGET]);
+
+    let second_run = TurnRunId::new();
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(second_run, false))
+        .await;
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, second_run).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    assert_eq!(
+        delivered_conversations(&harness.adapter),
+        vec![
+            "dm-creator".to_string(),
+            "dm-creator".to_string(),
+            "dm-beta".to_string()
+        ],
+        "the second fire reaches the newly activated channel too"
+    );
+    // The late channel's delivery went out through ITS OWN extension, read
+    // from the catalog entry — not the notifier's attribution bucket.
+    let envelopes = harness.adapter.envelopes();
+    let late = envelopes
+        .iter()
+        .find(|envelope| envelope.target.conversation.conversation_id() == "dm-beta")
+        .expect("the late channel received a gate prompt");
+    assert_eq!(late.extension_id, LATE_EXTENSION_ID);
+}
+
+/// The discriminating half of the empty-set rule.
+///
+/// Manual-token auth is the ONE arm with a run-mutating side effect: with a
+/// notification channel present it cancels the run, because a credential can
+/// never be typed into a chat (see
+/// `triggered_manual_token_auth_cancels_and_notifies_all_targets`). With NO
+/// channel there is no chat either — the user completes the credential in the
+/// web app — so the notifier must leave the run alone. A `BlockedApproval`
+/// arm cannot prove this: that arm never cancels under any configuration.
+#[tokio::test]
+async fn triggered_empty_notification_set_leaves_a_manual_token_auth_run_parked() {
+    // No auth-prompt source wired -> the non-OAuth (manual credential) arm.
+    let harness = build_triggered_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:auth-empty"),
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    // Catalog entries exist, but the creator selected none of them.
+    seed_notification_targets(&harness.store, &[]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    // The load-bearing assertion: the notifier must not have run the
+    // manual-token arm's cancel side effect at all.
+    assert_eq!(
+        harness.turns.cancel_call_count(),
+        0,
+        "with no notification channel the run is left parked for the web app, never cancelled"
+    );
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+    );
+    assert!(harness.adapter.texts().is_empty(), "nothing delivered");
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+}
+
+/// Spec §7 read-time migration: a record written before notification sets
+/// existed carries only the legacy single slot. It reads back as a one-element
+/// notification set, so today's users keep getting their notifications.
+#[tokio::test]
+async fn triggered_legacy_single_slot_preference_notifies_that_target() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000011"),
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_legacy_single_slot_preference(&harness.store, &SHARED_TARGET).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    assert_eq!(
+        delivered_conversations(&harness.adapter),
+        vec!["chan-eng".to_string()],
+        "only the migrated legacy slot is notified"
+    );
 }
 
 #[tokio::test]
@@ -2092,8 +2585,9 @@ async fn triggered_delivery_is_skipped_when_the_pending_queue_is_full() {
     let harness = build_triggered_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         None,
-        true,
+        vec![DM_TARGET],
     );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
     // Exhaust the pending-admission queue (capacity 8 in this harness).
     let mut held = Vec::new();
     while let Some(permit) = harness.driver.try_acquire_pending_permit() {
@@ -2107,31 +2601,4 @@ async fn triggered_delivery_is_skipped_when_the_pending_queue_is_full() {
     let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
     assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Skipped);
     assert!(harness.adapter.texts().is_empty(), "nothing delivered");
-}
-
-#[tokio::test]
-async fn triggered_oauth_prompt_to_non_dm_target_cancels_and_notifies() {
-    let harness = build_triggered_harness(
-        vec![scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-t"))],
-        Some("https://provider.example/oauth"),
-        false,
-    );
-    seed_preference(&harness.store).await;
-    let run_id = TurnRunId::new();
-
-    harness
-        .driver
-        .on_trigger_submitted(triggered_request(run_id, false))
-        .await;
-    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
-    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
-    assert_eq!(
-        harness.turns.cancel_call_count(),
-        1,
-        "blocked run cancelled"
-    );
-    let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 1, "only the auth-unavailable notice");
-    assert!(!texts[0].contains("Setup link:"), "{}", texts[0]);
-    assert!(texts[0].contains("Ironclaw web app"), "{}", texts[0]);
 }

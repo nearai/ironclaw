@@ -54,18 +54,18 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
@@ -327,7 +327,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         HTTP_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID,
     ] {
         assert_eq!(
             loop_run(gated),
@@ -884,104 +884,14 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
     assert_eq!(listed["triggers"][0]["state"], json!("scheduled"));
 }
 
-/// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
-/// shape-validated, host-validated through the create hook, persisted on the
-/// record, and echoed in the model-facing output — so one automation's
-/// routing no longer depends on the mutable user-global preference.
+/// Retired stored routing: a routine delivers externally only by calling
+/// `builtin.outbound_deliver` from its own prompt, so the create surface no
+/// longer accepts a delivery route. A call that still passes one is refused as
+/// invalid input through the real runtime dispatch path — never accepted and
+/// silently ignored, which would leave the caller believing a route was sealed
+/// — and nothing persists.
 #[tokio::test]
-async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_validates() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
-        "slack:personal-dm:T123:user-a",
-    ));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    let output = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
-            "delivery_target_id": "slack:personal-dm:T123:user-a"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        output["trigger"]["delivery_target_id"],
-        json!("slack:personal-dm:T123:user-a")
-    );
-    assert_eq!(
-        hook.validated(),
-        vec!["slack:personal-dm:T123:user-a".to_string()],
-        "the host validation hook must see the model-supplied target"
-    );
-
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0]
-            .delivery_target
-            .as_ref()
-            .map(|target| target.as_str()),
-        Some("slack:personal-dm:T123:user-a")
-    );
-}
-
-/// When the model omits `delivery_target_id`, the host hook still receives the
-/// trusted loop run id and may seal a source-derived target into the record.
-/// This is the authority path used for an automation created from an external
-/// conversation; prompt text never supplies the target.
-#[tokio::test]
-async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_context() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let inherited = "external:source-conversation";
-    let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
-    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-    let run_id = ironclaw_host_api::ids::RunId::new();
-    context.run_id = Some(run_id);
-
-    let output = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Source-routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(output["trigger"]["delivery_target_id"], json!(inherited));
-    assert_eq!(hook.seen_run_ids(), vec![Some(run_id)]);
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        records[0]
-            .delivery_target
-            .as_ref()
-            .map(|target| target.as_str()),
-        Some(inherited)
-    );
-}
-
-/// Fail closed: without host wiring that can resolve outbound delivery
-/// targets (the default no-op hook), a supplied `delivery_target_id` must be
-/// rejected as invalid input instead of being persisted unvalidated.
-#[tokio::test]
-async fn builtin_trigger_create_rejects_delivery_target_without_host_validation() {
+async fn builtin_trigger_create_rejects_the_retired_delivery_target_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -994,41 +904,6 @@ async fn builtin_trigger_create_rejects_delivery_target_without_host_validation(
             "prompt": "Summarize yesterday",
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "delivery_target_id": "slack:personal-dm:T123:user-a"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::InputEncode);
-    assert!(
-        repository
-            .list_triggers(context.resource_scope.tenant_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-/// A target the host rejects (unknown id, foreign owner, disconnected
-/// product) is invalid input and nothing persists.
-#[tokio::test]
-async fn builtin_trigger_create_rejects_delivery_target_the_host_rejects() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
-        "slack:personal-dm:T123:user-a",
-    ));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook);
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    let error = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
-            "delivery_target_id": "slack:shared-channel:T123:C_SOMEONE_ELSES"
         }),
         context.clone(),
     )
@@ -8932,86 +8807,6 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
     }
 }
 
-/// Test hook standing in for host composition's outbound-target resolution:
-/// accepts exactly one target id, records every validation request.
-struct DeliveryTargetValidatingTriggerCreateHook {
-    accepted: String,
-    validated: std::sync::Mutex<Vec<String>>,
-}
-
-struct SourceResolvingTriggerCreateHook {
-    target: String,
-    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::ids::RunId>>>,
-}
-
-impl SourceResolvingTriggerCreateHook {
-    fn new(target: &str) -> Self {
-        Self {
-            target: target.to_string(),
-            seen_run_ids: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::ids::RunId>> {
-        self.seen_run_ids.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
-    async fn resolve_implicit_delivery_target(
-        &self,
-        _scope: &ironclaw_host_api::resource::ResourceScope,
-        run_id: Option<ironclaw_host_api::ids::RunId>,
-    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-        self.seen_run_ids.lock().unwrap().push(run_id);
-        Ok(Some(
-            ironclaw_triggers::TriggerDeliveryTargetId::new(self.target.clone())
-                .expect("fixture target id"),
-        ))
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
-impl DeliveryTargetValidatingTriggerCreateHook {
-    fn accepting(target: &str) -> Self {
-        Self {
-            accepted: target.to_string(),
-            validated: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn validated(&self) -> Vec<String> {
-        self.validated.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
-    async fn validate_delivery_target(
-        &self,
-        _scope: &ironclaw_host_api::resource::ResourceScope,
-        target: &ironclaw_triggers::TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        self.validated.lock().unwrap().push(target.to_string());
-        if target.as_str() == self.accepted {
-            Ok(())
-        } else {
-            Err(TriggerError::InvalidRecord {
-                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-                reason: "delivery target is not available to this caller".to_string(),
-            })
-        }
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 #[cfg(feature = "test-support")]
 struct FixedTriggerClock(DateTime<Utc>);
@@ -9841,7 +9636,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID,
         ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,

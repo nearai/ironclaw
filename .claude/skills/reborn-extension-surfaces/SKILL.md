@@ -103,9 +103,12 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    top-level `[admin_configuration]` section (there is no `[channel.config]`);
    the host renders the generic form from it.
 2. Direction is the `inbound`/`outbound` bools, which project to
-   `channel { inbound, outbound }` on the extensions wire — the agent never gets
-   an "outbound delivery" tool; final delivery is the runtime-owned delivery
-   coordinator (overview §5.4).
+   `channel { inbound, outbound }` on the extensions wire. A run's own final
+   reply is never an agent decision — it rides the runtime-owned delivery
+   coordinator automatically (lane 1, overview §5.4). The agent DOES get one
+   generic, host-built-in tool for reaching any other target explicitly,
+   `builtin.outbound_deliver` (lane 2) — it is not a per-channel tool an
+   extension declares.
 3. Behavior lives in the extension's `ChannelAdapter` (`inbound` parse →
    normalized outcome; `deliver` render+send; idempotent `activate`/`cleanup`
    vendor wiring) — see the trait doc for the method contract. The binary

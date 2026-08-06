@@ -11,7 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
-mod outbound_delivery;
+mod outbound_deliver;
 mod reply_attachment;
 mod schemas;
 mod shell;
@@ -69,7 +69,7 @@ pub use memory::{
     memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
     register_native_memory_tools,
 };
-pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
+pub use outbound_deliver::OUTBOUND_DELIVER_CAPABILITY_ID;
 pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -235,7 +235,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
-                    outbound_delivery::manifest()?,
+                    outbound_deliver::manifest()?,
                     reply_attachment::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
@@ -373,13 +373,13 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
-/// Replace the fail-closed default for the current-run outbound route with the
-/// product-owned routing service selected by composition.
-pub fn register_outbound_delivery_first_party_handler(
+/// Replace the fail-closed default for the explicit model-delivery capability
+/// with the product-owned delivery service selected by composition.
+pub fn register_outbound_deliver_first_party_handler(
     registry: &mut FirstPartyCapabilityRegistry,
-    router: Arc<dyn ironclaw_outbound::RouteCurrentRunFinalReply>,
+    delivery: Arc<dyn ironclaw_outbound::ModelChannelDelivery>,
 ) -> Result<(), HostApiError> {
-    outbound_delivery::insert_handler(registry, router)
+    outbound_deliver::insert_handler(registry, delivery)
 }
 
 /// Replace the fail-closed reply-attachment default with the durable,
@@ -488,21 +488,24 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
         handler,
     );
-    outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
+    outbound_deliver::insert_handler(&mut registry, Arc::new(UnavailableModelChannelDelivery))?;
     reply_attachment::insert_unavailable_handler(&mut registry)?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
 
-struct UnavailableRunFinalReplyRouter;
+struct UnavailableModelChannelDelivery;
 
 #[async_trait]
-impl ironclaw_outbound::RouteCurrentRunFinalReply for UnavailableRunFinalReplyRouter {
-    async fn route_current_run_final_reply(
+impl ironclaw_outbound::ModelChannelDelivery for UnavailableModelChannelDelivery {
+    async fn deliver_for_model(
         &self,
-        _request: ironclaw_outbound::RouteCurrentRunFinalReplyRequest,
-    ) -> Result<(), ironclaw_outbound::RouteCurrentRunFinalReplyError> {
-        Err(ironclaw_outbound::RouteCurrentRunFinalReplyError::Unavailable)
+        _request: ironclaw_outbound::ModelChannelDeliveryRequest,
+    ) -> Result<
+        ironclaw_outbound::ModelChannelDeliveryEvidence,
+        ironclaw_outbound::ModelChannelDeliveryError,
+    > {
+        Err(ironclaw_outbound::ModelChannelDeliveryError::Unavailable)
     }
 }
 

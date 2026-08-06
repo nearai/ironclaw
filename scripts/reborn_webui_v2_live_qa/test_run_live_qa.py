@@ -6475,12 +6475,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "'{\"final_reply_target\": \"reply:adapter:slack\"}', 0)"
                 )
             targets = run_live_qa._outbound_final_reply_targets(home)
+            # Each row reports both the legacy single slot and the stored
+            # notification-channel set: the two-lane rework reads preference
+            # rows for the user-wide `notification_channels_set` list, and the
+            # probe asserts neither field was rewritten by a trigger run.
             self.assertEqual(
                 targets,
                 {
-                    "/tenants/t/users/u/outbound/communication-preferences/a.json": (
-                        "reply:adapter:slack"
-                    )
+                    "/tenants/t/users/u/outbound/communication-preferences/a.json": {
+                        "final_reply_target": "reply:adapter:slack",
+                        "notification_targets": None,
+                    }
                 },
             )
         with tempfile.TemporaryDirectory() as tmp:
@@ -6553,20 +6558,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with sqlite3_module.connect(db_path) as db:
+                # `prompt` is on every server this probe targets: per-trigger
+                # routing lives in the routine's persisted prompt (an explicit
+                # `builtin__outbound_deliver` step), and the snapshot's primary
+                # select reads it beside the schedule columns.
                 db.execute(
                     "CREATE TABLE trigger_records ("
                     "name TEXT, schedule_kind TEXT, next_run_at TEXT, "
-                    "delivery_target TEXT)"
+                    "prompt TEXT, delivery_target TEXT)"
                 )
                 db.execute(
                     "INSERT INTO trigger_records VALUES "
                     "('probe', 'once', '2026-07-09T21:16:11.000000000Z', "
+                    "'deliver via builtin__outbound_deliver to tgt-1', "
                     "'slack:personal-dm:T1:me')"
                 )
             snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
             self.assertTrue(snapshot["checked"])
             self.assertEqual(snapshot["record_count"], 1)
             self.assertEqual(snapshot["schedule_kind"], "once")
+            self.assertEqual(
+                snapshot["prompt"], "deliver via builtin__outbound_deliver to tgt-1"
+            )
             self.assertEqual(snapshot["delivery_target"], "slack:personal-dm:T1:me")
             self.assertFalse(snapshot["delivery_target_column_missing"])
 
@@ -6582,11 +6595,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with sqlite3_module.connect(db_path) as db:
                 db.execute(
                     "CREATE TABLE trigger_records ("
-                    "name TEXT, schedule_kind TEXT, next_run_at TEXT)"
+                    "name TEXT, schedule_kind TEXT, next_run_at TEXT, prompt TEXT)"
                 )
                 db.execute(
                     "INSERT INTO trigger_records VALUES "
-                    "('probe', 'cron', '2026-07-09T21:16:11.000000000Z')"
+                    "('probe', 'cron', '2026-07-09T21:16:11.000000000Z', 'p')"
                 )
             snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
             # Pre-fix server: schedule facts still readable, delivery target

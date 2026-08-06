@@ -371,22 +371,23 @@ export function removeProjectMember({ projectId, userId } = {}) {
   });
 }
 
-// --- Outbound delivery preferences ---
-
-export function getOutboundPreferences() {
-  return apiFetch(`${V2_BASE}/outbound/preferences`);
-}
+// --- Outbound delivery targets + notification channels ---
 
 export function listOutboundDeliveryTargets() {
   return apiFetch(`${V2_BASE}/outbound/targets`);
 }
 
-export function setOutboundPreferences({ finalReplyTargetId, clientActionId: clientId } = {}) {
-  return apiFetch(`${V2_BASE}/outbound/preferences`, {
+export function getNotificationChannels() {
+  return apiFetch(`${V2_BASE}/outbound/notification-channels`);
+}
+
+// `target_ids` is the sole canonical wire name for this full-replace body —
+// no aliases (see CLAUDE.md's wire-contract naming rule).
+export function setNotificationChannels({ targetIds } = {}) {
+  return apiFetch(`${V2_BASE}/outbound/notification-channels`, {
     method: "POST",
     body: JSON.stringify({
-      client_action_id: clientId || clientActionId(),
-      final_reply_target_id: finalReplyTargetId ?? null,
+      target_ids: targetIds ?? [],
     }),
   });
 }

@@ -3,23 +3,20 @@ use ironclaw_product_contracts::lifecycle_service::{
 };
 use std::{sync::Arc, time::Duration};
 
-use crate::{
-    LifecycleProductAction, LifecycleProductPayload, OutboundPreferencesProductService,
-    RebornOutboundDeliveryTargetStatus,
-};
+use crate::{LifecycleProductAction, LifecycleProductPayload, OutboundPreferencesProductService};
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+    ConnectedChannelSummary, ConnectedChannelsState, NotificationChannelsState,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use tokio::join;
 use tokio::time::timeout;
 
-/// Shared timeout budget for the whole communication-context fetch (outbound
-/// preferences + lifecycle/channels). Both futures run concurrently under this
-/// single budget; expiry degrades both delivery-target and connected-channels
+/// Shared timeout budget for the whole communication-context fetch (notification
+/// channels + lifecycle/channels). Both futures run concurrently under this
+/// single budget; expiry degrades both notification-channels and connected-channels
 /// to `Unknown`.
 const COMMUNICATION_CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -82,14 +79,14 @@ async fn fetch_communication_context(
     actor: Option<TurnActor>,
 ) -> Option<CommunicationRuntimeContext> {
     let actor = actor?;
-    // Key outbound preferences by the run's *owner*, not the acting principal.
-    // Product inbound and trusted-trigger runs can carry an explicit thread
-    // owner (subject/creator) that differs from `actor`; the owner is who the
-    // stored delivery preference belongs to. Fall back to the actor when no
-    // explicit owner is set, matching `TurnScope::to_resource_scope`'s owner
-    // resolution. Without this, shared/channel inbound and trigger runs would
-    // render the actor's delivery target (or "none set") instead of the
-    // owner's, producing wrong delivery guidance.
+    // Key notification-channel lookup by the run's *owner*, not the acting
+    // principal. Product inbound and trusted-trigger runs can carry an explicit
+    // thread owner (subject/creator) that differs from `actor`; the owner is who
+    // the stored notification-channel preference belongs to. Fall back to the
+    // actor when no explicit owner is set, matching `TurnScope::to_resource_scope`'s
+    // owner resolution. Without this, shared/channel inbound and trigger runs
+    // would render the actor's notification-channel state instead of the
+    // owner's, producing wrong guidance.
     let owner_user_id = scope
         .explicit_owner_user_id()
         .cloned()
@@ -101,11 +98,16 @@ async fn fetch_communication_context(
         scope.project_id.clone(),
     );
 
-    let preferences_fut = outbound_preferences.get_outbound_preferences(caller.clone());
+    // There is no stored "default reply target" anymore (route_current/
+    // web_app-pseudo-target/target_set were retired; see `delivery.md`) — the
+    // notification-channel set is the only per-user outbound preference this
+    // slice still surfaces, driving the "Background-run notifications: ..."
+    // one-liner.
+    let notifications_fut = outbound_preferences.get_notification_channels(caller.clone());
 
     // Fetch the installed-extension list to classify channel surfaces. Skipped
     // only when no lifecycle service is wired (the slice then renders channels as
-    // `unknown`). Runs concurrently with the preferences fetch under the shared
+    // `unknown`). Runs concurrently with the notifications fetch under the shared
     // budget below.
     let lifecycle_fut = async {
         match lifecycle_service.as_deref() {
@@ -128,47 +130,31 @@ async fn fetch_communication_context(
 
     // Both futures share a single 500 ms budget and run concurrently.
     let combined_result = timeout(COMMUNICATION_CONTEXT_FETCH_TIMEOUT, async {
-        join!(preferences_fut, lifecycle_fut)
+        join!(notifications_fut, lifecycle_fut)
     })
     .await;
 
-    let (pref_result, lifecycle_result) = match combined_result {
+    let (notifications_result, lifecycle_result) = match combined_result {
         Ok(pair) => pair,
         Err(_) => {
             tracing::debug!("communication context budget expired; degrading to unknown");
             // Budget expired — both are unknown.
             return Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Unknown,
-                delivery_target: DeliveryTargetState::Unknown,
+                notification_channels: NotificationChannelsState::Unknown,
                 delivery_tools_visible: false,
             });
         }
     };
 
-    let delivery_target = match pref_result {
-        Ok(response) => match (
-            response.final_reply_target,
-            response.final_reply_target_status,
-        ) {
-            (Some(target), _) => DeliveryTargetState::Set(DeliveryTargetSummary {
-                display_name: target.display_name.as_str().to_string(),
-                channel: target.channel.as_str().to_string(),
-            }),
-            // A target is stored but the resolving registry in this
-            // composition cannot produce its summary (e.g. no delivery
-            // target providers wired). Never report "none set" here — a
-            // preference exists and triggered delivery will use it.
-            (None, RebornOutboundDeliveryTargetStatus::Unavailable) => {
-                DeliveryTargetState::SetUnresolved
-            }
-            (None, _) => DeliveryTargetState::NoneSet,
-        },
+    let notification_channels = match notifications_result {
+        Ok(response) => NotificationChannelsState::Known(response.channels.len()),
         Err(error) => {
             tracing::debug!(
                 error = %error,
-                "outbound preferences fetch failed; degrading delivery target to unknown"
+                "notification channels fetch failed; degrading notification channels to unknown"
             );
-            DeliveryTargetState::Unknown
+            NotificationChannelsState::Unknown
         }
     };
 
@@ -207,7 +193,7 @@ async fn fetch_communication_context(
 
     Some(CommunicationRuntimeContext {
         connected_channels,
-        delivery_target,
+        notification_channels,
         delivery_tools_visible: false,
     })
 }
@@ -231,17 +217,16 @@ mod tests {
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
-        OutboundPreferencesProductService, RebornOutboundDeliveryTargetId,
+        OutboundPreferencesProductService, RebornNotificationChannel,
+        RebornNotificationChannelsResponse, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
-        RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-        RebornSetOutboundPreferencesRequest,
     };
     use async_trait::async_trait;
     use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_host_api::turn::{TurnActor, TurnScope};
     use ironclaw_loop_contracts::{
-        CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
+        CommunicationContextProvider, ConnectedChannelsState, NotificationChannelsState,
     };
     use ironclaw_product_contracts::lifecycle_service::{
         LifecycleProductContext, LifecycleProductService,
@@ -279,27 +264,17 @@ mod tests {
         }
     }
 
-    macro_rules! fake_preferences_service {
-        ($name:ident, $get:expr) => {
+    // `list_outbound_delivery_targets` is required by the trait but not read by
+    // `fetch_communication_context` (there is no stored "default reply target"
+    // anymore — see `delivery.md`); every fake below stubs it with a trivial
+    // default and drives `get_notification_channels` instead, which is what the
+    // fetch now calls.
+    macro_rules! fake_notification_channels_service {
+        ($name:ident, $get_notifications:expr) => {
             struct $name;
 
             #[async_trait]
             impl OutboundPreferencesProductService for $name {
-                async fn get_outbound_preferences(
-                    &self,
-                    _caller: ProductSurfaceCaller,
-                ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-                    $get
-                }
-
-                async fn set_outbound_preferences(
-                    &self,
-                    _caller: ProductSurfaceCaller,
-                    _request: RebornSetOutboundPreferencesRequest,
-                ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-                    $get
-                }
-
                 async fn list_outbound_delivery_targets(
                     &self,
                     _caller: ProductSurfaceCaller,
@@ -309,42 +284,44 @@ mod tests {
                         next_cursor: None,
                     })
                 }
+
+                async fn get_notification_channels(
+                    &self,
+                    _caller: ProductSurfaceCaller,
+                ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+                    $get_notifications
+                }
             }
         };
     }
 
-    fake_preferences_service!(
-        NoneSetPreferencesService,
-        Ok(RebornOutboundPreferencesResponse::default())
+    fake_notification_channels_service!(
+        EmptyNotificationChannelsService,
+        Ok(RebornNotificationChannelsResponse::default())
     );
 
-    fake_preferences_service!(
-        UnavailablePreferencesService,
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: None,
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
-            ..Default::default()
+    fake_notification_channels_service!(
+        PopulatedNotificationChannelsService,
+        Ok(RebornNotificationChannelsResponse {
+            channels: vec![
+                RebornNotificationChannel {
+                    target_id: RebornOutboundDeliveryTargetId::new("target-1").unwrap(),
+                    status: RebornOutboundDeliveryTargetStatus::Available,
+                    option: None,
+                },
+                RebornNotificationChannel {
+                    target_id: RebornOutboundDeliveryTargetId::new("target-2").unwrap(),
+                    status: RebornOutboundDeliveryTargetStatus::Available,
+                    option: None,
+                },
+            ],
         })
     );
 
-    fake_preferences_service!(
-        TargetSetPreferencesService,
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: Some(
-                RebornOutboundDeliveryTargetSummary::new(
-                    RebornOutboundDeliveryTargetId::new("target-1").unwrap(),
-                    "slack",
-                    "#alerts",
-                    None,
-                )
-                .unwrap(),
-            ),
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-            ..Default::default()
-        })
+    fake_notification_channels_service!(
+        ErrorNotificationChannelsService,
+        Err(test_service_error())
     );
-
-    fake_preferences_service!(ErrorPreferencesService, Err(test_service_error()));
 
     // --- LifecycleProductService fakes ---
 
@@ -491,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn actor_none_returns_none() {
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService));
+            RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService));
         let result = provider
             .begin_communication_context(scope(), None)
             .resolve(false)
@@ -499,33 +476,17 @@ mod tests {
         assert!(result.is_none(), "actor None must return None");
     }
 
-    // --- Tests: preference lookup is keyed by the run owner, not the actor ---
+    // --- Tests: notification-channel lookup is keyed by the run owner, not the actor ---
 
-    /// Preferences service that records the `user_id` of the caller it received,
-    /// so tests can assert the provider keys the lookup by the run owner rather
-    /// than the acting principal.
+    /// Notification-channels service that records the `user_id` of the caller it
+    /// received, so tests can assert the provider keys the lookup by the run
+    /// owner rather than the acting principal.
     struct CaptureCallerPreferencesService {
         seen_user_id: Arc<std::sync::Mutex<Option<String>>>,
     }
 
     #[async_trait]
     impl OutboundPreferencesProductService for CaptureCallerPreferencesService {
-        async fn get_outbound_preferences(
-            &self,
-            caller: ProductSurfaceCaller,
-        ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-            *self.seen_user_id.lock().expect("lock") = Some(caller.user_id.as_str().to_string());
-            Ok(RebornOutboundPreferencesResponse::default())
-        }
-
-        async fn set_outbound_preferences(
-            &self,
-            _caller: ProductSurfaceCaller,
-            _request: RebornSetOutboundPreferencesRequest,
-        ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-            Ok(RebornOutboundPreferencesResponse::default())
-        }
-
         async fn list_outbound_delivery_targets(
             &self,
             _caller: ProductSurfaceCaller,
@@ -534,6 +495,14 @@ mod tests {
                 targets: Vec::new(),
                 next_cursor: None,
             })
+        }
+
+        async fn get_notification_channels(
+            &self,
+            caller: ProductSurfaceCaller,
+        ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+            *self.seen_user_id.lock().expect("lock") = Some(caller.user_id.as_str().to_string());
+            Ok(RebornNotificationChannelsResponse::default())
         }
     }
 
@@ -590,57 +559,53 @@ mod tests {
         );
     }
 
-    // --- Tests: delivery target state branches ---
+    // --- Tests: notification-channel state branches ---
 
     #[tokio::test]
-    async fn none_configured_maps_to_none_set() {
+    async fn no_notification_channels_configured_maps_to_known_zero() {
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService));
+            RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
             .await
             .expect("context");
-        assert_eq!(ctx.delivery_target, DeliveryTargetState::NoneSet);
-    }
-
-    #[tokio::test]
-    async fn unavailable_status_maps_to_set_unresolved() {
-        let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(UnavailablePreferencesService));
-        let ctx = provider
-            .begin_communication_context(scope(), Some(actor()))
-            .resolve(false)
-            .await
-            .expect("context");
-        assert_eq!(ctx.delivery_target, DeliveryTargetState::SetUnresolved);
-    }
-
-    #[tokio::test]
-    async fn target_set_maps_to_set_with_summary() {
-        let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(TargetSetPreferencesService));
-        let ctx = provider
-            .begin_communication_context(scope(), Some(actor()))
-            .resolve(false)
-            .await
-            .expect("context");
-        assert!(
-            matches!(ctx.delivery_target, DeliveryTargetState::Set(_)),
-            "resolved target must map to Set: {:?}",
-            ctx.delivery_target
+        assert_eq!(
+            ctx.notification_channels,
+            NotificationChannelsState::Known(0)
         );
     }
 
     #[tokio::test]
-    async fn preferences_error_maps_to_unknown() {
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(ErrorPreferencesService));
+    async fn notification_channels_populated_maps_to_known_count() {
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(
+            PopulatedNotificationChannelsService,
+        ));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
             .await
             .expect("context");
-        assert_eq!(ctx.delivery_target, DeliveryTargetState::Unknown);
+        assert_eq!(
+            ctx.notification_channels,
+            NotificationChannelsState::Known(2),
+            "notification-channel count must reflect the resolved channel list length"
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_channels_error_maps_to_unknown() {
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(ErrorNotificationChannelsService));
+        let ctx = provider
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
+            .await
+            .expect("context");
+        assert_eq!(
+            ctx.notification_channels,
+            NotificationChannelsState::Unknown
+        );
     }
 
     // --- Tests: connected channels ---
@@ -648,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn no_lifecycle_service_returns_unknown_channels() {
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService));
+            RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -662,7 +627,7 @@ mod tests {
         // Classification is available, so an empty extension list is genuine
         // certainty: no channels connected → Known([]), not Unknown.
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
+            RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService))
                 .with_lifecycle_service(Arc::new(EmptyLifecycleService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
@@ -690,7 +655,7 @@ mod tests {
                 command_prefix: None,
             });
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
+            RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService))
                 .with_lifecycle_service(Arc::new(ChannelListLifecycleService {
                     extensions: vec![
                         telegram,
@@ -730,7 +695,7 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_service_error_returns_unknown_channels() {
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
+            RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService))
                 .with_lifecycle_service(Arc::new(ErrorLifecycleService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
@@ -742,7 +707,7 @@ mod tests {
 
     // --- Tests: timeout path ---
 
-    /// A preferences service whose `get_outbound_preferences` never resolves.
+    /// A preferences service whose `get_notification_channels` never resolves.
     /// Used to exercise the shared-timeout Unknown path.
     ///
     /// Note: `tokio/test-util` is not in this crate's feature set, so
@@ -752,21 +717,6 @@ mod tests {
 
     #[async_trait]
     impl OutboundPreferencesProductService for HangingPreferencesService {
-        async fn get_outbound_preferences(
-            &self,
-            _caller: ProductSurfaceCaller,
-        ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-            std::future::pending().await
-        }
-
-        async fn set_outbound_preferences(
-            &self,
-            _caller: ProductSurfaceCaller,
-            _request: RebornSetOutboundPreferencesRequest,
-        ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-            Ok(RebornOutboundPreferencesResponse::default())
-        }
-
         async fn list_outbound_delivery_targets(
             &self,
             _caller: ProductSurfaceCaller,
@@ -776,9 +726,16 @@ mod tests {
                 next_cursor: None,
             })
         }
+
+        async fn get_notification_channels(
+            &self,
+            _caller: ProductSurfaceCaller,
+        ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+            std::future::pending().await
+        }
     }
 
-    /// A preferences service whose `get_outbound_preferences` panics immediately.
+    /// A preferences service whose `get_notification_channels` panics immediately.
     /// This causes the spawned `fetch_communication_context` task to abort with a
     /// `JoinError`, exercising the actor-present degrade-to-unknown path in
     /// `begin_communication_context`.
@@ -786,21 +743,6 @@ mod tests {
 
     #[async_trait]
     impl OutboundPreferencesProductService for PanickingPreferencesService {
-        async fn get_outbound_preferences(
-            &self,
-            _caller: ProductSurfaceCaller,
-        ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-            panic!("induced panic for JoinError test")
-        }
-
-        async fn set_outbound_preferences(
-            &self,
-            _caller: ProductSurfaceCaller,
-            _request: RebornSetOutboundPreferencesRequest,
-        ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-            Ok(RebornOutboundPreferencesResponse::default())
-        }
-
         async fn list_outbound_delivery_targets(
             &self,
             _caller: ProductSurfaceCaller,
@@ -809,6 +751,13 @@ mod tests {
                 targets: Vec::new(),
                 next_cursor: None,
             })
+        }
+
+        async fn get_notification_channels(
+            &self,
+            _caller: ProductSurfaceCaller,
+        ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+            panic!("induced panic for JoinError test")
         }
     }
 
@@ -833,9 +782,9 @@ mod tests {
             "join failure with actor present must degrade connected_channels to Unknown"
         );
         assert_eq!(
-            ctx.delivery_target,
-            DeliveryTargetState::Unknown,
-            "join failure with actor present must degrade delivery_target to Unknown"
+            ctx.notification_channels,
+            NotificationChannelsState::Unknown,
+            "join failure with actor present must degrade notification_channels to Unknown"
         );
     }
 
@@ -903,11 +852,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_timeout_yields_unknown_for_both_delivery_and_channels() {
-        // The preferences future never resolves; the 500 ms outer timeout fires.
-        // Both delivery_target and connected_channels must be Unknown — never
-        // fabricated definitive states. Uses real wall-clock time (500 ms) since
-        // tokio/test-util is not in this crate's features.
+    async fn shared_timeout_yields_unknown_for_both_notifications_and_channels() {
+        // The notification-channels future never resolves; the 500 ms outer
+        // timeout fires. Both notification_channels and connected_channels must
+        // be Unknown — never fabricated definitive states. Uses real wall-clock
+        // time (500 ms) since tokio/test-util is not in this crate's features.
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(HangingPreferencesService));
 
@@ -918,9 +867,9 @@ mod tests {
             .expect("communication_context must return Some even on timeout");
 
         assert_eq!(
-            ctx.delivery_target,
-            DeliveryTargetState::Unknown,
-            "timed-out preferences must map to Unknown delivery_target"
+            ctx.notification_channels,
+            NotificationChannelsState::Unknown,
+            "timed-out notification-channels fetch must map to Unknown"
         );
         assert_eq!(
             ctx.connected_channels,

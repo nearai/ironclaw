@@ -695,6 +695,11 @@ mod tests {
     /// automation tools (`routine_create` / `routine_list`) misdirects every
     /// Reborn automation conversation its keywords match. The automation
     /// advisor must teach the Reborn capability surface instead.
+    ///
+    /// Delivery is explicit-prompt-step-only now (`builtin__outbound_deliver`,
+    /// per `crates/ironclaw_turns/prompts/delivery.md`): the skill must not
+    /// resurrect the retired `delivery_target_id` routing field or claim
+    /// external delivery happens automatically to a stored target.
     #[test]
     fn embedded_skills_teach_reborn_trigger_tools_not_retired_v1_routines() {
         let bundles = embedded_reborn_skill_bundles().expect("embedded bundles parse");
@@ -725,17 +730,34 @@ mod tests {
             "routine-advisor must teach delivery-target selection"
         );
         assert!(
-            skill_md.contains("delivered automatically"),
-            "routine-advisor must state host-owned result delivery"
+            // Not `contains("builtin__outbound_deliver")` alone: that's a literal
+            // prefix of `builtin__outbound_delivery_targets_list`, already proven
+            // present above, so that check alone can never fail. Assert the
+            // call-site phrase instead.
+            skill_md.contains("call `builtin__outbound_deliver`"),
+            "routine-advisor must teach the explicit outbound-delivery tool"
         );
         assert!(
-            skill_md.contains("delivery_target_id"),
-            "routine-advisor must teach per-trigger routing, not only the user-wide default"
+            skill_md.contains("delivery as an explicit prompt step"),
+            "routine-advisor must frame delivery as an explicit prompt-authored step, not a \
+             stored routing target"
         );
         assert!(
-            skill_md.contains("delivery routing, not a task step"),
-            "routine-advisor must frame send-me asks as routing so prompts never carry a \
-             send-to-requester step"
+            skill_md.contains("delivers nothing externally"),
+            "routine-advisor must state that a fire with no delivery call delivers nothing \
+             externally (successor to the dropped 'delivery routing, not a task step' pin)"
+        );
+        assert!(
+            skill_md.contains("builtin__notification_channels_set"),
+            "routine-advisor must teach the background-run notification channel tool"
+        );
+        assert!(
+            !skill_md.contains("delivery_target_id"),
+            "routine-advisor must not resurrect the retired delivery_target_id parameter"
+        );
+        assert!(
+            !skill_md.contains("delivered automatically"),
+            "routine-advisor must not claim external delivery happens automatically"
         );
     }
 

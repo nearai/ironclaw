@@ -670,27 +670,41 @@ Rules — kept short on purpose:
 ## 7. Channel outbound (OUT)
 
 - [x] OUT-1 Every outbound intent (final reply, gate prompt, auth prompt,
-  failure, connect-required, working, cleanup, triggered delivery) enters the
-  one coordinator; a grep/architecture check finds no direct product send
-  path. — The eight `DeliveryIntent`s split policy-class
-  (`deliver`) / notice-class (`deliver_notice`) with cross-class calls
-  rejected (`coordinator_notice_rejects_policy_class_intents`,
+  failure, connect-required, connection-status, working, cleanup,
+  background-run notice, model delivery) enters the one coordinator; a
+  grep/architecture check finds no direct product send path. — The ten
+  `DeliveryIntent`s split policy-class (`FinalReply`, `GatePrompt`,
+  `AuthPrompt`, `BackgroundRunNotice`, `ModelDelivery` — `deliver()`) /
+  notice-class (`FailureNotice`, `ConnectRequired`, `ConnectionStatus`,
+  `Working`, `Cleanup` — `deliver_notice()`) with cross-class calls rejected
+  (`coordinator_notice_rejects_policy_class_intents`,
   `coordinator_deliver_rejects_notice_class_intents`,
-  `outbound_delivery_contract.rs`); the generic observer/driver emit ONLY
-  through `RunDeliveryServices.coordinator` (`run_delivery_contract.rs`, 11
-  scenarios); the P5 cutover deleted the direct Slack send lane
-  (`slack_delivery.rs`, `slack_egress.rs`, `slack_dm_open.rs`) and re-pointed
-  all 28 `channel_host/e2e_tests.rs` scenarios through the coordinator.
-- [x] OUT-2 Target resolution preserves source-route replies and preference
-  targets; unauthorized/unavailable targets fail closed. — Policy-class
-  deliveries run the SAME `OutboundPolicyService` pipeline (source-route
-  reply-target validation + preference targets) inside the coordinator;
-  fail-closed rows: `coordinator_rejected_policy_decision_does_not_reach_the_adapter`,
+  `model_delivery_is_policy_class`, `outbound_delivery_contract.rs`); the
+  generic observer/driver emit ONLY through `RunDeliveryServices.coordinator`
+  (`run_delivery_contract.rs`, 11 scenarios); the P5 cutover deleted the
+  direct Slack send lane (`slack_delivery.rs`, `slack_egress.rs`,
+  `slack_dm_open.rs`) and re-pointed all 28 `channel_host/e2e_tests.rs`
+  scenarios through the coordinator. `TriggeredDelivery` (the routines/
+  heartbeat intent this row originally named) is retired: a routine now
+  delivers only by the model calling the SAME `builtin.outbound_deliver` tool
+  every other caller uses (OUT-13), and a background run's own gate/auth/
+  failure notices ride `BackgroundRunNotice` instead of a dedicated trigger
+  push.
+- [x] OUT-2 Target resolution preserves source-route replies and run-scoped
+  targets (a model-chosen catalog target, or one entry of a background run's
+  notification-channel-set fan-out); unauthorized/unavailable targets fail
+  closed. — Policy-class deliveries run the SAME `OutboundPolicyService`
+  pipeline (source-route reply-target validation + sealed run-scoped-target
+  validation) inside the coordinator; fail-closed rows:
+  `coordinator_rejected_policy_decision_does_not_reach_the_adapter`,
   `coordinator_require_direct_message_rejects_non_dm_target_without_egress`,
   `coordinator_fails_closed_when_the_channel_is_unavailable`,
   `coordinator_notice_fails_closed_when_the_channel_is_unavailable`
-  (`outbound_delivery_contract.rs`); the triggered path resolves the
-  creator's preference target (`run_delivery_contract.rs`).
+  (`outbound_delivery_contract.rs`); the background-run notifier fans out
+  over the creator's notification-channel set (`run_delivery_contract.rs`).
+  There are no per-purpose preference-target slots any more — the resolution
+  engine reads no stored preference at all
+  (`crates/ironclaw_outbound/src/resolution_engine.rs`).
 - [x] OUT-3 An attempt is persisted (`Prepared`→`Sending`) before vendor
   egress. — `coordinator_persists_sending_before_the_adapter_delivers` (the
   scripted adapter reads the durable attempt DURING deliver and sees
@@ -763,9 +777,7 @@ Rules — kept short on purpose:
   `channel.rs` + TEST-1 conformance); outbound integration proofs:
   `slack_final_reply_flows_through_the_real_delivery_coordinator` and
   `telegram_update_becomes_a_turn_and_a_coordinated_reply`
-  (`tests/integration/extension_delivery.rs`). The thin preference-target
-  provisioner glue (`slack_preference_targets.rs`) rides composition as a
-  §11 sliver until the P6 extraction.
+  (`tests/integration/extension_delivery.rs`).
 - [x] OUT-11 Prompt construction consumes `CommunicationPresentationPolicy`
   from the channel contract; concrete channel branches in `ironclaw_llm` are
   deleted. — no concrete channel branch remains in `ironclaw_llm`, and the
@@ -793,6 +805,25 @@ Rules — kept short on purpose:
   `channel_origin: Option<String>` as data
   (`trace_channel_origin_from_host_channel`, `client.rs`); no vendor enum
   variant remains in the trace vocabulary.
+- [x] OUT-13 An explicit model-initiated delivery
+  (`builtin.outbound_deliver` → `DeliveryIntent::ModelDelivery`) runs the SAME
+  policy-class path, attempt persistence, and sole-writer rule as every other
+  intent; its evidence is the coordinator's own `Delivered` outcome
+  (provider-issued `vendor_message_refs`), never a locally-constructed
+  success string; there is no queued/accepted state in v1 — a call either
+  returns provider evidence or a typed, model-visible failure. —
+  `model_delivery_is_policy_class`
+  (`crates/ironclaw_product/tests/outbound_delivery_contract.rs`) pins the
+  intent-class routing; `ModelChannelDeliveryEvidence.provider_message_refs`
+  (`crates/ironclaw_outbound/src/model_channel_delivery.rs`) is the only
+  success shape the tool port can return — no "queued"/"accepted" variant
+  exists to construct one; end to end,
+  `webui_send_me_on_slack_delivers_via_bot_with_evidence`,
+  `slack_origin_delivers_to_telegram_and_acks_in_slack`, and
+  `partial_failure_reports_per_call_honestly`
+  (`tests/integration/delivery_user_journeys.rs`) each assert the tool
+  result's `provider_message_refs` equals exactly the recorded vendor
+  response's refs.
 
 ## 8. Extraction and deletion (DEL)
 

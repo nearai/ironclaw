@@ -8,9 +8,9 @@
 /// string.
 #[cfg(feature = "test-support")]
 pub const OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID: &str =
-    crate::outbound::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID;
-/// Capability id of the standalone synthetic `outbound_delivery_target_set`
+    ironclaw_assistant::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID;
+/// Capability id of the standalone synthetic `notification_channels_set`
 /// capability. See [`OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID`].
 #[cfg(feature = "test-support")]
-pub const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
-    crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
+pub const OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID: &str =
+    ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID;

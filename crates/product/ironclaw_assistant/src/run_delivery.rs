@@ -32,8 +32,8 @@ use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEv
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
-    OutboundStateStorePort,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
+    OutboundError, OutboundStateStorePort,
 };
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
@@ -121,6 +121,10 @@ pub struct RunDeliveryServices {
     /// `/workspace/...` references only after outbound policy approves the
     /// delivery.
     pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
+    /// The owner-scoped outbound target catalog. The background-run notifier
+    /// resolves the creator's stored notification-channel ids through it at
+    /// fire time; a target that vanished since it was chosen simply drops out.
+    pub delivery_targets: Arc<dyn OutboundDeliveryTargetProvider>,
     /// The coordinator every send goes through (OUT-1: none bypasses).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the
@@ -402,9 +406,24 @@ impl RunDeliveryServices {
     }
 
     /// Best-effort cleanup of an earlier delivery (`Cleanup` intent with a
-    /// `Retract` part).
+    /// `Retract` part) on this component's own channel extension.
     pub(crate) async fn retract_message(
         &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        message: DeliveredChannelMessage,
+    ) {
+        self.retract_message_on_extension(&self.extension_id, scope, run_id, message)
+            .await;
+    }
+
+    /// [`Self::retract_message`] for a message delivered through a DIFFERENT
+    /// extension than this component's configured one. The background-run
+    /// notifier fans out across every notification channel, so the extension
+    /// that carried a prompt is per-message, not per-component.
+    pub(crate) async fn retract_message_on_extension(
+        &self,
+        extension_id: &str,
         scope: TurnScope,
         run_id: Option<TurnRunId>,
         message: DeliveredChannelMessage,
@@ -428,7 +447,7 @@ impl RunDeliveryServices {
                 parts: vec![OutboundPart::Retract {
                     vendor_message_ref: message.vendor_message_ref,
                 }],
-                extension_id: &self.extension_id,
+                extension_id,
                 notice_ref,
             })
             .await

@@ -20,8 +20,8 @@ use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BatchPolicyKind,
     CapabilityDeniedReasonKind, CapabilityDescriptionTrust, CapabilityDescriptorView,
     CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext,
-    ConcurrencyHint, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-    DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    ConcurrencyHint, ConnectedChannelSummary, ConnectedChannelsState,
+    EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
     InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
     InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked, LoopBlockedKind,
@@ -38,9 +38,10 @@ use ironclaw_loop_contracts::{
     LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
     LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
     LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext,
-    LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
-    PromptMode, PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest,
+    NotificationChannelsState, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
+    SkillTrustLevel, SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    resolution,
 };
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
@@ -4672,10 +4673,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     active: true,
                     presentation: None,
                 }]),
-                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
-                    display_name: "#general".to_string(),
-                    channel: "slack".to_string(),
-                }),
+                notification_channels: NotificationChannelsState::Known(2),
                 delivery_tools_visible: true,
             }),
             product_context: Some(ProductTurnContext::new(
@@ -4707,19 +4705,21 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
         "{content}"
     );
     assert!(
-        content.contains("Outbound delivery target: #general (slack)"),
+        content.contains("Background-run notifications: 2 channel(s) configured."),
         "{content}"
     );
     assert!(
         content.contains("Run origin: scheduled trigger fire."),
         "{content}"
     );
-    // No warning because delivery is Set (not NoneSet).
+    // delivery_tools_visible: true renders the single delivery-guidance block.
+    assert!(content.contains("builtin__outbound_deliver"), "{content}");
     assert!(!content.contains("Warning:"), "{content}");
 }
 
 #[tokio::test]
-async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_warning() {
+async fn instruction_bundle_runtime_scheduled_trigger_without_delivery_tools_omits_guidance_block()
+{
     let context = claimed_run_context().await;
     let builder = InstructionBundleBuilder::new(context);
 
@@ -4743,8 +4743,8 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             communication: Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Unknown,
-                delivery_target: DeliveryTargetState::NoneSet,
-                delivery_tools_visible: true,
+                notification_channels: NotificationChannelsState::Known(0),
+                delivery_tools_visible: false,
             }),
             product_context: Some(ProductTurnContext::new(
                 TurnOriginKind::ScheduledTrigger,
@@ -4766,11 +4766,22 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
         .expect("runtime section must exist");
     let content = &runtime_msg.model_content;
     assert!(
-        content.contains("Warning: no default delivery target is set"),
+        content.contains("Background-run notifications: none set - web app only."),
         "{content}"
     );
     assert!(
-        content.contains("builtin__outbound_delivery_target_set"),
+        content.contains(
+            "Run origin: scheduled trigger fire. The final reply is recorded in this routine's \
+             own run thread; it is not delivered externally. Deliver externally only if the \
+             prompt instructs it, using builtin__outbound_deliver."
+        ),
         "{content}"
+    );
+    // delivery_tools_visible: false must omit the single delivery-guidance block, even
+    // though the ScheduledTrigger origin line itself still names builtin__outbound_deliver
+    // (that line is unconditional — see runtime_context::render_origin_line).
+    assert!(
+        !content.contains("never deliver to the conversation you are replying in"),
+        "delivery-guidance block body must not render when delivery tools are not visible: {content}"
     );
 }

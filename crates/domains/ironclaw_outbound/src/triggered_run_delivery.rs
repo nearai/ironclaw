@@ -17,10 +17,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::UserId;
-use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
-
-use crate::delivery_resolution::TriggerCommunicationContext;
 
 /// Terminal outcome of a triggered-run delivery attempt.
 ///
@@ -76,19 +74,13 @@ pub trait TriggeredRunDeliveryStore: Send + Sync {
 pub struct TriggeredRunDeliveryRequest {
     pub run_id: TurnRunId,
     pub scope: TurnScope,
-    /// The trigger creator; delivery goes to their personal preference
-    /// target.
+    /// The trigger creator; notifications go to THEIR notification channels.
     pub creator_user_id: UserId,
-    /// Fail closed for non-personal triggers: a project-scoped trigger is
-    /// never delivered to a personal channel.
+    /// Fail closed for non-personal triggers: a project-scoped trigger never
+    /// notifies a personal channel.
     pub project_scoped: bool,
     /// The trigger prompt; its first line becomes the short footer label.
     pub prompt: String,
-    /// Optional per-trigger target resolved from the creator-scoped outbound
-    /// target registry. When present, ordinary results route here instead of
-    /// consulting the user's mutable global default.
-    pub delivery_target: Option<ReplyTargetBindingRef>,
-    pub trigger_context: TriggerCommunicationContext,
 }
 
 /// The proactive delivery driver for one channel extension, as its caller
@@ -100,8 +92,8 @@ pub struct TriggeredRunDeliveryRequest {
 /// `ironclaw_host_api` turn vocabulary, and the caller — the generic
 /// post-submit hook in `ironclaw_extension_host` — sits below the crate that
 /// implements it. Declaring it in the vocabulary's own home costs zero type
-/// weakening; narrowing it into a contracts crate would have cost
-/// [`TriggerCommunicationContext`] its typed refs.
+/// weakening; narrowing it into a contracts crate would have cost the request
+/// its typed turn vocabulary.
 #[async_trait::async_trait]
 pub trait TriggeredRunDelivery: Send + Sync {
     /// Watch the submitted run and deliver its outputs to the creator's

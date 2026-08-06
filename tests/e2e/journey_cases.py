@@ -398,7 +398,14 @@ PRODUCT_JOURNEY_CASES = (
         ),
     ),
     ProductJourneyCase(
-        case_id="scheduled_trigger_slack_delivery_default_and_explicit",
+        # Renamed from `scheduled_trigger_slack_delivery_default_and_explicit`:
+        # the per-trigger stored-target ("default") delivery model this case
+        # named was deleted (delivery_target_id removed; stored targets
+        # migrate into prompts). The surviving story is explicit-only: a
+        # routine/scheduled fire delivers by calling
+        # `builtin.outbound_deliver`, with no stored per-trigger destination
+        # anywhere in the path (see task-9-report.md §13.5 first half).
+        case_id="scheduled_trigger_explicit_tool_delivery_reaches_slack",
         provider_worlds=(ProviderWorld.SLACK,),
         mutable_provider_worlds=(ProviderWorld.SLACK,),
         ingress=JourneyIngress.SCHEDULED_TRIGGER,
@@ -409,29 +416,37 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.EXACT_DESTINATION,
             ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
-            ObservableAssertion.RESTART_IDEMPOTENCY,
         ),
         evidence=CargoEvidence(
-            source=("crates/app/ironclaw_composition/tests/trigger_poller_e2e.rs"),
-            test=(
-                "scheduled_trigger_results_reach_exact_slack_targets_once_"
-                "across_restart"
-            ),
-            target="trigger_poller_e2e",
-            manifest="crates/app/ironclaw_composition/Cargo.toml",
+            source="tests/integration/delivery_user_journeys.rs",
+            test="routine_fire_delivers_via_tool_without_stored_target",
+            target="reborn_integration_delivery_user_journeys",
+        ),
+    ),
+    ProductJourneyCase(
+        case_id="webui_explicit_slack_dm_delivery_with_bot_evidence",
+        provider_worlds=(ProviderWorld.SLACK,),
+        mutable_provider_worlds=(ProviderWorld.SLACK,),
+        ingress=JourneyIngress.WEBUI,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        delivery_target=JourneyDeliveryTarget.SLACK,
+        assertions=(
+            ObservableAssertion.DURABLE_STATE,
+            ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
+            ObservableAssertion.CREDENTIAL_INJECTION,
+        ),
+        evidence=CargoEvidence(
+            source="tests/integration/delivery_user_journeys.rs",
+            test="webui_send_me_on_slack_delivers_via_bot_with_evidence",
+            target="reborn_integration_delivery_user_journeys",
         ),
         delivery_addresses=(
             DeliveryAddressEvidence(
-                conversation_id="D-TRIGGER-DEFAULT",
+                conversation_id="D-JOURNEY",
                 thread_anchor=None,
                 exact_count=1,
                 assertion="assert_slack_dm_delivery_evidence",
-            ),
-            DeliveryAddressEvidence(
-                conversation_id="C-TRIGGER-OVERRIDE",
-                thread_anchor=None,
-                exact_count=1,
-                assertion="assert_slack_channel_delivery_evidence",
             ),
         ),
     ),

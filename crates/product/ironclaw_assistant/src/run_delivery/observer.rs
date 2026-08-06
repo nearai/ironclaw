@@ -834,7 +834,6 @@ impl RunDeliveryObserver {
             .coordinator
             .deliver(
                 &outbound_policy,
-                self.services.communication_preferences.as_ref(),
                 &target_authority,
                 self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {

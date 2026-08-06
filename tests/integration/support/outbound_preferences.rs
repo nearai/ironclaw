@@ -11,27 +11,28 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_assistant::{
-    OutboundPreferencesProductService, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
+    OutboundPreferencesProductService, RebornNotificationChannel,
+    RebornNotificationChannelsResponse, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornSetNotificationChannelsRequest,
 };
+use ironclaw_outbound::NOTIFICATION_TARGETS_CAP;
+use ironclaw_product_contracts::surface::ProductSurfaceValidationCode;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
-/// Bundled behind ONE mutex (not two) so a reader never observes `set_calls`
-/// and `last_accepted` out of sync.
 #[derive(Default)]
 struct FakeOutboundState {
-    set_calls: Vec<RebornOutboundDeliveryTargetId>,
-    last_accepted: Option<RebornOutboundDeliveryTargetSummary>,
+    /// Last full-replace notification-channel set applied through
+    /// `set_notification_channels` (dedup-preserving-order already applied).
+    notification_channel_ids: Vec<RebornOutboundDeliveryTargetId>,
 }
 
 /// Fixed in-memory `OutboundPreferencesProductService` double. Stateful:
-/// `set_outbound_preferences` updates `last_accepted`, and
-/// `get_outbound_preferences` reads it back — proves a `set` persisted via a
+/// `set_notification_channels` records the applied set and
+/// `get_notification_channels` reads it back — proving a `set` persisted via a
 /// different service method, not just an echo.
 pub(crate) struct FakeOutboundPreferencesService {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
@@ -39,29 +40,28 @@ pub(crate) struct FakeOutboundPreferencesService {
 }
 
 impl FakeOutboundPreferencesService {
-    /// Seed a double whose inventory carries two Slack targets. A `target_set`
-    /// call for either id resolves; any other id surfaces as `NotFound`.
+    /// Seed a double whose inventory carries two Slack targets. A
+    /// `notification_channels_set` call for either id resolves; any other id
+    /// surfaces as `NotFound`.
     pub(crate) fn with_default_targets() -> Arc<Self> {
         Arc::new(Self {
             targets: vec![
                 target_option("slack:dm:alpha", "Slack DM Alpha"),
                 target_option("slack:channel:beta", "Slack Channel Beta"),
-                target_option(
-                    ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
-                    "Web App",
-                ),
             ],
             state: Mutex::new(FakeOutboundState::default()),
         })
     }
 
-    /// Target ids passed to `set_outbound_preferences`, in call order — proves a
-    /// `Completed` outcome reached the service (a no-op set would leave this empty).
-    pub(crate) fn recorded_set_target_ids(&self) -> Vec<String> {
+    /// The stored notification-channel set after the most recent
+    /// `set_notification_channels` call — proves a `Completed`/applied outcome
+    /// actually reached the service seam (a no-op set would leave this at its
+    /// prior value, and a never-called service would leave it empty).
+    pub(crate) fn recorded_notification_channel_ids(&self) -> Vec<String> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .set_calls
+            .notification_channel_ids
             .iter()
             .map(|id| id.as_str().to_string())
             .collect()
@@ -80,52 +80,6 @@ impl FakeOutboundPreferencesService {
 
 #[async_trait]
 impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
-    async fn get_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        let last_accepted = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_accepted
-            .clone();
-        match last_accepted {
-            Some(summary) => Ok(RebornOutboundPreferencesResponse {
-                final_reply_target: Some(summary),
-                final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-                default_modality: RebornOutboundDeliveryModality::Text,
-            }),
-            None => Ok(RebornOutboundPreferencesResponse::default()),
-        }
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        let Some(target_id) = request.final_reply_target_id else {
-            return Err(target_not_found());
-        };
-        let Some(summary) = self.find_target(&target_id).cloned() else {
-            return Err(target_not_found());
-        };
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.set_calls.push(target_id);
-            state.last_accepted = Some(summary.clone());
-        }
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: Some(summary),
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-            default_modality: RebornOutboundDeliveryModality::Text,
-        })
-    }
-
     async fn list_outbound_delivery_targets(
         &self,
         _caller: ProductSurfaceCaller,
@@ -134,6 +88,84 @@ impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
             targets: self.targets.clone(),
             next_cursor: None,
         })
+    }
+
+    async fn set_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+        request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<_> = request
+            .target_ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        if deduped.len() > NOTIFICATION_TARGETS_CAP {
+            return Err(too_many_notification_targets());
+        }
+        let mut channels = Vec::with_capacity(deduped.len());
+        for id in &deduped {
+            let target = self.find_target(id).cloned().ok_or_else(target_not_found)?;
+            channels.push(RebornNotificationChannel {
+                target_id: id.clone(),
+                status: RebornOutboundDeliveryTargetStatus::Available,
+                option: Some(RebornOutboundDeliveryTargetOption {
+                    target,
+                    capabilities: RebornOutboundDeliveryTargetCapabilities {
+                        final_replies: true,
+                        gate_prompts: true,
+                        auth_prompts: true,
+                    },
+                }),
+            });
+        }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.notification_channel_ids = deduped;
+        }
+        Ok(RebornNotificationChannelsResponse { channels })
+    }
+
+    async fn get_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let ids = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .notification_channel_ids
+            .clone();
+        // Mirrors the production service: a stored id that no longer resolves
+        // is represented as `Unavailable` (no `option`), never dropped from
+        // the list.
+        let channels = ids
+            .iter()
+            .map(|id| match self.find_target(id).cloned() {
+                Some(target) => RebornNotificationChannel {
+                    target_id: id.clone(),
+                    status: RebornOutboundDeliveryTargetStatus::Available,
+                    option: Some(RebornOutboundDeliveryTargetOption {
+                        target,
+                        capabilities: RebornOutboundDeliveryTargetCapabilities {
+                            final_replies: true,
+                            gate_prompts: true,
+                            auth_prompts: true,
+                        },
+                    }),
+                },
+                None => RebornNotificationChannel {
+                    target_id: id.clone(),
+                    status: RebornOutboundDeliveryTargetStatus::Unavailable,
+                    option: None,
+                },
+            })
+            .collect();
+        Ok(RebornNotificationChannelsResponse { channels })
     }
 }
 
@@ -165,5 +197,20 @@ fn target_not_found() -> ProductSurfaceError {
         retryable: false,
         field: None,
         validation_code: None,
+    }
+}
+
+/// Mirrors the shape `RebornOutboundPreferencesService::set_notification_channels`
+/// returns for a `target_ids` list exceeding `NOTIFICATION_TARGETS_CAP` — an
+/// `InvalidRequest`/`Validation` error naming the `target_ids` field, which
+/// `outbound_delivery_outcome` maps to a model-visible `Failed(InvalidInput)`.
+fn too_many_notification_targets() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("target_ids".to_string()),
+        validation_code: Some(ProductSurfaceValidationCode::TooLong),
     }
 }

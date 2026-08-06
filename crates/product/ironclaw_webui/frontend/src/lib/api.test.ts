@@ -17,8 +17,8 @@ import {
   queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
+  setNotificationChannels,
   setupExtension,
-  setOutboundPreferences,
 } from "./api";
 
 function withCryptoGlobal(replacement, run) {
@@ -322,7 +322,7 @@ test("setupExtension serializes a generated client action id", async () => {
   });
 });
 
-test("setOutboundPreferences includes a client action id", async () => {
+test("setNotificationChannels posts the full-replace target_ids body with no other wire fields", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -331,26 +331,23 @@ test("setOutboundPreferences includes a client action id", async () => {
   };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ final_reply_target: null }), {
+    return new Response(JSON.stringify({ channels: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
 
-  await setOutboundPreferences({
-    finalReplyTargetId: "slack-dm-alpha",
-    clientActionId: "outbound-save-1",
-  });
+  await setNotificationChannels({ targetIds: ["slack-dm-alpha", "slack-dm-beta"] });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/outbound/preferences");
+  assert.equal(calls[0].path, "/api/webchat/v2/outbound/notification-channels");
+  assert.equal(calls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    client_action_id: "outbound-save-1",
-    final_reply_target_id: "slack-dm-alpha",
+    target_ids: ["slack-dm-alpha", "slack-dm-beta"],
   });
 });
 
-test("setOutboundPreferences serializes a generated client action id", async () => {
+test("setNotificationChannels defaults to an empty target_ids array", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -359,21 +356,16 @@ test("setOutboundPreferences serializes a generated client action id", async () 
   };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ final_reply_target: null }), {
+    return new Response(JSON.stringify({ channels: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
 
-  await withCryptoGlobal({ randomUUID: () => "generated-outbound-action" }, async () => {
-    await setOutboundPreferences();
-  });
+  await setNotificationChannels();
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
-    client_action_id: "generated-outbound-action",
-    final_reply_target_id: null,
-  });
+  assert.deepEqual(JSON.parse(calls[0].options.body), { target_ids: [] });
 });
 
 test("automation state mutations reject before fetch when automation id is missing", async () => {

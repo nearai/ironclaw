@@ -374,10 +374,11 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     communication_preferences_reject_empty_updated_by(&store).await;
     communication_preferences_reject_empty_shared_agent_scope(&store).await;
     communication_preference_put_existing_conflicts_without_writing(&store).await;
-    communication_preference_atomic_update_preserves_existing_slots(&store).await;
+    communication_preference_atomic_update_preserves_untouched_fields(&store).await;
     communication_preference_update_inserts_absent_record(&store).await;
     communication_preference_stale_version_conflicts_without_writing(&store).await;
     communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
+    notification_targets_round_trip_and_default_empty(&backend).await;
     outbound_state_store_rejects_communication_preference_put_cas_conflict(&backend).await;
     outbound_state_store_rejects_communication_preference_update_cas_conflict(&backend).await;
     outbound_state_store_rejects_mismatched_communication_preference_identity(&backend, &store)
@@ -487,11 +488,9 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
-        final_reply_target: Some(reply_ref("reply-pref-final")),
-        progress_target: Some(reply_ref("reply-pref-progress")),
-        approval_prompt_target: Some(reply_ref("reply-pref-approval")),
-        auth_prompt_target: Some(reply_ref("reply-pref-auth")),
+        legacy_notification_target: Some(reply_ref("reply-pref-legacy")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: updated_by.clone(),
     };
@@ -534,10 +533,7 @@ where
     );
 
     let updated = CommunicationPreferenceRecord {
-        final_reply_target: Some(reply_ref("reply-pref-final-updated")),
-        progress_target: None,
-        approval_prompt_target: Some(reply_ref("reply-pref-approval")),
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-legacy-updated")),
         default_modality: Some(CommunicationModality::Voice),
         updated_at: now(),
         updated_by,
@@ -575,11 +571,9 @@ where
             agent_id.clone(),
             Some(project_id.clone()),
         ),
-        final_reply_target: Some(reply_ref("reply-pref-shared-project")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-shared-project")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: updated_by.clone(),
     };
@@ -597,11 +591,9 @@ where
         CommunicationPreferenceKey::shared_agent(tenant_id.clone(), agent_id.clone(), None);
     let projectless_record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::shared_agent(tenant_id.clone(), agent_id.clone(), None),
-        final_reply_target: Some(reply_ref("reply-pref-shared-projectless")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-shared-projectless")),
         default_modality: Some(CommunicationModality::Voice),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by,
     };
@@ -647,11 +639,9 @@ where
             TenantId::new("tenant-outbound-validation").unwrap(),
             UserId::new("user-outbound-validation").unwrap(),
         ),
-        final_reply_target: Some(reply_ref("reply-pref-validation")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-validation")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-validation-updater").unwrap(),
     };
@@ -688,11 +678,9 @@ where
             AgentId::new("agent-outbound-shared-validation").unwrap(),
             None,
         ),
-        final_reply_target: Some(reply_ref("reply-pref-shared-validation")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-shared-validation")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-shared-validation").unwrap(),
     };
@@ -734,11 +722,9 @@ where
     let key = CommunicationPreferenceKey::personal(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-duplicate")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-duplicate")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-duplicate").unwrap(),
     };
@@ -748,7 +734,7 @@ where
         .unwrap();
 
     let duplicate = CommunicationPreferenceRecord {
-        final_reply_target: Some(reply_ref("reply-pref-duplicate-replacement")),
+        legacy_notification_target: Some(reply_ref("reply-pref-duplicate-replacement")),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-duplicate-2").unwrap(),
         ..record.clone()
@@ -758,7 +744,7 @@ where
     assert_eq!(load_preference_record(store, key).await, Some(record));
 }
 
-async fn communication_preference_atomic_update_preserves_existing_slots<S>(store: &S)
+async fn communication_preference_atomic_update_preserves_untouched_fields<S>(store: &S)
 where
     S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
@@ -767,11 +753,14 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-atomic-final")),
-        progress_target: Some(reply_ref("reply-pref-atomic-progress")),
-        approval_prompt_target: Some(reply_ref("reply-pref-atomic-approval")),
-        auth_prompt_target: Some(reply_ref("reply-pref-atomic-auth")),
+        legacy_notification_target: Some(reply_ref("reply-pref-atomic-final")),
         default_modality: Some(CommunicationModality::Voice),
+        // Non-empty so the assertions below actually prove preservation
+        // through the atomic update path rather than comparing empty == empty.
+        notification_targets: vec![
+            OutboundDeliveryTargetId::new("target:atomic-untouched-a").unwrap(),
+            OutboundDeliveryTargetId::new("target:atomic-untouched-b").unwrap(),
+        ],
         updated_at: now(),
         updated_by: UserId::new("user-outbound-atomic-updater").unwrap(),
     };
@@ -788,7 +777,7 @@ where
     let updated = write_preference_record(
         store,
         CommunicationPreferenceRecord {
-            final_reply_target: Some(reply_ref("reply-pref-atomic-final-updated")),
+            legacy_notification_target: Some(reply_ref("reply-pref-atomic-final-updated")),
             updated_at: now(),
             updated_by: UserId::new("user-outbound-atomic-updater-2").unwrap(),
             ..existing.record
@@ -799,15 +788,10 @@ where
     .record;
 
     assert_eq!(
-        updated.final_reply_target,
+        updated.legacy_notification_target,
         Some(reply_ref("reply-pref-atomic-final-updated"))
     );
-    assert_eq!(updated.progress_target, record.progress_target);
-    assert_eq!(
-        updated.approval_prompt_target,
-        record.approval_prompt_target
-    );
-    assert_eq!(updated.auth_prompt_target, record.auth_prompt_target);
+    assert_eq!(updated.notification_targets, record.notification_targets);
     assert_eq!(updated.default_modality, record.default_modality);
     assert_eq!(load_preference_record(store, key).await, Some(updated));
 }
@@ -821,11 +805,9 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-update-absent-final")),
-        progress_target: Some(reply_ref("reply-pref-update-absent-progress")),
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-update-absent-final")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-update-absent").unwrap(),
     };
@@ -846,11 +828,9 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-update-error-final")),
-        progress_target: Some(reply_ref("reply-pref-update-error-progress")),
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-update-error-final")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-update-error-updater").unwrap(),
     };
@@ -865,14 +845,14 @@ where
         .unwrap()
         .expect("existing communication preference");
     let first_update = CommunicationPreferenceRecord {
-        final_reply_target: Some(reply_ref("reply-pref-update-error-race")),
+        legacy_notification_target: Some(reply_ref("reply-pref-update-error-race")),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-update-error-racer").unwrap(),
         ..existing.record.clone()
     };
     write_preference_record(store, first_update, Some(existing.version)).await;
     let stale_update = CommunicationPreferenceRecord {
-        final_reply_target: Some(reply_ref("reply-pref-update-error-stale")),
+        legacy_notification_target: Some(reply_ref("reply-pref-update-error-stale")),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-update-error-stale").unwrap(),
         ..existing.record
@@ -896,11 +876,9 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-update-invalid-final")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-update-invalid-final")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-update-invalid-updater").unwrap(),
     };
@@ -942,6 +920,78 @@ where
     assert_eq!(load_preference_record(store, key).await, Some(record));
 }
 
+/// Write a record with a 2-element `notification_targets` set, reopen the
+/// store over the same backend, and read it back unchanged. Then prove a
+/// legacy row persisted before this field existed (no `notification_targets`
+/// key at all) still loads, defaulting to an empty vec.
+async fn notification_targets_round_trip_and_default_empty(backend: &Arc<InMemoryBackend>) {
+    let store = build_outbound_store_for_backend(Arc::clone(backend));
+    let tenant_id = TenantId::new("tenant-outbound-notification-targets").unwrap();
+    let user_id = UserId::new("user-outbound-notification-targets").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let targets = vec![
+        OutboundDeliveryTargetId::new("target:notification-a").unwrap(),
+        OutboundDeliveryTargetId::new("target:notification-b").unwrap(),
+    ];
+    let record = CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        legacy_notification_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        notification_targets: targets.clone(),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-notification-targets").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+
+    // Reopen: a fresh store instance over the same backend reads back the
+    // identical 2-element notification target set.
+    let reopened = build_outbound_store_for_backend(Arc::clone(backend));
+    assert_eq!(
+        load_preference_record(&reopened, key.clone()).await,
+        Some(record)
+    );
+
+    // A legacy row written before this field existed omits the key
+    // entirely. Simulate that by serializing a real record, then stripping
+    // `notification_targets` out of the JSON before writing it directly to
+    // the backend (bypassing the record's own Serialize impl, which always
+    // emits the field).
+    let legacy_tenant_id = TenantId::new("tenant-outbound-notification-targets-legacy").unwrap();
+    let legacy_user_id = UserId::new("user-outbound-notification-targets-legacy").unwrap();
+    let legacy_record = CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::personal(legacy_tenant_id, legacy_user_id),
+        legacy_notification_target: Some(reply_ref("reply-pref-notification-targets-legacy")),
+        default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-notification-targets-legacy").unwrap(),
+    };
+    let (legacy_key, legacy_path) =
+        put_preference_and_find_virtual_path(backend, &store, legacy_record.clone()).await;
+
+    let mut legacy_json = serde_json::to_value(&legacy_record).unwrap();
+    legacy_json
+        .as_object_mut()
+        .expect("record serializes to a JSON object")
+        .remove("notification_targets");
+    let entry = Entry::bytes(serde_json::to_vec(&legacy_json).unwrap())
+        .with_content_type(ContentType::json());
+    backend
+        .put(&legacy_path, entry, CasExpectation::Any)
+        .await
+        .unwrap();
+
+    let reloaded_legacy = store
+        .load_communication_preference(legacy_key)
+        .await
+        .unwrap()
+        .expect("legacy preference row without notification_targets");
+    assert!(reloaded_legacy.record.notification_targets.is_empty());
+}
+
 async fn outbound_state_store_rejects_mismatched_communication_preference_identity(
     backend: &Arc<InMemoryBackend>,
     store: &OutboundStateStore<InMemoryBackend>,
@@ -950,11 +1000,9 @@ async fn outbound_state_store_rejects_mismatched_communication_preference_identi
     let user_id = UserId::new("user-outbound-corrupt").unwrap();
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
-        final_reply_target: Some(reply_ref("reply-pref-corrupt")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-corrupt")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-corrupt").unwrap(),
     };
@@ -982,11 +1030,9 @@ async fn outbound_state_store_rejects_mismatched_communication_preference_identi
             tenant_mismatch_tenant_id,
             tenant_mismatch_user_id.clone(),
         ),
-        final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant-seed")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-corrupt-tenant-seed")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-corrupt-tenant-seed").unwrap(),
     };
@@ -997,11 +1043,9 @@ async fn outbound_state_store_rejects_mismatched_communication_preference_identi
             TenantId::new("tenant-outbound-corrupt-other").unwrap(),
             tenant_mismatch_user_id,
         ),
-        final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-corrupt-tenant")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-corrupt-tenant").unwrap(),
     };
@@ -1032,11 +1076,9 @@ async fn outbound_state_store_personal_and_shared_agent_hashes_are_always_distin
         CommunicationPreferenceKey::personal(tenant_id.clone(), UserId::new(shared_id).unwrap());
     let personal_record = CommunicationPreferenceRecord {
         scope: personal_key.scope.clone(),
-        final_reply_target: Some(reply_ref("reply-pref-hash-personal")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-hash-personal")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-hash-personal").unwrap(),
     };
@@ -1047,11 +1089,9 @@ async fn outbound_state_store_personal_and_shared_agent_hashes_are_always_distin
         CommunicationPreferenceKey::shared_agent(tenant_id, AgentId::new(shared_id).unwrap(), None);
     let shared_record = CommunicationPreferenceRecord {
         scope: shared_key.scope.clone(),
-        final_reply_target: Some(reply_ref("reply-pref-hash-shared")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-hash-shared")),
         default_modality: Some(CommunicationModality::Voice),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-hash-shared").unwrap(),
     };
@@ -1092,11 +1132,9 @@ async fn outbound_state_store_rejects_communication_preference_put_cas_conflict(
 
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
-        final_reply_target: Some(reply_ref("reply-pref-cas")),
-        progress_target: Some(reply_ref("reply-pref-cas-progress")),
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-cas")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-cas").unwrap(),
     };
@@ -1119,11 +1157,9 @@ async fn outbound_state_store_rejects_communication_preference_update_cas_confli
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-update-cas")),
-        progress_target: Some(reply_ref("reply-pref-update-cas-progress")),
-        approval_prompt_target: Some(reply_ref("reply-pref-update-cas-approval")),
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-update-cas")),
         default_modality: Some(CommunicationModality::Voice),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-update-cas").unwrap(),
     };
@@ -1144,7 +1180,7 @@ async fn outbound_state_store_rejects_communication_preference_update_cas_confli
         .unwrap()
         .expect("existing communication preference");
     let updated = CommunicationPreferenceRecord {
-        final_reply_target: Some(reply_ref("reply-pref-update-cas-final-updated")),
+        legacy_notification_target: Some(reply_ref("reply-pref-update-cas-final-updated")),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-update-cas-2").unwrap(),
         ..existing.record
@@ -1171,11 +1207,9 @@ async fn outbound_state_store_rejects_communication_preference_write_on_unsuppor
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
-        final_reply_target: Some(reply_ref("reply-pref-unsupported-cas")),
-        progress_target: Some(reply_ref("reply-pref-unsupported-cas-progress")),
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        legacy_notification_target: Some(reply_ref("reply-pref-unsupported-cas")),
         default_modality: Some(CommunicationModality::Text),
+        notification_targets: Vec::new(),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-unsupported-cas").unwrap(),
     };
@@ -1262,6 +1296,24 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
         .await
         .unwrap();
     assert!(default_progress.candidates.is_empty());
+
+    // ModelDelivery behaves like FinalReply: it must reach the ordinary
+    // reply_target even with no thread notification policy configured yet
+    // (no opted-in extra targets to fall back on).
+    let default_model_delivery = store
+        .plan_push_targets(OutboundPushTargetRequest {
+            scope: scope.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            reply_target: default_reply.clone(),
+            kind: OutboundPushKind::ModelDelivery,
+            projection_ref: ProjectionUpdateRef::new("projection:model-delivery-1").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        targets(&default_model_delivery),
+        vec![default_reply.clone()]
+    );
 
     store
         .put_thread_notification_policy(ThreadNotificationPolicy {
@@ -2870,169 +2922,6 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
 }
 
 #[tokio::test]
-async fn run_final_reply_target_is_durable_and_exactly_scoped() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let first = build_outbound_store_for_backend(Arc::clone(&backend));
-    let second = build_outbound_store_for_backend(backend);
-    let scope = turn_scope();
-    let run_id = TurnRunId::new();
-    let actor = TurnActor::new(UserId::new("user-run-route").unwrap());
-    let record = RunFinalReplyTargetRecord {
-        run_id,
-        scope: scope.clone(),
-        actor: actor.clone(),
-        destination: RunFinalReplyDestination::External {
-            reply_target_binding_ref: reply_ref("reply:run-scoped-slack-dm"),
-        },
-    };
-
-    first
-        .put_run_final_reply_target(record.clone())
-        .await
-        .expect("persist run final-reply target");
-
-    let loaded = second
-        .load_run_final_reply_target(RunFinalReplyTargetRequest {
-            run_id,
-            scope: scope.clone(),
-            actor: actor.clone(),
-        })
-        .await
-        .expect("load through an independent store instance");
-    assert_eq!(loaded, Some(record));
-
-    let foreign_actor = second
-        .load_run_final_reply_target(RunFinalReplyTargetRequest {
-            run_id,
-            scope: scope.clone(),
-            actor: TurnActor::new(UserId::new("user-foreign").unwrap()),
-        })
-        .await
-        .expect("foreign lookup must not reveal whether the route exists");
-    assert!(foreign_actor.is_none());
-
-    let foreign_scope = TurnScope::new_with_owner(
-        TenantId::new("tenant-foreign").unwrap(),
-        scope.agent_id.clone(),
-        scope.project_id.clone(),
-        scope.thread_id.clone(),
-        scope.explicit_owner_user_id().cloned(),
-    );
-    let foreign_scope = second
-        .load_run_final_reply_target(RunFinalReplyTargetRequest {
-            run_id,
-            scope: foreign_scope,
-            actor,
-        })
-        .await
-        .expect("foreign scope lookup must not reveal whether the route exists");
-    assert!(foreign_scope.is_none());
-}
-
-#[tokio::test]
-async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let first = build_outbound_store_for_backend(Arc::clone(&backend));
-    let reopened = build_outbound_store_for_backend(backend);
-    let handoff = RunFinalReplyHandoffRecord {
-        event_cursor: ironclaw_host_api::turn::EventCursor(41),
-        scope: turn_scope(),
-        run_id: TurnRunId::new(),
-    };
-
-    first
-        .put_run_final_reply_handoff(handoff.clone())
-        .await
-        .expect("persist handoff before process death");
-    first
-        .advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(41))
-        .await
-        .expect("persist materialization cursor");
-
-    assert_eq!(
-        reopened
-            .list_pending_run_final_reply_handoffs(10)
-            .await
-            .expect("reopened store lists pending handoff"),
-        vec![handoff.clone()]
-    );
-    assert_eq!(
-        reopened
-            .load_run_final_reply_handoff_cursor()
-            .await
-            .expect("reopened store loads cursor"),
-        ironclaw_host_api::turn::EventCursor(41)
-    );
-
-    reopened
-        .advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(12))
-        .await
-        .expect("stale replay is idempotent");
-    assert_eq!(
-        reopened
-            .load_run_final_reply_handoff_cursor()
-            .await
-            .expect("cursor never regresses"),
-        ironclaw_host_api::turn::EventCursor(41)
-    );
-
-    reopened
-        .complete_run_final_reply_handoff(&handoff)
-        .await
-        .expect("settle handoff");
-    reopened
-        .complete_run_final_reply_handoff(&handoff)
-        .await
-        .expect("settlement replay is idempotent");
-    assert!(
-        reopened
-            .list_pending_run_final_reply_handoffs(10)
-            .await
-            .expect("settled handoff is absent")
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn final_reply_handoff_keyset_survives_deletion_between_pages() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let store = build_outbound_store_for_backend(backend);
-    let mut handoffs = (0..3)
-        .map(|_| RunFinalReplyHandoffRecord {
-            event_cursor: ironclaw_host_api::turn::EventCursor(41),
-            scope: turn_scope(),
-            run_id: TurnRunId::new(),
-        })
-        .collect::<Vec<_>>();
-    handoffs.sort_by_key(|record| (record.event_cursor, record.run_id));
-    for handoff in &handoffs {
-        store
-            .put_run_final_reply_handoff(handoff.clone())
-            .await
-            .expect("persist handoff");
-    }
-
-    let first_page = store
-        .list_pending_run_final_reply_handoffs_after(None, 1)
-        .await
-        .expect("first keyset page");
-    assert_eq!(first_page, vec![handoffs[0].clone()]);
-    store
-        .complete_run_final_reply_handoff(&first_page[0])
-        .await
-        .expect("delete first page before continuing");
-
-    assert_eq!(
-        store
-            .list_pending_run_final_reply_handoffs_after(first_page.first(), 1)
-            .await
-            .expect("second keyset page after deleted cursor row"),
-        vec![handoffs[1].clone()],
-        "the continuation key must not depend on deletion-sensitive offsets"
-    );
-}
-
-#[tokio::test]
 async fn completing_last_run_delivery_cleanup_record_deletes_snapshot() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
@@ -3329,26 +3218,5 @@ async fn cleanup_completion_delete_permission_fault_preserves_snapshot() {
             .expect("load preserved cleanup snapshot"),
         vec![record],
         "a conditional-delete fault must not drop or rewrite the cleanup snapshot"
-    );
-}
-
-#[tokio::test]
-async fn final_reply_handoff_cursor_converges_across_concurrent_store_instances() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let first = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
-    let second = Arc::new(build_outbound_store_for_backend(backend));
-
-    let (low, high) = tokio::join!(
-        first.advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(17)),
-        second.advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(29)),
-    );
-    low.expect("lower cursor writer");
-    high.expect("higher cursor writer");
-    assert_eq!(
-        first
-            .load_run_final_reply_handoff_cursor()
-            .await
-            .expect("load converged cursor"),
-        ironclaw_host_api::turn::EventCursor(29)
     );
 }

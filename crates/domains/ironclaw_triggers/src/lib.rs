@@ -100,7 +100,6 @@ pub enum TriggerRecordValidationKind {
     NameTooLong,
     PromptEmpty,
     PromptTooLong,
-    DeliveryTargetInvalid,
     Other,
 }
 
@@ -287,16 +286,17 @@ impl<'de> Deserialize<'de> for TriggerInboundContentRef {
     }
 }
 
-/// Validate an opaque outbound target at the trigger record boundary.
+/// Decode the retired `delivery_target` column of a pre-removal trigger row.
 ///
-/// The identifier itself is the neutral host-API type used by outbound
-/// inventory and mediated routing. This helper is the only trigger-owned
-/// adaptation: it preserves the trigger repository's stable error taxonomy.
-pub fn parse_trigger_delivery_target_id(
+/// Nothing writes a non-null value into that column any more — a routine
+/// delivers by calling `builtin.outbound_deliver` from its own prompt — but
+/// rows written before the removal are still read until composition's boot
+/// migration rewrites them, so the durable backends keep decoding it.
+pub(crate) fn decode_legacy_delivery_target(
     value: impl Into<String>,
 ) -> Result<TriggerDeliveryTargetId, TriggerError> {
     TriggerDeliveryTargetId::new(value).map_err(|reason| TriggerError::InvalidRecord {
-        kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+        kind: TriggerRecordValidationKind::Other,
         reason,
     })
 }
@@ -352,10 +352,14 @@ pub struct TriggerRecord {
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
     pub prompt: String,
-    /// Optional per-trigger outbound delivery target. When set, fires deliver
-    /// their results to this target instead of the creator's user-global
-    /// outbound delivery preference, so one automation's routing cannot be
-    /// clobbered by another automation (or a later preference change).
+    /// Retired per-trigger delivery route, read-tolerated only.
+    ///
+    /// Fires used to push their final reply here; they no longer do — a
+    /// routine delivers externally only by calling `builtin.outbound_deliver`
+    /// from its own prompt. No create path populates this any more, and
+    /// composition's boot migration rewrites each surviving value into its
+    /// routine's prompt and then clears it. The field (and the column behind
+    /// it) stay so pre-removal rows keep deserializing until that pass runs.
     #[serde(default)]
     pub delivery_target: Option<TriggerDeliveryTargetId>,
     pub state: TriggerState,
@@ -873,10 +877,6 @@ pub struct TriggerFire {
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub prompt: String,
-    /// Per-trigger outbound delivery target carried from the record so the
-    /// delivery layer can honor it without re-reading the trigger row.
-    #[serde(default)]
-    pub delivery_target: Option<TriggerDeliveryTargetId>,
 }
 
 #[async_trait]
@@ -1038,7 +1038,6 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
-            delivery_target: record.delivery_target.clone(),
         }))
     }
 }

@@ -1,10 +1,10 @@
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel";
 import { AutomationsList } from "./components/automations-list";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip";
+import { NotificationChannelsPanel } from "./components/notification-channels-panel";
 import { useAutomations } from "./hooks/useAutomations";
-import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults";
+import { useNotificationChannels } from "./hooks/useNotificationChannels";
 
 export function AutomationsPage() {
   const t = useT();
@@ -12,7 +12,7 @@ export function AutomationsPage() {
   const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const includeCompleted = filter === "completed";
   const automationsState = useAutomations(includeCompleted);
-  const deliveryState = useOutboundDeliveryDefaults();
+  const channelsState = useNotificationChannels();
 
   // A local refetch can resolve almost instantly, leaving the spinner to flash
   // imperceptibly. Hold a minimum spin window so a manual refresh always reads
@@ -89,7 +89,7 @@ export function AutomationsPage() {
                   activeFilter={filter}
                   onSelectFilter={setFilter}
                 />
-                <AutomationDeliveryDefaultsPanel deliveryState={deliveryState} />
+                <NotificationChannelsPanel channelsState={channelsState} />
 
                 {automationsState.isLoading
                   ? (

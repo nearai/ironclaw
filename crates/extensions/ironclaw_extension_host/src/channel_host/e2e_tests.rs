@@ -70,7 +70,7 @@ use ironclaw_outbound::TriggeredRunDeliveryRequest;
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, OutboundDeliveryTargetEntry, RunFinalReplyDestination,
+    DeliveryDefaultScope, OutboundDeliveryTargetEntry, OutboundDeliveryTargetSummary,
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_contracts::admin_users::{
@@ -595,6 +595,15 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 outbound_store,
                 route_store: Arc::clone(&route_store),
                 communication_preferences: preferences,
+                // The creator-owned notification catalog the background-run
+                // notifier resolves stored channel ids through.
+                delivery_targets: notification_catalog(vec![
+                    (DM_NOTIFICATION_TARGET_ID, dm_reply_target_binding_ref()),
+                    (
+                        CHANNEL_NOTIFICATION_TARGET_ID,
+                        non_dm_channel_reply_target_binding_ref(),
+                    ),
+                ]),
                 approval_context: None,
                 blocked_auth_prompts: options.auth_challenges.map(|provider| {
                     Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
@@ -1224,18 +1233,18 @@ async fn wait_for_gate_route_matching(
 /// assertion deterministic regardless of whether that second message has
 /// landed yet. Mirrors `wait_for_gate_route`'s retry/backoff/timeout shape
 /// above.
-/// Delivery fixture for triggered-driver tests: an independent slack
-/// extension host + recording transport + coordinator (the driver posts are
-/// isolated from the inbound harness's transport).
-struct TriggeredDeliveryFixture {
+/// Delivery fixture for background-run notifier tests: an independent slack
+/// extension host + recording transport + coordinator (the notifier's posts
+/// are isolated from the inbound harness's transport).
+struct BackgroundRunNotifierFixture {
     driver_egress: RecordingEgress,
     delivery_coordinator: Arc<DeliveryCoordinator>,
     _host: Arc<ironclaw_extension_host::ExtensionHost>,
 }
 
-async fn triggered_delivery_fixture(
+async fn background_run_notifier_fixture(
     outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
-) -> TriggeredDeliveryFixture {
+) -> BackgroundRunNotifierFixture {
     let host = slack_test_extension_host().await;
     let driver_egress = RecordingEgress::default();
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
@@ -1250,11 +1259,114 @@ async fn triggered_delivery_fixture(
             backoff: Duration::ZERO,
         },
     ));
-    TriggeredDeliveryFixture {
+    BackgroundRunNotifierFixture {
         driver_egress,
         delivery_coordinator,
         _host: host,
     }
+}
+
+/// The creator-owned notification catalog for background-run notifier tests:
+/// one catalog entry per binding ref, each carrying the `slack` extension id
+/// in its `channel` field — which is where the notifier reads the delivering
+/// extension from. Entries have exactly the shape the real catalog mints and
+/// are served through the production `OutboundDeliveryTargetRegistry`. This
+/// fixture claims the REQUESTING caller as owner, so the registry's owner
+/// filter is unconditionally satisfied here — cross-owner isolation is proven
+/// by `ironclaw_outbound::delivery_targets`' owner-scoping tests, not by this
+/// fixture.
+/// Catalog id for the creator's personal Slack DM notification channel.
+const DM_NOTIFICATION_TARGET_ID: &str = "slack:notify-dm";
+/// Catalog id for a shared Slack channel notification channel (NOT a DM).
+const CHANNEL_NOTIFICATION_TARGET_ID: &str = "slack:notify-channel";
+
+/// One static catalog entry, claimed by whichever caller asks (the provider
+/// stamps the requesting caller as owner; the registry only filters).
+struct StaticNotificationTarget {
+    summary: OutboundDeliveryTargetSummary,
+    destination: ReplyTargetBindingRef,
+}
+
+#[async_trait]
+impl ironclaw_outbound::OutboundDeliveryTargetProvider for StaticNotificationTarget {
+    async fn list_outbound_delivery_targets(
+        &self,
+        scope: &ironclaw_outbound::OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, ironclaw_outbound::OutboundError> {
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: ironclaw_outbound::DeliveryTargetCapabilities {
+                final_replies: true,
+                progress: false,
+                gate_prompts: true,
+                auth_prompts: true,
+                modalities: Vec::new(),
+            },
+            destination: self.destination.clone(),
+            owner: ironclaw_outbound::OutboundDeliveryTargetOwner::for_scope(scope),
+        }])
+    }
+}
+
+fn notification_catalog(
+    entries: Vec<(&str, ReplyTargetBindingRef)>,
+) -> Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider> {
+    let providers = entries
+        .into_iter()
+        .map(|(target_id, destination)| {
+            Arc::new(StaticNotificationTarget {
+                summary: OutboundDeliveryTargetSummary::new(
+                    ironclaw_outbound::OutboundDeliveryTargetId::new(target_id)
+                        .expect("notification target id"), // safety: static test target id is valid.
+                    "slack",
+                    target_id,
+                    None,
+                )
+                .expect("notification target summary"), // safety: static test summary is valid.
+                destination,
+            }) as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>
+        })
+        .collect();
+    Arc::new(ironclaw_outbound::OutboundDeliveryTargetRegistry::new(
+        providers,
+    ))
+}
+
+/// Seed the creator's explicit notification-channel set.
+async fn seed_notification_channels(
+    outbound: &impl CommunicationPreferenceRepository,
+    tenant: &TenantId,
+    user: &UserId,
+    target_ids: &[&str],
+) {
+    // Read-modify-write: a scenario may re-point the creator's channels
+    // mid-test, and the store's CAS rejects a second create.
+    let existing = outbound
+        .load_communication_preference(ironclaw_outbound::CommunicationPreferenceKey {
+            scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+        })
+        .await
+        .expect("load notification channels"); // safety: in-memory store should not fail.
+    outbound
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+                legacy_notification_target: None,
+                default_modality: None,
+                notification_targets: target_ids
+                    .iter()
+                    .map(|id| {
+                        ironclaw_outbound::OutboundDeliveryTargetId::new(*id)
+                            .expect("notification target id") // safety: static test target id is valid.
+                    })
+                    .collect(),
+                updated_at: chrono::Utc::now(),
+                updated_by: user.clone(),
+            },
+            expected_version: existing.map(|existing| existing.version),
+        })
+        .await
+        .expect("seed notification channels"); // safety: in-memory store should not fail.
 }
 
 /// Translate a trigger fire into the generic driver's request — the same
@@ -1270,18 +1382,6 @@ fn triggered_request_from_fire(
         creator_user_id: fire.creator_user_id.clone(),
         project_scoped: fire.project_id.is_some(),
         prompt: fire.prompt.clone(),
-        delivery_target: None,
-        trigger_context: ironclaw_outbound::TriggerCommunicationContext {
-            trigger_origin_ref: ironclaw_outbound::TriggerOriginRef::new(
-                fire.identity.trigger_id().to_string(),
-            )
-            .expect("trigger origin ref"), // safety: trigger ids are valid origin refs.
-            trigger_source_kind: ironclaw_outbound::TriggerSourceKind::Schedule,
-            fire_slot: ironclaw_outbound::TriggerFireSlot::new(
-                fire.identity.fire_slot().to_rfc3339(),
-            )
-            .expect("fire slot"), // safety: RFC3339 timestamps are valid fire slots.
-        },
     }
 }
 
@@ -1380,22 +1480,13 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
-    outbound
-        .write_communication_preference(WriteCommunicationPreferenceRequest {
-            record: CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
-                final_reply_target: Some(dm_target.clone()),
-                progress_target: None,
-                approval_prompt_target: Some(dm_target.clone()),
-                auth_prompt_target: None,
-                default_modality: None,
-                updated_at: chrono::Utc::now(),
-                updated_by: user.clone(),
-            },
-            expected_version: None,
-        })
-        .await
-        .expect("seed personal preference"); // safety: in-memory store should not fail.
+    seed_notification_channels(
+        outbound.as_ref(),
+        &tenant,
+        &user,
+        &[DM_NOTIFICATION_TARGET_ID],
+    )
+    .await;
 
     // Seed the finalized assistant message the driver delivers once the scripted
     // coordinator reports Completed. The triggered thread never went through
@@ -1441,7 +1532,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
 
     let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
-    let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
+    let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
@@ -1453,6 +1544,10 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         // route is what the inbound approve resolves against.
         route_store: harness.route_store.clone(),
         communication_preferences: preferences,
+        delivery_targets: notification_catalog(vec![(
+            DM_NOTIFICATION_TARGET_ID,
+            dm_reply_target_binding_ref(),
+        )]),
         coordinator: Arc::clone(&fixture.delivery_coordinator),
         extension_id: "slack".to_string(),
         fallback_notice_scope: test_fallback_notice_scope(),
@@ -1469,7 +1564,13 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
         Arc::new(in_memory_backed_outbound_state_store()),
-        Arc::new(SlackPreferenceTargetCodec),
+        Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec,
+            >])
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs,
+            >,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
 
@@ -1481,7 +1582,6 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         agent_id: None,
         project_id: None,
         prompt: "triggered approval prompt".to_string(),
-        delivery_target: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(
@@ -1582,7 +1682,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
 /// requires the conversation id to start with `D`; `C123` fails that check by
 /// construction. Used to drive `TriggeredRunDeliveryDriver` through its
 /// send-time OAuth-DM backstop (`TriggeredNotificationFailure::OAuthTargetNotDm`):
-/// an OAuth-carrying auth prompt whose resolved `auth_prompt_target` is not a
+/// an OAuth-carrying auth prompt whose resolved notification channel is not a
 /// personal DM must never post the setup link.
 fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
     fn seg(name: &str, value: &str) -> String {
@@ -1603,17 +1703,6 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
     );
     ironclaw_slack_extension::slack_reply_target_binding_ref_from_raw(raw)
         .expect("channel reply target binding ref") // safety: static test binding ref is valid.
-}
-
-fn external_reply_target(entry: &OutboundDeliveryTargetEntry) -> &ReplyTargetBindingRef {
-    match &entry.destination {
-        RunFinalReplyDestination::External {
-            reply_target_binding_ref,
-        } => reply_target_binding_ref,
-        RunFinalReplyDestination::WebApp => {
-            panic!("test fixture expected an external reply target")
-        }
-    }
 }
 
 /// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
@@ -1641,8 +1730,8 @@ async fn wait_for_auth_prompt_messages(egress: &RecordingEgress) -> Vec<serde_js
 
 /// Auth-gate twin of `triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope`:
 /// a triggered run (personal, foreign thread scope) blocks on auth instead of
-/// approval. `TriggeredRunDeliveryDriver` resolves the creator's `auth_prompt_target`
-/// preference to their Slack DM and posts the OAuth setup link there — mirroring
+/// approval. `TriggeredRunDeliveryDriver` resolves the creator's notification
+/// channel to their Slack DM and posts the OAuth setup link there — mirroring
 /// the inbound DM auth-prompt assertion shape in
 /// `slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack`, but driven
 /// through the triggered delivery path (a real `TriggeredRunDeliveryDriver`, no
@@ -1668,22 +1757,13 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     // prompt resolves to team T-A / channel D123 — a personal DM.
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
-    outbound
-        .write_communication_preference(WriteCommunicationPreferenceRequest {
-            record: CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
-                final_reply_target: Some(dm_target.clone()),
-                progress_target: None,
-                approval_prompt_target: None,
-                auth_prompt_target: Some(dm_target.clone()),
-                default_modality: None,
-                updated_at: chrono::Utc::now(),
-                updated_by: user.clone(),
-            },
-            expected_version: None,
-        })
-        .await
-        .expect("seed personal preference"); // safety: in-memory store should not fail.
+    seed_notification_channels(
+        outbound.as_ref(),
+        &tenant,
+        &user,
+        &[DM_NOTIFICATION_TARGET_ID],
+    )
+    .await;
 
     // Seed the finalized assistant message the driver delivers once the scripted
     // coordinator reports Completed on the second poll.
@@ -1731,7 +1811,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
+    let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
@@ -1741,6 +1821,10 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         outbound_store,
         route_store: route_store.clone(),
         communication_preferences: preferences,
+        delivery_targets: notification_catalog(vec![(
+            DM_NOTIFICATION_TARGET_ID,
+            dm_reply_target_binding_ref(),
+        )]),
         coordinator: Arc::clone(&fixture.delivery_coordinator),
         extension_id: "slack".to_string(),
         fallback_notice_scope: test_fallback_notice_scope(),
@@ -1759,7 +1843,13 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
         Arc::new(in_memory_backed_outbound_state_store()),
-        Arc::new(SlackPreferenceTargetCodec),
+        Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec,
+            >])
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs,
+            >,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
 
@@ -1769,7 +1859,6 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt".to_string(),
-        delivery_target: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -1804,45 +1893,29 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
 }
 
 /// Discriminating negative arm for
-/// `triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope` (see its
-/// doc comment for why a "channel" arm does not apply to
-/// `TriggeredRunDeliveryDriver`). When the creator's `auth_prompt_target`
-/// preference resolves to a non-DM target, the send-time OAuth-DM backstop
-/// (`require_direct_message_target` in `deliver_triggered_notification`) must
-/// reject the OAuth-carrying prompt before it is ever posted — the setup link is
-/// never leaked to a shared channel. `deliver_triggered_run` handles the
-/// resulting `OAuthTargetNotDm` failure by cancelling the blocked run and posting
-/// the plain-text auth-unavailable notice (`SLACK_AUTH_UNAVAILABLE_MESSAGE`)
-/// instead, using `final_reply_target` (still the DM here) so the notice itself
-/// is still observable.
+/// `triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope`: the
+/// creator's ONLY notification channel is a shared Slack channel, not a DM.
+/// The OAuth-carrying prompt must never be posted there — that channel gets
+/// the redacted "needs re-authorization, open the app" notice instead — and
+/// the run must NOT be cancelled (spec §7): it parks so the user can finish
+/// the re-auth in the web app and let the routine resume.
 #[tokio::test]
-async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_cancels_run() {
+async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_run() {
     let tenant = TenantId::new(TENANT).expect("tenant"); // safety: static test tenant id is valid.
     let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
     let foreign_scope = foreign_run_scope();
     let run_id = TurnRunId::new();
 
-    // auth_prompt_target resolves to a shared channel (not a DM); final_reply_target
-    // stays the DM so the follow-up deny notice can still be delivered and inspected.
+    // The only notification channel is a shared channel (not a DM).
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
-    let channel_target = non_dm_channel_reply_target_binding_ref();
-    outbound
-        .write_communication_preference(WriteCommunicationPreferenceRequest {
-            record: CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
-                final_reply_target: Some(dm_target.clone()),
-                progress_target: None,
-                approval_prompt_target: None,
-                auth_prompt_target: Some(channel_target),
-                default_modality: None,
-                updated_at: chrono::Utc::now(),
-                updated_by: user.clone(),
-            },
-            expected_version: None,
-        })
-        .await
-        .expect("seed personal preference"); // safety: in-memory store should not fail.
+    seed_notification_channels(
+        outbound.as_ref(),
+        &tenant,
+        &user,
+        &[CHANNEL_NOTIFICATION_TARGET_ID],
+    )
+    .await;
 
     let threads = InMemorySessionThreadService::default();
 
@@ -1864,7 +1937,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
+    let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
@@ -1874,6 +1947,10 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         outbound_store,
         route_store: route_store.clone(),
         communication_preferences: preferences,
+        delivery_targets: notification_catalog(vec![(
+            CHANNEL_NOTIFICATION_TARGET_ID,
+            non_dm_channel_reply_target_binding_ref(),
+        )]),
         coordinator: Arc::clone(&fixture.delivery_coordinator),
         extension_id: "slack".to_string(),
         fallback_notice_scope: test_fallback_notice_scope(),
@@ -1892,7 +1969,13 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
         Arc::new(in_memory_backed_outbound_state_store()),
-        Arc::new(SlackPreferenceTargetCodec),
+        Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec,
+            >])
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs,
+            >,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
 
@@ -1902,40 +1985,40 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt not dm".to_string(),
-        delivery_target: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
         .await;
 
-    // The coordinator scripts exactly one `get_run_state` poll on this path (the
-    // `OAuthTargetNotDm` arm cancels the run and returns without polling again),
-    // so there is no racing second message to filter out — bounded-poll for "at
-    // least one" is sufficient and deterministic.
-    let messages =
-        wait_for_post_messages_matching(&driver_egress, "at least one chat.postMessage", |_| true)
-            .await;
+    // The shared channel receives exactly one message: the redacted re-auth
+    // notice. Bounded-poll for the shape (the notifier re-waits on the parked
+    // run, so filtering by shape keeps the count deterministic).
+    let messages = wait_for_post_messages_matching(
+        &driver_egress,
+        "the redacted re-authorization notice",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("A routine needs re-authorization"))
+        },
+    )
+    .await;
     assert_eq!(
         messages.len(),
         1,
-        "expected exactly one chat.postMessage — the auth-unavailable deny notice; \
-         the OAuth-carrying prompt must never be posted to a non-DM target; got {messages:?}"
+        "expected exactly one chat.postMessage — the redacted re-auth notice; got {messages:?}"
     );
     let text = messages[0]["text"]
         .as_str()
-        .expect("deny notice carries a text field");
+        .expect("re-auth notice carries a text field");
     assert!(
         !text.contains("Setup link:") && !text.contains("https://provider.example/oauth"),
         "OAuth setup link must never be posted to a non-DM target: {text}"
     );
-    assert!(
-        text.contains("Ironclaw web app"),
-        "expected the auth-unavailable deny notice, got: {text}"
-    );
     assert_eq!(
         coordinator.cancel_call_count(),
-        1,
-        "the blocked run must be cancelled exactly once when the OAuth target is not a DM"
+        0,
+        "a background run parked on OAuth is never cancelled for lack of a DM channel"
     );
     auth_provider.assert_single_call();
 }
@@ -4417,14 +4500,16 @@ use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 /// The per-extension triggered-delivery drivers composition supplies the hook:
 /// built by the SAME product-side workflow factory the assembly's graphs are
 /// built by, from the same codec the harness registered as an extra.
-fn harness_triggered_drivers(
+fn harness_background_run_notifier(
     harness: &Harness,
-) -> Vec<(String, Arc<dyn ironclaw_outbound::TriggeredRunDelivery>)> {
+) -> Option<Arc<dyn ironclaw_outbound::TriggeredRunDelivery>> {
     harness
         .workflow_factory
-        .triggered_run_delivery("slack", Arc::new(SlackPreferenceTargetCodec))
-        .map(|driver| vec![("slack".to_string(), driver)])
-        .unwrap_or_default()
+        .background_run_notifier(Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
+            as Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>])
+            as Arc<
+                dyn ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs,
+            >)
 }
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec as _;
 use ironclaw_extension_contracts::state::InstallationState;
@@ -4527,7 +4612,7 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
     assert_eq!(registered.summary.channel.as_str(), ADAPTER);
     assert!(registered.owner.matches_scope(&caller));
     let conversation = SlackPreferenceTargetCodec
-        .conversation_for_target(external_reply_target(registered))
+        .conversation_for_target(&registered.destination)
         .expect("registered target should retain its Slack destination");
     assert_eq!(conversation.space_id(), Some(TEAM));
     assert_eq!(conversation.conversation_id(), ROUTED_CHANNEL);
@@ -4568,7 +4653,7 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"),
         "generic ids keep the retired lane's shape"
     );
-    let shared_reply_target = external_reply_target(shared);
+    let shared_reply_target = &shared.destination;
     let shared_conversation = codec
         .conversation_for_target(shared_reply_target)
         .expect("shared binding ref decodes");
@@ -4584,7 +4669,7 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         dm.summary.target_id.as_str(),
         format!("slack:personal-dm:{TEAM}:{USER}")
     );
-    let dm_reply_target = external_reply_target(dm);
+    let dm_reply_target = &dm.destination;
     assert!(codec.is_personal_direct_message(dm_reply_target));
     assert_eq!(
         codec.direct_message_actor_for_target(dm_reply_target),
@@ -4690,11 +4775,12 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         .expect("resolve succeeds")
         .expect("retired-id shared preference still resolves");
     assert!(
-        external_reply_target(&resolved_shared)
+        resolved_shared
+            .destination
             .as_str()
             .contains(&durable_segment),
         "re-resolved ref carries the durable installation id: {}",
-        external_reply_target(&resolved_shared).as_str()
+        resolved_shared.destination.as_str()
     );
 
     // Personal-DM preference saved under the retired setup id.
@@ -4713,11 +4799,9 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         .expect("resolve succeeds")
         .expect("retired-id DM preference still resolves");
     assert!(
-        external_reply_target(&resolved_dm)
-            .as_str()
-            .contains(&durable_segment),
+        resolved_dm.destination.as_str().contains(&durable_segment),
         "re-resolved DM ref carries the durable installation id: {}",
-        external_reply_target(&resolved_dm).as_str()
+        resolved_dm.destination.as_str()
     );
 
     // Fail-closed arms: a tampered actor never resolves; an unrouted
@@ -4757,13 +4841,13 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
     );
 }
 
-/// The generic triggered hook routes a settled fire to the owning
-/// extension's driver: the creator's stored preference decodes through the
-/// slack codec registered in the assembly extras, the driver is built from
-/// the assembly's OWN delivery services, and the approval prompt lands on
-/// the harness egress with the delivered gate route recorded.
+/// The generic hook hands a settled fire to the background-run notifier: the
+/// notifier is built from the assembly's OWN delivery services and codecs,
+/// resolves the creator's stored notification channels through the assembly's
+/// catalog, and the approval prompt lands on the harness egress with the
+/// delivered gate route recorded.
 #[tokio::test]
-async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
+async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
     let (harness, _approvals) = build_harness_for_delivered_route_tests().await;
 
     // A blocked run the coordinator knows about (the hook's driver polls the
@@ -4779,34 +4863,20 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
     let tenant = TenantId::new(TENANT).expect("tenant"); // safety: static test tenant id is valid.
     let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
 
-    // Seed the creator's personal preference on the SAME store the
+    // Seed the creator's notification channels on the SAME store the
     // assembly's delivery deps read.
-    let dm_target = dm_reply_target_binding_ref();
-    harness
-        .outbound
-        .write_communication_preference(WriteCommunicationPreferenceRequest {
-            record: CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
-                final_reply_target: Some(dm_target.clone()),
-                progress_target: None,
-                approval_prompt_target: Some(dm_target.clone()),
-                auth_prompt_target: None,
-                default_modality: None,
-                updated_at: chrono::Utc::now(),
-                updated_by: user.clone(),
-            },
-            expected_version: None,
-        })
-        .await
-        .expect("seed personal preference"); // safety: in-memory store should not fail.
+    seed_notification_channels(
+        harness.outbound.as_ref(),
+        &tenant,
+        &user,
+        &[DM_NOTIFICATION_TARGET_ID],
+    )
+    .await;
 
     let delivery_store = Arc::clone(&harness.triggered_delivery_store);
     let hook = GenericTriggeredRunDeliveryHook::new(
-        Arc::clone(&harness.assembly),
-        Arc::clone(&delivery_store),
-        harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        Arc::new(ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default()),
-        harness_triggered_drivers(&harness),
+        harness_background_run_notifier(&harness),
+        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
     );
 
     let fire = TriggerFire {
@@ -4815,7 +4885,6 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         agent_id: None,
         project_id: None,
         prompt: "generic triggered delivery".to_string(),
-        delivery_target: None,
     };
     use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
@@ -4848,161 +4917,58 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         route.delivered_conversation_fingerprints
     );
 
-    // Fail-closed routing: a stored preference no registered codec decodes
-    // records a Failed outcome instead of guessing a channel.
-    harness
-        .outbound
-        .write_communication_preference(WriteCommunicationPreferenceRequest {
-            record: CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
-                final_reply_target: Some(
-                    ReplyTargetBindingRef::new("reply:adapter:5:other;rest").expect("ref"), // safety: static test ref is valid.
-                ),
-                progress_target: None,
-                approval_prompt_target: None,
-                auth_prompt_target: None,
-                default_modality: None,
-                updated_at: chrono::Utc::now(),
-                updated_by: user.clone(),
-            },
-            expected_version: Some(ironclaw_outbound::CommunicationPreferenceVersion::from_raw(
-                1,
-            )),
-        })
-        .await
-        .expect("overwrite preference with a foreign-vendor target");
-    let foreign_fire = TriggerFire {
+    // Fail closed on a vanished channel: a stored notification-channel id the
+    // catalog no longer resolves is skipped, never guessed at, so a fire with
+    // nothing left to notify attempts no external delivery at all.
+    let delivered_before = harness.slack_messages().len();
+    seed_notification_channels(
+        harness.outbound.as_ref(),
+        &tenant,
+        &user,
+        &["slack:notify-removed"],
+    )
+    .await;
+    let vanished_fire = TriggerFire {
         identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
         creator_user_id: user.clone(),
         agent_id: None,
         project_id: None,
-        prompt: "unroutable triggered delivery".to_string(),
-        delivery_target: None,
+        prompt: "notification channel removed since it was chosen".to_string(),
     };
-    let unroutable_run_id = TurnRunId::new();
-    hook.on_trigger_submitted(foreign_fire, unroutable_run_id, foreign_run_scope())
+    let vanished_run_id = TurnRunId::new();
+    hook.on_trigger_submitted(vanished_fire, vanished_run_id, foreign_run_scope())
         .await;
-    let record = delivery_store
-        .load_triggered_run_delivery(unroutable_run_id)
-        .await
-        .expect("load outcome")
-        .expect("unroutable fire records an outcome");
+    let record = wait_for_triggered_outcome(delivery_store.as_ref(), vanished_run_id).await;
     assert_eq!(
         record.outcome,
-        ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Failed,
-        "an undecodable stored target fails closed"
+        ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured,
+        "a vanished notification channel leaves the fire with nothing to notify"
+    );
+    assert_eq!(
+        harness.slack_messages().len(),
+        delivered_before,
+        "a vanished notification channel must not produce any external delivery"
     );
 }
 
-/// A trigger's own target id is resolved at fire time through the same
-/// creator-scoped registry used during creation, then delivered without a
-/// user-global preference. This is the whole composition path used by
-/// Telegram, Slack, and future manifest-driven channel providers.
-#[tokio::test]
-async fn generic_triggered_hook_honors_per_trigger_target_without_global_default() {
-    let harness = build_harness(TurnMode::Running).await;
-    save_outbound_target_config(&harness).await;
-    let dm_targets = generic_dm_target_store();
-    let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
-    dm_targets
-        .upsert(
-            ADAPTER,
-            &user,
-            SLACK_USER.to_string(),
-            dm_target_payload(Some(TEAM), CHANNEL),
-        )
-        .await
-        .expect("provision DM target");
-    let provider = Arc::new(generic_outbound_target_provider(&harness, dm_targets));
-    let listed = provider
-        .list_outbound_delivery_targets(&operator_caller())
-        .await
-        .expect("list targets");
-    let target_id = listed
-        .iter()
-        .find(|entry| entry.summary.target_id.as_str().contains("personal-dm"))
-        .expect("personal target")
-        .summary
-        .target_id
-        .as_str()
-        .to_string();
-    let registry = Arc::new(ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default());
-    registry
-        .register_provider(
-            "channel",
-            provider as Arc<dyn OutboundDeliveryTargetProvider>,
-        )
-        .expect("register target provider");
-
-    let scope = foreign_run_scope();
-    harness.ensure_scope_thread(&scope).await;
-    let run_id = TurnRunId::new();
-    harness
-        .coordinator
-        .complete_run(
-            scope.clone(),
-            TurnActor::new(user.clone()),
-            run_id,
-            "scheduled result",
-        )
-        .await
-        .expect("seed completed trigger run");
-
-    let delivery_store = Arc::clone(&harness.triggered_delivery_store);
-    let hook = GenericTriggeredRunDeliveryHook::new(
-        Arc::clone(&harness.assembly),
-        Arc::clone(&delivery_store),
-        harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        registry,
-        harness_triggered_drivers(&harness),
-    );
-    let fire = TriggerFire {
-        identity: TriggerFireIdentity::new(
-            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            TriggerId::new(),
-            chrono::Utc::now(),
-        ),
-        creator_user_id: user,
-        agent_id: Some(AgentId::new(AGENT).expect("agent")), // safety: static test agent id is valid.
-        project_id: None,
-        prompt: "scheduled result to this DM".to_string(),
-        delivery_target: Some(
-            ironclaw_triggers::TriggerDeliveryTargetId::new(target_id).expect("target id"),
-        ),
-    };
-    use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
-    hook.on_trigger_submitted(fire, run_id, scope).await;
-
+/// Bounded-poll the triggered-delivery store for one run's recorded outcome.
+async fn wait_for_triggered_outcome(
+    store: &dyn TriggeredRunDeliveryStore,
+    run_id: TurnRunId,
+) -> ironclaw_outbound::TriggeredRunDeliveryRecord {
     for _ in 0..200 {
-        if delivery_store
+        if let Some(record) = store
             .load_triggered_run_delivery(run_id)
             .await
             .expect("load outcome")
-            .is_some()
         {
-            break;
+            return record;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let record = delivery_store
-        .load_triggered_run_delivery(run_id)
-        .await
-        .expect("load outcome")
-        .expect("delivery outcome");
-    assert_eq!(
-        record.outcome,
-        ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Delivered
-    );
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1, "one per-trigger result: {messages:?}");
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    assert!(
-        messages[0]["text"]
-            .as_str()
-            .is_some_and(|text| text.starts_with("scheduled result")),
-        "final result reaches the selected target: {messages:?}"
-    );
+    panic!("no triggered delivery outcome recorded for {run_id}");
 }
+
 // arch-exempt: large_file, channel host end-to-end coverage remains centralized, plan #6175
 
 /// A standardized slash command in a DM must cross the production channel

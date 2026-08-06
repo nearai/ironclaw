@@ -152,8 +152,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a scheduled run chain through *two* approval prompts and still be recognised as a scheduled run | `scenario_triggered_chained_gate.rs` |
 | See "waiting on you" on an automation whose run is parked, and see it clear when the run ends | `scenario_triggered_gate_hold_visible.rs` |
 | Trust that a scheduled run can't create/remove/pause its own automations | `scenario_trigger_self_create_denied.rs` |
-| Create an automation from Slack/Telegram and have the result routed back to that conversation | `scenario_external_source_trigger_captures_delivery.rs` |
-| Not create an automation pointed at a delivery target this deployment can't reach | `scenario_delivery_target_fail_closed.rs` |
+| Create an automation whose create input carries no delivery-routing field at all | `scenario_trigger_create_has_no_delivery_target_field.rs` |
 | See and rename their automations in the WebUI, backed by the real trigger store | `scenario_webui_automations_list.rs`, `scenario_webui_automations_rename.rs` |
 
 ---
@@ -236,9 +235,20 @@ One thread, whole real turn. Grouped by what the user experiences.
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-The 54th registered bin, `delivery_user_journeys.rs`, is a retired Cargo target
-with no scenario behavior. Current delivery evidence is listed under Extensions
-& channels and the group trigger scenarios; the retired target is not coverage.
+The 54th registered bin, `delivery_user_journeys.rs`, holds the explicit
+channel-delivery journeys (two-lane model):
+
+| A user can… | Scenario |
+|---|---|
+| Ask in WebUI to be pinged on Slack and get a bot delivery with provider evidence | `webui_send_me_on_slack_delivers_via_bot_with_evidence` |
+| Ask from Slack for a Telegram delivery; ack lands in Slack, payload in Telegram | `slack_origin_delivers_to_telegram_and_acks_in_slack` |
+| Never have the model deliver into the run's own conversation (lane 1 is automatic) | `deliver_to_origin_conversation_is_denied_and_model_replies` |
+| See per-call honest results when one of several deliveries fails | `partial_failure_reports_per_call_honestly` |
+| Get a refusal (no tool calls) for an undeliverable destination | `undeliverable_destination_is_refused_without_tool_calls` |
+| Have a routine fire deliver via the tool with no stored target anywhere | `routine_fire_delivers_via_tool_without_stored_target` |
+| Have a conditional fire that calls no delivery tool produce zero outbound attempts | `conditional_fire_with_no_delivery_call_produces_zero_attempts` |
+| Get blocked-fire notices fanned out to every notification channel, first approve wins | `blocked_fire_fans_out_and_first_approve_wins` |
+| Keep a blocked fire app-only when the notification-channel set is empty | `empty_notification_set_keeps_blocked_fire_in_app_only` |
 
 ---
 
@@ -252,7 +262,9 @@ with no scenario behavior. Current delivery evidence is listed under Extensions
 | a question in a Slack DM / a keyword-prefixed message, and gets a Slack reply | `reborn_qa_channel_delivery.rs` (2) |
 | "use this Google Drive doc as your knowledge base" | `reborn_qa_doc_grounding.rs` (2) |
 | "does api.github.com return 200 / summarize this release page" | `reborn_qa_web_fetch.rs` (3) |
-| any of the above, replayed from committed real-LLM traces | `reborn_qa_recorded_behavior.rs` (25) |
+| any of the above, replayed from committed real-LLM traces | `reborn_qa_recorded_behavior.rs` (29) |
+| "send me XYZ every morning" from the web app and gets a routine whose fires stay in the run thread (no delivery step — the source-surface default, live-recorded) | `reborn_qa_recorded_behavior.rs::contract_routine_bare_send_me_from_web_app_pins_no_delivery_step` (+ replay) |
+| "send me XYZ to Slack and Telegram" and gets a routine whose prompt pins one delivery step per channel (live-recorded) | `reborn_qa_recorded_behavior.rs::contract_routine_multi_channel_delivery_pins_both_targets_in_prompt` (+ replay) |
 | a broad smoke set of whole turns on a full runtime | `reborn_qa_smoke_scenarios_e2e.rs` (10) |
 
 **Binary-level behavior**

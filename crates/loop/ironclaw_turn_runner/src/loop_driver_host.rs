@@ -1771,16 +1771,19 @@ where
                 return Err(error);
             }
         };
-        // The rendered guidance names BOTH the lister and the setter; require both
+        // The rendered guidance names BOTH the delivery tool and the lister; require both
         // capabilities to be visible before setting the flag, so we never prompt
-        // the model to call a tool that is not actually in the surface.
+        // the model to call a tool that is not actually in the surface. The pair is the
+        // delivery verb plus its address book: a lister with no way to deliver is not a
+        // delivery surface, and `builtin.notification_channels_set` is a settings tool
+        // that configures notice fan-out — it delivers nothing and does not qualify.
         let delivery_tools_visible = {
             let ids: std::collections::HashSet<&str> = visible_surface
                 .descriptors
                 .iter()
                 .map(|d| d.capability_id.as_str())
                 .collect();
-            ids.contains("builtin.outbound_delivery_target_set")
+            ids.contains("builtin.outbound_deliver")
                 && ids.contains("builtin.outbound_delivery_targets_list")
         };
         // Join the fetch started at loop entry and stamp the surface-derived
