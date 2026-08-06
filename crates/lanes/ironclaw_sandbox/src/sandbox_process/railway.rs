@@ -1158,7 +1158,7 @@ fn parse_exit_sentinel(stdout: String) -> Result<(String, i32), RuntimeProcessEr
                 "Railway preview command returned an invalid exit status".into(),
             )
         })?;
-    let line_start = stdout[..marker_start]
+    let line_start = stdout[..marker_start] // safety: `str::rfind` returns a UTF-8 boundary.
         .rfind('\n')
         .map(|offset| offset + 1)
         .unwrap_or(marker_start);
@@ -1217,7 +1217,7 @@ where
         if read == 0 {
             break;
         }
-        let chunk = &buffer[..read];
+        let chunk = &buffer[..read]; // safety: `read` is at most the byte-buffer length.
         if !truncated && captured.len().saturating_add(read) <= limit {
             captured.extend_from_slice(chunk);
             continue;
