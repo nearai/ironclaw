@@ -73,7 +73,7 @@ Layer ①'s templates carry three review-oriented sections that make a change's
 
 **The limit worth naming:** this is **generic team review**, not a mechanism
 that classifies a change and *routes it to a named cross-functional partner*
-(security / data / backend / design) for required sign-off. The kit signals
+(engineering / product / design) for required sign-off. The kit signals
 "circulate for review"; it never says "this diff touches X, so partner Y must
 review." That specific auto-routing is *not* in the kit — see the matrix (§3)
 and the adaptation proposed in [PROPOSAL.md](PROPOSAL.md).
@@ -198,7 +198,7 @@ informal / not wired as the kit does) · **❌ Gap** (absent).
 | Feature-impact flag (spec §5 *Architecture Impact*) | ① | `architecture.md` rule + knowledge-graph blast-radius; no per-feature spec field | **◑ Partial** — different shape |
 | Dependency/sequencing section (plan §4) | ① | `docs/plans/*` note deps ad-hoc; not a structured field | **◑ Partial** |
 | Review gate (spec §8 *Feedback & Decisions*, hard gate) | ① | PR review + `review-discipline.md`; not a spec-embedded pre-code gate | **◑ Partial** |
-| **Cross-functional-partner review trigger** (auto-route to security/data/design) | ① | `review-discipline.md` + PR *Reborn Trust-Boundary Checklist* — strong, but **manual, not auto-routed** | **❌ Gap in both** — the kit has only a generic team gate; opportunity to wire IronClaw's boundary signals into an explicit trigger |
+| **Cross-functional-partner review trigger** (auto-route to engineering/product/design) | ① | `review-discipline.md` + PR *Reborn Trust-Boundary Checklist* — strong, but **manual, not auto-routed** | **❌ Gap in both** — the kit has only a generic team gate; opportunity to wire IronClaw's boundary signals into an explicit trigger |
 | Critical User Journeys registry + `critical-flows` rule | ③ | e2e/Playwright exist; no CUJ catalog/rule | **❌ Gap** |
 | `DESIGN.md` design constitution | design | none | **❌ Gap** |
 | Design/UX auto-loading rules (styling, a11y, taxonomy) | design | none | **❌ Gap** |

@@ -40,12 +40,13 @@ frontend edit. This is the single biggest gap and the clearest win.
 | 1.3 | Codify the **token rule**: no raw hex at call sites; every custom color ships light+dark; `ironclaw`-prefixed semantic tokens. Reconcile with the existing `theme-colors.test.ts`. | `DESIGN.md` §2 + rule |
 | 1.4 | Add a CLAUDE.md pointer: "UI work conforms to `docs/design/DESIGN.md`; its REJECT list is a hard gate." | `CLAUDE.md` |
 | 1.5 | Consolidate the **embedded-AI-agent invariants** into a single referenced "What NOT to do" list, mapping **every** invariant named in EVALUATION §1 to its IronClaw home so none is lost: **keys encrypted at rest** (secrets/credential-storage path), **per-agent config in the DB not env vars** (`RootFilesystem`-persisted config), **tenant/scoped context on every LLM call** (capability-dispatch + scoped-filesystem isolation), **LLM-data-never-deleted**, and **credential/extension identity** — cross-linking existing CLAUDE.md/safety rules, not duplicating them. | `CLAUDE.md` / `.claude/rules/` |
-| 1.6 | Add the **cross-functional-review trigger** (see PROPOSAL §3): (a) a *"Cross-functional review required: security / data / design / none"* field in the feature-spec template; (b) extend `review-discipline.md` so a diff crossing a **trust / persistence / capability** boundary names the required partner **role** and links the PR *Reborn Trust-Boundary Checklist* — reusing IronClaw's existing signals, not the kit's generic §8 gate. (`review-discipline.md` supplies the boundary *checks*, not reviewer identity — it names no people; leave role→person mapping to `CODEOWNERS`/team process.) Adopt spec **§5 Architecture Impact** + plan **§4 Dependencies & Sequencing** verbatim in the templates while you're there. | feature-spec template + `.claude/rules/review-discipline.md` |
+| 1.6 | Add the **cross-functional-review trigger** (see PROPOSAL §3): (a) a *"Cross-functional review required: engineering / product / design / none"* field in the feature-spec template; (b) extend `review-discipline.md` so the rule routes to the owning partner **role** by area — **engineering** (trust / persistence / capability / runtime boundaries), **product** (user-facing behavior / a product-surface contract), **design** (UI / the design system) — and links the PR *Reborn Trust-Boundary Checklist*, reusing IronClaw's existing signals rather than the kit's generic §8 gate. (`review-discipline.md` supplies the boundary *checks*, not reviewer identity — it names no people; leave role→person mapping to `CODEOWNERS`/team process.) Adopt spec **§5 Architecture Impact** + plan **§4 Dependencies & Sequencing** verbatim in the templates while you're there. | feature-spec template + `.claude/rules/review-discipline.md` |
 
 **Exit:** editing a frontend file surfaces the design rule; `DESIGN.md` is
 concrete enough to reject a raw-hex or unlabeled-control diff; a
-trust/persistence/capability-boundary diff surfaces the cross-functional-review
-trigger naming the partner. **No runtime code changes** — pure governance.
+boundary-crossing diff surfaces the cross-functional-review trigger naming the
+owning role (engineering / product / design). **No runtime code changes** —
+pure governance.
 
 **Risk:** over-specifying `DESIGN.md` before the design system is mature →
 mitigate by keeping §§ that IronClaw can honor today and marking aspirational
