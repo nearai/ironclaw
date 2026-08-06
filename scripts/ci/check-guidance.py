@@ -11,7 +11,7 @@ correctness bug, and the detectable classes belong in CI
 (`docs/reborn/guidance-conventions.md` closes with "the guidance half is this
 convention's job"; this gate is that job's mechanical part).
 
-Four claims are checked, all against **git-tracked** state so local build
+Five claims are checked, all against **git-tracked** state so local build
 artifacts can never satisfy a reference and CI and a laptop agree:
 
   1. **References resolve.** Every repo path a guidance document names —
@@ -31,6 +31,18 @@ artifacts can never satisfy a reference and CI and a laptop agree:
   4. **Every crate has a `README.md`.** The convention requires one per crate
      and `crates/AGENTS.md` states "Every crate has one"; measured 2026-08-06
      the tree is at 62/62, so this gates rather than warns.
+  5. **The `CLAUDE.md` alias rule holds.** Beside the root `AGENTS.md` and
+     every `AGENTS.md` under `crates/`, a `CLAUDE.md` must be tracked — and,
+     outside the two named real-file exceptions in
+     `ALIAS_REAL_FILE_EXCEPTIONS` below, tracked *as a symlink* (index mode
+     `120000`) whose target is exactly `AGENTS.md`. Checked against the git
+     **index**, not the working tree: a committed symlink deletion, or a link
+     silently replaced by a copied regular file, is the drift this catches
+     (the 2026-08-06 audit proved a committed deletion left this gate green;
+     a working-tree-only deletion was caught, but only accidentally, by the
+     "cannot read guidance file" refusal). Standalone `CLAUDE.md` guides with
+     no `AGENTS.md` sibling — the sanctioned `ironclaw_agent_loop` sub-module
+     guides — are not alias sites and are not checked here.
 
 **What is deliberately NOT a reference** (the false-positive design — a noisy
 gate gets disabled, which is worse than no gate):
@@ -44,14 +56,24 @@ gate gets disabled, which is worse than no gate):
     the *live* tree (derived from `git ls-files`, never hardcoded) nor a
     tracked subdirectory of the citing document's own directory — prose about
     long-deleted trees ("the v1 `src/auth/…` was deleted") is historical
-    narration, not a claim about today's tree;
+    narration, not a claim about today's tree. The known blind spot this
+    buys: a dead reference whose first segment died *with its whole tree* is
+    indistinguishable from narration and passes even when written as a live
+    instruction — two `src/…/README.md` rows phrased as "read these files"
+    hid in `.claude/skills/architecture-video/SKILL.md` until 2026-08-06.
+    Only review catches that class; this gate structurally cannot;
   * wire-protocol identifiers that lexically collide with repo roots
     (`NON_PATH_IDENTIFIERS`: the MCP JSON-RPC method names such as
     `tools/list`);
   * any line carrying the repo's dated-correction glyph `✎` — the convention's
-    own marker for historical/corrected prose;
-  * any line carrying `check-guidance: path-ok` (put it in an HTML comment
-    beside a deliberate example: `<!-- check-guidance: path-ok -->`).
+    own marker for historical/corrected prose. The glyph is deliberately
+    line-scoped (a dated correction is a whole line of prose);
+  * the one reference immediately preceding a `check-guidance: path-ok`
+    marker — put the marker in an HTML comment right after the deliberate
+    example: `` `crates/…/myprovider.rs` <!-- check-guidance: path-ok -->``.
+    Unlike the glyph, the marker is per-reference, not per-line: other
+    references on the same line are still checked, so a fresh dangling path
+    cannot ride into the tree beside a vouched-for one.
 
 **How a reference resolves** — the ways this repository's guidance actually
 cites paths, each verified against the live tree before being modeled:
@@ -87,9 +109,9 @@ never be reported as "the guidance is fine".
     python3 scripts/ci/check-guidance.py --json    # machine-readable report
 
 Test overrides: `--repo-root` and `--tracked-files` (a file holding one
-repo-relative path per line, standing in for `git ls-files`, so the self-test
-needs no git repository). Self-tests patch the floor constants; production
-runs never do.
+repo-relative path per line — `<path> -> <target>` marks a tracked symlink —
+standing in for `git ls-files -s`, so the self-test needs no git repository).
+Self-tests patch the floor constants; production runs never do.
 """
 
 from __future__ import annotations
@@ -129,14 +151,44 @@ NON_PATH_IDENTIFIERS = frozenset(
     }
 )
 
+# The `CLAUDE.md` alias rule (docs/reborn/guidance-conventions.md, "How the
+# files actually load"): beside the root `AGENTS.md` and every `AGENTS.md`
+# under `crates/`, a `CLAUDE.md` symlink — index mode `120000`, target exactly
+# this string — keeps Claude Code auto-injection and AGENTS.md-reading tools
+# on the same bytes. A regular-file copy would drift; a deleted or retargeted
+# link silently splits the two audiences again.
+ALIAS_TARGET = "AGENTS.md"
+
+# Named real-file exceptions to the alias rule — the only two, each carrying
+# the reason it must stay a regular file. A row here is a live claim about
+# the tree, not a skip: the gate fails when the named file goes missing,
+# becomes a symlink, or its sibling `AGENTS.md` disappears, so a stale row
+# cannot outlive the exception it encodes.
+ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
+    # The root adapter carries a genuine Claude-only tail after its
+    # `@AGENTS.md` import (skills routing, knowledge-graph recipes, the REPL
+    # logging rule), so it cannot be a plain symlink to AGENTS.md.
+    "CLAUDE.md": "root adapter: `@AGENTS.md` import plus a Claude-only tail",
+    # `reborn_composition_boundaries.rs::composition_root_embeds_no_prompt_content`
+    # refuses symlinks anywhere under this crate — its ownership walks do not
+    # follow links — so this alias is a real file (which says so itself).
+    "crates/app/ironclaw_composition/CLAUDE.md": (
+        "the composition ownership walks reject symlinks "
+        "(reborn_composition_boundaries.rs)"
+    ),
+}
+
 # Fail-closed floors. A scan that discovers almost no guidance files, or an
 # extraction pass that finds almost no path references, means the discovery
 # globs or the extractor broke — not that the repository stopped documenting
 # itself. Refuse rather than report an empty scan as clean. (Measured
-# 2026-08-06: 174 guidance files, ~800 path references, 30 rule globs.)
+# 2026-08-06 on the shipped tree: 237 guidance files, ~2070 path references,
+# 38 rule globs, 65 AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json`
+# and re-date this comment when the numbers move materially.)
 MIN_GUIDANCE_FILES = 40
 MIN_PATH_REFERENCES = 80
 MIN_RULE_GLOBS = 1
+MIN_ALIAS_PAIRS = 10
 
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -172,8 +224,9 @@ class Suppression:
 # The suppression table — shrink-only. Every row is a reference that is
 # *accurate while unresolvable* and merely lacks the in-file marker this
 # gate's author may not add (guidance content has its own owner). The content
-# owner deletes a row by adding `✎` or `<!-- check-guidance: path-ok -->` to
-# the line — or by rewording it. Real drift never belongs here.
+# owner deletes a row by marking the line with `✎` (line-scoped), by putting
+# `<!-- check-guidance: path-ok -->` immediately after the reference, or by
+# rewording it. Real drift never belongs here.
 # ---------------------------------------------------------------------------
 KNOWN_MISSING: tuple[Suppression, ...] = (
 )
@@ -184,17 +237,37 @@ KNOWN_MISSING: tuple[Suppression, ...] = (
 # ---------------------------------------------------------------------------
 def load_tracked(
     repo_root: pathlib.Path, tracked_file: pathlib.Path | None
-) -> list[str]:
-    """Repo-relative POSIX paths of every tracked file."""
+) -> tuple[list[str], dict[str, str]]:
+    """Every tracked file (repo-relative POSIX paths), plus the link target of
+    every tracked *symlink*.
+
+    Both come from the git **index** (`git ls-files -s`: mode `120000` marks a
+    symlink, its blob holds the target), so the committed state is what the
+    alias check judges — a checkout quirk can neither hide a committed
+    deletion nor forge a link that is not really tracked. The
+    `--tracked-files` override marks a symlink as `<path> -> <target>`; a
+    plain line is a regular file.
+    """
     if tracked_file is not None:
         try:
             raw = tracked_file.read_text(encoding="utf-8")
         except OSError as error:
             raise GuidanceError(f"cannot read --tracked-files: {error}") from error
-        return [line for line in raw.splitlines() if line]
+        paths: list[str] = []
+        symlinks: dict[str, str] = {}
+        for line in raw.splitlines():
+            if not line:
+                continue
+            if " -> " in line:
+                path, target = line.split(" -> ", 1)
+                paths.append(path)
+                symlinks[path] = target
+            else:
+                paths.append(line)
+        return paths, symlinks
     try:
         completed = subprocess.run(
-            ["git", "ls-files", "-z"],
+            ["git", "ls-files", "-s", "-z"],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -204,10 +277,42 @@ def load_tracked(
         raise GuidanceError("git is not on PATH; the tracked set cannot be read") from error
     except subprocess.CalledProcessError as error:
         raise GuidanceError(
-            f"`git ls-files` failed, so the tracked set cannot be read: "
+            f"`git ls-files -s` failed, so the tracked set cannot be read: "
             f"{error.stderr.strip()}"
         ) from error
-    return [path for path in completed.stdout.split("\0") if path]
+    paths = []
+    link_blobs: dict[str, list[str]] = {}
+    for entry in completed.stdout.split("\0"):
+        if not entry:
+            continue
+        try:
+            header, path = entry.split("\t", 1)
+            mode, blob, _stage = header.split(" ")
+        except ValueError as error:
+            raise GuidanceError(
+                f"unparseable `git ls-files -s` entry: {entry!r}"
+            ) from error
+        paths.append(path)
+        if mode == "120000":
+            link_blobs.setdefault(blob, []).append(path)
+    symlinks = {}
+    for blob, blob_paths in link_blobs.items():
+        try:
+            shown = subprocess.run(
+                ["git", "cat-file", "blob", blob],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as error:
+            raise GuidanceError(
+                f"`git cat-file blob {blob}` failed, so a tracked symlink's "
+                f"target cannot be read: {error.stderr.strip()}"
+            ) from error
+        for path in blob_paths:
+            symlinks[path] = shown.stdout
+    return paths, symlinks
 
 
 @dataclasses.dataclass(frozen=True)
@@ -306,9 +411,16 @@ def _read_guidance(path: pathlib.Path) -> str:
         raise GuidanceError(f"cannot read guidance file {path}: {error}") from error
 
 
-def _reference_lines(text: str, doc: str) -> list[tuple[int, str]]:
-    """Prose lines eligible for extraction: fences, comments, and marked lines out."""
-    lines: list[tuple[int, str]] = []
+def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...]]]:
+    """Prose lines eligible for extraction: fences, comments, and `✎` lines out.
+
+    Each entry carries the positions, in the comment-stripped line, where a
+    `path-ok` marker comment stood — `extract_references` suppresses only the
+    one reference immediately preceding each marker. The `✎` glyph, by
+    contrast, skips its whole line: a dated correction is a line of prose,
+    and that line-level meaning is the glyph's documented contract.
+    """
+    lines: list[tuple[int, str, tuple[int, ...]]] = []
     in_fence = False
     in_comment = False
     for number, raw in enumerate(text.splitlines(), start=1):
@@ -318,29 +430,38 @@ def _reference_lines(text: str, doc: str) -> list[tuple[int, str]]:
             continue
         if in_fence:
             continue
-        # Suppression markers are honored before comment stripping — the
-        # `path-ok` marker is *expected* to live inside an HTML comment.
-        if CORRECTION_GLYPH in raw or SUPPRESS_MARKER in raw:
+        if CORRECTION_GLYPH in raw:
             continue
         line = raw
+        markers: list[int] = []
         if in_comment:
             end = line.find("-->")
             if end == -1:
                 continue
+            # A marker inside a comment that opened on an earlier line has no
+            # same-line reference before it; position 0 suppresses nothing.
+            if SUPPRESS_MARKER in line[: end + 3]:
+                markers.append(0)
             line = line[end + 3 :]
             in_comment = False
+        # Comments are collapsed left to right, so a recorded position stays
+        # valid in the final string: everything before it is comment-free.
         while True:
             start = line.find("<!--")
             if start == -1:
                 break
             end = line.find("-->", start)
             if end == -1:
+                if SUPPRESS_MARKER in line[start:]:
+                    markers.append(start)
                 line = line[:start]
                 in_comment = True
                 break
+            if SUPPRESS_MARKER in line[start : end + 3]:
+                markers.append(start)
             line = line[:start] + line[end + 3 :]
         if line.strip():
-            lines.append((number, line))
+            lines.append((number, line, tuple(markers)))
     if in_fence:
         raise GuidanceError(
             f"{doc}: unterminated ``` fence — the extractor cannot tell prose "
@@ -410,27 +531,50 @@ def extract_references(
     references: list[Reference] = []
     base = str(pathlib.PurePosixPath(doc).parent)
     previous_spans: list[str] = []
-    for number, line in _reference_lines(text, doc):
-        spans = _INLINE_CODE.findall(line)
+    for number, line, markers in _reference_lines(text, doc):
+        inline_matches = list(_INLINE_CODE.finditer(line))
+        spans = [match.group(1) for match in inline_matches]
         context = tuple(
             directory
             for span in previous_spans + spans
             for directory in crates_by_name.get(span.strip().strip("/"), ())
         )
-        for span in spans:
-            token = _normalize_inline(span)
+        candidates: list[tuple[int, Reference]] = []
+        for match in inline_matches:
+            token = _normalize_inline(match.group(1))
             if token is None or token in NON_PATH_IDENTIFIERS:
                 continue
             first = token.split("/", 1)[0]
             is_root_claim = first in tree.roots
             is_local_claim = base != "." and f"{base}/{first}" in tree.directories
             if is_root_claim or is_local_claim:
-                references.append(Reference(doc, number, token, context))
-        for target in _MARKDOWN_LINK.findall(line):
-            token = _resolve_link(doc, target)
+                candidates.append(
+                    (match.end(), Reference(doc, number, token, context))
+                )
+        for match in _MARKDOWN_LINK.finditer(line):
+            token = _resolve_link(doc, match.group(1))
             if token is None or _NOT_A_PATH.search(token):
                 continue
-            references.append(Reference(doc, number, token, context))
+            candidates.append((match.end(), Reference(doc, number, token, context)))
+        candidates.sort(key=lambda item: item[0])
+        # A `path-ok` marker vouches for the one reference immediately before
+        # it — never the whole line, so a fresh dangling path beside a
+        # vouched-for one still fails. A marker with nothing before it
+        # suppresses nothing.
+        suppressed: set[int] = set()
+        for marker in markers:
+            preceding = [
+                index
+                for index, (end, _) in enumerate(candidates)
+                if end <= marker
+            ]
+            if preceding:
+                suppressed.add(preceding[-1])
+        references.extend(
+            reference
+            for index, (_, reference) in enumerate(candidates)
+            if index not in suppressed
+        )
         previous_spans = spans
     return references
 
@@ -693,6 +837,88 @@ def check_family_tables(
 
 
 # ---------------------------------------------------------------------------
+# Check 5 — a CLAUDE.md symlink alias sits beside every AGENTS.md
+# ---------------------------------------------------------------------------
+def check_claude_aliases(
+    tree: Tree, symlinks: dict[str, str]
+) -> tuple[list[str], int]:
+    """The alias rule, judged from the index (see `ALIAS_TARGET` above)."""
+    problems: list[str] = []
+    verified = 0
+    agents_docs = ["AGENTS.md"] + sorted(
+        path
+        for path in tree.files
+        if path.startswith("crates/") and path.endswith("/AGENTS.md")
+    )
+    if len(agents_docs) < MIN_ALIAS_PAIRS:
+        raise GuidanceError(
+            f"found only {len(agents_docs)} AGENTS.md alias sites (floor is "
+            f"{MIN_ALIAS_PAIRS}). The discovery prefix broke or the checkout "
+            "is partial; refusing rather than verifying almost nothing."
+        )
+    seen_aliases: set[str] = set()
+    for agents in agents_docs:
+        alias = agents[: -len("AGENTS.md")] + "CLAUDE.md"
+        seen_aliases.add(alias)
+        reason = ALIAS_REAL_FILE_EXCEPTIONS.get(alias)
+        if reason is not None:
+            if alias not in tree.files:
+                problems.append(
+                    f"  {alias} is not tracked, yet it is a named real-file "
+                    f"exception to the alias rule ({reason}) — restore the real "
+                    "file, or delete its ALIAS_REAL_FILE_EXCEPTIONS row in "
+                    "scripts/ci/check-guidance.py if the exception no longer "
+                    "applies"
+                )
+            elif alias in symlinks:
+                problems.append(
+                    f"  {alias} is tracked as a symlink, yet it is a named "
+                    f"real-file exception to the alias rule ({reason}) — restore "
+                    "the real file, or delete its ALIAS_REAL_FILE_EXCEPTIONS row "
+                    "now that the reason no longer holds"
+                )
+            else:
+                verified += 1
+            continue
+        if alias not in tree.files:
+            problems.append(
+                f"  {agents} has no tracked CLAUDE.md beside it — every "
+                "AGENTS.md at the root and under crates/ carries a "
+                "`CLAUDE.md -> AGENTS.md` symlink alias so Claude Code "
+                "auto-injection and AGENTS.md readers see the same bytes "
+                "(docs/reborn/guidance-conventions.md). Restore it: "
+                f"`ln -s AGENTS.md {alias} && git add {alias}`"
+            )
+        elif alias not in symlinks:
+            problems.append(
+                f"  {alias} is tracked as a regular file, not a symlink — the "
+                "alias must stay index mode 120000 targeting `AGENTS.md`, or "
+                "the two copies drift apart. Replace it: `git rm "
+                f"{alias} && ln -s AGENTS.md {alias} && git add {alias}` "
+                "(a real-file alias is legal only as a named "
+                "ALIAS_REAL_FILE_EXCEPTIONS row in "
+                "scripts/ci/check-guidance.py, with its reason)"
+            )
+        elif symlinks[alias] != ALIAS_TARGET:
+            problems.append(
+                f"  {alias} is a symlink to {symlinks[alias]!r} — the alias "
+                f"must target the sibling `{ALIAS_TARGET}` exactly (a bare "
+                "one-segment relative link), nothing else"
+            )
+        else:
+            verified += 1
+    for alias in sorted(ALIAS_REAL_FILE_EXCEPTIONS):
+        if alias not in seen_aliases:
+            problems.append(
+                f"  ALIAS_REAL_FILE_EXCEPTIONS names {alias}, but no AGENTS.md "
+                "sits beside it, so the row excuses nothing — delete it from "
+                "scripts/ci/check-guidance.py; a stale exception cannot "
+                "outlive the pair it encodes"
+            )
+    return problems, verified
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
@@ -714,7 +940,8 @@ def main(argv: list[str] | None = None) -> int:
     tracked_file = pathlib.Path(args.tracked_files) if args.tracked_files else None
 
     try:
-        tree = Tree.build(load_tracked(repo_root, tracked_file))
+        tracked, symlinks = load_tracked(repo_root, tracked_file)
+        tree = Tree.build(tracked)
         docs = discover_guidance(tree)
         if len(docs) < MIN_GUIDANCE_FILES:
             raise GuidanceError(
@@ -728,16 +955,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         glob_problems, globs_checked = check_rule_globs(repo_root, docs, tree)
         table_problems, crates_tabled = check_family_tables(repo_root, tree, crates)
+        alias_problems, aliases_verified = check_claude_aliases(tree, symlinks)
     except GuidanceError as error:
         print(f"guidance: {error}", file=sys.stderr)
         return 1
 
-    problems = reference_problems + glob_problems + table_problems
+    problems = reference_problems + glob_problems + table_problems + alias_problems
     report = {
         "guidance_files": len(docs),
         "path_references": references,
         "rule_globs": globs_checked,
         "crates_tabled": crates_tabled,
+        "aliases_verified": aliases_verified,
         "grandfathered": [dataclasses.asdict(row) for row in KNOWN_MISSING],
         "warnings": warnings,
         "problems": problems,
@@ -755,8 +984,9 @@ def main(argv: list[str] | None = None) -> int:
             + "\n".join(problems)
             + "\n\nFix: repoint the reference (or glob, or table row) at today's "
             "tree. For a deliberately historical mention, put it in a fenced "
-            "block, mark the line with the dated-correction glyph `✎`, or add "
-            "`<!-- check-guidance: path-ok -->` on the line. KNOWN_MISSING in "
+            "block, mark the whole line with the dated-correction glyph `✎`, or "
+            "put `<!-- check-guidance: path-ok -->` immediately after the one "
+            "reference it vouches for. KNOWN_MISSING in "
             "scripts/ci/check-guidance.py is the last resort and shrinks only.",
             file=sys.stderr,
         )
@@ -767,6 +997,7 @@ def main(argv: list[str] | None = None) -> int:
         f"({len(docs)} guidance files, {references} path references verified, "
         f"{globs_checked} frontmatter globs live, {crates_tabled} crates tabled "
         f"in their family AGENTS.md with README.md present, "
+        f"{aliases_verified} CLAUDE.md aliases verified, "
         f"{len(KNOWN_MISSING)} grandfathered)"
     )
     return 0

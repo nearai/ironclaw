@@ -7,17 +7,21 @@ So almost every case here is about the gate REFUSING — a dangling backticked
 reference, a dead markdown link, a `paths:` glob that matches nothing (the
 `.claude/rules/skills.md` failure this gate exists for), a crate missing from
 its family table, a crate without a README, a family without an AGENTS.md, a
-suppression row that outlived its debt, frontmatter the parser cannot trust,
-an unreadable guidance file, and extraction floors that stop a broken scanner
-from reporting an empty pass as clean. The legitimate-citation forms the
-extractor must NOT flag get their own case, and the happy path runs against
-the real repository, last.
+`CLAUDE.md` alias that is deleted from the index / a regular file / a symlink
+to the wrong target (the 2026-08-06 audit's committed-deletion exploit), an
+alias-exception row that stopped matching the tree, a `path-ok` marker being
+read as covering its whole line, a suppression row that outlived its debt,
+frontmatter the parser cannot trust, an unreadable guidance file, and
+extraction floors that stop a broken scanner from reporting an empty pass as
+clean. The legitimate-citation forms the extractor must NOT flag get their
+own case, and the happy path runs against the real repository, last.
 
-The gate reads the tracked set through `git ls-files`; these tests feed it a
-written file instead (`--tracked-files`), so a doctored tree costs a text
-edit rather than a fixture git repository. Fixture runs patch the floor
-constants and empty the real `KNOWN_MISSING` table; the real-repository run
-patches nothing.
+The gate reads the tracked set through `git ls-files -s`; these tests feed it
+a written file instead (`--tracked-files`, where `<path> -> <target>` marks a
+symlink), so a doctored tree costs a text edit rather than a fixture git
+repository. Fixture runs patch the floor constants, empty the real
+`KNOWN_MISSING` table, and shrink `ALIAS_REAL_FILE_EXCEPTIONS` to the root
+row the fixture needs; the real-repository run patches nothing.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import pathlib
 import sys
 import tempfile
@@ -62,10 +67,23 @@ class GuidanceGateTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    def symlink(self, relative: str, target: str) -> None:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink() or path.exists():
+            path.unlink()
+        os.symlink(target, path)
+
     def build_fixture(self) -> None:
-        """A minimal, internally consistent guidance tree that passes."""
+        """A minimal, internally consistent guidance tree that passes.
+
+        The root `CLAUDE.md` is a real file (covered by the root exception row
+        `run_gate` patches in); the family `AGENTS.md` gets the
+        `CLAUDE.md -> AGENTS.md` symlink alias the alias rule requires.
+        """
         self.write("AGENTS.md", "Start at [the family](crates/core/AGENTS.md).\n")
         self.write("CLAUDE.md", "Read `docs/guide.md` and `crates/core/ironclaw_alpha/README.md`.\n")
+        self.symlink("crates/core/CLAUDE.md", "AGENTS.md")
         self.write("docs/guide.md", "not scanned, only referenced\n")
         self.write(
             ".claude/rules/alpha.md",
@@ -102,16 +120,23 @@ class GuidanceGateTests(unittest.TestCase):
         self.write("crates/core/ironclaw_beta/src/lib.rs", "\n")
 
     def tracked(self) -> list[str]:
-        return sorted(
-            path.relative_to(self.root).as_posix()
-            for path in self.root.rglob("*")
-            if path.is_file()
-        )
+        """The fixture's tracked set; symlinks appear as `<path> -> <target>`."""
+        entries: list[str] = []
+        for path in self.root.rglob("*"):
+            if path.is_symlink():
+                rel = path.relative_to(self.root).as_posix()
+                entries.append(f"{rel} -> {os.readlink(path)}")
+            elif path.is_file():
+                entries.append(path.relative_to(self.root).as_posix())
+        return sorted(entries)
+
+    ROOT_ALIAS_EXCEPTION = {"CLAUDE.md": "root adapter (fixture)"}
 
     def run_gate(
         self,
         tracked: list[str] | None = None,
         known_missing: tuple | None = (),
+        alias_exceptions: dict[str, str] | None = None,
     ) -> tuple[int, str]:
         listing = self.root / "tracked-files.txt"
         listing.write_text(
@@ -124,6 +149,14 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
             mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
+            mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
+            mock.patch.object(
+                GATE,
+                "ALIAS_REAL_FILE_EXCEPTIONS",
+                dict(self.ROOT_ALIAS_EXCEPTION)
+                if alias_exceptions is None
+                else alias_exceptions,
+            ),
             mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
         ]
         if known_missing is not None:
@@ -199,6 +232,26 @@ class GuidanceGateTests(unittest.TestCase):
         )
         code, output = self.run_gate()
         self.assertEqual(code, 0, output)
+
+    def test_path_ok_marker_covers_one_reference_not_the_line(self) -> None:
+        """The marker vouches for the reference immediately before it — a
+        dangling path slipped onto an already-marked line (before or after
+        the marked reference) must still fail. The 2026-08-06 audit rode a
+        fresh dangling path in on exactly this line-blanket behavior."""
+        self.build_fixture()
+        self.write(
+            "crates/core/ironclaw_alpha/README.md",
+            "Entry point `src/lib.rs`.\n"
+            "See `crates/core/ironclaw_before/README.md` and the deliberate "
+            "`crates/core/ironclaw_marked/README.md` "
+            "<!-- check-guidance: path-ok --> "
+            "plus `crates/core/ironclaw_after/README.md`.\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("crates/core/ironclaw_before/README.md", output)
+        self.assertIn("crates/core/ironclaw_after/README.md", output)
+        self.assertNotIn("crates/core/ironclaw_marked/README.md", output)
 
     def test_suppression_row_that_outlived_its_debt_fails(self) -> None:
         self.build_fixture()
@@ -328,6 +381,76 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("crates/core/ironclaw_beta", output)
         self.assertIn("no tracked README.md", output)
+
+    # -- check 5: the CLAUDE.md alias rule ---------------------------------
+    def test_alias_deleted_from_the_index_fails_naming_the_pair(self) -> None:
+        """The audit's exploit: a committed symlink deletion left the gate
+        green. Removing the alias from the *tracked set* (the disk copy may
+        even survive) must fail, naming both halves of the pair."""
+        self.build_fixture()
+        tracked = [
+            t for t in self.tracked() if not t.startswith("crates/core/CLAUDE.md")
+        ]
+        code, output = self.run_gate(tracked=tracked)
+        self.assertEqual(code, 1)
+        self.assertIn("crates/core/AGENTS.md has no tracked CLAUDE.md", output)
+        self.assertIn("ln -s AGENTS.md crates/core/CLAUDE.md", output)
+
+    def test_alias_as_regular_file_fails(self) -> None:
+        """A copied real file drifts; only a mode-120000 symlink (or a named
+        exception row) is a legal alias."""
+        self.build_fixture()
+        (self.root / "crates/core/CLAUDE.md").unlink()
+        self.write("crates/core/CLAUDE.md", "# core family\n\ncopied bytes\n")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "crates/core/CLAUDE.md is tracked as a regular file, not a symlink",
+            output,
+        )
+        self.assertIn("ALIAS_REAL_FILE_EXCEPTIONS", output)
+
+    def test_alias_with_wrong_target_fails(self) -> None:
+        """The target must be the bare sibling string; a link that resolves
+        to *an* AGENTS.md via another route still fails. (`../../AGENTS.md`
+        reaches the fixture root's real file, so the content read stays
+        healthy and the refusal is the alias check's, not a read error.)"""
+        self.build_fixture()
+        self.symlink("crates/core/CLAUDE.md", "../../AGENTS.md")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("'../../AGENTS.md'", output)
+        self.assertIn("must target the sibling `AGENTS.md`", output)
+
+    def test_root_real_file_exception_row_is_load_bearing(self) -> None:
+        """The fixture's root CLAUDE.md is a real file and passes only via
+        the patched exception row; with the row gone the gate must flag it."""
+        self.build_fixture()
+        code, output = self.run_gate(alias_exceptions={})
+        self.assertEqual(code, 1)
+        self.assertIn("CLAUDE.md is tracked as a regular file", output)
+
+    def test_alias_exception_rows_must_match_reality(self) -> None:
+        self.build_fixture()
+        # A row excusing an alias that is actually a symlink is stale.
+        code, output = self.run_gate(
+            alias_exceptions={
+                **self.ROOT_ALIAS_EXCEPTION,
+                "crates/core/CLAUDE.md": "pretend reason",
+            }
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("tracked as a symlink, yet it is a named real-file", output)
+        # A row whose directory has no AGENTS.md at all excuses nothing.
+        code, output = self.run_gate(
+            alias_exceptions={
+                **self.ROOT_ALIAS_EXCEPTION,
+                "crates/core/ironclaw_alpha/CLAUDE.md": "stale row",
+            }
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("no AGENTS.md sits beside it", output)
+        self.assertIn("delete it", output)
 
     # -- the gate must not fail open ---------------------------------------
     def test_unreadable_guidance_file_refuses(self) -> None:
