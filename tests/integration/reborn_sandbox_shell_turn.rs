@@ -15,7 +15,6 @@ use serde_json::json;
 
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
-const EGRESS_MARKER: &str = "SANDBOX_DIRECT_EGRESS_OK";
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
@@ -37,7 +36,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                     "builtin.shell",
                     json!({
                         "command": format!(
-                            "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && python -c \"import urllib.request; response = urllib.request.urlopen('https://example.com', timeout=15); assert response.status == 200; response.close()\" && echo {CONTAINER_MARKER} {EGRESS_MARKER}"
+                            "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && echo {CONTAINER_MARKER}"
                         )
                     }),
                 ),
@@ -67,10 +66,6 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .assert_tool_result_contains(CONTAINER_MARKER)
             .await
             .expect("command ran in Docker");
-        harness
-            .assert_tool_result_contains(EGRESS_MARKER)
-            .await
-            .expect("sandbox profile enabled direct HTTPS egress");
         harness
             .assert_tool_result_contains("NON_ROOT_UID_OK")
             .await

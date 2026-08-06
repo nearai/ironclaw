@@ -66,7 +66,6 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
             format!(
                 "python - <<'PY'\n\
                  import os\n\
-                 import urllib.request\n\
                  from pathlib import Path\n\
                  assert os.getuid() != 0\n\
                  assert Path('/.dockerenv').is_file()\n\
@@ -82,11 +81,8 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
                  routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
                  assert any(route[1] == '00000000' for route in routes)\n\
                  assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
-                 response = urllib.request.urlopen('https://example.com', timeout=15)\n\
-                 assert response.status == 200\n\
-                 response.close()\n\
                  Path('state.txt').write_text('{marker}')\n\
-                 print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}} egress=ok')\n\
+                 print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}}')\n\
                  PY"
             ),
         ))
@@ -120,4 +116,42 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     );
     assert!(other_user.output.contains("False"));
     assert!(!other_user.output.contains(&marker));
+}
+
+#[tokio::test]
+#[ignore = "requires public DNS and Internet access; run as a live egress canary"]
+async fn sandbox_profile_allows_public_https_egress() {
+    if !docker_gate::docker_available() {
+        eprintln!("SKIP: sandbox egress canary — no Docker daemon is reachable");
+        return;
+    }
+    let image = docker_gate::configured_sandbox_image();
+    if !docker_gate::docker_image_available(&image) {
+        eprintln!("SKIP: sandbox egress canary — worker image {image:?} is not built");
+        return;
+    }
+
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("Docker-visible egress canary workspace");
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces")).with_network_enabled(),
+    )
+    .await
+    .expect("Docker transport connects");
+
+    let result = transport
+        .run_command(request(
+            scope("egress-user", "egress-project", "egress-thread"),
+            "python -c \"import os, urllib.request; assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'; response = urllib.request.urlopen('https://example.com', timeout=15); assert response.status == 200; response.close(); print('SANDBOX_PUBLIC_HTTPS_OK')\"",
+        ))
+        .await
+        .expect("public HTTPS request runs");
+
+    assert_eq!(
+        result.exit_code, 0,
+        "egress canary failed: {}",
+        result.output
+    );
+    assert!(result.output.contains("SANDBOX_PUBLIC_HTTPS_OK"));
+    assert!(result.sandboxed);
 }
