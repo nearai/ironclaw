@@ -52,6 +52,7 @@ test("panel switches tabs, closes, reopens, overlays tablets, and hides on mobil
   const panel = document.querySelector<HTMLElement>("[data-testid='inspector-panel']");
   assert.equal(panel?.dataset.layout, "sidebar");
   assert.equal(document.querySelector("[data-testid='inspector-health']")?.textContent, "Live");
+  assert.equal(inspectorCalls.at(-1)?.enabled, true);
 
   await act(async () =>
     document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-stats']")?.click(),
@@ -66,6 +67,7 @@ test("panel switches tabs, closes, reopens, overlays tablets, and hides on mobil
   );
   assert.equal(document.querySelector("[data-testid='inspector-panel']"), null);
   assert.ok(document.querySelector("[data-testid='inspector-open']"));
+  assert.equal(inspectorCalls.at(-1)?.enabled, false);
 
   await act(async () =>
     document.querySelector<HTMLButtonElement>("[data-testid='inspector-open']")?.click(),
@@ -74,6 +76,7 @@ test("panel switches tabs, closes, reopens, overlays tablets, and hides on mobil
     document.querySelector("[data-testid='inspector-tab-stats']")?.getAttribute("aria-selected"),
     "true",
   );
+  assert.equal(inspectorCalls.at(-1)?.enabled, true);
 
   await act(async () => setViewport(900));
   assert.equal(

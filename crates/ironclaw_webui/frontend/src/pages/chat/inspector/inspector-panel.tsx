@@ -143,7 +143,7 @@ function InspectorPanelCore({
     readInspectorPreferences(),
   );
   const inspector = useInspector({
-    enabled: viewportMode !== "mobile",
+    enabled: preferences.open && viewportMode !== "mobile",
     threadId,
     runId,
   });
