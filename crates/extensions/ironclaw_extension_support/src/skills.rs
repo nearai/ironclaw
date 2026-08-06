@@ -102,13 +102,9 @@ struct ParsedInstallFile {
 
 /// Normalize a `builtin.skill_install` input before [`dispatch`] sees it.
 ///
-/// Inline installs — `content`, optionally with the rest of the bundle in
-/// `files` — pass through untouched. A `url` install is resolved here: the
-/// HTTPS/GitHub source is fetched through the mediated egress port on `fetch`,
-/// and the fetched SKILL.md plus any bundle files are rewritten into that same
-/// `content`/`files` shape, with `source`/`source_url` recording the provenance.
-/// Anything else (both, or neither, or either arm carrying forged provenance) is
-/// an input error.
+/// Inline installs (`content`, optionally with `files`) pass through untouched. A `url` install is
+/// fetched through the mediated egress port and rewritten into that same shape, with
+/// `source`/`source_url` recording provenance. Anything else is an input error.
 ///
 /// `usage` accumulates the fetch's network egress so the host runtime can
 /// account for a failed install exactly as it accounts for a successful one.
@@ -671,12 +667,11 @@ mod install_files_encoding_tests {
     }
 }
 
-/// Which inline inputs [`resolve_install_input`] admits, tested on the function itself.
+/// Which inline inputs [`resolve_install_input`] admits.
 ///
-/// The fetch context deliberately carries no egress port, so a case that wrongly routes to the url
-/// arm fails closed instead of passing for the wrong reason. The same contract is asserted end to end
-/// through runtime dispatch in `ironclaw_host_runtime/tests/first_party_builtin_tools.rs`; these are
-/// the cheap version that runs in this crate's own suite.
+/// The fetch context carries no egress port, so a case that wrongly routes to the url arm fails
+/// closed rather than passing for the wrong reason. Asserted end to end in
+/// `ironclaw_host_runtime/tests/first_party_builtin_tools.rs`.
 #[cfg(test)]
 mod resolve_install_input_tests {
     use ironclaw_host_api::{

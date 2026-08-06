@@ -4517,14 +4517,9 @@ fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> 
     skill_injection_mode_from_env_value(std::env::var(SKILL_INJECTION_MODE_ENV_KEY))
 }
 
-/// The decision itself, separated from the lookup so every branch is reachable
-/// from a test without mutating process environment.
-///
-/// `set_var`/`remove_var` would be the alternative and it is not one: this crate's
-/// tests run in-process and in parallel, so a test that unsets the key to reach the
-/// `NotPresent` branch races every other test resolving the same key. Taking the
-/// `Result` as a parameter is the whole seam — there is no test-only field on a
-/// production type and the caller above is the only lookup site.
+/// The decision itself, split from the lookup so every branch is testable. `remove_var` is not an
+/// option: these tests run in-process and in parallel, so unsetting the key races every other test
+/// reading it.
 fn skill_injection_mode_from_env_value(
     value: Result<String, std::env::VarError>,
 ) -> Result<SkillInjectionMode, RebornRuntimeError> {
@@ -4542,38 +4537,15 @@ const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
 /// Binding for the `skill.activation.v1` profile.
 const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
 
-/// Default activation strategy for Reborn: **behavior-preserving**.
-///
-/// Deliberately `CriteriaOnly`, matching the memory-provider discipline where the
-/// bundled native provider stays the default and a new provider is opt-in. Three
-/// existing local-dev tests encode today's selection behavior (setup-marker
-/// suppression, the webui listing candidate, `skill_activate` context loading);
-/// flipping this default changes them, so the strategy ships opt-in and the
-/// default remains byte-identical.
-///
-/// Opt in with `IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`.
-///
-/// Why anyone would: the selector scores only
-/// `activation.keywords`/`tags`/`patterns` and keeps a skill `if score > 0`, but
-/// **0 of 30** skills an agent authored for itself on the SkillsBench subset
-/// (nearai/benchmarks#287) declared any of those. Under `CriteriaOnly` every
-/// agent-authored skill is permanently unselectable — the agent can create a
-/// skill and never reuse it. `name_and_description` restores the Claude-Code
-/// contract where name + description suffice.
 /// Default stays `CriteriaOnly` — behavior-preserving.
 ///
-/// `name_and_description` is the opt-in
-/// (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`): it lets a skill match on its
-/// name and description, not only on `activation.keywords`/`tags`/`patterns`. Measured on
-/// nearai/benchmarks#287, **0 of 30 agent-authored skills carried an `activation` block**, so
-/// under criteria scoring they never auto-activate.
+/// `name_and_description` is the opt-in (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`):
+/// a skill matches on name and description, not only `activation.keywords`/`tags`/`patterns`. On
+/// nearai/benchmarks#287, 0 of 30 agent-authored skills carried an `activation` block, so under
+/// criteria scoring they never auto-activate.
 ///
-/// A floor-score strategy (`always_available`, "every skill is a candidate") was tried and
-/// REMOVED. It bought nothing: listing membership is decided by VISIBILITY, not selection
-/// (`extension_ports/activation.rs`), so the model was already shown every visible skill; the
-/// floor only reordered that listing, and it demoted chain-loaded companions. The real gap is
-/// not that the model cannot see a skill -- it is that it rarely acts on the listing
-/// (`builtin.skill_activate` called in 3 of 30 measured runs, body read in 0 of 30).
+/// A floor-score strategy (`always_available`) was tried and REMOVED: listing membership is decided
+/// by visibility, not selection, so the floor only reordered a listing the model already saw.
 const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
     ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
 
@@ -4592,46 +4564,16 @@ fn skill_activation_env()
     }
 }
 
-/// Default skill-injection mode for Reborn.
+/// Default skill-injection mode. `Listing` shows a one-line menu and loads a body only on `$name`
+/// or `builtin.skill_activate`; `Full` injects scored bodies.
 ///
-/// `Full` (the library default in
-/// [`SkillActivationSelectorConfig::default`]) injects keyword-scored skill
-/// bodies into model context. `Listing` instead shows a one-line
-/// `- name: description` menu and loads a body only on an explicit `$name`
-/// mention or a `builtin.skill_activate` call.
+/// On the 31-task subset in nearai/benchmarks#287 (`deepseek-v4-flash`), `Listing` leaves skills
+/// nearly inert -- `skill_list` called in 30/30 runs, `skill_activate` in 3/30, a body read in
+/// 0/30 -- and scores 79.8% against 78.5% for no skills at all, where `Full` scores 85.6%.
 ///
-/// Reborn previously defaulted to `Listing` to save context. Benchmarking shows
-/// that trade is badly priced: the model reads the menu and then does not open
-/// the skill. Over 30 human-curated-skill runs of the SkillsBench/SkillLearnBench
-/// subset in nearai/benchmarks#287 (`deepseek-v4-flash`):
-///
-/// * `builtin.skill_list`      — called in 30/30 runs
-/// * `builtin.skill_activate`  — called in  3/30 runs
-/// * a skill body actually read —          0/30 runs
-///
-/// So installed skills were inert. Scores over those 31 tasks, same skills and
-/// same model, differing only in this constant:
-///
-/// | condition                | score |
-/// |--------------------------|-------|
-/// | no skills                | 78.5% |
-/// | curated skills, `Listing`| 79.8% |
-/// | curated skills, `Full`   | 85.6% |
-///
-/// `Listing` bought +1.3pp over having no skills at all; `Full` buys +7.1pp. For
-/// reference, harnesses that inject skill bodies unconditionally (Hermes, Claude
-/// Code) score 91.5% on the same tasks with the same skills.
-///
-/// **This default is deliberately left at `Listing`** even though the measurement
-/// above argues for `Full`: three existing local-dev tests HANG under `Full`
-/// (`local_dev_skill_activate_tool_loads_selected_skill_context`,
-/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
-/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`) because
-/// they drive a mock that expects the one-line listing candidate. Flipping the
-/// product default is a maintainer call that needs those expectations updated
-/// first, so this ships as an opt-in switch with the evidence attached.
-///
-/// Opt in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
+/// **Left at `Listing` anyway**: three `local_dev_*` tests drive a mock expecting the listing
+/// candidate and HANG under `Full`, so flipping the product default needs those updated first. Opt
+/// in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
 const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Listing;
 
 fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
