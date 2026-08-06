@@ -65,6 +65,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 - [ ] Onboarding CUJ green against a real build.
 - [ ] PROPOSAL §10 Foundational decisions (2, 3, 4, 5) all closed.
 
+**Success criteria (adopted from epic #7044):**
+
+- [ ] **Time to first automation** — sign-in → a working automation under the target the epic sets ([X] min).
+- [ ] **First-session activation** — % of new users who accept ≥1 automation in session one meets target.
+- [ ] **Suggestion quality** — first-suggestion accept-vs-dismiss rate meets target (proxy for profile quality).
+
 ---
 
 ## V1 — Reveal + anticipatory states (D-V2 + D-V3)
