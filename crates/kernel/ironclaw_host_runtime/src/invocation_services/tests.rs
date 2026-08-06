@@ -354,6 +354,51 @@ fn local_resolver_rejects_unsupported_filesystem_backend() {
     ));
 }
 
+#[tokio::test]
+async fn hosted_tenant_workspace_uses_the_invocations_scoped_mounts() {
+    let backing: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let alice_file = vpath("/projects/workspace/tenants/acme/users/alice/marker.txt");
+    let bob_file = vpath("/projects/workspace/tenants/acme/users/bob/marker.txt");
+    backing.write_file(&alice_file, b"alice").await.unwrap();
+    backing.write_file(&bob_file, b"bob").await.unwrap();
+
+    let resolver = resolver_with_filesystem(backing);
+    let mut plan = plan(
+        ProcessBackendKind::UserSandbox,
+        false,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::HostedSafe;
+    plan.requires_filesystem = true;
+    plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        vpath("/projects/workspace/tenants/acme/users/alice"),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let services = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: Some(&mounts),
+        })
+        .expect("hosted tenant workspace should resolve through its scoped mount grants");
+
+    assert_eq!(
+        services.filesystem.read_file(&alice_file).await.unwrap(),
+        b"alice"
+    );
+    assert_permission_denied(
+        services.filesystem.read_file(&bob_file).await.unwrap_err(),
+        FilesystemOperation::ReadFile,
+    );
+}
+
 #[test]
 fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
     let resolver = resolver_without_http();

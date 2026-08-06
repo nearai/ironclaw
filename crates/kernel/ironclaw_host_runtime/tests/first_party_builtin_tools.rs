@@ -7149,22 +7149,24 @@ async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_service
 }
 
 #[tokio::test]
-async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
+async fn builtin_read_file_uses_scoped_mounts_for_hosted_tenant_workspace() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    std::fs::write(temp.path().join("README.md"), "hosted scoped read\n").unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
         execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, FailureKind::FilesystemDenied);
+    assert_eq!(output["content"], json!("     1│ hosted scoped read"));
+    assert_eq!(output["path"], json!("/workspace/README.md"));
+    assert_eq!(output["total_lines"], json!(1));
 }
 
 #[tokio::test]

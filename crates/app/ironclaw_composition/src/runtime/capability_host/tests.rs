@@ -196,6 +196,22 @@ mod tests {
         policy
     }
 
+    #[derive(Debug)]
+    struct UnusedSandboxTransport;
+
+    #[async_trait::async_trait]
+    impl ironclaw_host_api::process::SandboxCommandTransport for UnusedSandboxTransport {
+        async fn run_command(
+            &self,
+            _request: ironclaw_host_api::process::CommandExecutionRequest,
+        ) -> Result<
+            ironclaw_host_api::process::CommandExecutionOutput,
+            ironclaw_host_api::process::RuntimeProcessError,
+        > {
+            panic!("filesystem-only extension lifecycle calls must not start a sandbox process")
+        }
+    }
+
     #[tokio::test]
     async fn visible_capability_request_uses_run_actor_for_runtime_scope() {
         let run_context = run_context("actor-runtime-scope")
@@ -5552,16 +5568,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_extension_search_makes_every_bundled_result_model_visible() {
+    async fn hosted_sandbox_extension_search_and_registration_use_tenant_workspace() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let network = Arc::new(
+            ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name(
+                "calendar-search",
+            ),
+        );
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
-                "standalone-extension-search-owner",
+                "hosted-sandbox-extension-search-owner",
                 dir.path().join("standalone"),
-            ),
+            )
+            .with_runtime_policy(
+                crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
+                    .expect("hosted sandbox runtime policy resolves"),
+            )
+            .with_runtime_process_binding(crate::RebornRuntimeProcessBinding::user_sandbox(
+                Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
+                    Arc::new(UnusedSandboxTransport),
+                )),
+            ))
+            .with_network_http_egress_for_test(network),
         )
         .await
-        .expect("standalone services build");
+        .expect("hosted sandbox services build");
         let run_context = run_context("extension-search-loop-port").await;
         enable_global_auto_approve_for_run(
             &services,
@@ -5642,6 +5673,64 @@ mod tests {
                 "the model-visible result must contain the {extension_id} catalog entry: {preview}"
             );
         }
+
+        let register_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| {
+                definition.capability_id.as_str() == EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID
+            })
+            .expect("extension_register_hosted_mcp tool definition");
+        let mut register_call = provider_tool_call_with_name(
+            register_definition.name.as_str(),
+            serde_json::json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_type": "no_auth"
+            }),
+        );
+        register_call.turn_id = Some("hosted-register-turn".to_string());
+        register_call.id = "hosted-register-call".to_string();
+        let register_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(register_call))
+            .await
+            .expect("hosted registration tool call stages");
+        let register_outcome = port
+            .invoke_capability(invocation_for_candidate(&register_candidate))
+            .await
+            .expect("hosted registration invocation");
+        assert!(
+            matches!(register_outcome, Resolution::Done(_)),
+            "hosted registration should persist through the tenant-workspace mount: {register_outcome:?}"
+        );
+
+        let mut read_back_call = provider_tool_call_with_name(
+            tool_definition.name.as_str(),
+            serde_json::json!({"query": "mcp-calendar"}),
+        );
+        read_back_call.turn_id = Some("hosted-register-read-back-turn".to_string());
+        read_back_call.id = "hosted-register-read-back-call".to_string();
+        let read_back_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(read_back_call))
+            .await
+            .expect("registration read-back tool call stages");
+        let read_back = port
+            .invoke_capability(invocation_for_candidate(&read_back_candidate))
+            .await
+            .expect("registration read-back invocation");
+        let Resolution::Done(read_back) = read_back else {
+            panic!("registered hosted MCP should be discoverable, got {read_back:?}");
+        };
+        let preview = read_back
+            .refs
+            .preview
+            .expect("registered hosted MCP is model-visible");
+        assert!(
+            preview.as_str().contains("\"id\":\"mcp-calendar\""),
+            "registration read-back must contain the durable package: {preview}"
+        );
     }
 
     #[tokio::test]

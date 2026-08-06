@@ -1811,16 +1811,15 @@ fn process_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-/// HostedDev-shaped tenant policy with a user-sandbox process backend. The
-/// filesystem backend is ScopedVirtual (not the hosted TenantWorkspace)
-/// because the local invocation-services resolver under test can only serve
-/// mount-scoped filesystem plans; the axis under test is the process backend.
+/// HostedDev-shaped tenant policy with a user-sandbox process backend and the
+/// same tenant-workspace filesystem selection used by production hosted
+/// deployments.
 fn user_sandbox_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
-        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
         process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,

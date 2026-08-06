@@ -381,6 +381,18 @@ impl ConfiguredInvocationServicesResolver {
                     mounts.clone(),
                 )))
             }
+            FilesystemBackendKind::TenantWorkspace
+                if matches!(plan.deployment, DeploymentMode::HostedMultiTenant) =>
+            {
+                let mounts =
+                    mounts.ok_or(InvocationServicesError::UnsupportedFilesystemBackend {
+                        backend: plan.filesystem_backend,
+                    })?;
+                Ok(Arc::new(MountScopedRootFilesystem::new(
+                    Arc::clone(&self.filesystem),
+                    mounts.clone(),
+                )))
+            }
             _ => Err(InvocationServicesError::UnsupportedFilesystemBackend {
                 backend: plan.filesystem_backend,
             }),
