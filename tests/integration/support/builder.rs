@@ -165,7 +165,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
     tool_disclosure: ToolDisclosureMode,
     /// #5647 RED-pin seam: pass-through to
-    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_surface_policy_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_surface_policy_for_bridged_test`.
+    /// `None` (default) preserves today's forced `CapabilitySurfacePolicy::allow_all()` behavior.
     narrowed_bridged_policy_ids: Option<Vec<CapabilityId>>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).

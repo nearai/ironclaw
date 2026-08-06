@@ -282,7 +282,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// tool-call response into a `CapabilityCallCandidate`
 /// (`LoopCapabilityPort::register_provider_tool_call`), so registering
 /// through it here exercises the *real* `CapabilitySurfacePolicyFilter` /
-/// `CapabilitySurfacePolicyFilter` composition chain, not a stand-in.
+/// `ToolDisclosureCapabilityDecorator` composition chain, not a stand-in.
 ///
 /// Generalized from a single `trigger_create`-only attempt (PR #5515 review:
 /// "production mutator deny set only has create covered end-to-end — the

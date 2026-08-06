@@ -459,7 +459,7 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
   `trigger_resume` by subtracting them from the one resolved
   `ironclaw_host_api::capability_surface::CapabilitySurfacePolicy` in
-  `ironclaw_turn_runner::runtime`). Read-only `trigger_list` remains visible and
+  `ironclaw_turn_runner::runtime`. Read-only `trigger_list` remains visible and
   callable during a fire, so a routine can still inspect triggers. This
   prevents a fired trigger's own run from creating or mutating the trigger
   fleet — a malformed or self-referential routine prompt could otherwise

@@ -647,6 +647,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["affected_packages"], [])
                 self.assertEqual(plan["crate_buckets"], [])
                 self.assertEqual(plan["integration_lanes"], [])
+                self.assertEqual(plan["root_partitions"], [])
 
     def test_repo_root_metadata_class_is_owned_by_other_lanes(self) -> None:
         """The repo-root metadata class de-escalates instead of failing closed.
