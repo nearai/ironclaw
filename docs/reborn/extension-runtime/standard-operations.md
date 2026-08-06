@@ -3,7 +3,7 @@
 **Status:** Current (standardized messaging framework).
 **Authority module:** `ironclaw_host_api::messaging`
 (`crates/contracts/ironclaw_host_api/src/messaging.rs`).
-**Design source:** `docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
+**Design source:** `docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
 (§§4-8, Appendix A/B). This page condenses that spec into the durable
 reference for anyone binding, calling, or reviewing a standard messaging
 operation. It does not fork the spec's semantics — where landed code diverges

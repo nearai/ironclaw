@@ -8,7 +8,7 @@ enforced input/output schemas, error taxonomy) that channel extensions bind via 
 implementing all 16 core ops as the conformance fixture.
 
 **Architecture:** Design A / tools-entry binding (spec:
-`docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`).
+`docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`).
 Standard ops project as ordinary per-extension tool surfaces; capability ids, wire
 names, approvals, credentials, dispatch are untouched. New: an
 `ironclaw_host_api::messaging` authority module (enum + contracts + error codes), a
@@ -45,7 +45,7 @@ in-process integration harness (`tests/integration/`).
   `cargo clippy --all --tests --examples -- -D warnings`.
 - Deep integration binaries need `RUST_MIN_STACK=16777216`.
 - Commits end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
-- Spec appendix A/B (`docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`)
+- Spec appendix A/B (`docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`)
   is the normative source for all 16 op schemas and the description-core
   requirements; where this plan shows only exemplars, transcribe the rest from the
   spec verbatim.
