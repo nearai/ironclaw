@@ -1,0 +1,25 @@
+[package]
+name = "ironclaw_architecture_tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "app"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+# Dev-only: the origin→gate matrix ratchet imports the reviewed Ungated allowlist
+# from its owner (so the pin checks the REAL constant, not a copy) and parses the
+# hand-authored first-party extension manifest assets. Not a production edge —
+# `ironclaw_architecture_tests` ships no runtime code.
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "3", features = ["full"] }
+toml = "1.1"
+# Dev-only: the #7146 tracing-target gate emits both macro forms through a
+# capturing subscriber, so the language fact it enforces is measured rather than
+# asserted in a comment.
+tracing = "0.1"
+tracing-subscriber = "0.3"

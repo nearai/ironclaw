@@ -50,10 +50,10 @@ cargo install cargo-mutants --locked
 
 # one file (start here — a file is a coffee break, not an overnight job)
 ./scripts/mutation-audit.sh -p ironclaw_event_projections \
-    crates/ironclaw_event_projections/src/runtime_projection.rs
+    crates/events/ironclaw_event_projections/src/runtime_projection.rs
 
 # a whole package
-./scripts/mutation-audit.sh -p ironclaw_dispatcher
+./scripts/mutation-audit.sh -p ironclaw_event_projections
 ```
 
 Output is `mutants.out/triage-queue.md`: one entry per survivor, with the
@@ -73,8 +73,8 @@ audit dies at the baseline with no mutants tested. Set `SKIP_FRONTEND_BUILD=1`,
 which the build script already honours:
 
 ```bash
-SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_reborn_composition \
-    crates/ironclaw_reborn_composition/src/extension_host/channel_outbound_targets.rs
+SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_composition \
+    crates/app/ironclaw_composition/src/capability_authorization.rs
 ```
 
 The frontend is not under mutation, so skipping it costs no coverage.
@@ -87,7 +87,7 @@ adding a second heavy build on top starves the test processes, and **starvation
 is indistinguishable from a hang** — libtest prints "has been running for over
 60 seconds" and then nothing.
 
-This cost real time while writing this guide. `ironclaw_reborn_composition`'s
+This cost real time while writing this guide. `ironclaw_composition`'s
 lib suite appeared to hang at 807 of 981 tests, twice, and was written up as an
 environment problem needing Docker. Run on an idle machine it is
 **981 passed in 77 seconds**. Nothing was wrong with the suite; the audit was
@@ -175,7 +175,7 @@ A fix for a `real-gap` survivor is accepted only when both hold:
 
 ```bash
 ./scripts/mutation-verify-fix.sh -p ironclaw_event_projections \
-  'crates/ironclaw_event_projections/src/runtime_projection.rs:80:5: replace sort_runs_for_projection with ()'
+  'crates/events/ironclaw_event_projections/src/runtime_projection.rs:80:5: replace sort_runs_for_projection with ()'
 ```
 
 Copy the mutant string verbatim from `missed.txt` or the triage queue. Exit 0

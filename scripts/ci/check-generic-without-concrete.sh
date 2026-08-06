@@ -7,7 +7,7 @@
 # workspace crate declaring a Reborn layer — minus the concrete extension
 # crates themselves, the package inventory crate, and the sanctioned
 # assemblers (the binary and the architecture test crate).
-# This mirrors `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`;
+# This mirrors `crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`;
 # keep the two lists in sync.
 #
 # TEMPORARY_EXCEPTIONS below mirrors CONCRETE_DEPENDENCY_EXCEPTIONS in that
@@ -48,9 +48,16 @@ EXCLUDED = {
     "ironclaw_telegram_extension",
     # The package inventory crate owns the concrete packages.
     "ironclaw_extension_support",
-    # Sanctioned assemblers.
-    "ironclaw_reborn_cli",
-    "ironclaw_architecture",
+    # Sanctioned assemblers. NOTE: these are cargo *package* names, not crate
+    # directory names. The CLI package is named "ironclaw" while its directory
+    # is crates/ironclaw_cli. This entry used to read "ironclaw_cli"
+    # (a directory name), so it matched no package and left this gate red on
+    # main for the two concrete extension crates the binary is explicitly
+    # allowed to link under DEL-7. Same class of bug that
+    # boundary_rule_names_are_package_names_not_crate_directories catches for
+    # the dependency-boundary rules.
+    "ironclaw",
+    "ironclaw_architecture_tests",
     "ironclaw_stress",
 }
 

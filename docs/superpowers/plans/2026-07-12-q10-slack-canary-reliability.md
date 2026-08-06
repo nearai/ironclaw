@@ -27,13 +27,13 @@
 ### Task 1: Correct model-visible Slack and outbound-delivery contracts
 
 **Files:**
-- Modify: crates/ironclaw_reborn_composition/src/outbound/outbound_delivery_capability_surface.rs
+- Modify: crates/ironclaw_composition/src/outbound/outbound_delivery_capability_surface.rs
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/manifest.toml
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/search_messages.md
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/list_conversations.md
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/get_conversation_history.md
-- Modify: crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
+- Modify: crates/ironclaw_composition/src/extension_host/available_extensions.rs
+- Modify: crates/ironclaw_composition/src/runtime/capability_host/tests.rs
 
 **Interfaces:**
 - Consumes: OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION and the bundled Slack manifest catalog.
@@ -62,9 +62,9 @@ The outbound test must inspect the actual provider tool definition, not only the
 - [ ] **Step 2: Run RED**
 
 ~~~bash
-cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta \
+cargo test -p ironclaw_composition --features slack-v2-host-beta \
   slack_read_descriptions -- --nocapture
-cargo test -p ironclaw_reborn_composition \
+cargo test -p ironclaw_composition \
   outbound_delivery_targets_list -- --nocapture
 ~~~
 
@@ -86,14 +86,14 @@ Do not change Slack schemas or WASM behavior.
 - [ ] **Step 4: Run GREEN and commit**
 
 ~~~bash
-cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta \
+cargo test -p ironclaw_composition --features slack-v2-host-beta \
   slack_read_descriptions -- --nocapture
-cargo test -p ironclaw_reborn_composition \
+cargo test -p ironclaw_composition \
   outbound_delivery_targets_list -- --nocapture
-git add crates/ironclaw_reborn_composition/src/outbound/outbound_delivery_capability_surface.rs \
+git add crates/ironclaw_composition/src/outbound/outbound_delivery_capability_surface.rs \
   crates/ironclaw_first_party_extensions/assets/slack \
-  crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs \
-  crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
+  crates/ironclaw_composition/src/extension_host/available_extensions.rs \
+  crates/ironclaw_composition/src/runtime/capability_host/tests.rs
 git commit -m "fix(reborn): clarify Slack capability selection"
 ~~~
 
@@ -102,10 +102,10 @@ git commit -m "fix(reborn): clarify Slack capability selection"
 ### Task 2: Keep Slack-specific output policy out of core runtime
 
 **Files:**
-- Delete: crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
-- Modify: crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
+- Delete: crates/ironclaw_composition/src/runtime/slack_output_hygiene.rs
+- Modify: crates/ironclaw_composition/src/runtime.rs
+- Modify: crates/ironclaw_composition/src/runtime/capability_host/tests.rs
+- Modify: crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
 - Modify: scripts/reborn_webui_v2_live_qa/run_live_qa.py
 - Modify: scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 
@@ -124,7 +124,7 @@ cannot silently restore extension-specific policy to the core model path.
 - [ ] **Step 2: Run RED**
 
 ~~~bash
-cargo test -p ironclaw_architecture composition_runtime_has_no_slack_output_policy -- --nocapture
+cargo test -p ironclaw_architecture_tests composition_runtime_has_no_slack_output_policy -- --nocapture
 ~~~
 
 Expected: FAIL because `runtime.rs` installs `SlackOutputHygieneGateway` and the
@@ -147,12 +147,12 @@ failure artifacts.
 - [ ] **Step 5: Run GREEN and commit**
 
 ~~~bash
-cargo test -p ironclaw_architecture composition_runtime_has_no_slack_output_policy -- --nocapture
-cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta --lib
+cargo test -p ironclaw_architecture_tests composition_runtime_has_no_slack_output_policy -- --nocapture
+cargo test -p ironclaw_composition --features slack-v2-host-beta --lib
 python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
-git add crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs \
-  crates/ironclaw_reborn_composition/src/runtime.rs \
-  crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs \
+git add crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs \
+  crates/ironclaw_composition/src/runtime.rs \
+  crates/ironclaw_composition/src/runtime/capability_host/tests.rs \
   scripts/reborn_webui_v2_live_qa/run_live_qa.py \
   scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 git commit -m "refactor(reborn): remove Slack policy from core runtime"
@@ -443,11 +443,11 @@ python3 scripts/live-canary/test_notify_slack.py
 python3 scripts/live-canary/test_run_dispatch.py
 (cd crates/ironclaw_webui/frontend && \
   node --test --import tsx src/pages/chat/components/message-bubble.test.ts)
-cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta -- --nocapture
+cargo test -p ironclaw_composition --features slack-v2-host-beta -- --nocapture
 cargo test -p ironclaw_host_runtime --test github_wasm_runtime_contract slack_ -- --nocapture
 cargo fmt --all -- --check
 bash scripts/check-boundaries.sh
-cargo clippy -p ironclaw_reborn_composition --all-targets \
+cargo clippy -p ironclaw_composition --all-targets \
   --features slack-v2-host-beta -- -D warnings
 ~~~
 

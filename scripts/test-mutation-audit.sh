@@ -165,7 +165,7 @@ check "the generated queue carries the survivor, not an empty shell" \
   grep -q 'replace add with ()' "$audit_out/mutants.out/triage-queue.md"
 
 echo "▶ H. an audit that tests nothing is an error, not a pass"
-# Found in the field: crates/ironclaw_reborn_composition/src/extension_host/
+# Found in the field: crates/ironclaw_composition/src/extension_host/
 # channel_outbound_targets.rs moved to crates/ironclaw_extension_host/ in #6669.
 # The old command line still ran, cargo-mutants filtered to zero mutants, and
 # the audit exited 0 with an empty queue — a clean bill of health for a file it

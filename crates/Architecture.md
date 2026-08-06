@@ -1,12 +1,21 @@
 # Reborn Agent Architecture
 
-This document maps the Reborn agent architecture as implemented in the `crates/`
-workspace. It focuses on the crates-level shape: how a
-user turn enters Reborn, how a runner executes it, how model and capability work
-flow through host ports, and where each component is allowed to depend.
+This document is the long-form runtime narrative for the `crates/` workspace:
+how a user turn enters Reborn, how a runner executes it, how model and
+capability work flow through host ports, and where each component is allowed
+to depend. The workspace itself is arranged as ten family directories — the
+inventory is `crates/README.md`, the routing map and the enforced seven-layer
+dependency matrix are `crates/AGENTS.md`, and the design record is
+`docs/reborn/target-architecture/`. This file names crates by package name
+(`ironclaw_turns`); their directories are `crates/<family>/<package>`.
 
 For behavior-changing work, prefer the contract docs in `docs/reborn/contracts/`
-and crate-local `AGENTS.md` / `CLAUDE.md` files as the authoritative sources.
+and the family/crate guidance (`crates/<family>/AGENTS.md`, crate `README.md`,
+module specs) as the authoritative sources.
+
+*Audited against the live tree 2026-08-05: every named type, module, and file
+path in this document was re-verified on that date unless a section carries its
+own dated note.*
 
 ## Architecture Thesis
 
@@ -21,11 +30,13 @@ Substrates own durable, reusable primitives.
 ```
 
 This gives Reborn a narrow place to enforce security and recovery without
-hardcoding one agent brain or one product transport. A CLI, WebUI, Slack adapter,
-Telegram adapter, or future ProductAdapter should all enter through the same
-turn/runtime contracts. A planned loop, subagent loop, CodeAct loop, or custom
-loop should all request effects through the same host ports and kernel-mediated
-capability path.
+hardcoding one agent brain or one product transport. The CLI, the WebUI, and
+every channel extension (the Slack and Telegram `ChannelAdapter` packages, and
+any future one) enter through the same turn/runtime contracts. A planned loop,
+subagent loop, CodeAct loop, or custom loop should all request effects through
+the same host ports and kernel-mediated capability path. (The v1-era
+`ProductAdapter` contract is retired with zero residue; the extension tier's
+adapter vocabulary lives in `ironclaw_extension_contracts`.)
 
 ### Non-Goals
 
@@ -89,7 +100,7 @@ Reborn is easiest to understand as four layers with different jobs:
 ```text
 Products
   Own user experience and transport shape.
-  Examples: CLI, WebUI, future Slack/Telegram/ProductAdapter surfaces.
+  Examples: CLI, WebUI, the Slack/Telegram channel extension packages.
 
 Userland loops
   Own agent behavior.
@@ -104,9 +115,17 @@ Kernel boundary
 
 Substrates
   Own reusable storage and service primitives.
-  Examples: filesystem, memory, events, projections, threads, run state,
-  authorization stores, approval stores, resource governor, runtime lanes.
+  Examples: filesystem, memory, events, projections, threads, the process
+  journal, authorization stores, approval stores, resource governor,
+  runtime lanes.
 ```
+
+These four conceptual layers are the narrative view. The *enforced* view is
+the seven-layer matrix in `crates/AGENTS.md` (contracts → substrates →
+runtimes → kernel → loops → products → app, checked per-manifest by the
+architecture tests); "kernel boundary" here spans the `kernel/` family, and
+"substrates" here spans the `substrates/`, `events/`, and `domains/`
+families.
 
 The important design choice is that these layers are not peers. Products and
 loops are replaceable userland code. The kernel boundary is the narrow authority
@@ -157,7 +176,7 @@ behind that boundary.
 
 ```mermaid
 flowchart TD
-    Product["Products\nCLI, WebUI, ProductAdapters"]
+    Product["Products\nCLI, WebUI, channel extensions"]
     Kernel1["Kernel boundary\nTurnCoordinator, TurnRunner leases,\nCapabilityHost, gates"]
     Loop["Userland loops\nplanned loop, subagents,\ncustom loop families"]
     Kernel2["Kernel boundary\npolicy and side-effect mediation"]
@@ -182,7 +201,7 @@ heuristics, tool authorization, runtime dispatch, or low-level persistence
 policy.
 
 In crates, product-facing assembly currently enters through
-`ironclaw_reborn_composition::RebornRuntime`. CLI and WebUI code should treat
+`ironclaw_composition::RebornRuntime`. CLI and WebUI code should treat
 that service as the public runtime handle instead of wiring `ProcessRuntimeSystem`,
 the `TurnRunScheduler`/`TurnRunExecutor` pair, `HostRuntimeServices`, or
 concrete drivers directly.
@@ -204,7 +223,8 @@ adapters.
 ### Kernel Boundary
 
 The kernel boundary is the security and recovery perimeter. It is not a single
-`ironclaw_kernel` crate; it is the set of mediated services that enforce:
+crate — it is the `crates/kernel/` family, nine crates with one mediation
+stage each — and together they enforce:
 
 - scope and active-thread ownership;
 - runner claim/heartbeat/recovery rules;
@@ -234,15 +254,18 @@ access to them is mediated through the kernel boundary.
 
 ## Layer Ownership Matrix
 
-Use this table when deciding where a new concern belongs.
+Use this table when deciding where a new concern belongs. It describes
+*roles*; the machine-checked dependency matrix (seven `[package.metadata.ironclaw]
+layer` values and who may depend on whom) is stated once, in
+`crates/AGENTS.md`, and enforced by `cargo test -p ironclaw_architecture_tests`.
 
 | Layer | May call | Must not call | Owns | Typical crates |
 | --- | --- | --- | --- | --- |
-| Products | Composition service, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui`, product adapters |
-| Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, service handles | `ironclaw_reborn_composition`, `ironclaw_runner` |
-| Userland loops | `AgentLoopDriverHost` ports only | `CapabilityHost`, `RuntimeDispatcher`, secret/network stores, product adapters | Prompt/model/tool strategy, retry/stop/gate decisions, loop-local checkpoints | `ironclaw_agent_loop`, loop families |
+| Products | Composition service, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_cli`, `ironclaw_webui`, the channel extension packages |
+| Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, service handles | `ironclaw_composition`, `ironclaw_turn_runner` |
+| Userland loops | `AgentLoopDriverHost` ports only | `CapabilityHost`, `RuntimeDispatcher`, secret/network stores, product surfaces | Prompt/model/tool strategy, retry/stop/gate decisions, loop-local checkpoints | `ironclaw_agent_loop`, loop families |
 | Kernel boundary | Substrates and runtime lanes through typed policy/authority APIs | Product UX decisions, loop strategy internals | Authorization, approvals, exact invocation leases, active locks, runner leases, validated exits, resource/process ownership | `ironclaw_turns`, `ironclaw_host_runtime`, `ironclaw_authorization`, `ironclaw_approvals` |
-| Substrates | Lower neutral contracts and storage backends | Product service APIs, loop behavior, direct authority escalation | Durable records, files, memory, events, projections, threads, resource stores, runtime adapters | `ironclaw_filesystem`, `ironclaw_memory`, `ironclaw_events`, `ironclaw_threads`, runtime lane crates |
+| Substrates | Lower neutral contracts and storage backends | Product service APIs, loop behavior, direct authority escalation | Durable records, files, memory, events, projections, threads, resource stores, runtime adapters | `ironclaw_filesystem`, `ironclaw_memory`, `ironclaw_event_log`, `ironclaw_threads`, runtime lane crates |
 
 Short version:
 
@@ -276,7 +299,7 @@ Substrate primitives
   SessionThreadService
   DurableEventLog and projection streams
   RootFilesystem / ScopedFilesystem / memory services
-  approval, authorization, run-state, resource stores
+  approval, authorization, resource stores
   WASM / script / MCP / first-party runtime adapters
 ```
 
@@ -289,14 +312,14 @@ authority decision.
 
 ```mermaid
 flowchart TD
-    CLI["ironclaw_reborn_cli\nUX shell"]
+    CLI["ironclaw_cli\nUX shell"]
     WebUI["ironclaw_webui /\nweb ingress"]
-    Runtime["ironclaw_reborn_composition::RebornRuntime\nproduct-facing handle"]
+    Runtime["ironclaw_composition::RebornRuntime\nproduct-facing handle"]
     Factory["build_reborn_runtime\ncomposition assembly entry point"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]
     Processes["ProcessJournalStore\nneutral lifecycle authority"]
     TurnView["AgentTurnRuntimePort\nagent-turn projection"]
-    Worker["TurnRunScheduler + RebornTurnRunExecutor\n(ironclaw_runner)\nclaim, heartbeat, invoke, apply"]
+    Worker["TurnRunScheduler + RebornTurnRunExecutor\n(ironclaw_turn_runner)\nclaim, heartbeat, invoke, apply"]
     Registry["DriverRegistry\nregistered loop drivers"]
     Planned["PlannedDriver\nAgentLoopDriver adapter"]
     Executor["ironclaw_agent_loop::CanonicalAgentLoopExecutor\ncanonical tick pipeline"]
@@ -306,7 +329,7 @@ flowchart TD
     HostRuntime["ironclaw_host_runtime\nCapabilityHost, dispatcher, processes, approvals"]
     LLM["ironclaw_llm / model gateway\nprovider boundary"]
     Threads["ironclaw_threads\nconversation transcript"]
-    Events["ironclaw_events + projections\nredacted events and streams"]
+    Events["ironclaw_event_log + projections\nredacted events and streams"]
 
     CLI --> Runtime
     WebUI --> Runtime
@@ -338,34 +361,45 @@ flowchart TD
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `ironclaw_reborn_composition` | Product-facing runtime assembly, service handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
+| `ironclaw_composition` | Product-facing runtime assembly, service handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
 | `ironclaw_processes` | Neutral process journal, lifecycle transitions, leases, suspension, process trees, gates, and lifecycle queries. | Agent-loop policy, product bindings, or turn projections. |
-| `ironclaw_runner` | Agent-turn scheduling policy, per-process executor, concrete loop driver registry, loop host factory, and exit-applier wiring over process ports. | Generic process persistence, loop strategy internals, or product workflow. |
-| `ironclaw_turns` | Turn admission and the coordinator API, agent-turn process projections, loop-exit DTOs, run profiles, and loop checkpoint contracts. | The turn vocabulary itself (ids/scope/status/refs — those are `ironclaw_host_api::turn`'s), generic process lifecycle state, runtime dispatch, product adapters, or raw prompts/tool inputs/secrets. |
+| `ironclaw_turn_runner` | Agent-turn scheduling policy, per-process executor, concrete loop driver registry, loop host factory, and exit-applier wiring over process ports. | Generic process persistence, loop strategy internals, or product workflow. |
+| `ironclaw_turns` | Turn admission and the coordinator API, agent-turn process projections, loop-exit DTOs, run profiles, and loop checkpoint contracts. | The turn vocabulary itself (ids/scope/status/refs — those are `ironclaw_host_api::turn`'s), generic process lifecycle state, runtime dispatch, product surfaces, or raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
 | `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime service or durable turn state ownership. |
 | `ironclaw_host_runtime` | Kernel-facing host runtime services: capability host, dispatcher composition, approvals, resources, processes, secrets/network mediation. | Agent-loop planning or product conversation UX. |
 
 ## Dependency Direction
 
-The dependency shape should flow from neutral contracts and substrates upward to
-composition. Lower layers should not import product/runtime orchestration.
+The dependency shape flows from neutral contracts and substrates upward to
+assembly. Lower layers do not import product/runtime orchestration. The
+enforced form is the seven-layer ladder — each crate declares its rung as
+`[package.metadata.ironclaw] layer`, and a crate may take normal dependencies
+only on its own layer or below:
 
 ```text
-host_api / common / prompt_envelope
-  -> filesystem / memory / events / projections / streams / resources / trust
-  -> auth / authorization / approvals / processes / runtime_policy / secrets / network
-  -> host_runtime / dispatcher / processes / runtime lanes
-  -> turns / threads / loop_host / agent_loop / capabilities
-  -> reborn / reborn_composition / product workflow / adapters
-  -> reborn_cli / webui / gateway / TUI / product entry points
+contracts    host_api, common, prompt_envelope, loop/extension/product contracts
+  -> substrates   filesystem, libsql_runtime, secrets, network, safety, observability
+                  (also every events/ and domains/ crate)
+  -> runtimes     wasm, wasm_limiter, mcp, sandbox, extension_support
+  -> kernel       trust, authorization, approvals, resources, runtime_policy,
+                  capabilities, processes, turns, host_runtime
+  -> loops        agent_loop, loop_host, turn_runner, hooks, extension_host
+  -> products     assistant, operator, openai_compat, webui,
+                  extension_manager, slack/telegram packages
+  -> app          composition, the ironclaw binary, config*, architecture tests
 ```
+
+(*`ironclaw_config` and `ironclaw_host_ingress` sit in the `app/` and
+`product/` directories but declare the `substrates` layer — family placement
+is ownership, the layer key is the rule. The full matrix and the current
+zero-exception state live in `crates/AGENTS.md`.)
 
 ```mermaid
 flowchart BT
-    Entry["CLI / WebUI / product adapters"]
-    Composition["ironclaw_reborn_composition"]
-    Reborn["ironclaw_runner"]
+    Entry["CLI / WebUI / channel extensions"]
+    Composition["ironclaw_composition"]
+    Reborn["ironclaw_turn_runner"]
     LoopSupport["ironclaw_loop_host"]
     AgentLoop["ironclaw_agent_loop"]
     Turns["ironclaw_turns"]
@@ -389,7 +423,7 @@ flowchart BT
     Turns --> HostApi
 ```
 
-Boundary rules are mechanically checked in `ironclaw_architecture`, especially
+Boundary rules are mechanically checked in `ironclaw_architecture_tests`, especially
 for Reborn dependency edges and public-surface restrictions.
 
 ## Core Data Model
@@ -408,11 +442,11 @@ refs that cross crate boundaries:
 | `JournaledProcessSnapshot` | Authoritative lifecycle status, lease, suspension, checkpoint, tree, and journal cursor. | `ironclaw_processes` |
 | `TurnRunState` | Agent-turn view of a process snapshot plus typed profile and binding metadata. | `ironclaw_turns::AgentTurnRuntimePort` |
 | `LoopExecutionState` | Loop-owned resumable strategy state, serialized only as bounded checkpoint payload bytes. | `ironclaw_agent_loop` |
-| `LoopCheckpointStateRef` / `TurnCheckpointId` | Opaque checkpoint payload ref and agent-turn checkpoint projection id. | processes + turns |
-| `LoopExit` | Driver claim containing durable refs only; never trusted by itself. | loop driver / turns |
-| `LoopMessageRef` / `LoopResultRef` / `LoopGateRef` | Host-minted evidence refs used to validate exits and blocked gates. | host ports / turns |
-| `LoopRequest` / `CapabilityOutcome` | Scoped tool/capability request and sanitized result refs/summaries. | loop host ports + host runtime |
-| `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. Two distinct types: `ironclaw_events::EventCursor` for the durable event log, `ironclaw_host_api::turn::EventCursor` for a turn's lifecycle stream. | `ironclaw_events` / `ironclaw_host_api::turn` |
+| `LoopCheckpointStateRef` / `TurnCheckpointId` | Opaque checkpoint payload ref and agent-turn checkpoint projection id. | declared in `ironclaw_loop_contracts` / `ironclaw_host_api::turn`; minted by checkpoint stores (processes) and the turn projection (turns) |
+| `LoopExit` | Driver claim containing durable refs only; never trusted by itself. | declared in `ironclaw_loop_contracts`; claimed by the driver, validated by turns |
+| `LoopMessageRef` / `LoopResultRef` / `LoopGateRef` | Host-minted evidence refs used to validate exits and blocked gates. | declared in `ironclaw_host_api::turn`; minted by host ports, verified by turns |
+| `LoopRequest` / `CapabilityOutcome` | Scoped tool/capability request and sanitized result refs/summaries. | declared in `ironclaw_loop_contracts::host`; fulfilled by loop-host ports + host runtime |
+| `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. Two distinct types: `ironclaw_event_log::EventCursor` for the durable event log, `ironclaw_host_api::turn::EventCursor` for a turn's lifecycle stream. | `ironclaw_event_log` / `ironclaw_host_api::turn` |
 
 Persistence placement follows this split:
 
@@ -488,10 +522,10 @@ The normal single-message flow is:
 2. Caller submits SubmitTurnRequest to TurnCoordinator.
 3. TurnCoordinator persists turn/run state, enforces active-thread ownership,
    resolves the run profile, and emits a wake hint.
-4. TurnRunScheduler (in ironclaw_runner) wakes or polls, recovers
+4. TurnRunScheduler (in ironclaw_turn_runner) wakes or polls, recovers
    expired leases, and claims queued runs — concurrently, bounded by a
    semaphore plus per-user and per-inbound-type caps.
-5. For each claimed run, RebornTurnRunExecutor (in ironclaw_runner) resolves
+5. For each claimed run, RebornTurnRunExecutor (in ironclaw_turn_runner) resolves
    the assigned AgentLoopDriver from DriverRegistry.
 6. The executor builds a per-run AgentLoopDriverHost from the host factory
    and persists a model-route snapshot before invoking the driver.
@@ -542,7 +576,7 @@ sequenceDiagram
 
 ## Runner And Lease Flow
 
-`TurnRunScheduler` plus `RebornTurnRunExecutor` (both in `ironclaw_runner`)
+`TurnRunScheduler` plus `RebornTurnRunExecutor` (both in `ironclaw_turn_runner`)
 form the trusted worker-side control plane. It does not
 accept traffic directly; the scheduler claims durable work already accepted by
 `TurnCoordinator` and runs claimed executions concurrently under a bounded
@@ -777,7 +811,7 @@ trust/source classification
 
 Key rules:
 
-- Trust class is assigned by the host, never by a loop, product adapter, or
+- Trust class is assigned by the host, never by a loop, product surface, or
   user-installed manifest.
 - Visible capability surfaces are publication metadata, not grants. Direct
   invocation of a hidden or denied capability must still fail closed.
@@ -810,13 +844,13 @@ ExtensionDiscovery / registry
 
 Runtime lanes:
 
-| Lane | Role | Boundary |
-| --- | --- | --- |
-| WASM | Sandboxed extension/component execution. | Uses host imports for filesystem, HTTP, credentials, and output mediation. |
-| Script/process | Host or sandbox process-backed work. | Process backend is selected by runtime policy; brokered network/secrets are host-owned. |
-| MCP | External MCP server/tool integration. | HTTP/SSE egress must use host-mediated runtime HTTP where policy requires it. |
-| First-party | Host-owned built-in handlers. | Still dispatches through `CapabilityHost` and `RuntimeDispatcher`; manifests cannot self-assign first-party/system authority. |
-| System | Deferred stricter host-only lane. | Do not treat first-party as a shortcut to system authority. |
+| Lane | Crate | Role | Boundary |
+| --- | --- | --- | --- |
+| WASM | `ironclaw_wasm` (+ shared `ironclaw_wasm_limiter`) | Sandboxed extension/component execution. | Uses host imports for filesystem, HTTP, credentials, and output mediation. |
+| Script/process | `ironclaw_sandbox` | Script lane and container-sandboxed process work. | Process backend is selected by runtime policy; brokered network/secrets are host-owned. |
+| MCP | `ironclaw_mcp` | External MCP server/tool integration. | HTTP/SSE egress must use host-mediated runtime HTTP where policy requires it. |
+| First-party | `ironclaw_extension_support` executors | Host-owned built-in handlers. | Still dispatches through `CapabilityHost` and `RuntimeDispatcher`; manifests cannot self-assign first-party/system authority. |
+| System | — | Deferred stricter host-only lane. | Do not treat first-party as a shortcut to system authority. |
 
 `RuntimeDispatcher` is intentionally below authorization. It routes an
 already-authorized request to a runtime adapter and normalizes the result; it is
@@ -826,11 +860,12 @@ not a workflow or permission API.
 
 Subagent work is modeled as child runs, not as a second private loop engine.
 
-> **Status note (2026-07):** the machinery below is wired and tested, but the
-> `builtin.spawn_subagent` capability is currently deny-filtered off in all
-> shipped profiles (`TEMP(disable-spawn-subagents)` in
-> `crates/ironclaw_runner/src/runtime.rs`) — the model cannot invoke it until
-> that filter is lifted.
+> **Status note (2026-07, re-verified 2026-08-05):** the machinery below is
+> wired and tested, but the `builtin.spawn_subagent` capability is currently
+> deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`
+> in `crates/loop/ironclaw_turn_runner/src/runtime.rs`; the id constant lives
+> in `ironclaw_loop_host`) — the model cannot invoke it until that filter is
+> lifted.
 
 ```text
 parent loop capability
@@ -901,7 +936,7 @@ their data models:
 
 ## Composition Modes
 
-`ironclaw_reborn_composition::build_reborn_runtime` is the intended assembled
+`ironclaw_composition::build_reborn_runtime` is the intended assembled
 entry point for CLI, WebUI, and harness callers. It:
 
 - builds substrate services through composition's internal
@@ -909,7 +944,7 @@ entry point for CLI, WebUI, and harness callers. It:
   outside composition go through `build_reborn_runtime`);
 - wires thread, turn, checkpoint, event, approval, auth, skill, and projection
   services;
-- builds the default planned runtime through `ironclaw_runner`;
+- builds the default planned runtime through `ironclaw_turn_runner`;
 - starts the `TurnRunScheduler` + `RebornTurnRunExecutor` pair;
 - exposes task-level methods such as `new_conversation`, `send_user_message`,
   cancellation, approval/auth interactions, WebUI handles, and skill execution.
@@ -935,8 +970,8 @@ Use these routes for common changes:
 
 | Change | Start in | Also check | Avoid |
 | --- | --- | --- | --- |
-| Add product surface | Product adapter/WebUI/CLI crate, then `ironclaw_reborn_composition` service if a new handle is needed. | Product workflow, projection/auth/approval APIs, e2e harness. | Direct store/worker/dispatcher imports from product code. |
-| Add loop family | `ironclaw_agent_loop` family/planner/executor tests, then `ironclaw_runner` driver registration/profile wiring. | Checkpoint schema, run profile, loop-exit validation. | Exposing strategy slots or host runtime handles to loops. |
+| Add product surface | The owning `product/` crate (WebUI/CLI) or channel extension package, then `ironclaw_composition` service if a new handle is needed. | Product workflow, projection/auth/approval APIs, e2e harness. | Direct store/worker/dispatcher imports from product code. |
+| Add loop family | `ironclaw_agent_loop` family/planner/executor tests, then `ironclaw_turn_runner` driver registration/profile wiring. | Checkpoint schema, run profile, loop-exit validation. | Exposing strategy slots or host runtime handles to loops. |
 | Add capability | Descriptor/extension registry, capability surface, host runtime/handler or runtime lane. | Authorization, approvals, obligations, resource estimates, redaction, architecture tests. | Calling dispatcher directly or treating visibility as authority. |
 | Add runtime lane | Owning runtime crate + `RuntimeDispatcher` adapter + host-runtime policy handoffs. | Network/secrets/resources/process/audit contracts. | Direct network/secrets/filesystem access inside the lane. |
 | Add persistence | Owning domain trait first, then libSQL/PostgreSQL parity where production-facing. | Contract tests, migration/backfill, idempotency/recovery semantics. | Backend-only behavior divergence. |
@@ -958,9 +993,12 @@ Implemented or strongly established:
 - loop-exit validation/application model;
 - host-runtime capability path with authorization, approvals, obligations,
   dispatch, resource/process handoff, and redaction concepts;
-- dependency-boundary tests in `ironclaw_architecture`.
+- dependency-boundary tests in `ironclaw_architecture_tests`.
 
-Partial or evolving:
+Partial or evolving (✎ this list dates from before the family restructure and
+was **not** re-measured in the 2026-08-05 audit — treat each item as a claim
+to verify against the live tree, not settled status; the Slack/Telegram
+channel packages in particular have shipped since it was written):
 
 - durable production storage parity and service-graph wiring across every
   substrate;
@@ -968,7 +1006,6 @@ Partial or evolving:
 - complete hosted/enterprise runtime profile coverage;
 - generalized artifact references for large/sensitive/streaming outputs;
 - richer recovery/fork/retry UX after terminal lease-expiry failures;
-- full product adapter coverage beyond current local/WebUI/CLI slices;
 - complete extension lifecycle/product installability semantics across all
   runtime lanes.
 
@@ -990,6 +1027,10 @@ Partial or evolving:
 
 ## Evidence Pointers
 
+- `crates/AGENTS.md` (routing map + the enforced layer matrix) and
+  `crates/<family>/AGENTS.md` (family boundaries)
+- `docs/reborn/target-architecture/README.md` and
+  `docs/reborn/target-architecture/families/` (the design record)
 - `docs/reborn/contracts/turns-agent-loop.md`
 - `docs/reborn/contracts/turn-runner.md`
 - `docs/reborn/contracts/loop-exit.md`
@@ -1001,19 +1042,18 @@ Partial or evolving:
 - `docs/reborn/contracts/events-projections.md`
 - `docs/reborn/contracts/network.md`
 - `docs/reborn/contracts/secrets.md`
-- `crates/AGENTS.md`
-- `crates/ironclaw_turns/src/lib.rs`
-- `crates/ironclaw_turns/src/runner.rs`
-- `crates/ironclaw_loop_contracts/src/driver.rs`
-- `crates/ironclaw_loop_contracts/src/host/`
-- `crates/ironclaw_agent_loop/src/executor.rs`
-- `crates/ironclaw_agent_loop/src/family.rs`
-- `crates/ironclaw_agent_loop/src/state.rs`
-- `crates/ironclaw_runner/src/planned_driver.rs`
-- `crates/ironclaw_runner/src/turn_runner.rs`
-- `crates/ironclaw_runner/src/turn_run_executor.rs`
-- `crates/ironclaw_runner/src/turn_scheduler.rs`
-- `crates/ironclaw_runner/src/runtime.rs`
-- `crates/ironclaw_runner/src/loop_driver_host.rs`
-- `crates/ironclaw_reborn_composition/src/runtime.rs`
-- `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
+- `crates/kernel/ironclaw_turns/src/lib.rs`
+- `crates/kernel/ironclaw_turns/src/runner.rs`
+- `crates/contracts/ironclaw_loop_contracts/src/driver.rs`
+- `crates/contracts/ironclaw_loop_contracts/src/host/`
+- `crates/loop/ironclaw_agent_loop/src/executor.rs`
+- `crates/loop/ironclaw_agent_loop/src/family.rs`
+- `crates/loop/ironclaw_agent_loop/src/state.rs`
+- `crates/loop/ironclaw_turn_runner/src/planned_driver.rs`
+- `crates/loop/ironclaw_turn_runner/src/turn_runner.rs`
+- `crates/loop/ironclaw_turn_runner/src/turn_run_executor.rs`
+- `crates/loop/ironclaw_turn_runner/src/turn_scheduler.rs`
+- `crates/loop/ironclaw_turn_runner/src/runtime.rs`
+- `crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs`
+- `crates/app/ironclaw_composition/src/runtime.rs`
+- `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`

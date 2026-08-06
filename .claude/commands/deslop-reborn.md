@@ -21,18 +21,19 @@ crate and skip the selection cascade in §1 — but still run the §1 Reborn/leg
 a legitimate Reborn target. Otherwise pick one per §1.
 
 ## 0. Environment & state
-- **Reborn-only.** New feature and quality work targets the Reborn stack in `crates/`, never the v1
-  `src/` monolith (root CLAUDE.md, "Where to Build — Reborn-First"). This loop only touches `crates/`
-  Reborn crates. It must **skip the legacy enclave** — crates that serve *only* the retiring v1
-  monolith. That enclave is now empty — `ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, and
-  `ironclaw_oauth` have all been removed, so every crate under `crates/` that the workspace builds
-  is a legitimate target. Two caveats you can check in the root `Cargo.toml`: `ironclaw_silk_decoder`
+- **Reborn-only.** All work targets the Reborn stack in `crates/` (root CLAUDE.md, "Where to Build
+  — the Reborn stack in `crates/`"). The v1 `src/` monolith and its legacy enclave
+  (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`) have all been removed,
+  so every crate under `crates/` that the workspace builds is a legitimate target. Two caveats you can check in the root `Cargo.toml`: `tools/ironclaw_silk_decoder`
   is in `exclude`, so workspace-wide `cargo` commands never see it; and a crate with no consumers
-  may be queued for deletion rather than for de-slopping (`grep -rl "<crate>" crates/*/Cargo.toml
-  Cargo.toml`). Verify each candidate's status with the orientation recipe (§1) before picking it.
+  may be queued for deletion rather than for de-slopping (`grep -rl --include=Cargo.toml "<crate>"
+  crates/ Cargo.toml` — the family layout means `crates/*/Cargo.toml` matches nothing). Verify each
+  candidate's status with the orientation recipe (§1) before picking it.
 - **Local gate reality.** You can prove `cargo fmt`, `cargo clippy`, per-crate `cargo test -p <crate>`,
-  the workspace unit-test tier, and the architecture-boundary test (`cargo test -p ironclaw_architecture`)
-  locally. The **integration tier** (`cargo test --features integration`) needs a running PostgreSQL;
+  the workspace unit-test tier, and the architecture-boundary test (`cargo test -p ironclaw_architecture_tests`)
+  locally. The **backend-integration tier** (crate-level feature-gated suites, e.g.
+  `cargo test -p ironclaw_hooks --features integration` — the workspace-root `integration` feature is
+  empty and does nothing) needs Docker for its Postgres testcontainers;
   the **live tier** (`-- --ignored`) needs Postgres + LLM API keys; **Reborn e2e**
   (`scripts/reborn-e2e-rust.sh`) may need Docker. If a fix touches those paths, implement it fully and
   mark the gate **"CI-deferred (needs Postgres/Docker/keys)"** in the PR body. Never weaken or delete
@@ -45,10 +46,12 @@ a legitimate Reborn target. Otherwise pick one per §1.
   open PR holds.
 
 ## 1. Pick ONE un-de-slopped Reborn crate — stop at first viable
-List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
-- **it is a Reborn crate, not legacy-enclave.** Verify: `grep -rl "<crate_name>" crates/*/Cargo.toml Cargo.toml`
-  — if the **only** consumer is the root `Cargo.toml` package, it's v1-only; skip it. When unsure,
-  consult the `ironclaw-reborn-orientation` skill (it maps which side each crate is on).
+List the crates (`ls crates/*/` — the top level is the ten family directories, crates are one level
+down, plus `crates/extensions/packages/*`). A crate is a **candidate** when ALL hold:
+- **it has real consumers.** Verify: `grep -rl --include=Cargo.toml "<crate_name>" crates/ Cargo.toml`
+  — the legacy enclave is gone (every workspace crate is Reborn), so this check now exists to catch
+  crates with no consumers that may be queued for deletion instead. When unsure,
+  consult the `ironclaw-reborn-orientation` skill.
 - **not already in the ledger DESLOPPED list** (§0),
 - **not the hot surface of an open PR** (§0) — leave those to the build/review loops,
 - it has real source to review (skip thin aggregator/facade crates with ~no `src` — though their
@@ -57,7 +60,7 @@ List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
 **Selection bias:** prefer **smaller / leaf crates first** — they fit entirely in context, gate
 cleanly, and merge independently. A crate whose `src` is **under ~2k lines** can and SHOULD be read in
 full (§3). Clear the small, high-leverage crates before taking on the giants (e.g.
-`ironclaw_reborn_composition`, `ironclaw_product`, `ironclaw_extension_host`-scale surfaces need
+`ironclaw_composition`, `ironclaw_assistant`, `ironclaw_extension_host`-scale surfaces need
 targeted reading, not a full load, and may warrant splitting the de-slop across iterations
 module-by-module). When unsure, prefer a crate that is **load-bearing for invariants** (turns,
 dispatcher, authorization, approvals, secrets, run_state, event store) over a purely mechanical one —
@@ -76,7 +79,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
   crate, a dependency edge, or a re-export, apply the `ironclaw-reborn-architecture-review` skill first.
 - **Respect the Reborn layering.** Product/runtime composition flows **downward** through typed
   contracts (`crates/AGENTS.md` → "Dependency Mental Model"). Never introduce an upstream dependency in
-  a lower-level crate to make a fix convenient — `cargo test -p ironclaw_architecture` enforces the
+  a lower-level crate to make a fix convenient — `cargo test -p ironclaw_architecture_tests` enforces the
   boundaries and will fail. A de-slop that needs a new upward edge is out of scope; record it (§9).
 - **Scope = ONE coherent, single-crate PR.** If the crate is huge and the findings sprawl, do the
   **smallest self-contained slice** (one module / one invariant / one test gap) and record the rest in
@@ -222,7 +225,7 @@ the PR body. The bar is "every finding *resolved*" — fixed, or explicitly just
 seal/delete whose fallout is confined to this crate (+ its own tests) is in-scope — just do it. But when
 tightening a `pub` item would force edits to **other crates'** production code (routing their reads
 through a new accessor), or would require a new dependency edge / re-export (which
-`cargo test -p ironclaw_architecture` guards), that's a cross-crate change masquerading as de-slop:
+`cargo test -p ironclaw_architecture_tests` guards), that's a cross-crate change masquerading as de-slop:
 **defer it** rather than drag this PR into three crates. Likewise defer anything that **changes the
 crate's observable contract or adds a dependency**. Fix the clean, contained findings now; hand off the
 ripple-y ones per "Deferred findings" below.
@@ -262,13 +265,14 @@ detectors. A new test must actually pin behavior; a sealed `pub` must still comp
 cargo fmt --all --check
 cargo clippy -p <crate> --all-targets --all-features -- -D warnings
 cargo test  -p <crate>
-cargo test  -p ironclaw_architecture          # dependency-boundary enforcement for crates/
+cargo test  -p ironclaw_architecture_tests          # dependency-boundary enforcement for crates/
 cargo build --workspace --all-targets         # sealing a pub can break OTHER crates — this catches it
 cargo clippy --all --benches --tests --examples --all-features
 ```
 Sealing a public item can break **other** crates — the workspace build/clippy catches that; fix the
-fallout or keep the item public with a note. If the crate has an **integration** path, run
-`cargo test --features integration` when Postgres is reachable; if it has a **Reborn e2e** path
+fallout or keep the item public with a note. If the crate has an **integration** feature, run
+`cargo test -p <crate> --features integration` when Docker is reachable (the workspace-root
+`integration` feature is empty — the flag only means something per-crate); if it has a **Reborn e2e** path
 (turns, runtime lanes, host services, authorization, approvals, networking, secrets, product
 workflow, capability dispatch), run `scripts/reborn-e2e-rust.sh`. Any tier you cannot run here (needs
 Postgres/Docker/keys) → note it **"CI-deferred"** in the PR body. Everything runnable must be **green

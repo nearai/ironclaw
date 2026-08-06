@@ -23,7 +23,7 @@ pub(crate) fn profile_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             memory_mounts(MountPermissions::read_write_list_delete())?,
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         ),
         auto_approve_default: Some(true),
         ..ToolsProfile::new("reborn-e2e-profile-tools", "reborn-e2e-profile-tools-user")?

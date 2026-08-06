@@ -22,7 +22,7 @@ concurrency:
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
-  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
+  # crates/substrates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -78,7 +78,7 @@ jobs:
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -95,10 +95,10 @@ jobs:
           # instead of quietly falling out of scope.
           # `ironclaw_loop_host` joined the list with the WS3 runner sheds: the
           # model gateway and the tool-disclosure decorator moved there out of
-          # `ironclaw_runner`, so without it a PR touching only the new home
+          # `ironclaw_turn_runner`, so without it a PR touching only the new home
           # would no longer light this lane — the move would have narrowed CI
           # scope as a side effect.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_reborn_cli/|crates/([^/]+/)*ironclaw_reborn_config/|crates/([^/]+/)*ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_turn_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_cli/|crates/([^/]+/)*ironclaw_config/|crates/([^/]+/)*ironclaw_architecture_tests/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -164,7 +164,14 @@ jobs:
           scripts/ci/test-main-ci-slack-alerts.sh
           python3 scripts/ci/test_ws12_suite_shards.py
           python3 scripts/ci/test_ws12_workflow_contracts.py
+          python3 scripts/ci/test-check-target-tree.py
           scripts/ci/test-hermetic-test-process.sh
+          scripts/ci/test-reborn-docker-entrypoint.sh
+          # #7144: this 204-test module had never been run by any lane, so five
+          # of its assertions had silently drifted out of sync with the code they
+          # gate — including the live-canary shard roster, which pinned a
+          # `reborn-e2e.yml` string that no longer existed.
+          python3 -m unittest scripts.reborn_webui_v2_live_qa.test_run_live_qa
           bash .github/scripts/test-pr-labeler.sh
       - name: Self-test panic checker
         if: github.event_name != 'push'
@@ -182,6 +189,12 @@ jobs:
       # before testing it, so it never compares against what is committed.
       - name: Check committed WASM artifacts are not stale
         run: python3 scripts/ci/check-wasm-artifact-freshness.py
+      # Every other path gate answers "where is crate X?" by discovery, which
+      # is what lets them survive a family move — and is exactly why none of
+      # them can say the move landed where PROPOSAL §5 draws it. This one
+      # compares `cargo metadata` against the documented tree itself.
+      - name: Check the crate tree matches PROPOSAL §5
+        run: python3 scripts/ci/check-target-tree.py
       - name: Check composition mass budget
         run: bash scripts/ci/check-composition-budget.sh
       - name: Self-test the composition budget gate
@@ -231,11 +244,15 @@ jobs:
           # (verified against the pinned commit's bundled dist/setup/index.js:
           # `hashFiles` walks one globber built from every newline-separated
           # pattern and only throws when the COMBINED walk finds nothing), so
-          # the flat line stays live for today's tree and the nested line picks
-          # up the family move without either one needing to be conditional.
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
       # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
       # symbol they never imported. The VM-based component suites stub
       # every collaborator through a `vm` context, so that class of bug (e.g. an
@@ -296,8 +313,8 @@ jobs:
           # See the webui-v2-js-lint job above for why this is a depth-tolerant
           # glob list rather than a single literal.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
@@ -336,7 +353,7 @@ jobs:
           done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
           # No explicit target filter. `--lib` is a hard error on a bin-only
           # package ("no library targets found in package `ironclaw`"), which
-          # is exactly what a PR touching only crates/ironclaw_reborn_cli
+          # is exactly what a PR touching only crates/app/ironclaw_cli
           # selects, and `--bins` alone degrades to "no targets matched; this
           # is a no-op" on a lib-only package — the lane would report green
           # having linted nothing. Cargo's default target set for a package is
@@ -348,6 +365,24 @@ jobs:
       - name: Check all-target lints
         if: github.event_name != 'pull_request'
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+      # #7119. The PR lane above lints only the *changed* packages, so a crate
+      # that is merely a dependency of that set compiles with whatever features
+      # the set happens to enable. `--lib --bins` builds no dev-dependencies, and
+      # in this workspace `test-support` is turned on exclusively through
+      # dev-dependency edges — so it is OFF here and ON in every `--tests` lane.
+      # Code behind `cfg(any(test, feature = "test-support"))` then vanishes and
+      # a `use` that only it names becomes an unused import, which no
+      # whole-workspace lane could see: `--all --tests` builds the dev-deps that
+      # unify the feature back on. This step is that missing shape, workspace-
+      # wide, so the failure lands at merge time instead of waiting for the one
+      # PR whose diff happens to produce the tripping package set.
+      #
+      # Deliberately the `default` flavor: `--all-features` re-enables
+      # `test-support` on every selected package and masks the exact class this
+      # step exists to catch.
+      - name: Check production-target lints (workspace, no dev-dependency features)
+        if: github.event_name != 'pull_request' && matrix.name == 'default'
+        run: cargo clippy --all --lib --bins -- -D warnings
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
@@ -379,8 +414,8 @@ jobs:
           # See the webui-v2-js-lint job above for why this is a depth-tolerant
           # glob list rather than a single literal.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
@@ -432,7 +467,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
-        run: cargo test -p ironclaw_reborn_config
+        run: cargo test -p ironclaw_config
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw
       - name: Test Reborn libSQL restart integration
@@ -441,7 +476,7 @@ jobs:
             --test reborn_durable_restart_integration \
             -- --nocapture
       - name: Test Reborn architecture boundaries
-        run: cargo test -p ironclaw_architecture reborn
+        run: cargo test -p ironclaw_architecture_tests reborn
 
   code-style:
     name: Code Style (fmt + clippy)

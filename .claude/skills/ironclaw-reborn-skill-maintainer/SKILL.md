@@ -10,7 +10,7 @@ Every rule below counters a rot pattern this repo's guidance is prone to. Guidan
 ## The two skill systems — never conflate them
 
 - `.claude/skills/` + `.claude/commands/` + `.claude/rules/` → **developer-facing** (Claude Code; Codex reads only the AGENTS.md hierarchy).
-- Top-level `skills/` → **product runtime skills, compiled into the shipping `ironclaw` binary** (`crates/ironclaw_extension_host/build.rs` → `crates/ironclaw_extension_host/src/bundled_skills.rs`). Editing `skills/` changes what users' agents do, not your workflow. Treat it as production code: test-first, product review.
+- Top-level `skills/` → **product runtime skills, compiled into the shipping `ironclaw` binary** (`crates/extensions/ironclaw_extension_host/build.rs` → `crates/extensions/ironclaw_extension_host/src/bundled_skills.rs`). Editing `skills/` changes what users' agents do, not your workflow. Treat it as production code: test-first, product review.
 
 ## Authoring rules (each one earned)
 
@@ -21,7 +21,7 @@ Every rule below counters a rot pattern this repo's guidance is prone to. Guidan
 4. **Triggers live in frontmatter `description`, nowhere else.** The runtime surfaces only frontmatter for selection; a "when to use" buried in the body is invisible. Description = triggering conditions only — never a workflow summary (agents will follow the summary and skip the body).
 5. **Never claim enforcement that doesn't exist.** Before writing "enforced by X", run X. If you add a check to `scripts/pre-commit-safety.sh` or `scripts/check-boundaries.sh`, add its self-test — and know there are two hook install paths (`.githooks/` vs `scripts/dev-setup.sh` symlink); a check is only real if both run it.
 6. **After any extraction/move/rename, grep the guidance layer** for old paths in the same PR: `.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`, `docs/reborn/contracts/`, skill bodies.
-7. **Runtime-skill spec must track the parser.** `crates/ironclaw_skills/src/types.rs` supports `requires.config`, `requires.skills`, `activation.setup_marker`, and silently truncates >20 keywords / >5 patterns (`enforce_limits`). If you use or change parser behavior, update `.claude/rules/skills.md` in the same PR.
+7. **Runtime-skill spec must track the parser.** `crates/domains/ironclaw_skills/src/types.rs` supports `requires.config`, `requires.skills`, `activation.setup_marker`, and silently truncates >20 keywords / >5 patterns (`enforce_limits`). If you use or change parser behavior, update `.claude/rules/skills.md` in the same PR.
 8. **Codex parity check.** Codex cannot load Claude skills; it reads AGENTS.md. When a skill carries a rule Codex must also follow, the AGENTS.md hierarchy needs the pointer *with enough inline substance* ("read `.claude/skills/<name>/SKILL.md`" works — skills are plain markdown).
 9. **Test skills like code (RED-GREEN).** Before shipping a new/edited skill: run the tempting scenario with a fresh subagent *without* the change (does the failure actually occur?), then with it (is it caught?). A skill nobody failed without is dead weight; a skill you didn't re-test may not bind. Record trap results in the skill PR.
 10. **`crates/AGENTS.md` map hygiene**: when adding a crate, add its row. Absence from the routing map = agents misrouted.

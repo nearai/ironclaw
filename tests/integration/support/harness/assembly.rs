@@ -8,7 +8,7 @@ use super::super::{
     extension_surface::BUNDLED_EXTENSION_IDS, github as github_support, harness_web_access,
 };
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
     DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
@@ -55,7 +55,7 @@ pub(crate) fn default_capability_io_pair() -> (
     Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) {
-    let capability_io = Arc::new(ironclaw_reborn_composition::ProductLiveCapabilityIo::default());
+    let capability_io = Arc::new(ironclaw_composition::ProductLiveCapabilityIo::default());
     (capability_io.clone(), capability_io)
 }
 
@@ -303,7 +303,7 @@ pub(crate) fn standalone_host_runtime_with_registry_and_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let filesystem =
         standalone_root_filesystem(storage_root, StandaloneRootMounts::github_assets())?;
-    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
+    let scoped_filesystem = ironclaw_composition::wrap_scoped(Arc::clone(&filesystem));
     let process_runtime: Arc<dyn ironclaw_processes::ProcessRuntimePort> = Arc::new(
         ironclaw_processes::ProcessJournalStore::new(Arc::clone(&scoped_filesystem)),
     );
@@ -393,7 +393,7 @@ pub(crate) fn standalone_host_runtime_with_real_egress_pipeline(
     registry.insert(builtin_first_party_package()?)?;
     let filesystem =
         standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?;
-    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
+    let scoped_filesystem = ironclaw_composition::wrap_scoped(Arc::clone(&filesystem));
 
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),

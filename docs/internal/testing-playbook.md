@@ -208,7 +208,7 @@ tiers ran. Name the tiers actually exercised in the pull request test card.
 ### Unit or crate contract
 
 Example:
-[`crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs`](../../crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs)
+[`crates/product/ironclaw_webui/tests/webui_v2_descriptors_contract.rs`](../../crates/product/ironclaw_webui/tests/webui_v2_descriptors_contract.rs)
 
 This contract locks the declared WebChat v2 route surface, including method,
 path, authentication, body limit, rate limit, CORS, audit class, and allowed
@@ -407,21 +407,21 @@ pytest scenarios/test_reborn_webui_v2_smoke.py
 ### Database or runtime integration
 
 Example:
-[`crates/ironclaw_hooks/tests/parity_matrix.rs`](../../crates/ironclaw_hooks/tests/parity_matrix.rs)
+[`crates/loop/ironclaw_hooks/tests/parity_matrix.rs`](../../crates/loop/ironclaw_hooks/tests/parity_matrix.rs)
 
 This is the right shape when multiple backends must implement the same
 behavioral contract. Production-facing persistence behavior should cover both
 libSQL and PostgreSQL unless the owning contract explicitly says otherwise.
 
 Prefer the owning crate's `tests/` directory for one storage or runtime
-contract. Use an existing feature-gated root integration suite when behavior
-crosses composition layers.
+contract. Use an existing feature-gated crate suite when behavior crosses
+composition layers.
 
 Never silently return from a test because Docker or PostgreSQL is missing. Use
 documented feature gates or a loud, explicit opt-out.
 
 ```bash
-cargo test --features integration
+cargo test -p <owning-crate> --features integration   # e.g. -p ironclaw_hooks; the workspace-root `integration` feature is empty
 ```
 
 ### Live canary
@@ -512,7 +512,7 @@ layer is omitted, explain why in one sentence.
 - Assert an observable outcome, not only `Completed` status or a mock call
   count.
 - Run the narrowest test during development, then expand based on risk.
-- Add `cargo test -p ironclaw_architecture` when dependency or ownership edges
+- Add `cargo test -p ironclaw_architecture_tests` when dependency or ownership edges
   change.
 - Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
   behavior changes.

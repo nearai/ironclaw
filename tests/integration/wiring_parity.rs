@@ -1,7 +1,7 @@
 //! W5-WIRING-PARITY (issue #5637): the harness's `DefaultPlannedRuntimeParts`
 //! construction (`support/group.rs`'s `into_group`) stays field-Some/None-
 //! identical to production's local-dev construction
-//! (`ironclaw_reborn_composition::runtime::build_reborn_runtime`), modulo a
+//! (`ironclaw_composition::runtime::build_reborn_runtime`), modulo a
 //! named allowlist of deliberate test-double substitutions — so a new
 //! port/field lands loud instead of silently drifting. Zero production-crate
 //! edits: the mechanism is entirely test-side.
@@ -44,7 +44,7 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
 // ---------------------------------------------------------------------------
 
-/// Hand-derived from `crates/ironclaw_reborn_composition/src/runtime.rs`
+/// Hand-derived from `crates/ironclaw_composition/src/runtime.rs`
 /// lines 3365-3459 (`build_reborn_runtime`, `Standalone`/`StandaloneUnrestricted`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
@@ -229,7 +229,7 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
 /// referenced `Standalone` literal still exists and the profile still builds.
-/// Mirrors `crates/ironclaw_reborn_composition/tests/runtime.rs:132-146`. The
+/// Mirrors `crates/ironclaw_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
 /// introspecting this built `RebornRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted
@@ -237,15 +237,15 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 #[tokio::test]
 async fn standalone_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
-    let policy = ironclaw_reborn_composition::standalone_runtime_policy()
+    let policy = ironclaw_composition::standalone_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let input = ironclaw_composition::local_filesystem_build_input(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )
     .with_runtime_policy(policy);
-    let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-        ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(input),
+    let runtime = ironclaw_composition::build_reborn_runtime(
+        ironclaw_composition::RebornRuntimeInput::from_build_input(input),
     )
     .await
     .expect(
@@ -274,20 +274,20 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     (
         "project",
         "PROJECT_CREATE_CAPABILITY_ID (harness/profiles/project.rs) is a local-dev synthetic \
-         capability (E-PROJ, ironclaw_reborn_composition::test_support), not part of \
+         capability (E-PROJ, ironclaw_composition::test_support), not part of \
          builtin_first_party_package()",
     ),
     (
         "outbound",
         "OUTBOUND_DELIVERY_TARGETS_LIST/TARGET_SET_CAPABILITY_ID (harness/profiles/outbound.rs) \
          are local-dev synthetic capabilities (C-SYNTH outbound, \
-         ironclaw_reborn_composition::test_support), not part of builtin_first_party_package()",
+         ironclaw_composition::test_support), not part of builtin_first_party_package()",
     ),
     (
         "skill",
         "skill_activation_tools_profile()'s SKILL_ACTIVATE_CAPABILITY_ID \
          (harness/profiles/skill.rs) is a local-dev synthetic capability (E-SKILL, \
-         ironclaw_reborn_composition::test_support), not part of builtin_first_party_package(); \
+         ironclaw_composition::test_support), not part of builtin_first_party_package(); \
          skill_management_tools_profile()'s ids in the same file ARE checked below",
     ),
     (
@@ -313,7 +313,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// **Deliberately NOT unioned**: `extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS`
 /// (the three `builtin.extension_search`/`_install`/`_remove` ids).
 /// Their real values are defined in a production crate
-/// (`ironclaw_reborn_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
+/// (`ironclaw_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
 /// but as a `pub(crate)` constant with no public accessor — visibility-blocked
 /// from this test crate short of a `crates/` change, which is out of scope
 /// here. Unioning the test-support copy of this list back in would recreate
@@ -323,7 +323,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// these 3 ids from the check it runs for the same reason, and the PR that
 /// introduced this restructure (W5-WIRING-PARITY finding 1) for the tracked
 /// follow-up (export the list, or add a public accessor, from
-/// `ironclaw_reborn_composition`).
+/// `ironclaw_composition`).
 fn production_capability_surface() -> HashSet<String> {
     let mut surface: HashSet<String> = ironclaw_host_runtime::builtin_first_party_package()
         .expect("builtin first-party package parses")

@@ -111,7 +111,7 @@ def metadata() -> dict:
     return {
         "workspace_members": ["root", "alpha", "beta", "gamma"],
         "packages": [
-            {"id": "root", "name": "ironclaw_reborn_integration_tests", "manifest_path": root},
+            {"id": "root", "name": "ironclaw_integration_tests", "manifest_path": root},
             {"id": "alpha", "name": "alpha", "manifest_path": alpha},
             {"id": "beta", "name": "beta", "manifest_path": beta},
             {"id": "gamma", "name": "gamma", "manifest_path": gamma},
@@ -153,14 +153,14 @@ def real_owner_metadata() -> dict:
         }
 
     packages = [
-        package("ironclaw_reborn_integration_tests", "Cargo.toml"),
+        package("ironclaw_integration_tests", "Cargo.toml"),
         package(
             "ironclaw_extension_support",
             "crates/extensions/ironclaw_extension_support/Cargo.toml",
         ),
         package(
             "ironclaw_extension_host",
-            "crates/ironclaw_extension_host/Cargo.toml",
+            "crates/extensions/ironclaw_extension_host/Cargo.toml",
             ("ironclaw_extension_support",),
         ),
         package(
@@ -219,7 +219,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             canonical_packages=[
                 package["name"]
                 for package in metadata["packages"]
-                if package["name"] != "ironclaw_reborn_integration_tests"
+                if package["name"] != "ironclaw_integration_tests"
             ],
         )
 
@@ -454,6 +454,19 @@ class RebornPrTestPlanTests(unittest.TestCase):
             # raising `unmapped test or CI path` until they were classified.
             "scripts/reborn_qa_matrix/audit_surface_inventory.py",
             "scripts/reborn_qa_matrix/test_audit_surface_inventory.py",
+            # 2026-08-05: `scripts/live_canary/` (UNDERSCORE) is a second real
+            # directory beside `scripts/live-canary/` (hyphen) above, and
+            # classifying the hyphen tree never classified this one. It is the
+            # canary's importable Python package; a crate rename reaches it
+            # through a `RUST_LOG` string, and the fail-closed arm rejected the
+            # whole rename PR on that one line.
+            "scripts/live_canary/common.py",
+            "scripts/live_canary/auth_runtime.py",
+            # 2026-08-06: the live Telegram release smoke harness — run by
+            # hand, referenced by no workflow. PR #7264's stale-command fix in
+            # its README hit the fail-closed arm.
+            "scripts/telegram_smoke/README.md",
+            "scripts/telegram_smoke/run_smoke.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -597,6 +610,99 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["integration_lanes"], [])
 
+    def test_out_of_workspace_harness_is_owned_by_dedicated_workflow(self) -> None:
+        """`harness/**` is a standalone cargo project, not a workspace member.
+
+        `harness/latency/runner` carries its own `Cargo.lock` and is excluded
+        from the workspace, so no `Tests (Reborn)` lane builds it. Without a
+        rule the planner fails closed on it, the same shape as the `.claude/`
+        and container-input gaps this file already pins.
+        """
+        plan = self.plan("pull_request", ["harness/latency/runner/src/main.rs"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+    def test_workspace_excluded_helper_selects_nothing(self) -> None:
+        """`tools/ironclaw_silk_decoder/**` is `[workspace]`-rooted and named in
+        the root `exclude`, and has no workflow of its own either.
+
+        Two things are pinned here, and the second is the interesting one.
+        First, it must be *classified* — WS7 moved it out of `crates/`
+        (PROPOSAL §12.13 D-O), and an unclassified path fails the planner
+        closed, skipping every downstream Reborn lane. Second, it must select
+        **nothing**: under its old `crates/` home the crate-attribution
+        fall-through selected the ENTIRE workspace for a one-line edit to a
+        helper nothing builds. Asserting emptiness is what stops a future
+        "classification" from quietly restoring that over-selection.
+        """
+        for path in (
+            "tools/ironclaw_silk_decoder/src/main.rs",
+            "tools/ironclaw_silk_decoder/Cargo.toml",
+            "tools/ironclaw_silk_decoder/AGENTS.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["affected_packages"], [])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
+    def test_repo_root_metadata_class_is_owned_by_other_lanes(self) -> None:
+        """The repo-root metadata class de-escalates instead of failing closed.
+
+        Classified as a *class* rather than one file per red run: a
+        rename-shaped diff touches root files no feature PR normally touches,
+        the fail-closed arm rejects the first one, and the next only surfaces
+        after that one is fixed. Each entry was checked against `crates/**` and
+        `tests/**` for a reader before being listed; none has one.
+
+        Paired assertion, as in the `.claude/` regression: accepted AND
+        selecting nothing, so a later "classification" that quietly escalates
+        these to a full matrix fails here too.
+        """
+        for path in (
+            "clippy.toml",
+            "deny.toml",
+            "release-plz.toml",
+            ".gitattributes",
+            ".coderabbit.yaml",
+            ".mcp.json",
+            ".node-version",
+            ".nvmrc",
+            ".sqlfluff",
+            "Dockerfile.process-sandbox",
+            "docker-compose.yml",
+            "railway.toml",
+            "codecov.yml",
+            "ironclaw.bash",
+            "ironclaw.fish",
+            "ironclaw.zsh",
+            "ironclaw.png",
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+            "scripts/check_no_panics.py",
+            "scripts/dev_metrics.py",
+            "scripts/pre-commit-safety.sh",
+            "scripts/test-mutation-audit.sh",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+                # The plan must say *why*, so a future reader sees the
+                # decision rather than a silent "nothing to run".
+                self.assertTrue(
+                    any(
+                        reason.startswith("static CI or workspace-policy checks own")
+                        and path in reason
+                        for reason in plan["reasons"]
+                    ),
+                    plan["reasons"],
+                )
+
     def test_e2e_paths_are_owned_by_dedicated_workflows(self) -> None:
         for path in (
             "tests/e2e/helpers.py",
@@ -648,7 +754,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
         self.assertIn(
-            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
             "\\\n      --ignore-rust-version",
             lane_runner,
         )
@@ -658,7 +764,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
             "\\\n      --ignore-rust-version -- --nocapture",
             lane_runner,
         )
@@ -766,6 +872,44 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", [".env.local"])
 
+    def test_github_pr_template_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.github/pull_request_template.md` is a GitHub UI template.
+
+        Regression for the gap PR #7264 hit: `ISSUE_TEMPLATE/` was classified
+        but its exact sibling — the PR-body template, the other GitHub UI
+        template — was not, so a one-line checklist correction failed the whole
+        `Tests (Reborn)` roll-up. GitHub renders the file into the PR editor;
+        no crate, test, or workflow reads it (`classify-test-scope.sh` already
+        pairs it with `ISSUE_TEMPLATE/` in its docs-only arm).
+
+        Paired assertions, same reason as the `.claude/` test above: the path
+        must be *accepted* AND select no Rust lane. The sibling probes then
+        keep the fail-closed arm authoritative for the rest of `.github/` —
+        real, undecided neighbours must still refuse.
+        """
+        plan = self.plan("pull_request", [".github/pull_request_template.md"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        # The ignore is per-path, not per-PR: a real change riding along still
+        # selects its lane.
+        paired = self.plan(
+            "pull_request",
+            [".github/pull_request_template.md", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
+
+        # And an unknown `.github/` sibling still refuses.
+        for path in (".github/dependabot.yml", ".github/labeler.yml"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
+
     def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root files another workflow owns outright.
 
@@ -775,7 +919,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
         the panic baseline belongs to Code Style, the E2E selector script
         belongs to the `Reborn E2E` workflow's own scope detector,
         `check-version-bumps.sh` is invoked only by `platform-and-compat.yml`,
-        `run-reborn-webui.sh` is a local launcher no workflow references, and
+        `run-reborn-webui.sh` is a local launcher no workflow references,
+        `mutation-audit.sh` is run only by `nightly-deep-ci.yml`'s
+        mutation-frontier job (the lane that already owned its self-test;
+        unclassified until 2026-08-06, when PR #7264's one-line usage-comment
+        fix in it failed the whole `Tests (Reborn)` roll-up), and
         `.gitignore` is read by Code Style's `Reject tracked files that match
         .gitignore` guard (#6965 — unclassified until 2026-08-04, which failed
         the whole `Tests (Reborn)` roll-up on any PR that added an ignore
@@ -793,6 +941,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/check-version-bumps.sh",
             "scripts/run-reborn-webui.sh",
             "scripts/codebase-graph.sh",
+            "scripts/mutation-audit.sh",
             ".gitignore",
         ):
             with self.subTest(path=path):
@@ -1031,7 +1180,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         Both halves of that bite. `crates/extensions/packages/` is embedded by
         four crates, not one — `ironclaw_extension_host`,
-        `ironclaw_extension_manager` and `ironclaw_reborn_composition` reach
+        `ironclaw_extension_manager` and `ironclaw_composition` reach
         into it alongside `ironclaw_extension_support` — and they are covered
         only because each depends on the support crate. Drop that edge and a
         shipped-artifact change stops scheduling a crate that embeds it, which
@@ -1066,6 +1215,67 @@ class RebornPrTestPlanTests(unittest.TestCase):
                         f"depend on {owner}, so routing there never schedules it",
                     )
 
+    # `.env.example` classification (the other half of the run-30921860394
+    # rejection, which sorts first and masked the entrypoint miss below) is
+    # covered by `test_repo_root_example_env_is_classified_and_selects_no_rust_lane`
+    # above — main classified it independently via `IGNORED_ROOT_FILES` while
+    # this branch was in flight, same fix by the same route.
+    def test_reborn_container_entrypoint_is_owned_by_code_style(self) -> None:
+        """`docker/reborn/entrypoint.sh` is shell that Code Style self-tests.
+
+        Second half of the same rejection. It is deliberately *not* an ignore:
+        the plan names an owner, because one exists —
+        `scripts/ci/test-reborn-docker-entrypoint.sh` drives the real script in
+        Code Style's script self-test step, and `code_style.yml`'s `has_code`
+        filter lights that lane for this exact path. No Reborn Rust lane
+        executes it, so it selects nothing here.
+        """
+        plan = self.plan("pull_request", ["docker/reborn/entrypoint.sh"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertIn(
+            "static CI or workspace-policy checks own: docker/reborn/entrypoint.sh",
+            plan["reasons"],
+        )
+
+    def test_classified_operator_paths_do_not_mask_a_real_lane(self) -> None:
+        """Neither classification may swallow its neighbours.
+
+        The planner raises on the *first* unclassified path in sorted order, so
+        a per-PR shortcut would look identical to a per-path rule on the diff
+        that motivated them. Drive both together with a crate change and assert
+        the crate lane still gets selected.
+        """
+        plan = self.plan(
+            "pull_request",
+            [
+                ".env.example",
+                "docker/reborn/entrypoint.sh",
+                "crates/alpha/src/lib.rs",
+            ],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
+        """The entrypoint is decided; its neighbours are not.
+
+        `docker/` is classified per-file for the same reason repo-root
+        `scripts/` is: a blanket prefix would silently absorb the runtime
+        configs, which have no owning lane yet. Keep the fail-closed arm proven
+        for the paths nobody has decided.
+        """
+        for path in (
+            "docker/reborn/config.production.toml",
+            "docker/process-sandbox-entrypoint.sh",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
+
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.
 
@@ -1096,6 +1306,38 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 docs = self.plan("pull_request", ["docs/reborn/README.md"])
                 self.assertEqual(plan["mode"], "none")
                 self.assertEqual(plan, docs)
+
+    def test_generated_wiki_paths_are_prose_and_select_nothing(self) -> None:
+        """`openwiki/**` is generated prose, like `docs/**`.
+
+        Regression fixture for the same class as `.claude/` above: the planner
+        had no rule for the auto-generated wiki, so its fail-closed arm rejected
+        any PR that touched it. A crate rename touches it by construction — the
+        wiki's prose names crate directories — so the whole of WS6 was
+        unplannable while the gap stood.
+
+        Paired against `docs/`: the assertion is that the two are the *same*
+        plan, so a later change that quietly escalates the wiki to a lane fails
+        here too.
+        """
+        for path in (
+            "openwiki/quickstart.md",
+            "openwiki/architecture/crates.md",
+            "openwiki/development/workflows.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan, docs)
+
+        # The decision is per-path, not per-PR: a real change riding along
+        # still selects its lane.
+        paired = self.plan(
+            "pull_request", ["openwiki/quickstart.md", "crates/alpha/src/lib.rs"]
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
 
     def test_crate_tree_prose_outside_any_package_selects_nothing(self) -> None:
         """`crates/AGENTS.md` and friends belong to no package.
@@ -1159,14 +1401,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
-    def test_hosted_mcp_support_selects_its_owning_integration_lane(self) -> None:
-        owner = planner.INTEGRATION_SUPPORT_OWNERS[
-            "tests/support/hosted_mcp_registration_server.rs"
+    def test_owned_integration_support_selects_its_exact_lane(self) -> None:
+        for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
+            with self.subTest(path=path):
+                expected_lane = planner._integration_test_lanes()[owner]
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["integration_lanes"], [expected_lane])
+
+    def test_golden_payload_snapshot_selects_its_owning_integration_lane(self) -> None:
+        owner = planner.INTEGRATION_SNAPSHOT_PREFIX_OWNERS[
+            "tests/snapshots/golden_payload__"
         ]
+        self.assertEqual(owner, "tests/integration/golden_payload.rs")
         expected_lane = planner._integration_test_lanes()[owner]
 
         plan = self.plan(
-            "pull_request", ["tests/support/hosted_mcp_registration_server.rs"]
+            "pull_request", ["tests/snapshots/golden_payload__tool_call.snap"]
         )
 
         self.assertEqual(plan["integration_lanes"], [expected_lane])
