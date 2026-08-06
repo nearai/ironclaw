@@ -62,14 +62,17 @@ Run (resolve the path against this skill's `scripts/` directory):
 scripts/preview_state.sh <PR> [REPO] [PREVIEW_URL]
 ```
 
-Record `head_sha`, `railway_state`, and `asset`. Poll every 30–45 seconds,
-up to 20 attempts (roughly 15 minutes), until the head-specific Railway check
-passes. Send a concise progress update at least once per minute.
+Record `head_sha`, `railway_state` (`success`, `pending`, `failure`, `error`,
+`missing`, or `query_failed`), `railway_details`, and `asset`. The script
+queries the commit-scoped status and check-run endpoints, so the result is
+bound to the tested head SHA — never a stale build. Poll every 30–45 seconds,
+up to 20 attempts (roughly 15 minutes), until `railway_state` reports
+`success`. Send a concise progress update at least once per minute.
 
-If the Railway check is still `missing` or `pending` after the attempt limit,
-stop polling and report BLOCKED with the latest check diagnostics; never test
-a partial build. A failing Railway check is BLOCKED as well until the
-intended build is live.
+If the exact-head Railway status is still `pending`, `missing`, or
+`query_failed` after the attempt limit, stop polling and report BLOCKED with
+the latest diagnostics; never test a partial build. A `failure` or `error`
+status is BLOCKED as well until the intended build is live.
 
 For frontend changes, compare the asset hash with the pre-deploy baseline.
 For backend-only changes, an unchanged asset is acceptable after the
@@ -181,38 +184,53 @@ Then clean up, guarded so failures cannot skip publication:
 await browser.tabs.finalize({ keep: [] })
 ```
 
-3. Re-read `headRefOid` once more. If it differs from the tested head, append
-   a BLOCKED note to the evidence instead of publishing evidence for a stale
-   build.
+3. Re-read `headRefOid` once more. If it differs from the tested head,
+   discard the browser observations: rebuild the evidence as
+   `Railway preview QA — BLOCKED` with the reason (`head changed during
+   testing: tested <old SHA>, head is now <new SHA>`) and no stale PASS/FAIL
+   heading or matrix, then publish that.
 4. Publish the prepared evidence as a comment on the tested pull request.
    Post evidence for PASS, FAIL, and BLOCKED runs; a failed or blocked test is
    still useful PR evidence. Never put the bearer, credentials, sensitive
    browser state, or secrets in the comment.
 
-   Find the existing evidence comment for this exact head — the one whose
-   body contains the hidden marker AND whose author is the current GitHub
-   user:
+   List ALL matching comments — paginated, filtered to the current GitHub
+   user and the exact head marker:
 
    ```bash
    GH_USER="$(gh api user --jq .login)"
-   gh api repos/<REPO>/issues/<PR>/comments \
+   gh api --paginate repos/<REPO>/issues/<PR>/comments \
      --jq ".[] | select(.user.login == \"$GH_USER\") | select(.body | contains(\"railway-test:evidence head=<HEAD_SHA>\")) | .id"
    ```
 
-   - If found, update it instead of adding a duplicate for the same head:
+   Reconcile to exactly one canonical comment before publishing:
 
-     ```bash
-     gh api repos/<REPO>/issues/comments/<COMMENT_ID> -F body=@<evidence-file>
-     ```
-
-   - Otherwise create a new comment:
+   - No match: create a new comment:
 
      ```bash
      gh pr comment <PR> --repo <REPO> --body-file <evidence-file>
      ```
 
-   A new deployed head gets a new evidence comment; the same head is never
-   published twice.
+   - Exactly one match: update it (the API needs PATCH, not the default GET):
+
+     ```bash
+     gh api --method PATCH repos/<REPO>/issues/comments/<COMMENT_ID> \
+       -F body=@<evidence-file>
+     ```
+
+   - Multiple matches (a lost create response or a concurrent run): keep the
+     first as canonical and delete the duplicates:
+
+     ```bash
+     gh api --method DELETE repos/<REPO>/issues/comments/<DUPLICATE_ID>
+     ```
+
+     then update the canonical comment as above.
+
+   Re-list with the same query after creating, updating, or deleting; if the
+   list still does not contain exactly one comment for this user and head,
+   reconcile again before reporting success. A new deployed head gets a new
+   evidence comment; the same head is never published twice.
 5. Capture the resulting comment URL and include it in the final response.
 
 Do not report the Railway test as fully delivered until the comment URL is
