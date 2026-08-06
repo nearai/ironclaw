@@ -9,7 +9,7 @@ use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
     LoopContextPort, LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority,
     LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
-    LoopRunContext, PromptMode, VisibleCapabilitySurface,
+    LoopRunContext, PromptMode, SkillName, VisibleCapabilitySurface,
 };
 use ironclaw_loop_contracts::{
     InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
@@ -401,8 +401,15 @@ where
                     active_skills: instruction_bundle
                         .skill_context
                         .iter()
-                        .map(|skill| skill.source_name.clone())
-                        .collect(),
+                        .map(|skill| {
+                            SkillName::new(skill.source_name.clone()).map_err(|_| {
+                                AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::Invalid,
+                                    "prompt bundle contains an invalid skill name",
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
                 }),
             )?;
         trace_prompt_latency_ok(

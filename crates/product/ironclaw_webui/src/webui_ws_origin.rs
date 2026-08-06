@@ -122,7 +122,7 @@ fn forbidden_origin(detail: &'static str) -> Response {
     // CLAUDE.md REPL/TUI restriction is about background tasks and
     // interactive CLI surfaces, not gateway request handling.
     tracing::info!(
-        target = "ironclaw::reborn::webui_ws_origin",
+        target: "ironclaw::reborn::webui_ws_origin",
         detail,
         "rejecting WebSocket upgrade with disallowed Origin",
     );
@@ -269,6 +269,57 @@ mod tests {
         assert!(!origin_is_localhost("http://192.168.1.1"));
         // Malformed bracketed origin must NOT pass.
         assert!(!origin_is_localhost("http://[no-close"));
+    }
+
+    /// The rejection is only useful if an operator can filter for it. #7146
+    /// found this site (and 120 others) written `target = "…"`, which records a
+    /// *field* named `target` and leaves the event's metadata target as the
+    /// module path — so `RUST_LOG=ironclaw::reborn::webui_ws_origin=info`
+    /// matched nothing while the events were being emitted.
+    ///
+    /// Asserted off `event.metadata().target()` rather than off rendered output:
+    /// the field form also prints a `target=` in the formatted line, so a text
+    /// assertion passes on the broken form too. The architecture gate
+    /// `reborn_tracing_target_syntax` holds the syntax repo-wide; this measures
+    /// one real production emission end-to-end so the rule is anchored to
+    /// behaviour and not only to a scan.
+    #[test]
+    fn forbidden_origin_announces_itself_on_the_ws_origin_target() {
+        use std::sync::{Arc, Mutex};
+
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+        use tracing_subscriber::registry::Registry;
+
+        #[derive(Clone, Default)]
+        struct TargetCapture(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for TargetCapture {
+            fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event.metadata().target().to_string());
+            }
+        }
+
+        let capture = TargetCapture::default();
+        let subscriber = Registry::default().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let response = forbidden_origin("origin not allowed");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        });
+
+        let captured = capture
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(
+            captured,
+            vec!["ironclaw::reborn::webui_ws_origin".to_string()],
+            "the WS-origin rejection must carry its documented metadata target, \
+             not the module path"
+        );
     }
 
     #[test]
