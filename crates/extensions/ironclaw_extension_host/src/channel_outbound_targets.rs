@@ -290,7 +290,8 @@ impl GenericChannelOutboundTargetProvider {
         caller: &OutboundDeliveryTargetScope,
         record: &ChannelDmTargetRecord,
     ) -> Option<OutboundDeliveryTargetEntry> {
-        let (space_id, conversation_id) = dm_record_conversation(record)?;
+        let (space_id, conversation_id) =
+            dm_record_conversation(record, context.space_id.as_deref())?;
         let conversation =
             ExternalConversationRef::new(space_id.as_deref(), &conversation_id, None, None).ok()?;
         let reply_target_binding_ref = context.codec.encode_personal_direct_message_target(
@@ -447,10 +448,14 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
                 let Some(record) = self.dm_record(&context, caller).await? else {
                     return Ok(None);
                 };
-                let Some((_, record_conversation_id)) = dm_record_conversation(&record) else {
+                let Some((record_space_id, record_conversation_id)) =
+                    dm_record_conversation(&record, context.space_id.as_deref())
+                else {
                     return Ok(None);
                 };
-                if record_conversation_id != decoded.conversation_id() {
+                if record_space_id.as_deref() != decoded.space_id()
+                    || record_conversation_id != decoded.conversation_id()
+                {
                     return Ok(None);
                 }
                 // The presented ref's actor must be the provisioned actor —
@@ -474,18 +479,30 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
     }
 }
 
-/// The canonical DM-target payload's conversation ref.
-fn dm_record_conversation(record: &ChannelDmTargetRecord) -> Option<(Option<String>, String)> {
+/// The canonical DM-target payload's conversation ref, completed from the
+/// active connection scope when post-bind provisioning could only persist the
+/// conversation id. An explicitly stored space must match the active scope;
+/// stale cross-workspace state fails closed instead of being rebound.
+fn dm_record_conversation(
+    record: &ChannelDmTargetRecord,
+    active_space_id: Option<&str>,
+) -> Option<(Option<String>, String)> {
     let conversation_id = record
         .target
         .get(DM_TARGET_CONVERSATION_ID_KEY)?
         .as_str()?
         .to_string();
-    let space_id = record
+    let stored_space_id = record
         .target
         .get(DM_TARGET_SPACE_ID_KEY)
         .and_then(|value| value.as_str())
-        .map(str::to_string);
+        .filter(|value| !value.trim().is_empty());
+    let space_id = match (stored_space_id, active_space_id) {
+        (Some(stored), Some(active)) if stored != active => return None,
+        (Some(stored), _) => Some(stored.to_string()),
+        (None, Some(active)) => Some(active.to_string()),
+        (None, None) => None,
+    };
     Some((space_id, conversation_id))
 }
 
