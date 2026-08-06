@@ -715,9 +715,12 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const append = [];
 
   for (const message of anchoredPreserved) {
+    const isClientOnlyError =
+      typeof message?.id === "string" && message.id.startsWith("err-");
     if (
       !isRunActivityMessage(message) &&
-      !isLiveAssistantMessage(message)
+      !isLiveAssistantMessage(message) &&
+      !isClientOnlyError
     ) {
       append.push(message);
       continue;

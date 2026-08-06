@@ -895,17 +895,18 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   });
 
   // Timeline order is authoritative and the rich tool card replaces the
-  // sparse live one; the client-only err-* bubble is preserved at the end.
+  // sparse live one; the client-only err-* bubble stays at its original
+  // boundary before the later timeline reply.
   assert.equal(
     merged.map((m) => m.id).join(","),
-    "msg-user-1,tool-abc,msg-assistant-1,err-run-1",
+    "msg-user-1,tool-abc,err-run-1,msg-assistant-1",
   );
   const toolCard = merged.find((m) => m.id === "tool-abc");
   assert.equal(toolCard.toolParameters, "{}");
   assert.equal(toolCard.toolResultPreview, "ok");
 });
 
-test("mergeFullRefresh anchors preserved runtime bubbles at their original positions", () => {
+test("mergeFullRefresh keeps client-only failures beside the prompt that failed", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
@@ -915,6 +916,7 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
       { id: "msg-user-1", role: "user" },
       { id: "msg-assistant-1", role: "assistant" },
       { id: "msg-user-2", role: "user" },
+      { id: "msg-user-3", role: "user" },
     ],
     [
       { id: "msg-user-1", role: "user" },
@@ -922,6 +924,8 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
       { id: "msg-assistant-1", role: "assistant" },
       { id: "err-run-1", role: "error", content: "run failed" },
       { id: "msg-user-2", role: "user" },
+      { id: "err-run-2", role: "error", content: "run failed again" },
+      { id: "msg-user-3", role: "user" },
     ],
     {
       preserveClientOnly: true,
@@ -930,8 +934,11 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
 
   assert.equal(
     merged.map((m) => m.id).join(","),
-    "msg-user-1,thinking-live,msg-assistant-1,msg-user-2,err-run-1",
+    "msg-user-1,thinking-live,msg-assistant-1,err-run-1,msg-user-2,err-run-2,msg-user-3",
   );
+  const firstFailure = merged.findIndex((message) => message.id === "err-run-1");
+  const secondPrompt = merged.findIndex((message) => message.id === "msg-user-2");
+  assert.equal(firstFailure + 1, secondPrompt);
 });
 
 test("mergeFullRefresh preserves paginated older timeline messages", () => {
