@@ -101,6 +101,15 @@
                 ]
               },
               {
+                "group": "IronHub",
+                "icon": "archive",
+                "pages": [
+                  "hub/overview",
+                  "hub/installing",
+                  "hub/contributing"
+                ]
+              },
+              {
                 "group": "API",
                 "icon": "code",
                 "pages": [
@@ -226,6 +235,15 @@
                 "pages": [
                   "zh/channels/overview",
                   "zh/channels/telegram"
+                ]
+              },
+              {
+                "group": "IronHub",
+                "icon": "archive",
+                "pages": [
+                  "zh/hub/overview",
+                  "zh/hub/installing",
+                  "zh/hub/contributing"
                 ]
               },
               {

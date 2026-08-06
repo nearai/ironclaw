@@ -37,7 +37,7 @@ earlier `Delivered`.
 
 ### Code path (verified)
 
-`crates/ironclaw_reborn_composition/src/slack_delivery.rs`:
+`crates/ironclaw_composition/src/slack_delivery.rs`:
 
 - `deliver_triggered_run` (l.2012) loops: `wait_for_actionable_triggered` → build
   notification → deliver.
@@ -168,9 +168,9 @@ The invariant lives as a doc comment directly on `deliver_triggered_run`
 
 ## File lane
 
-This change touches ONLY `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
+This change touches ONLY `crates/ironclaw_composition/src/slack_delivery.rs`
 (+ its tests) and this plan doc. No edits to `ironclaw_turns/src/status.rs`,
-`ironclaw_runner/src/runtime.rs`, `turn_scheduler.rs`, or any config — those are
+`ironclaw_turn_runner/src/runtime.rs`, `turn_scheduler.rs`, or any config — those are
 owned by sibling tracks.
 
 ## Out of scope / follow-ups

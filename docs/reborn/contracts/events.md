@@ -2,14 +2,14 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_events`
+**Crate:** `crates/events/ironclaw_event_log`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/dispatcher.md`, `docs/reborn/contracts/live-vertical-slice.md`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_events` defines two separate observability surfaces:
+`ironclaw_event_log` defines two separate observability surfaces:
 
 ```text
 Runtime/process events -> RuntimeEvent + EventSink
@@ -102,7 +102,7 @@ Approval-specific runtime event kinds are deliberately absent. Approval resoluti
 
 ## 3. Audit sink shape
 
-`ironclaw_events` provides an async `AuditSink` for control-plane audit records:
+`ironclaw_event_log` provides an async `AuditSink` for control-plane audit records:
 
 ```rust
 #[async_trait]
@@ -210,7 +210,7 @@ Snapshot and cursor-resume projection behavior is pinned by:
 
 ```bash
 cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract
-cargo test -p ironclaw_reborn_composition --lib projection::tests::nested_dispatch_stream
+cargo test -p ironclaw_composition --lib projection::tests::nested_dispatch_stream
 ```
 
 Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure.

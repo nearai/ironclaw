@@ -42,7 +42,7 @@ turned each into a compile error.
 ## Extension/Auth identity invariant
 
 See `CLAUDE.md` → "Extension/Auth Invariants" for routing rules. The
-types live in `crates/ironclaw_common/src/identity.rs`:
+types live in `crates/contracts/ironclaw_common/src/identity.rs`:
 
 - [`CredentialName`] — backend secret identity (e.g.
   `telegram_bot_token`, `google_oauth_token`), intended for secrets-store
@@ -149,7 +149,7 @@ for values handed over from a typed upstream (DB row, parsed
 `ExtensionManifest` field); do not copy that pattern onto new newtypes. Four
 types carry it today: `CredentialName` and `ExtensionName` (via the
 `identity_newtype!` macro), plus `ExternalThreadId` and `McpServerName`, each
-with its own documented rationale in `crates/ironclaw_common/src/identity.rs`.
+with its own documented rationale in `crates/contracts/ironclaw_common/src/identity.rs`.
 
 Review flag: `#[serde(transparent)]` on a newly added validated
 newtype, or a `from_trusted` helper on anything other than the four

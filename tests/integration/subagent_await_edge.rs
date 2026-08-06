@@ -18,7 +18,7 @@ use ironclaw_processes::{
     ProcessLifecycleStatus, ProcessOperationId, ProcessSubmissionPort, ProcessTerminalEvidence,
     SettleProcessDependencyRequest, SubmitProcessRequest,
 };
-use ironclaw_runner::subagent::await_edge::{EdgeTerminalKind, store::AwaitEdgeStore};
+use ironclaw_turn_runner::subagent::await_edge::{EdgeTerminalKind, store::AwaitEdgeStore};
 
 #[tokio::test]
 async fn runner_await_edge_is_a_projection_over_process_dependencies() {

@@ -2,8 +2,8 @@
 
 > **Superseded.** This is a migration record, not current implementation
 > guidance. Use `docs/reborn/extension-runtime/overview.md` and the live crate
-> code under `crates/ironclaw_extensions`, `crates/ironclaw_extension_host`,
-> `crates/ironclaw_product`, and the first-party extension crates.
+> code under `crates/extensions/ironclaw_extension_registry`, `crates/extensions/ironclaw_extension_host`,
+> `crates/product/ironclaw_assistant`, and the first-party extension crates.
 
 **Companions:** `overview.md` (model — read it first), `checklist.md` (acceptance).
 **Baseline:** this branch. It already contains the pending unified-extension-taxonomy PR stack (eight PRs, merge chain ending in #5850) that must land on main before this work starts.
@@ -30,10 +30,10 @@ behavior, and persistent behavior is proven on libSQL **and** PostgreSQL.
 
 Already generic on this branch: one manifest per extension parsed through
 `ExtensionManifestV2::parse`; surfaces projected by `capability_surfaces()`
-(`crates/ironclaw_extensions/src/v2.rs`); surface kinds in
-`crates/ironclaw_extension_contracts/src/surface.rs`; channel surfaces on the extensions
+(`crates/extensions/ironclaw_extension_registry/src/v2.rs`); surface kinds in
+`crates/contracts/ironclaw_extension_contracts/src/surface.rs`; channel surfaces on the extensions
 wire with directions and connection affordance
-(`crates/ironclaw_product/src/reborn_services/{types,extensions}.rs`);
+(`crates/product/ironclaw_assistant/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait
 (`crates/ironclaw_product_adapters/src/adapter.rs`) implemented by
 `crates/extensions/packages/slack`; retired-taxonomy architecture gate.
@@ -42,19 +42,19 @@ Not generic yet — the work:
 
 | Problem | Where |
 | --- | --- |
-| ~30k lines of Slack production code inside composition | `crates/ironclaw_reborn_composition/src/slack/**` (host graph, serve, installation resolution, delivery, egress, targets, DM open, connection, setup, routes, personal OAuth/binding, state roots) |
+| ~30k lines of Slack production code inside composition | `crates/app/ironclaw_composition/src/slack/**` (host graph, serve, installation resolution, delivery, egress, targets, DM open, connection, setup, routes, personal OAuth/binding, state roots) |
 | Dispatcher selects package + runtime kind per invocation | `crates/ironclaw_dispatcher/src/lib.rs` |
 | Adapter trait duplicates manifest metadata (surface kind, capabilities, auth requirement, egress getters) | `crates/ironclaw_product_adapters/src/adapter.rs` |
 | Adapter registry projection is not the production path | `crates/ironclaw_product_adapter_registry/src/lib.rs` |
-| OAuth branches on Slack; providers multiplexed by string | `crates/ironclaw_webui/src/product_auth/oauth.rs`, composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`, `crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs` |
-| Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, `ironclaw_auth` recipe data + composition provider wiring |
-| Installed records persist raw TOML and reproject from it | `crates/ironclaw_extensions/src/installations.rs` |
-| Hosted MCP mutates capabilities from live `tools/list` | `crates/ironclaw_extensions/src/hosted_mcp_discovery.rs` |
-| Lifecycle emits channel connection copy; workflow has cleanup literals | `crates/ironclaw_extension_host/src/product_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
-| Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
-| Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
-| Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution/envelope.rs` |
-| Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
+| OAuth branches on Slack; providers multiplexed by string | `crates/product/ironclaw_webui/src/product_auth/oauth.rs`, composition provider wiring in `crates/app/ironclaw_composition/src/factory.rs`, `crates/app/ironclaw_composition/src/slack/slack_personal_oauth.rs` |
+| Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/extensions/ironclaw_extension_registry/src/v2.rs`, `ironclaw_auth` recipe data + composition provider wiring |
+| Installed records persist raw TOML and reproject from it | `crates/extensions/ironclaw_extension_registry/src/installations.rs` |
+| Hosted MCP mutates capabilities from live `tools/list` | `crates/extensions/ironclaw_extension_registry/src/hosted_mcp_discovery.rs` |
+| Lifecycle emits channel connection copy; workflow has cleanup literals | `crates/extensions/ironclaw_extension_host/src/product_lifecycle.rs`, `crates/product/ironclaw_assistant/src/reborn_services/extensions.rs` |
+| Slack-only frontend components and branches | `crates/product/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
+| Concrete channel formatting in LLM prompt construction | `crates/domains/ironclaw_llm/src/reasoning.rs` |
+| Concrete channel variants in trace contributions | `crates/domains/ironclaw_trace_commons/src/contribution/envelope.rs` |
+| Slack CLI command, cargo feature, config types | `crates/app/ironclaw_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/app/ironclaw_config` |
 | Telegram adapter exists but is test-only | `crates/extensions/packages/telegram` |
 
 ## 3. Target crate and module map
@@ -72,18 +72,18 @@ Not generic yet — the work:
 | Crate | Change |
 | --- | --- |
 | `ironclaw_host_api` | Add `ToolAdapter`, `ToolCall`/`ToolResult`/`ToolPorts`, `RestrictedEgress` trait, auth recipe types, ingress verification recipe types. Base vocabulary — no implementations |
-| `ironclaw_extensions` | Manifest v3 (inline `[channel]`, `[auth.*]`, `[mcp]`), v2 normalization, `ResolvedExtensionManifest` + persisted resolved record + `manifest_digest`, widening diff |
+| `ironclaw_extension_registry` | Manifest v3 (inline `[channel]`, `[auth.*]`, `[mcp]`), v2 normalization, `ResolvedExtensionManifest` + persisted resolved record + `manifest_digest`, widening diff |
 | `ironclaw_product_adapters` | `ChannelAdapter` (replaces `ProductAdapter`; metadata getters deleted), normalized inbound/outbound DTOs, exported conformance suite |
 | `ironclaw_auth` | `AuthEngine` (oauth2_code + api_key), auth account state machine, recipe execution, flow/grant stores kept |
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
-| `ironclaw_product` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
-| `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
+| `ironclaw_assistant` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
+| `ironclaw_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
 | `ironclaw_extension_support` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
-| `ironclaw` (`crates/ironclaw_reborn_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
+| `ironclaw` (`crates/app/ironclaw_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
-| `ironclaw_reborn_traces` | Generic extension/surface origin ids replace concrete variants |
-| `ironclaw_architecture` | New specificity scanner + dependency gates (section 12) |
+| `ironclaw_trace_commons` | Generic extension/surface origin ids replace concrete variants |
+| `ironclaw_architecture_tests` | New specificity scanner + dependency gates (section 12) |
 | `ironclaw_reborn_migration` | One-time migrations (section 11) |
 
 **Deleted crates (2):** `ironclaw_slack_extension`, `ironclaw_telegram_extension` (folded into their extension crates).
@@ -96,7 +96,7 @@ engine, or the router.
 
 ## 4. Workstream A — Manifest v3, recipes, resolved record
 
-**Changes** (`crates/ironclaw_extensions`, `crates/ironclaw_host_api`):
+**Changes** (`crates/extensions/ironclaw_extension_registry`, `crates/contracts/ironclaw_host_api`):
 
 - Add v3 schema: top-level `[[tools]]`, `[mcp]`, `[channel]`
   (ingress + verification + egress + presentation + `conversation_model`),
@@ -139,7 +139,7 @@ engine, or the router.
   `diff_resolved_contracts` ships as the data-model seed for a future
   registry/third-party-distribution trigger.
 
-**Tests first:** `manifest_v3_contract.rs` in `ironclaw_extensions/tests` —
+**Tests first:** `manifest_v3_contract.rs` in `ironclaw_extension_registry/tests` —
 v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent
 (including `provider` → `vendor` mapping); recipe validation failures
 (reserved param, bad pointer, http endpoint, wildcard egress); missing
@@ -224,7 +224,7 @@ remove on both DBs, with a second user proving membership isolation.
 
 ## 6. Workstream C — Tool dispatch cutover
 
-**Changes** (`crates/ironclaw_dispatcher`, `crates/ironclaw_host_runtime`):
+**Changes** (`crates/ironclaw_dispatcher`, `crates/kernel/ironclaw_host_runtime`):
 
 - Dispatcher resolves `ToolResolver::resolve(capability_id)` → prebound adapter
   + resolved declaration. Authorization, approvals, obligations, resource
@@ -251,7 +251,7 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
 
 ## 7. Workstream D — Auth engine cutover
 
-**Changes** (`crates/ironclaw_auth`, composition `product_auth/**`):
+**Changes** (`crates/domains/ironclaw_auth`, composition `product_auth/**`):
 
 - `AuthEngine` implements two methods over recipes: `oauth2_code`, `api_key`.
   Responsibilities split exactly as `overview.md` §4.3. Flow state, PKCE,
@@ -384,7 +384,7 @@ signed vendor POST → verified → normalized → turn admitted.
 
 ## 9. Workstream F — Outbound delivery cutover
 
-**Changes** (`crates/ironclaw_product`, extension crates):
+**Changes** (`crates/product/ironclaw_assistant`, extension crates):
 
 - One `DeliveryCoordinator` (evolve `outbound_delivery.rs` and the generic
   halves of `slack_delivery.rs`): intents `FinalReply | Progress | GatePrompt |
@@ -436,8 +436,8 @@ signed vendor POST → verified → normalized → turn admitted.
 - `CommunicationPresentationPolicy` derived from `[channel.presentation]`
   flows into prompt construction; delete the concrete
   Discord/WhatsApp/Telegram/Slack branches in
-  `crates/ironclaw_llm/src/reasoning.rs`. Replace concrete trace contribution
-  variants in `crates/ironclaw_reborn_traces/src/contribution/envelope.rs`
+  `crates/domains/ironclaw_llm/src/reasoning.rs`. Replace concrete trace contribution
+  variants in `crates/domains/ironclaw_trace_commons/src/contribution/envelope.rs`
   with extension/surface origin ids.
 - **Slack:** `SlackChannelAdapter::deliver` absorbs Block Kit/plain rendering,
   splitting, `chat.postMessage`/update/delete, DM provisioning
@@ -482,10 +482,10 @@ Also delete/replace: Slack cleanup constants in
 covers it); Slack connection copy in `extension_lifecycle.rs` (manifest
 display data); manual Slack scopes/onboarding in `available_extensions.rs`
 (manifest-driven); Slack trust/effect special-casing in `factory.rs`; Slack
-config types in `ironclaw_reborn_config`; `serve_slack.rs` and the
+config types in `ironclaw_config`; `serve_slack.rs` and the
 `slack-v2-host-beta` cargo feature.
 
-**Frontend** (`crates/ironclaw_webui/frontend`):
+**Frontend** (`crates/product/ironclaw_webui/frontend`):
 
 - Wire additions (backend `reborn_services/types.rs`): full surface key per
   surface; three-state public lifecycle projection (§6.1); auth account state enum (§6.3),
@@ -574,7 +574,7 @@ carries a removal note in `checklist.md`.
   → outbound → remove) — proof that no generic path needs a real product.
   (The upgrade-with-widening approval leg is removed — see overview §7; the
   contract diff ships as data-model code without a consent gate.)
-- **Architecture gates** (`crates/ironclaw_architecture/tests/`):
+- **Architecture gates** (`crates/app/ironclaw_architecture_tests/tests/`):
   - keep `reborn_retired_taxonomy.rs`;
   - add `reborn_extension_specificity.rs`: scans generic `crates/**/src`,
     WebUI TS, and production TOML for concrete extension ids, vendor ids,
@@ -597,7 +597,7 @@ carries a removal note in `checklist.md`.
 Phases are PRs into main (after the taxonomy stack merges). Each lands green: `cargo fmt`,
 `cargo clippy --all --benches --tests --examples --all-features` (zero
 warnings), `cargo test` (+ integration features where touched),
-`cargo test -p ironclaw_architecture`, frontend `vitest` when touched.
+`cargo test -p ironclaw_architecture_tests`, frontend `vitest` when touched.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |

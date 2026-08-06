@@ -1,0 +1,126 @@
+//! Delivered-gate-route recording: after a gate/auth prompt lands in a
+//! channel conversation, remember which conversation fingerprints can carry
+//! a bare `approve`/`deny` reply back to the run's (possibly foreign) scope.
+
+use chrono::Utc;
+use ironclaw_extension_contracts::external::ExternalConversationRef;
+use ironclaw_host_api::ids::{TenantId, UserId};
+use ironclaw_outbound::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
+use ironclaw_turns::{TurnRunId, TurnScope};
+
+use super::DeliveredChannelMessage;
+
+/// Record the delivered conversations for a gate/auth prompt so a later
+/// reply in one of them resolves the gate. Every fingerprint variant an
+/// inbound reply could produce is recorded: with and without the space id
+/// (vendors omit it on some events), and with and without the message ref
+/// as the topic (threaded replies to the prompt vs bare replies in the
+/// conversation root).
+// arch-exempt: too_many_args, gate-route identity is a wide tuple; a context bundle is tracked with the P6 extraction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_gate_route_if_needed(
+    route_store: &dyn DeliveredGateRouteStore,
+    run_id: TurnRunId,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    gate_ref: &str,
+    scope: &TurnScope,
+    delivered: &[DeliveredChannelMessage],
+    confirmed_conversation: Option<&ExternalConversationRef>,
+) {
+    let mut conversation_fingerprints = std::collections::BTreeSet::new();
+
+    for message in delivered {
+        let space = message.conversation.space_id();
+        let conversation_id = message.conversation.conversation_id();
+        let vendor_ref = message.vendor_message_ref.as_str();
+        // Space-qualified refs (matches inbound events that carry the
+        // vendor space id), threaded on the prompt and at conversation root.
+        if let Some(space) = space {
+            if let Ok(conv_ref) =
+                ExternalConversationRef::new(Some(space), conversation_id, Some(vendor_ref), None)
+            {
+                conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+            }
+            if let Ok(conv_ref) =
+                ExternalConversationRef::new(Some(space), conversation_id, None, None)
+            {
+                conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+            }
+        }
+        // No-space fallbacks for events that omit the space id; the set
+        // deduplicates when the two forms coincide.
+        if let Ok(conv_ref) =
+            ExternalConversationRef::new(None, conversation_id, Some(vendor_ref), None)
+        {
+            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+        }
+        if let Ok(conv_ref) = ExternalConversationRef::new(None, conversation_id, None, None) {
+            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+        }
+    }
+
+    // An independently confirmed conversation (without its message ref) also
+    // routes: this is the originating conversation on live delivery, or the
+    // already-resolved destination when an authoritative durable row proves
+    // that a replayed prompt was previously delivered.
+    //
+    // `None` for the reply target is the *route*, spelled explicitly. It is not
+    // load-bearing — `conversation_fingerprint` hashes space + conversation +
+    // topic and deliberately excludes the reply-target hint, so this is
+    // byte-identical to threading the source's own hint through. It is written
+    // this way because a per-event message id inside a stable route key reads
+    // like a bug on every future review, and the previous spelling had to be
+    // read together with the fingerprint function to be seen as correct.
+    if let Some(conversation) = confirmed_conversation
+        && let Ok(conv_ref) = ExternalConversationRef::new(
+            conversation.space_id(),
+            conversation.conversation_id(),
+            conversation.topic_id(),
+            None,
+        )
+    {
+        conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+    }
+
+    if conversation_fingerprints.is_empty() {
+        return;
+    }
+
+    let record = DeliveredGateRouteRecord {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        gate_ref: gate_ref.to_string(),
+        run_id,
+        scope: scope.clone(),
+        recorded_at: Utc::now(),
+        delivered_conversation_fingerprints: conversation_fingerprints.into_iter().collect(),
+    };
+
+    if let Err(error) = route_store.record_delivered_gate_route(record).await {
+        // silent-ok: route recording is best-effort; resolution falls back
+        // to explicit gate refs and the hint path, so a write failure never
+        // aborts delivery.
+        tracing::debug!(
+            target = "ironclaw::reborn::run_delivery",
+            %run_id,
+            error = %error,
+            "failed to record delivered gate route"
+        );
+        return;
+    }
+
+    if let Err(sweep_err) = route_store
+        .sweep_expired_delivered_gate_routes(Utc::now())
+        .await
+    {
+        // silent-ok: sweep is opportunistic; expired routes are filtered at
+        // lookup time, so a failed sweep never affects correctness.
+        tracing::debug!(
+            target = "ironclaw::reborn::run_delivery",
+            %run_id,
+            error = %sweep_err,
+            "delivered gate route sweep failed"
+        );
+    }
+}

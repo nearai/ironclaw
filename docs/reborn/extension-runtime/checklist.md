@@ -26,7 +26,7 @@ Rules — kept short on purpose:
   shared with normalized v2. Admin fields are not duplicated below `[channel]`. —
   `acme_fixture_parses_through_the_single_entry_point`,
   `v2_and_v3_rewrites_resolve_identically`
-  (`crates/ironclaw_extensions/tests/manifest_v3_contract.rs`); both schemas
+  (`crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`); both schemas
   dispatch through `ExtensionManifestRecord::from_toml`. The new
   admin-configuration-only schema rows await the combined matrix.
 - [x] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
@@ -34,7 +34,7 @@ Rules — kept short on purpose:
   11 first-party packages; the two hosted-MCP packages instead assert their
   `[mcp]` ceiling plus the discovered set, since their placeholder static
   tools intentionally become discovery). —
-  `crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs`
+  `crates/app/ironclaw_composition/tests/first_party_manifest_v3_parity.rs`
   (9 static-parity tests against the pre-rewrite v2 snapshots under
   `tests/fixtures/first_party_v2/`, plus `notion_mcp_v3_declares_the_ceiling`
   and `nearai_mcp_v3_declares_the_ceiling`). Effects compare modulo the
@@ -44,7 +44,7 @@ Rules — kept short on purpose:
   — `unknown_top_level_fields_fail_closed_with_path_context`
   (`manifest_v3_contract.rs`); `unknown_recipe_fields_fail_closed`,
   `unknown_channel_fields_fail_closed`
-  (`crates/ironclaw_host_api/src/{recipe,channel}.rs`).
+  (`crates/contracts/ironclaw_host_api/src/{recipe,channel}.rs`).
 - [x] MAN-5 Recipe validation rejects: non-https endpoints, reserved authorize
   params in `extra_authorize_params`, invalid/deep/wildcard JSON pointers,
   wildcard egress hosts, multi-segment `route_suffix`. —
@@ -60,7 +60,7 @@ Rules — kept short on purpose:
   only the `[mcp]` connection credential and server host carry authority —
   discovered tools cannot add credentials or egress.
   — PARTIAL: the manifest half is built + tested (`[mcp]` mutual-exclusion +
-  required-field checks, `crates/ironclaw_extensions/tests/manifest_v3_contract.rs`);
+  required-field checks, `crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`);
   the runtime discovery-ceiling *rejection* (out-of-namespace/count/schema-size/
   effects) is not pinned by a MAN-6-named test — loader-owned discovery is
   covered structurally under TOOL-9. Ticks with a ceiling-rejection test.
@@ -69,13 +69,13 @@ Rules — kept short on purpose:
   fail internal publication with a conflict error.
   — PARTIAL: the recipe union/conflict logic is unit-tested
   (`shared_vendor_recipes_union_scopes_and_reject_conflicts`,
-  `crates/ironclaw_extension_host/src/recipes.rs`), asserting both extension
+  `crates/extensions/ironclaw_extension_host/src/recipes.rs`), asserting both extension
   names in the conflict error; but the publication-caller path (two extensions
   reconciling → shared record / conflict-fails-publication) is not pinned by a
   caller-level test. Ticks with that caller-level test.
 - [x] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding. —
   `CapabilitySurfaceKind::{Trigger,File}` are reserved enum variants
-  (`crates/ironclaw_extension_contracts/src/surface.rs`, doc "no manifest section projects
+  (`crates/contracts/ironclaw_extension_contracts/src/surface.rs`, doc "no manifest section projects
   this kind yet"), wire-pinned by
   `surface_kind_wire_shape_is_snake_case_and_matches_as_str`; nothing binds them
   at runtime by construction — the binding rule (LIFE-1) binds only
@@ -83,9 +83,9 @@ Rules — kept short on purpose:
 - [x] MAN-9 Retired-taxonomy gate still passes (no `slack_bot`/
   `slack_personal`/channel-as-product vocabulary). —
   `reborn_code_never_references_retired_taxonomy`
-  (`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs`) scans
+  (`crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs`) scans
   `crates/` + `tests/integration/` and pins the retired vocabulary at zero;
-  green under `cargo test -p ironclaw_architecture`.
+  green under `cargo test -p ironclaw_architecture_tests`.
 - [ ] MAN-10 `[channel].conversation_model` is required and validated;
   conversation binding honors the declared model through a caller-level
   workflow test; the WebUI's internal channel uses the same enum.
@@ -93,7 +93,7 @@ Rules — kept short on purpose:
   field is `vendor` (v2 `provider` maps in normalization); stored vendor id
   strings are unchanged; the old type name's deprecation alias is now
   **deleted (P7b)**. — workspace-wide rename
-  (`crates/ironclaw_host_api/src/ids.rs`; the
+  (`crates/contracts/ironclaw_host_api/src/ids.rs`; the
   `RuntimeCredentialAccountProviderId = VendorId` alias was removed with zero
   remaining references workspace-wide);
   `v2_and_v3_rewrites_resolve_identically` pins the `provider` → `vendor`
@@ -110,7 +110,7 @@ Rules — kept short on purpose:
   `ctx.resolved.to_internal(source)`; manifest-source re-checks come from the
   persisted record). The no-reparse gate is now enforced:
   `manifest_reparse_stays_within_the_compiler_migration_and_bundled_paths`
-  (`crates/ironclaw_architecture/tests/reborn_manifest_reparse_gate.rs`)
+  (`crates/app/ironclaw_architecture_tests/tests/reborn_manifest_reparse_gate.rs`)
   scans production Rust (test-stripped) and holds every
   `ExtensionManifest::parse` / `ExtensionManifestRecord::from_toml` site to a
   categorized (compiler/migration/bundled-asset) allowlist — a new
@@ -119,7 +119,7 @@ Rules — kept short on purpose:
 - [x] REC-2 Restart restores extensions from persisted records with the
   package source unavailable. — `records_rehydrate_from_resolved_in_memory` /
   `records_rehydrate_from_resolved_on_libsql`
-  (`crates/ironclaw_reborn_composition/src/extension_host/extension_installation_store.rs`
+  (`crates/app/ironclaw_composition/src/extension_host/extension_installation_store.rs`
   tests): a record with a corrupted raw source rehydrates from its persisted
   resolved contract. Full package-source-unavailable restart through the
   integration harness lands with the P2 composition cutover.
@@ -136,7 +136,7 @@ Rules — kept short on purpose:
   as silent boot-time adoption of bundled contracts
   (`migrate_host_bundled_manifest_hash`); first-party manifests change via
   reviewed PRs. The classifier (`diff_resolved_contracts`,
-  `crates/ironclaw_extensions/src/resolved.rs`) exists and stays tested. Revisit
+  `crates/extensions/ironclaw_extension_registry/src/resolved.rs`) exists and stays tested. Revisit
   trigger: third-party/registry package distribution (overview §7). REL-1's
   sweep counts this row as dispositioned by owner decision.
 
@@ -145,7 +145,7 @@ Rules — kept short on purpose:
 - [x] LIFE-1 Declared `[[tools]]`/`[mcp]` without a bound tool
   adapter prevents publication; same for `[channel]`; undeclared bindings fail;
   auth never binds.
-  — `binding rule` unit tests (`crates/ironclaw_extension_host/src/entrypoint.rs`):
+  — `binding rule` unit tests (`crates/extensions/ironclaw_extension_host/src/entrypoint.rs`):
   declared-tool/channel-without-adapter, undeclared-tool/channel adapter, exact
   binding, and `auth_never_binds_is_not_a_binding_field` (the bindings struct
   has no auth field); driven at the internal publication caller by
@@ -195,7 +195,7 @@ Rules — kept short on purpose:
   resurrect the extension. There is no persisted `RemovalPending` state — the
   removal facade retries the whole operation.
   — `ui_facade_extension_remove_retries_incomplete_credential_cleanup_until_converged`
-  (`crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`):
+  (`crates/app/ironclaw_composition/src/extension_host/extension_lifecycle.rs`):
   an incomplete credential cleanup returns a retryable
   `ProductWorkflowError::Transient` carrying a typed
   `SecretCleanupQuarantineReason` instead of reporting removal success, and a
@@ -219,7 +219,7 @@ Rules — kept short on purpose:
   extensions fails internal publication.
   — `duplicate_capability_across_extensions_fails_activation`
   (`tests/lifecycle_contract.rs`) plus `ActiveSnapshot::build`/`would_conflict`
-  conflict detection (`crates/ironclaw_extension_host/src/active.rs`).
+  conflict detection (`crates/extensions/ironclaw_extension_host/src/active.rs`).
 - [x] LIFE-15 Upgrade swaps one immutable snapshot; in-flight work completes
   on its old generation `Arc`; new work resolves the new generation; no mixed
   generation under concurrent publish/resolve stress.
@@ -249,12 +249,12 @@ Rules — kept short on purpose:
   `RuntimeDispatcher` resolves through the injected `ToolResolver` port and
   the per-invocation registry/package/runtime-kind selection is gone from
   `crates/ironclaw_dispatcher` (the crate no longer depends on
-  `ironclaw_extensions` at all);
+  `ironclaw_extension_registry` at all);
   `dispatcher_routes_capability_through_resolved_binding`
   (`crates/ironclaw_dispatcher/tests/dispatch_contract.rs`) plus
   `resolver_prebinds_and_dispatches_through_the_registered_lane` /
   `resolver_tracks_registry_mutations_across_versions`
-  (`crates/ironclaw_host_runtime/src/services/tests/registry_lane_tool_resolver.rs`
+  (`crates/kernel/ironclaw_host_runtime/src/services/tests/registry_lane_tool_resolver.rs`
   — bindings rebuilt per registry generation, resolution is a map lookup).
   The active-snapshot resolver for `ExtensionHost`-published extensions
   chains in with the P2 composition cutover.
@@ -283,7 +283,7 @@ Rules — kept short on purpose:
   `undeclared_host_is_rejected_before_any_transport_activity`,
   `non_https_and_undeclared_method_are_rejected_before_transport`, and
   `undeclared_credential_handle_is_rejected`
-  (`crates/ironclaw_extension_host/src/egress.rs`). Tool side: TOOL-7's
+  (`crates/extensions/ironclaw_extension_host/src/egress.rs`). Tool side: TOOL-7's
   `slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress`
   proves declaration-staged network policy + token injection (every
   recorded request targets the declared `slack.com` host with the
@@ -306,7 +306,7 @@ Rules — kept short on purpose:
   result/event semantics. — the WASM lane is proven through `ToolAdapter`
   (TOOL-7 plus the binder contract suite), and the MCP lane is now pinned by
   `binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter`
-  (`crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`):
+  (`crates/kernel/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`):
   a *discovered* (tools/list-originated via
   `package_with_discovered_hosted_mcp_tools`) MCP capability binds through the
   same `LaneBackedToolAdapter` and dispatches into the MCP lane, with the
@@ -352,17 +352,17 @@ Rules — kept short on purpose:
   `hosted_mcp_activation_discards_discovery_when_credential_epoch_changes`, and
   `hosted_mcp_activation_discards_discovery_when_manifest_inputs_change`
   (changed authority inputs reject the stale generation) — all in
-  `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`.
+  `crates/app/ironclaw_composition/src/extension_host/extension_lifecycle.rs`.
   There is no separate public activation API: refresh means reconcile →
   discover → atomic publish.
 - [x] TOOL-10 Host built-in capabilities resolve through the same dispatcher
   pipeline; an extension capability id colliding with a built-in fails
   publication. — built-ins resolve through the registry-lane resolver in the
   same chain (`registry_resolver_allowlist_restricts_to_builtin_provider`,
-  `crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`);
+  `crates/kernel/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`);
   the collision conflict is pinned at the publication caller by
   `extension_capability_colliding_with_a_host_builtin_fails_activation`
-  (`crates/ironclaw_extension_host/tests/lifecycle_contract.rs`), with the
+  (`crates/extensions/ironclaw_extension_host/tests/lifecycle_contract.rs`), with the
   builtin id set injected by composition
   (`build_local_runtime` → `reserved_capability_ids`).
 
@@ -373,9 +373,9 @@ Rules — kept short on purpose:
   vendor-conditional in auth crates/composition). — `ironclaw_auth::AuthEngine`
   is the only `AuthProviderClient` composition builds
   (`compose_provider_client`,
-  `crates/ironclaw_reborn_composition/src/factory.rs`);
+  `crates/app/ironclaw_composition/src/factory.rs`);
   the `ironclaw_auth` engine crate carries zero concrete-vendor literals and the
-  extension ABI (`crates/ironclaw_wasm/wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
+  extension ABI (`crates/lanes/ironclaw_wasm/wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
   "no vendor-conditional in composition" is not yet literal — the specificity
   gate `reborn_generic_code_names_no_concrete_extension` passes against a
   non-empty allowlist that still lists composition vendor branches (e.g.
@@ -386,12 +386,12 @@ Rules — kept short on purpose:
   scope parameter. — `authorize_url_is_host_constructed_for_every_oauth_vendor_row`,
   `recipes_cannot_supply_or_override_reserved_authorize_params`,
   `authorization_endpoint_predefining_reserved_params_is_rejected`
-  (`crates/ironclaw_auth/tests/auth_engine_contract.rs`).
+  (`crates/domains/ironclaw_auth/tests/auth_engine_contract.rs`).
 - [x] AUTH-3 State/CSRF, PKCE, TTL, and callback replay are enforced; exactly
   one transition consumes a callback. — `exactly_one_transition_consumes_a_callback`,
   `cross_flow_callbacks_are_rejected` (`auth_engine_contract.rs`); state-hash /
   PKCE-hash / TTL validation stays in the durable `AuthFlowManager`
-  (`crates/ironclaw_auth/src/product_auth/durable/tests.rs`).
+  (`crates/domains/ironclaw_auth/src/product_auth/durable/tests.rs`).
 - [x] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
   rejected before the vendor call. A host flow's explicit scopes are then
   honored verbatim; an extension-scoped flow's scopes are validated as a
@@ -413,7 +413,7 @@ Rules — kept short on purpose:
   `vendor_error_responses_are_size_capped_and_never_echoed`
   (`auth_engine_contract.rs`); on-demand-at-injection single-flight is the
   per-account refresh lock in `ProviderBackedCredentialAccountService`
-  (`crates/ironclaw_auth/src/credential.rs`) driven by the inline
+  (`crates/domains/ironclaw_auth/src/credential.rs`) driven by the inline
   injection-time refresh in `runtime_credentials.rs`. KEEPALIVE LEG (owner
   call, resolves the #6008 owner note): a recipe may declare an idle
   keepalive threshold (`refresh.keepalive_idle_seconds`, a vendor lifetime
@@ -427,7 +427,7 @@ Rules — kept short on purpose:
   `google_manifests_declare_the_keepalive_idle_lifetime_identically`
   (`auth_engine_contract.rs`); vendor-blind candidate enumeration on both
   DB-gated builds (`list_refresh_candidates_covers_agent_and_project_scopes`,
-  `crates/ironclaw_auth/src/product_auth/durable/tests.rs`); recipe-field validation +
+  `crates/domains/ironclaw_auth/src/product_auth/durable/tests.rs`); recipe-field validation +
   shared-vendor conflict coverage in `ironclaw_host_api` `recipe.rs` tests.
 - [x] AUTH-7 Identity extracts from the token response or the declared
   identity endpoint and is validated against the flow before storage. —
@@ -445,7 +445,7 @@ Rules — kept short on purpose:
   (`disconnected/authenticating/connected/expired` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
   exposes exactly this enum. — enum + typed `last_error` + transitions live
-  with the engine (`crates/ironclaw_auth/src/account_state.rs`,
+  with the engine (`crates/domains/ironclaw_auth/src/account_state.rs`,
   `legal_transitions_only`, `auth_account_state_wire_form_matches_str`;
   re-exported by `ironclaw_extension_host::state`). P7a puts it on the wire:
   the extensions wire now carries a per-vendor **accounts list** whose
@@ -463,7 +463,7 @@ Rules — kept short on purpose:
 - [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`. —
   `projection_prefers_live_flow_then_account_status`
-  (`crates/ironclaw_auth/src/account_state.rs`).
+  (`crates/domains/ironclaw_auth/src/account_state.rs`).
 - [x] AUTH-11 `api_key` renders from recipe fields, runs the optional
   validation probe through restricted egress, and uses the same state machine.
   — probe + storage + state machine proven engine-tier
@@ -475,7 +475,7 @@ Rules — kept short on purpose:
   api_key-recipe → wire field projection is now pinned end-to-end on the real
   github manifest by
   `webui_v2_github_api_key_setup_projects_manual_token_secret`
-  (`crates/ironclaw_reborn_composition/tests/webui_v2_e2e.rs`): the composed
+  (`crates/app/ironclaw_composition/tests/webui_v2_e2e.rs`): the composed
   `/extensions/github/setup` route projects the `[auth.github] method = "api_key"`
   recipe's single field handle into exactly one `manual_token` secret
   descriptor (handle-named, not-yet-provided) through the production
@@ -493,7 +493,7 @@ Rules — kept short on purpose:
   route (`VENDOR_OAUTH_CALLBACK_PATH`) resolves `{provider}` through the
   engine's `AuthRecipeResolver`; the Google/Slack URLs are served by the same
   generic route (`vendor_oauth_callback_completes_a_started_flow`,
-  `crates/ironclaw_webui/src/product_auth/mod.rs`; the
+  `crates/product/ironclaw_webui/src/product_auth/mod.rs`; the
   google/slack callback tests in `tests/webui_v2_product_auth.rs` drive the
   unchanged URLs end-to-end).
 - [x] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
@@ -501,10 +501,10 @@ Rules — kept short on purpose:
   test). — the generic round trip is proven at the composed-services tier with
   the recipe-driven driver and the `{provider}` callback route
   (`vendor_oauth_callback_resumes_blocked_turn_gate`,
-  `crates/ironclaw_webui/src/product_auth/mod.rs`), and the
+  `crates/product/ironclaw_webui/src/product_auth/mod.rs`), and the
   callback→coordinator resume is pinned by
   `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`
-  (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`); the full
+  (`crates/app/ironclaw_composition/src/factory/auth_tests.rs`); the full
   Slack personal-OAuth connect against production serve is proven end-to-end by
   the P6 §10 e2e (`tests/e2e/scenarios/test_reborn_slack_channel_e2e.py`). The
   blocked-tool → auth gate → grant stored → tool resumes leg through the
@@ -549,7 +549,7 @@ Rules — kept short on purpose:
   host routes fail publication. —
   `route_table_follows_snapshot_swaps_without_router_rebuild`,
   `activation_rejects_collision_with_fixed_host_routes`
-  (`crates/ironclaw_extension_host/tests/ingress_router_contract.rs`);
+  (`crates/extensions/ironclaw_extension_host/tests/ingress_router_contract.rs`);
   production mount leg:
   `signed_acme_post_flows_through_the_production_mount_into_a_turn`
   (`tests/integration/extension_ingress.rs`). Fixed-route set injected by
@@ -565,7 +565,7 @@ Rules — kept short on purpose:
   rejection. — `hmac_recipe_verifies_the_exact_acme_byte_construction`,
   `hmac_recipe_enforces_the_replay_window_before_any_hmac`,
   `hmac_recipe_rejects_tampered_body_missing_and_bad_signatures`
-  (`crates/ironclaw_extension_host/src/ingress/verifier.rs`, `subtle::ct_eq`
+  (`crates/extensions/ironclaw_extension_host/src/ingress/verifier.rs`, `subtle::ct_eq`
   comparisons); wire legs in `ingress_router_contract.rs` and
   `tests/integration/extension_ingress.rs`.
 - [x] ING-4 `shared_secret_header` verifies constant-time and rejects
@@ -635,7 +635,7 @@ Rules — kept short on purpose:
 - [x] ING-12 Slack and Telegram inbound both pass through the same router and
   workflow caller with zero host branches (one integration proof each). —
   Slack: the full
-  `crates/ironclaw_reborn_composition/src/extension_host/channel_host/e2e_tests.rs`
+  `crates/app/ironclaw_composition/src/extension_host/channel_host/e2e_tests.rs`
   scenario suite (28 tests) now drives the generic router + recipe verifier +
   `SlackChannelAdapter` + generic sink through the alias mount (e.g.
   `slack_dm_delivers_final_reply_after_immediate_ack`,
@@ -711,7 +711,7 @@ Rules — kept short on purpose:
   `delivery_coordinator.rs`; the factory constructs the coordinator only
   when a real channel-egress transport exists — with no transport the factory
   returns `delivery_coordinator: None` rather than wiring a no-op sink
-  (`crates/ironclaw_reborn_composition/src/factory.rs`). There is deliberately
+  (`crates/app/ironclaw_composition/src/factory.rs`). There is deliberately
   no no-op-sink constructor (`delivery_coordinator.rs` doc), so the guarantee
   is structural rather than a dedicated test.
 - [x] OUT-5 Retry/backoff and run-notice dedupe are generic; the coordinator
@@ -829,14 +829,14 @@ Rules — kept short on purpose:
   Option B (a new extension-host lookup port). `LifecycleExtensionSummary` is an
   internal lifecycle DTO, not the WebUI wire, so no golden fixture changes.
 - [x] OUT-12 Trace contributions use generic extension/surface origin ids;
-  concrete variants are deleted. — `ironclaw_reborn_traces` carries
+  concrete variants are deleted. — `ironclaw_trace_commons` carries
   `channel_origin: Option<String>` as data
   (`trace_channel_origin_from_host_channel`, `client.rs`); no vendor enum
   variant remains in the trace vocabulary.
 
 ## 8. Extraction and deletion (DEL)
 
-- [x] DEL-1 `crates/ironclaw_reborn_composition/src/slack/` no longer exists.
+- [x] DEL-1 `crates/app/ironclaw_composition/src/slack/` no longer exists.
   — P6 deleted the lane: the generic channel host assembly +
   manifest `[admin_configuration]` + the generic outbound-target provider and
   triggered-delivery hook replaced every lane surface; the H.3/H.4 folds
@@ -853,11 +853,11 @@ Rules — kept short on purpose:
   lists, and docs are renamed. The deletion-gate crate lists (specificity
   `CONCRETE_EXTENSION_CRATES`, `check-generic-without-concrete.sh`) already
   reserved both new names, so the old entries were removed rather than
-  duplicated. `cargo check --workspace --tests` + `ironclaw_architecture` (42)
+  duplicated. `cargo check --workspace --tests` + `ironclaw_architecture_tests` (42)
   green.
 - [x] DEL-3 `serve_slack.rs` and the `slack-v2-host-beta` cargo feature are
   deleted; no channel-specific config type remains in
-  `ironclaw_reborn_config`. — `SlackSection`/`SlackChannelRouteSection` are
+  `ironclaw_config`. — `SlackSection`/`SlackChannelRouteSection` are
   gone; a stale `[slack]` section hard-fails config parse (accepted beta
   posture, pinned by `rejects_retired_slack_section`); the secrets guard
   keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
@@ -875,11 +875,11 @@ Rules — kept short on purpose:
   > setup key; an inert section boots with a deprecation notice. Pinned by
   > `retired_setup_key_fails_closed_with_migration_guidance` and
   > `inert_retired_section_boots_with_a_notice`
-  > (`crates/ironclaw_reborn_config/src/config_file.rs`). See PROPOSAL
+  > (`crates/app/ironclaw_config/src/config_file.rs`). See PROPOSAL
   > §6.10.3.
 - [x] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
-  — no non-test slack constant remains in `ironclaw_product`
+  — no non-test slack constant remains in `ironclaw_assistant`
   (removal cleanup rides the vendor-blind removable-channel path); P7a
   deletes the hardcoded `slack` OAuth branch in
   `channel_connection_requirement` (`extension_lifecycle.rs`). The connect
@@ -900,7 +900,7 @@ Rules — kept short on purpose:
   remainder: the `ProductAdapter` trait + `ProductAdapterHealth` +
   metadata getters (`crates/ironclaw_product_adapters/src/adapter.rs`); the
   production-dead `prepare_and_render_product_outbound` + its
-  request/outcome/error types (`ironclaw_product/src/outbound_delivery.rs`,
+  request/outcome/error types (`ironclaw_assistant/src/outbound_delivery.rs`,
   keeping the LIVE `VerifiedProductOutboundTargetMetadata` +
   `ProductOutboundTargetResolver` + `delivery_failure_kind_for_workflow_error`
   the coordinator uses); the concrete `SlackV2Adapter`/`TelegramV2Adapter`
@@ -931,7 +931,7 @@ Rules — kept short on purpose:
   adapters through `RebornHostBindings::with_channel_extension_bindings`).
   Gates green: `reborn_generic_code_names_no_concrete_extension` +
   `concrete_extension_crates_link_only_from_the_binary_and_tests`
-  (`crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`,
+  (`crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`,
   empty `CONCRETE_DEPENDENCY_EXCEPTIONS`).
 - [x] DEL-7 Only the canonical `ironclaw` CLI package and tests depend on concrete extension
   crates (`cargo metadata` gate). — `CONCRETE_DEPENDENCY_EXCEPTIONS` is
@@ -957,7 +957,7 @@ Rules — kept short on purpose:
     false-positive (the English word "no notion of", not the extension) was
     reworded and cleared. The `reborn-extension-surfaces` skill how-to was
     rewritten to the v3 manifest shape (REL-4, not an allowlist entry).
-  - **Lane 2 done** — the `ironclaw_reborn_traces::contribution` redaction
+  - **Lane 2 done** — the `ironclaw_trace_commons::contribution` redaction
     classifier (4: slack/telegram/gmail/github) carved as a **vendor-safety
     denylist**: it keys the payload-redaction profile + external-write
     side-effect off tool-name keywords and is a *superset* of the inventory
@@ -984,7 +984,7 @@ Rules — kept short on purpose:
   correct with `TEMPORARY_EXCEPTIONS` empty; `bash
   scripts/ci/check-generic-without-concrete.sh --trees-only` is green
   ("dependency graphs clean", 63 generic crates). The *dependency-direction*
-  half runs in CI via the `ironclaw_architecture` arch test
+  half runs in CI via the `ironclaw_architecture_tests` arch test
   (`concrete_extension_crates_link_only_from_the_binary_and_tests`), but **no
   CI workflow invokes this script**, so the "in CI" clause and the full
   per-crate isolated-test form are unmet. Wiring the script into a CI job (and
@@ -1001,7 +1001,7 @@ Rules — kept short on purpose:
   `ironclaw_extension_support::packages::telegram`; P7b DEL-8 lane A
   migrated the former `available_extensions.rs::telegram_package` builder into
   the self-contained inventory), the binary-assembled
-  entrypoint binding (`crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`),
+  entrypoint binding (`crates/app/ironclaw_cli/src/runtime/native_extensions.rs`),
   the real channel-egress transport with host-side path-placeholder token
   injection (`HostRuntimeChannelEgressTransport`,
   `path_placeholder_injection_substitutes_the_secret_host_side`), the
@@ -1139,7 +1139,7 @@ Rules — kept short on purpose:
   needed) — verified by the route tests. — The
   `/api/reborn/product-auth/oauth/{provider}/callback` shape is unchanged
   (AUTH-13's pins: `vendor_oauth_callback_completes_a_started_flow`,
-  `crates/ironclaw_webui/src/product_auth/mod.rs`; the google/slack callback URL tests in
+  `crates/product/ironclaw_webui/src/product_auth/mod.rs`; the google/slack callback URL tests in
   `tests/webui_v2_product_auth.rs`), and the P6 §10 e2e drives the same
   URL against production serve
   (`test_reborn_slack_channel_e2e.py`).
@@ -1155,7 +1155,7 @@ Rules — kept short on purpose:
   no-op on each. REL-3: the Postgres arm uses a no-skip `src/`-local
   testcontainer provisioner (the `pub(crate)` fold can't be reached from the
   integration harness — correction A escape hatch); it runs under
-  `cargo test -p ironclaw_reborn_composition --features
+  `cargo test -p ironclaw_composition --features
   test-support,webui-v2-beta,libsql,postgres`.
 
 ## 11. Testing and gates (TEST)
@@ -1174,7 +1174,7 @@ Rules — kept short on purpose:
   through the binder — and the native/static proof via the acme fixture; the
   MCP lane is now covered by
   `binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter`
-  (`crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`),
+  (`crates/kernel/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`),
   which drives a discovered MCP capability through the same
   `LaneBackedToolAdapter` and asserts the exact call reached the MCP executor
   and its output returned — see TOOL-6.)
@@ -1211,7 +1211,7 @@ Rules — kept short on purpose:
 - [x] TEST-6 The specificity scanner derives forbidden names from the package
   inventory (an invented product id in a fixture is caught without editing the
   scanner). — `scanner_derives_terms_from_an_invented_inventory_package`
-  (`crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`); the
+  (`crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`); the
   acme fixture itself is derivation input.
 - [x] TEST-7 Allowlist shrinkage is enforced: stale entries fail, new
   violations fail. — `scanner_allowlist_is_shrink_only` plus the stale-entry
@@ -1230,7 +1230,7 @@ Rules — kept short on purpose:
   `cargo clippy --all --tests --examples --all-features -- -D warnings`
   raw exit 0; composition full suite
   (`test-support,webui-v2-beta,libsql` — 1113 lib tests + all targets),
-  `ironclaw_architecture`, `ironclaw_network`, CLI (`webui-v2-beta`),
+  `ironclaw_architecture_tests`, `ironclaw_network`, CLI (`webui-v2-beta`),
   config, and `ironclaw_webui_v2 --all-features` suites green; the
   delivery/ingress/runtime/oauth-connect integration suites green with
   Docker (real Postgres lane included); the P6 §10 Python e2e green.
