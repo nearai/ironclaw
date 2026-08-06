@@ -514,6 +514,82 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         )
         await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
         await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
+
+        second_marker = f"turn-navigation-e2e-{uuid.uuid4()}"
+        async with httpx.AsyncClient(headers=headers) as client:
+            await _send_and_settle(
+                client,
+                reborn_v2_server,
+                thread_id,
+                second_marker,
+                expected=2,
+            )
+            second_assistant = await _wait_for_assistant_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+            )
+        second_run_id = second_assistant.get("turn_run_id")
+        assert second_run_id and second_run_id != run_id, second_assistant
+
+        await page.locator("[data-testid='inspector-tab-activity']").click()
+        activity = page.locator("[data-testid='inspector-activity-content']")
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible(
+            timeout=30000
+        )
+        await expect(activity.get_by_label("Previous turn")).to_be_enabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+        await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(
+            second_run_id
+        )
+
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 1 of 2", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_enabled()
+        await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(run_id)
+
+        await activity.get_by_label("Next turn").click()
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
+        await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(
+            second_run_id
+        )
+
+        await page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true,
+                value: "hidden",
+              });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await expect(page.locator("[data-testid='inspector-health']")).to_have_text("Idle")
+        async with page.expect_response(
+            lambda response: "/operator/inspector/" in response.url
+            and "/events" in response.url
+            and "connection_generation=" in response.url,
+            timeout=30000,
+        ) as reconnect_info:
+            await page.evaluate(
+                """() => {
+                  Object.defineProperty(document, "visibilityState", {
+                    configurable: true,
+                    value: "visible",
+                  });
+                  document.dispatchEvent(new Event("visibilitychange"));
+                }"""
+            )
+        reconnect_response = await reconnect_info.value
+        assert reconnect_response.status == 200, reconnect_response.url
+        activity = page.locator("[data-testid='inspector-activity-content']")
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
     finally:
         await context.close()
 

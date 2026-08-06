@@ -10,6 +10,7 @@ Tracks nearai/ironclaw#4633.
 
 import asyncio
 import json
+import re
 import uuid
 from urllib.parse import quote
 
@@ -324,13 +325,14 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     reborn_v2_browser,
 ):
     marker = f"tool-turn-{uuid.uuid4().hex[:8]}"
+    oversized_output = f"{marker}-" + ("x" * (50 * 1024 + 512))
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, reborn_v2_yolo_server)
         submitted = await send_message(
             client,
             reborn_v2_yolo_server,
             thread_id,
-            f"reborn builtin echo {marker}",
+            f"reborn builtin echo {oversized_output}",
         )
         assistant = await wait_for_assistant_message(
             client,
@@ -368,6 +370,10 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
         await expect(detail).to_contain_text("succeeded")
         await expect(detail.locator("pre").first).to_contain_text(marker)
         await expect(detail.get_by_text("Output size:")).to_have_count(1)
+        await expect(detail.get_by_text(re.compile(r"Output · truncated from 5[1-9],[0-9]{3} bytes"))).to_be_visible()
+        output = detail.locator("pre").nth(1)
+        retained_bytes = await output.evaluate("element => new TextEncoder().encode(element.textContent || '').length")
+        assert retained_bytes <= 50 * 1024
     finally:
         await context.close()
 

@@ -316,7 +316,7 @@ entries.
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
-| Opt into the debug inspector and inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for a completed run | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell`, `…::test_inspector_prompt_and_stats_render_host_diagnostics` |
+| Opt into the debug inspector and inspect the bounded host-resolved prompt, ordered activity timeline, multi-turn navigation, visibility reconnect behavior, and model-call statistics without changing ordinary chat | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell`, `…::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
 | Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
 
@@ -324,7 +324,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Run built-in tools, parallel calls, and multi-step chains and see the result | `test_reborn_webui_v2_legacy_tool_execution.py` (9), `test_v2_engine_tool_lifecycle.py` (6), `test_tool_execution.py` |
-| Inspect safely bounded arguments and output for a completed tool call | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_tool_turn_records_result_and_final_reply` |
+| Inspect safely bounded arguments and a visibly truncated 50 KiB output for a completed tool call | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_tool_turn_records_result_and_final_reply` |
 | Recover when a tool fails, a tool call is truncated, or the model loops | `test_reborn_webui_v2_legacy_tool_execution.py`, `test_agent_loop_recovery.py` (4), `test_v2_engine_error_handling.py` |
 | See the approval card with payload details, approve/deny, and see it disable while resolving | `test_reborn_webui_v2_legacy_approval.py` (8) |
 | Not send messages while a gate is pending — but keep using other threads | `test_reborn_webui_v2_legacy_approval.py::test_reborn_legacy_pending_approval_does_not_block_other_thread` |
