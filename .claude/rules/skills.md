@@ -1,7 +1,7 @@
 ---
 paths:
   - "crates/domains/ironclaw_skills/**"
-  - "crates/app/ironclaw_composition/src/extension_host/bundled_skills.rs"
+  - "crates/extensions/ironclaw_extension_host/src/bundled_skills.rs"
   - "skills/**"
 ---
 # Skills System
@@ -64,8 +64,8 @@ When parser behavior changes, update this file in the same PR
 ## Selection Pipeline
 
 1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
-2. **Scoring** -- Deterministic scoring: keywords (10/5 pts, cap 30) + patterns (20 pts, cap 40) + tags (3 pts, cap 15). `exclude_keywords` veto (score = 0 if any present). Pattern (regex) scoring is gated on `SKILLS_REGEX_ACTIVATION_ENABLED` (default `true`); when `false`, regex activation contributes 0 and only keywords/tags/explicit mentions can select a skill.
-3. **Budget** -- Select top-scoring skills within `SKILLS_MAX_TOKENS` prompt budget
+2. **Scoring** -- Deterministic scoring: keywords (10/5 pts, cap 30) + patterns (20 pts, cap 40) + tags (3 pts, cap 15). `exclude_keywords` veto (score = 0 if any present). Pattern (regex) scoring is gated on the config-file setting `[skills] regex_activation_enabled` (default `true`; `SkillsSection` in `crates/app/ironclaw_config/src/config_file.rs` — there is no env var for it); when `false`, regex activation contributes 0 and only keywords/tags/explicit mentions can select a skill.
+3. **Budget** -- Select top-scoring skills within the prompt token budget (`DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000` in `crates/loop/ironclaw_loop_host/src/skill_activation/activation.rs`, overridable via `set_max_context_tokens`; the former `SKILLS_MAX_TOKENS` env var is not read by anything)
 4. **Attenuation** -- Minimum trust across active skills determines tool ceiling; installed skills lose dangerous tools
 
 ## Skill Tools

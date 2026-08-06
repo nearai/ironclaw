@@ -2,6 +2,14 @@
 
 **Status:** Validation record — parity evidence for removing engine v2.
 **Date:** 2026-07-02
+**Historical note (2026-08-05):** the removal this record justified has since
+happened — engine v2 (`crates/ironclaw_engine`, `src/bridge/`) is gone, and
+several Reborn crates cited below were later renamed, moved into family
+directories, or merged (`ironclaw_dispatcher` deleted in WS0 #6942;
+`ironclaw_hooks_{libsql,postgres,parity}` merged into
+`crates/loop/ironclaw_hooks`). The "coexist on `main`" claim below was true at
+the recorded date; verify citations against the commit that introduced this
+record, not against HEAD.
 **Purpose:** Prove that every capability the interim **engine v2** architecture
 (`crates/ironclaw_engine` + `src/bridge/`, gated behind `ENGINE_V2`, default
 off) provided has a home in the **Reborn** architecture
