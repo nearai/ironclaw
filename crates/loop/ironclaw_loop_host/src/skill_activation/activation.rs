@@ -81,6 +81,8 @@ const LISTING_CHAR_BUDGET: usize =
 /// Room reserved inside the snippet cap for the listing header and the hidden-count note.
 const LISTING_SNIPPET_HEADROOM_BYTES: usize = 4 * 1024;
 const _: () = assert!(
+    // safety: compile-time assert in a const block -- rustc evaluates it, so it cannot execute
+    // at runtime. Restoring the old budget fails the BUILD, it does not panic a process.
     LISTING_CHAR_BUDGET < LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
     "the rendered listing must fit the single snippet it ships as, or the skill-context build      fails closed with ContextBudgetExceeded"
 );
