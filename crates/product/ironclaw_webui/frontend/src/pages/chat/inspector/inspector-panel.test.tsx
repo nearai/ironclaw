@@ -105,9 +105,6 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
       cache_read_input_tokens: { known_total: 0, unavailable_samples: 3 },
       cache_creation_input_tokens: { known_total: 20, unavailable_samples: 1 },
       total_latency_ms: { known_total: 900, unavailable_samples: 1 },
-      total_tool_calls: 4,
-      successful_tool_calls: 3,
-      failed_tool_calls: 1,
     },
   };
 
@@ -124,7 +121,7 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
   assert.match(stats.textContent || "", /450 ms/);
   assert.match(stats.textContent || "", /Unavailable/);
   assert.match(stats.textContent || "", /provider-model3/);
-  assert.match(stats.textContent || "", /3 succeeded · 1 failed/);
+  assert.doesNotMatch(stats.textContent || "", /Tool calls|Tool outcomes/);
   assert.match(stats.textContent || "", /metric samples were unavailable/);
 });
 

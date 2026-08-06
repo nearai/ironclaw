@@ -248,9 +248,6 @@ interface SessionDiagnosticStats {
   cache_read_input_tokens: DiagnosticMetricTotal;
   cache_creation_input_tokens: DiagnosticMetricTotal;
   total_latency_ms: DiagnosticMetricTotal;
-  total_tool_calls: number;
-  successful_tool_calls: number;
-  failed_tool_calls: number;
 }
 
 function metricValue(
@@ -277,7 +274,7 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
     return (
       <EmptyTab
         title="No statistics yet"
-        description="Session totals will appear after the run records model or tool activity."
+        description="Session totals will appear after the run records model activity."
       />
     );
   }
@@ -305,7 +302,6 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
         <MetricCard label="Cache-read tokens" value={metricValue(stats.cache_read_input_tokens, stats.total_model_calls)} />
         <MetricCard label="Cache-created tokens" value={metricValue(stats.cache_creation_input_tokens, stats.total_model_calls)} />
         <MetricCard label="Total latency" value={metricValue(stats.total_latency_ms, stats.total_model_calls, " ms")} />
-        <MetricCard label="Tool calls" value={stats.total_tool_calls.toLocaleString()} />
       </div>
       <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs">
         <p className="font-medium text-[var(--v2-text-strong)]">Calls per model</p>
@@ -321,9 +317,6 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
             ))}
           </dl>
         )}
-      </div>
-      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs text-[var(--v2-text-muted)]">
-        Tool outcomes: {stats.successful_tool_calls.toLocaleString()} succeeded · {stats.failed_tool_calls.toLocaleString()} failed
       </div>
       {(partialMetricCount > 0 || stats.calls_per_model_truncated) && (
         <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
