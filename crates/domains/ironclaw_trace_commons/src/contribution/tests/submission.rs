@@ -410,6 +410,87 @@ async fn policy_aware_direct_submit_uses_default_credential_provider() {
         vec!["Bearer direct-submit-token".to_string()]
     );
 }
+/// A 2xx whose body STREAM fails mid-read is a transport failure, not a
+/// protocol one: the old `response.text().await.unwrap_or_default()` collapsed
+/// the read error into an empty body, which the strict receipt parse (#7144)
+/// then reported as `response_invalid` ("server returned success with a body
+/// that is not a submission receipt") — blaming the server's payload for the
+/// client's dropped connection and recording the wrong telemetry kind.
+#[tokio::test]
+async fn submit_preserves_response_body_read_failure_as_request_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock trace commons listener binds");
+    let endpoint = format!(
+        "http://{}/v1/traces",
+        listener.local_addr().expect("local addr")
+    );
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        // Drain the request: headers, then the Content-Length'd JSON body.
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.expect("read request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(headers_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..headers_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().expect("content length"))
+                    })
+                    .unwrap_or(0);
+                if request.len() >= headers_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        // 200 with a Content-Length the body never reaches, then close: the
+        // response headers complete (so `send()` succeeds) but `.text()`'s
+        // body stream dies mid-read.
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 4096\r\n\r\n{\"status\":",
+            )
+            .await
+            .expect("write truncated response");
+        socket.flush().await.expect("flush");
+        drop(socket);
+    });
+
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default(),
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+
+    let failure = submit_trace_envelope_to_endpoint_with_token(&envelope, &endpoint, "test-token")
+        .await
+        .expect_err("a failed body read must surface as an error");
+
+    assert_ne!(
+        failure.kind,
+        TraceQueueTelemetryFailureKind::Submission,
+        "a dropped body stream is a transport failure and must not be \
+         classified as a server-protocol (`response_invalid`) failure: {failure}"
+    );
+    assert!(
+        failure
+            .to_string()
+            .contains("trace submission response body"),
+        "the failure must name the body read as the failing operation, got: {failure}"
+    );
+}
 #[test]
 fn upload_claim_issuer_url_validation_rejects_unsafe_targets() {
     let allowed_hosts = BTreeSet::from(["issuer.example.com".to_string()]);

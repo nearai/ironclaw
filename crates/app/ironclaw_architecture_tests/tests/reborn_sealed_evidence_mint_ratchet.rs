@@ -88,7 +88,7 @@
 #[allow(dead_code)]
 mod ratchet_support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1205,7 +1205,10 @@ fn test_seam_mint_constructors_have_no_production_call_sites() {
     );
 
     let mut offenders = Vec::new();
-    let mut sighted = 0usize;
+    let mut sighted: BTreeMap<&str, usize> = TEST_SEAM_MINT_FNS
+        .iter()
+        .map(|name| (*name, 0usize))
+        .collect();
     for file in &files {
         let source = read_source(file);
         let owner = owning_crate(&root, file);
@@ -1216,7 +1219,7 @@ fn test_seam_mint_constructors_have_no_production_call_sites() {
                 if !mentions_symbol(line, name) {
                     continue;
                 }
-                sighted += 1;
+                *sighted.entry(name).or_default() += 1;
                 if owner != EVIDENCE_TYPE_OWNER {
                     offenders.push(format!("{}: {line}", render(&root, file)));
                 }
@@ -1225,12 +1228,24 @@ fn test_seam_mint_constructors_have_no_production_call_sites() {
     }
 
     // The definitions in `ironclaw_host_api` guarantee at least one sighting
-    // per name; zero means the family was renamed without updating
-    // TEST_SEAM_MINT_FNS and this scan now measures nothing.
+    // per name; a name at zero means THAT constructor was renamed without
+    // updating TEST_SEAM_MINT_FNS and the scan no longer governs it. Floored
+    // per name, not in aggregate: today each name has exactly one kept
+    // production-text sighting (its definition), so an aggregate floor sits
+    // coincidentally at threshold — one legitimate extra mention of the
+    // sibling (say, a `test-support`-gated fixture inside the owner crate)
+    // and a partial rename would slip under an aggregate count while the doc
+    // above still promised per-name coverage.
+    let unsighted: Vec<&str> = sighted
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(name, _)| *name)
+        .collect();
     assert!(
-        sighted >= TEST_SEAM_MINT_FNS.len(),
-        "the test-seam scan sighted only {sighted} mentions — the constructors were renamed \
-         without updating TEST_SEAM_MINT_FNS, and this ratchet is now measuring an empty set"
+        unsighted.is_empty(),
+        "the test-seam scan sighted no production-text mention of {unsighted:?} — the \
+         constructor was renamed without updating TEST_SEAM_MINT_FNS, and this ratchet now \
+         measures an empty set for it"
     );
     assert!(
         offenders.is_empty(),

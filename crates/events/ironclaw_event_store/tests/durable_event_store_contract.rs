@@ -550,6 +550,33 @@ static STALE_SWEEP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new
 /// Distinguishes the databases of concurrently provisioning tests.
 static NEXT_DATABASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Only sweep databases at least this old. A prefix-only sweep could delete
+/// a concurrent *process*'s freshly created database in the window between
+/// its `CREATE DATABASE` and its first connection (zero backends — nothing
+/// for a no-`FORCE` drop to refuse); the epoch embedded in every name keeps
+/// anything younger than this out of the sweep's SELECT entirely, so that
+/// window is unreachable. Leftovers from crashed runs collect on the first
+/// run after the cutoff.
+const STALE_SWEEP_MIN_AGE_SECS: u64 = 3600;
+
+fn unix_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the UNIX epoch")
+        .as_secs()
+}
+
+/// Parses the creation epoch out of `<prefix><epoch>_<pid>_<counter>`.
+/// `None` marks a pre-timestamp legacy name: definitionally past the cutoff,
+/// collected immediately.
+fn isolated_database_epoch(name: &str, prefix: &str) -> Option<u64> {
+    name.strip_prefix(prefix)?
+        .split('_')
+        .next()?
+        .parse::<u64>()
+        .ok()
+}
+
 async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
     let base_url = match std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") {
         Ok(url) => url,
@@ -576,10 +603,13 @@ async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
     });
     STALE_SWEEP
         .get_or_init(|| async {
-            // Collect databases previously failed runs unwound past. No
-            // `FORCE`: a database another live run still holds open refuses
-            // to drop, which is the outcome we want when two runs share a
-            // server.
+            // Collect databases previously failed runs unwound past. Age-
+            // gated by the epoch in each name so a concurrent run's fresh
+            // database is never selected — even inside its zero-backend
+            // window between `CREATE DATABASE` and first connection, which
+            // a backend-count check (or the no-`FORCE` drop below) cannot
+            // protect. No `FORCE`: anything old but still held open by a
+            // live run additionally refuses to drop.
             if let Ok(stale) = admin
                 .query(
                     "SELECT datname FROM pg_database WHERE datname LIKE 'evstore_isolated_%'",
@@ -587,8 +617,14 @@ async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
                 )
                 .await
             {
+                let now = unix_epoch_secs();
                 for row in stale {
                     let name = row.get::<_, String>(0);
+                    let stale_enough = isolated_database_epoch(&name, "evstore_isolated_")
+                        .is_none_or(|epoch| now.saturating_sub(epoch) > STALE_SWEEP_MIN_AGE_SECS);
+                    if !stale_enough {
+                        continue;
+                    }
                     let _ = admin
                         .execute(&format!("DROP DATABASE IF EXISTS {name}"), &[])
                         .await;
@@ -597,10 +633,11 @@ async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
         })
         .await;
     // Identifiers cannot be bind parameters in DDL. The interpolations are
-    // process-generated (pid + counter) or come from `pg_database`, never
-    // caller input.
+    // process-generated (epoch + pid + counter) or come from `pg_database`,
+    // never caller input.
     let name = format!(
-        "evstore_isolated_{}_{}",
+        "evstore_isolated_{}_{}_{}",
+        unix_epoch_secs(),
         std::process::id(),
         NEXT_DATABASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );

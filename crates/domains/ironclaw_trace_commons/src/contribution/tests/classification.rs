@@ -318,6 +318,40 @@ async fn novelty_score_is_clamped_at_both_ends() {
     });
     let high = compute_value_scorecard(&envelope);
     assert_eq!(high.novelty, 0.85, "the upper cap must still hold");
+
+    // `clamp` bounds both ends but passes NaN straight through
+    // (`f32::NAN.clamp(0.0, 0.85)` is NaN), so a non-finite score off the
+    // re-scored on-disk queue would poison `raw`, `online_score`, and the
+    // persisted `credit_points_estimate`. Non-finite values must be treated
+    // as absent: novelty falls back to the event-count heuristic, duplicate
+    // to 0.0.
+    envelope.embedding_analysis = Some(EmbeddingAnalysisMetadata {
+        embedding_model: None,
+        canonical_summary_hash: String::new(),
+        trace_vector_id: None,
+        nearest_trace_ids: Vec::new(),
+        cluster_id: None,
+        nearest_cluster_id: None,
+        novelty_score: Some(f32::NAN),
+        duplicate_score: Some(f32::NAN),
+        coverage_tags: Vec::new(),
+    });
+    let poisoned = compute_value_scorecard(&envelope);
+    assert!(
+        poisoned.novelty.is_finite() && (0.0..=0.85).contains(&poisoned.novelty),
+        "a NaN novelty must fall back to the derived default, got {}",
+        poisoned.novelty
+    );
+    assert_eq!(
+        poisoned.duplicate_penalty, 0.0,
+        "a NaN duplicate score must be treated as absent"
+    );
+    assert!(
+        poisoned.online_score.is_finite() && poisoned.credit_points_estimate.is_finite(),
+        "non-finite embedding scores must never poison the credit estimate, got score {} / credit {}",
+        poisoned.online_score,
+        poisoned.credit_points_estimate
+    );
 }
 
 /// #7144: dataset eligibility used to be decided by scanning `warnings` for

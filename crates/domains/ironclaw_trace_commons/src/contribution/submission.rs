@@ -84,14 +84,24 @@ pub(crate) async fn submit_trace_envelope_to_endpoint_with_token(
         .await
         .map_err(|error| TraceRemoteRequestFailure::request_failed("trace submission", error))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await;
     if !status.is_success() {
+        // The rejection is classified by status; the body is best-effort
+        // detail, so a failed read degrades to an empty message, not an
+        // error-shape change.
         return Err(TraceRemoteRequestFailure::http_rejection(
             "trace submission",
             status,
-            body,
+            body.unwrap_or_default(),
         ));
     }
+    // On a 2xx the body IS the receipt: a stream that dies mid-read is a
+    // transport failure and must keep its I/O cause (and its network
+    // telemetry kind) rather than collapse into an empty body that the
+    // strict parse below would misreport as a server-protocol violation.
+    let body = body.map_err(|error| {
+        TraceRemoteRequestFailure::request_failed("trace submission response body", error)
+    })?;
 
     // A 2xx whose body does not parse is not a receipt. Synthesizing
     // `status: "submitted"` with a *locally estimated* credit told the user the
