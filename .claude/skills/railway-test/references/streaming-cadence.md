@@ -17,7 +17,12 @@ streaming, so stream naturally and do not make the answer terse.
 
 ## Fresh-thread sampler
 
-Assume the browser skill produced a tab binding named `railwayTab`.
+Sample rendered text at roughly 100 ms intervals with the selected browser
+driver. Record a baseline immediately after submission, then count only later
+DOM changes; the submitted user message and static post-submit markup are not
+streaming evidence. The following implementation is for the Codex in-app
+browser when it produced a tab binding named `railwayTab`. With another driver,
+translate the same baseline, polling, and completion assertions to its DOM API.
 
 ```js
 var railwayPrompt = "Compare and contrast NEAR Protocol with Ethereum using current web research. Briefly tell me what you will research before using at least three tools, include another short progress update between tool phases, then write a detailed final answer of at least ten short paragraphs. I am testing smooth streaming, so stream naturally and do not make the answer terse.";

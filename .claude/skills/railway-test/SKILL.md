@@ -120,12 +120,21 @@ Re-read `headRefOid` and confirm it still equals the `head_sha` recorded in
 step 2 before opening the preview; if it changed, return to step 2 for the new
 head instead of testing a stale build.
 
-Read and follow the `browser:control-in-app-browser` skill. Announce that this
-skill is opening the preview and will use the supplied token only for UI login.
+Select the browser driver available in the current agent harness:
 
-Use the in-app browser, not an external Playwright process. Open the route most
-relevant to the PR; use `/chat` only for chat changes. Wait for session
-initialization and inspect a DOM snapshot before assuming labels or controls.
+- If `browser:control-in-app-browser` is available, read and follow it and use
+  the in-app browser.
+- Otherwise use the harness's supported browser automation capability (for
+  example a browser tool, Playwright integration, or Chrome integration) that
+  can inspect rendered DOM and interact through visible controls.
+- If no browser automation capability is available, mark every required
+  browser case BLOCKED. HTTP requests, local tests, or source inspection may be
+  supplemental evidence, but they do not constitute browser acceptance.
+
+Announce which driver is opening the preview and that the supplied token will
+be used only for UI login. Open the route most relevant to the PR; use `/chat`
+only for chat changes. Wait for session initialization and inspect rendered DOM
+before assuming labels or controls.
 
 - If already authenticated, continue.
 - If a login form appears, fill the bearer into its token/password field and
@@ -218,7 +227,8 @@ Then clean up, guarded so failures cannot skip publication:
 
 1. Remove tracked `railway-test-` test data in a `finally`-equivalent step;
    record cleanup status in the evidence regardless of outcome.
-2. Finalize browser tabs best effort:
+2. Finalize browser tabs best effort using the selected driver's close or
+   cleanup operation. With the Codex in-app browser, use:
 
 ```js
 await browser.tabs.finalize({ keep: [] })
