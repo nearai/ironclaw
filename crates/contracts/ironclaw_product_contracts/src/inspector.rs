@@ -296,6 +296,41 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+fn deserialize_bounded_prompt_component<'de, D>(
+    deserializer: D,
+) -> Result<BoundedDiagnosticText, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BoundedDiagnosticText::deserialize(deserializer)?
+        .validate_retained_max(PROMPT_COMPONENT_CONTENT_MAX_BYTES)
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_bounded_tool_arguments<'de, D>(
+    deserializer: D,
+) -> Result<Option<BoundedDiagnosticText>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BoundedDiagnosticText>::deserialize(deserializer)?
+        .map(|value| value.validate_retained_max(TOOL_ARGUMENTS_MAX_BYTES))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_bounded_tool_result<'de, D>(
+    deserializer: D,
+) -> Result<Option<BoundedDiagnosticText>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BoundedDiagnosticText>::deserialize(deserializer)?
+        .map(|value| value.validate_retained_max(TOOL_RESULT_MAX_BYTES))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
 fn deserialize_optional_bounded_label<'de, D>(
     deserializer: D,
 ) -> Result<Option<BoundedDiagnosticText>, D::Error>
@@ -347,10 +382,12 @@ pub enum PromptComponentKind {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptComponentDiagnostic {
     pub kind: PromptComponentKind,
+    #[serde(deserialize_with = "deserialize_bounded_label")]
     pub label: BoundedDiagnosticText,
+    #[serde(deserialize_with = "deserialize_bounded_prompt_component")]
     pub content: BoundedDiagnosticText,
     pub estimated_tokens: Option<u64>,
 }
@@ -540,7 +577,30 @@ pub enum ToolExecutionStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Deserialize)]
+struct ToolExecutionDiagnosticWire {
+    activity_id: CapabilityActivityId,
+    model_call_id: Option<DiagnosticModelCallId>,
+    #[serde(deserialize_with = "deserialize_bounded_label")]
+    capability_name: BoundedDiagnosticText,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_bounded_tool_arguments"
+    )]
+    arguments: Option<BoundedDiagnosticText>,
+    #[serde(default, deserialize_with = "deserialize_optional_bounded_tool_result")]
+    result: Option<BoundedDiagnosticText>,
+    status: ToolExecutionStatus,
+    duration_ms: Option<u64>,
+    output_bytes: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_bounded_label")]
+    failure_category: Option<BoundedDiagnosticText>,
+    #[serde(default, deserialize_with = "deserialize_optional_bounded_summary")]
+    failure_summary: Option<BoundedDiagnosticText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ToolExecutionDiagnosticWire")]
 pub struct ToolExecutionDiagnostic {
     pub activity_id: CapabilityActivityId,
     pub model_call_id: Option<DiagnosticModelCallId>,
@@ -552,6 +612,30 @@ pub struct ToolExecutionDiagnostic {
     pub output_bytes: Option<u64>,
     pub failure_category: Option<BoundedDiagnosticText>,
     pub failure_summary: Option<BoundedDiagnosticText>,
+}
+
+impl TryFrom<ToolExecutionDiagnosticWire> for ToolExecutionDiagnostic {
+    type Error = &'static str;
+
+    fn try_from(wire: ToolExecutionDiagnosticWire) -> Result<Self, Self::Error> {
+        if let Some(result) = wire.result.as_ref()
+            && wire.output_bytes != Some(result.original_bytes())
+        {
+            return Err("tool result byte metadata is inconsistent");
+        }
+        Ok(Self {
+            activity_id: wire.activity_id,
+            model_call_id: wire.model_call_id,
+            capability_name: wire.capability_name,
+            arguments: wire.arguments,
+            result: wire.result,
+            status: wire.status,
+            duration_ms: wire.duration_ms,
+            output_bytes: wire.output_bytes,
+            failure_category: wire.failure_category,
+            failure_summary: wire.failure_summary,
+        })
+    }
 }
 
 impl ToolExecutionDiagnostic {
@@ -774,6 +858,14 @@ mod tests {
         }
     }
 
+    fn oversized_bounded_text(max_bytes: usize) -> serde_json::Value {
+        serde_json::json!({
+            "content": "x".repeat(max_bytes + 1),
+            "original_bytes": max_bytes + 1,
+            "truncated": false,
+        })
+    }
+
     #[test]
     fn bounded_text_preserves_utf8_and_reports_original_size() {
         let value = "€".repeat(TOOL_RESULT_MAX_BYTES);
@@ -919,6 +1011,114 @@ mod tests {
                 serde_json::from_value(encoded).expect("deserialize diagnostic update");
             assert_eq!(decoded, update);
         }
+    }
+
+    #[test]
+    fn owning_diagnostic_records_round_trip_through_json() {
+        let component = PromptComponentDiagnostic::new(
+            PromptComponentKind::Instruction,
+            "policy",
+            "keep responses concise",
+            Some(4),
+        );
+        let encoded = serde_json::to_value(&component).expect("serialize prompt component");
+        let decoded = serde_json::from_value::<PromptComponentDiagnostic>(encoded)
+            .expect("deserialize prompt component");
+        assert_eq!(decoded, component);
+
+        let tool = ToolExecutionDiagnostic::new(
+            CapabilityActivityId::new(),
+            Some(DiagnosticModelCallId::new()),
+            "filesystem.read",
+            Some("{\"path\":\"notes.txt\"}".to_string()),
+            Some("contents".to_string()),
+            ToolExecutionStatus::Succeeded,
+            Some(2),
+            Some(1),
+            Some("none".to_string()),
+            Some("completed".to_string()),
+        );
+        let encoded = serde_json::to_value(&tool).expect("serialize tool execution");
+        let decoded = serde_json::from_value::<ToolExecutionDiagnostic>(encoded)
+            .expect("deserialize tool execution");
+        assert_eq!(decoded, tool);
+    }
+
+    #[test]
+    fn prompt_component_deserialization_enforces_its_field_limits() {
+        let component = PromptComponentDiagnostic::new(
+            PromptComponentKind::Instruction,
+            "policy",
+            "content",
+            None,
+        );
+        let payload = serde_json::to_value(component).expect("serialize prompt component");
+
+        for (field, max_bytes) in [
+            ("label", DIAGNOSTIC_LABEL_MAX_BYTES),
+            ("content", PROMPT_COMPONENT_CONTENT_MAX_BYTES),
+        ] {
+            let mut oversized = payload.clone();
+            oversized[field] = oversized_bounded_text(max_bytes);
+
+            let error = serde_json::from_value::<PromptComponentDiagnostic>(oversized)
+                .expect_err("oversized prompt component field must be rejected");
+            assert!(error.to_string().contains("field byte limit"));
+        }
+    }
+
+    #[test]
+    fn tool_execution_deserialization_enforces_its_field_limits() {
+        let tool = ToolExecutionDiagnostic::new(
+            CapabilityActivityId::new(),
+            None,
+            "filesystem.read",
+            Some("arguments".to_string()),
+            Some("result".to_string()),
+            ToolExecutionStatus::Failed,
+            None,
+            None,
+            Some("provider".to_string()),
+            Some("failed".to_string()),
+        );
+        let payload = serde_json::to_value(tool).expect("serialize tool execution");
+
+        for (field, max_bytes) in [
+            ("capability_name", DIAGNOSTIC_LABEL_MAX_BYTES),
+            ("arguments", TOOL_ARGUMENTS_MAX_BYTES),
+            ("result", TOOL_RESULT_MAX_BYTES),
+            ("failure_category", DIAGNOSTIC_LABEL_MAX_BYTES),
+            ("failure_summary", DIAGNOSTIC_SUMMARY_MAX_BYTES),
+        ] {
+            let mut oversized = payload.clone();
+            oversized[field] = oversized_bounded_text(max_bytes);
+
+            let error = serde_json::from_value::<ToolExecutionDiagnostic>(oversized)
+                .expect_err("oversized tool execution field must be rejected");
+            assert!(error.to_string().contains("field byte limit"));
+        }
+    }
+
+    #[test]
+    fn tool_execution_deserialization_rejects_inconsistent_result_size() {
+        let tool = ToolExecutionDiagnostic::new(
+            CapabilityActivityId::new(),
+            None,
+            "filesystem.read",
+            None,
+            Some("result".to_string()),
+            ToolExecutionStatus::Succeeded,
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut payload = serde_json::to_value(tool).expect("serialize tool execution");
+        payload["output_bytes"] = serde_json::json!(1);
+
+        let error = serde_json::from_value::<ToolExecutionDiagnostic>(payload)
+            .expect_err("inconsistent tool result byte metadata must be rejected");
+        assert!(error.to_string().contains("byte metadata is inconsistent"));
     }
 
     #[test]
