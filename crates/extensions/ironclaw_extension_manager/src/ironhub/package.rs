@@ -125,6 +125,15 @@ pub(crate) fn ironhub_tool_package(
             ),
         });
     }
+    let occupied_paths: BTreeSet<_> = files.iter().map(|(path, _)| path.as_str()).collect();
+    if let Some(path) = prompt_assets
+        .keys()
+        .find(|path| occupied_paths.contains(path.as_str()))
+    {
+        return Err(IronHubCommandError::Catalog {
+            reason: format!("published prompt path '{path}' collides with another package asset"),
+        });
+    }
     files.extend(prompt_assets);
 
     let package = registry_extension_package(files, reserved_bundled_ids)
@@ -396,6 +405,38 @@ access_token = "/access_token""#
         assert!(
             error.to_string().contains("missing")
                 && error.to_string().contains("prompts/attio/invoke.md"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn package_rejects_a_prompt_that_collides_with_the_wasm_module() {
+        let module_path = "wasm/attio-tool.wasm";
+        let manifest = String::from_utf8(published_manifest(
+            "attio",
+            &api_key_auth("attio", ""),
+        ))
+        .expect("manifest UTF-8")
+        .replace(
+            "output_schema_ref = \"schemas/attio/raw_output.v1.json\"",
+            &format!(
+                "output_schema_ref = \"schemas/attio/raw_output.v1.json\"\nprompt_doc_ref = \"{module_path}\""
+            ),
+        )
+        .into_bytes();
+        let error = ironhub_tool_package(
+            &entry_named("attio"),
+            manifest,
+            component(),
+            b"{}".to_vec(),
+            published_schemas("attio"),
+            vec![(module_path.to_string(), b"# Prompt".to_vec())],
+            &[],
+        )
+        .expect_err("a prompt must not overwrite the validated wasm module");
+
+        assert!(
+            error.to_string().contains("collides") && error.to_string().contains(module_path),
             "got {error}"
         );
     }

@@ -2118,6 +2118,7 @@ output_schema_ref = "schemas/installed-tool/raw_output.v1.json"
     .into_bytes()
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn published_tool_manifest_with_prompt(version: &str) -> Vec<u8> {
     String::from_utf8(published_tool_manifest(version))
         .expect("fixture manifest is UTF-8")
