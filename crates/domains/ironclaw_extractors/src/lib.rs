@@ -49,7 +49,7 @@ const MAX_DECOMPRESSED_TOTAL: u64 = 100 * 1024 * 1024;
 ///   never in a model result, a capability output, a projected event, a
 ///   snapshot, or a user-visible error. Consumers bound by a stricter
 ///   redaction charter than a debug log (see
-///   `crates/ironclaw_host_runtime/AGENTS.md`) should re-check that ceiling
+///   `crates/kernel/ironclaw_host_runtime/AGENTS.md`) should re-check that ceiling
 ///   before widening where the payload goes; what it carries today is
 ///   container/parser *structure* — `lopdf`'s object ids, byte offsets and
 ///   dictionary keys, `zip`'s archive diagnostics and the fixed OOXML entry
