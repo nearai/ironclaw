@@ -573,6 +573,8 @@ fn prompt_component_kind(
     let content_ref = message.content_ref.as_str();
     if index < identity_message_count as usize {
         PromptComponentKind::Identity
+    } else if content_ref.starts_with("msg:instruction.") {
+        PromptComponentKind::Instruction
     } else if content_ref.starts_with("msg:snippet.") {
         PromptComponentKind::Skill
     } else if content_ref.contains("capability") {
@@ -1232,6 +1234,22 @@ mod tests {
                         ),
                     },
                     HostManagedPromptDiagnosticMessage {
+                        role: HostManagedModelMessageRole::System,
+                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                            "msg:instruction.system.0.deadbeef",
+                        )
+                        .expect("ref"),
+                        content: "Follow the workspace instructions.".to_string(),
+                    },
+                    HostManagedPromptDiagnosticMessage {
+                        role: HostManagedModelMessageRole::System,
+                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                            "msg:snippet.skill.workspace-search.0.deadbeef",
+                        )
+                        .expect("ref"),
+                        content: "Use workspace search when needed.".to_string(),
+                    },
+                    HostManagedPromptDiagnosticMessage {
                         role: HostManagedModelMessageRole::User,
                         content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
                             "msg:thread.user",
@@ -1254,7 +1272,7 @@ mod tests {
             .prompt(&DiagnosticScope::new(tenant_id, user_id, thread_id, run_id))
             .expect("prompt read")
             .expect("prompt captured");
-        assert_eq!(prompt.message_count, 2);
+        assert_eq!(prompt.message_count, 4);
         assert_eq!(prompt.identity_message_count, 1);
         assert_eq!(prompt.instruction_snippet_count, 2);
         assert_eq!(prompt.capability_count, 1);
@@ -1282,6 +1300,10 @@ mod tests {
                 .content()
                 .contains("[REDACTED]")
         );
+        assert_eq!(prompt.components[0].kind, PromptComponentKind::Identity);
+        assert_eq!(prompt.components[1].kind, PromptComponentKind::Instruction);
+        assert_eq!(prompt.components[2].kind, PromptComponentKind::Skill);
+        assert_eq!(prompt.components[3].kind, PromptComponentKind::Conversation);
         assert_eq!(
             prompt.components.last().map(|component| component.kind),
             Some(PromptComponentKind::Capability)
