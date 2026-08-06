@@ -324,6 +324,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Run built-in tools, parallel calls, and multi-step chains and see the result | `test_reborn_webui_v2_legacy_tool_execution.py` (9), `test_v2_engine_tool_lifecycle.py` (6), `test_tool_execution.py` |
+| Inspect safely bounded arguments and output for a completed tool call | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_tool_turn_records_result_and_final_reply` |
 | Recover when a tool fails, a tool call is truncated, or the model loops | `test_reborn_webui_v2_legacy_tool_execution.py`, `test_agent_loop_recovery.py` (4), `test_v2_engine_error_handling.py` |
 | See the approval card with payload details, approve/deny, and see it disable while resolving | `test_reborn_webui_v2_legacy_approval.py` (8) |
 | Not send messages while a gate is pending — but keep using other threads | `test_reborn_webui_v2_legacy_approval.py::test_reborn_legacy_pending_approval_does_not_block_other_thread` |
