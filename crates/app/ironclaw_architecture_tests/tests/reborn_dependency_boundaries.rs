@@ -626,7 +626,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // reviewed in the PR body's architecture-audit section.
         ("ironclaw_host_api", 18_570),
         ("ironclaw_loop_contracts", 14_479),
-        ("ironclaw_product_contracts", 14_471),
+        // Raised 14_471 -> 15_685 by #7230 (operator inspector diagnostics):
+        // the growth is neutral snapshot, update, cursor, prompt, model-call,
+        // tool-execution, activity, and stats wire vocabulary plus serde and
+        // bounded-field invariants. Process-local retention and sequencing
+        // remain implemented by ironclaw_assistant.
+        ("ironclaw_product_contracts", 15_685),
         ("ironclaw_prompt_envelope", 832),
     ];
 

@@ -1,7 +1,7 @@
-# ironclaw_resources guardrails
+# ironclaw_resources
 
-- Own resource reservation, reconciliation, release, and quota accounting.
-- No costed or quota-limited work should execute without an active reservation or explicit documented exception.
-- Do not import runtimes, dispatcher, capabilities, approvals, processes, events, or product workflow crates.
-- Preserve tenant/user/project scope in every reservation and receipt.
-- Keep accounting deterministic and safe under concurrent reservations.
+Canonical guidance for this crate lives in [`AGENTS.md`](./AGENTS.md)
+(working rules + guardrails) and [`README.md`](./README.md) (orientation).
+This file is a pointer, kept so tooling that loads `CLAUDE.md` lands there —
+do not add rules here (one canonical home per fact,
+`docs/reborn/guidance-conventions.md`).

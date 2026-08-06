@@ -164,7 +164,7 @@ impl RebornChannelWorkflowFactory {
             Ok(thread_id) => thread_id,
             Err(error) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_workflow",
+                    target: "ironclaw::reborn::channel_workflow",
                     extension_id,
                     %error,
                     "invalid channel-notice thread id; triggered delivery unavailable"

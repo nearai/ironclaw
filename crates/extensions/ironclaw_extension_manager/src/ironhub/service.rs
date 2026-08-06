@@ -365,6 +365,13 @@ impl IronHubService {
                         .await?;
                     schemas.push((path.clone(), content));
                 }
+                let mut prompts = Vec::with_capacity(entry.prompts.len());
+                for (path, artifact) in &entry.prompts {
+                    let content = self
+                        .download_verified(artifact, MAX_METADATA_BYTES, private_origin.as_ref())
+                        .await?;
+                    prompts.push((path.clone(), content));
+                }
                 let reserved = self
                     .extension_management
                     .reserved_bundled_extension_ids()
@@ -375,6 +382,7 @@ impl IronHubService {
                     wasm,
                     capabilities,
                     schemas,
+                    prompts,
                     &reserved,
                 )?;
                 self.extension_management

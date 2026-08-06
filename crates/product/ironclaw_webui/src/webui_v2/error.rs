@@ -32,7 +32,7 @@ impl WebUiV2HttpError {
             // If a future variant introduces a non-HTTP code, log loudly and
             // fall back to 500 rather than poisoning the response.
             tracing::error!(
-                target = "ironclaw_webui_v2::error",
+                target: "ironclaw_webui_v2::error",
                 status_code = parts.status_code,
                 "ProductSurfaceError carried a non-HTTP status code; coercing to 500"
             );

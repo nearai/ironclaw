@@ -2,7 +2,8 @@
 
 ## Start Here
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
+- Read `README.md` for orientation (charter, measured deps/consumers, gates).
+  This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
 - `docs/reborn/contracts/approvals.md`
@@ -18,6 +19,21 @@
 - Best-effort, metadata-only approval audit emission (never alters resolution outcomes).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 - Filesystem-backed `ApprovalRequestStore` and `GateRecordStore` persistence.
+
+## Guardrails
+
+- Own durable approval requests, gate records, and the approval resolution
+  workflow from pending record to scoped lease or denial.
+- Do not prompt users, dispatch capabilities, manage processes, reserve
+  resources, or import runtime/dispatcher/capability workflow crates.
+- Approve fail-closed: persist `approve` (the authority record) first, then
+  issue the lease. If the lease store fails after approval is persisted, the
+  request stays `Approved` and the caller surfaces the lease error — no
+  rollback to `Pending`. The approval record is the durable decision; lease
+  re-issuance against an already-decided request is recoverable.
+- Denials issue no lease.
+- Audit emission is metadata-only and best-effort. Failures are logged at
+  `debug!` and never alter resolution outcomes.
 
 ## Do Not Move In Here
 
