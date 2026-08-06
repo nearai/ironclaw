@@ -233,7 +233,7 @@ Key notes:
 - `complete_with_tools()` is never cached (tool calls can have side effects) — `CachedProvider` always passes them through.
 
 To add a new provider:
-1. Create `crates/domains/ironclaw_llm/src/myprovider.rs` implementing `LlmProvider`
+1. Create `crates/domains/ironclaw_llm/src/myprovider.rs` implementing `LlmProvider` <!-- check-guidance: path-ok --> (prescriptive: the file you are about to add, not one that exists)
 2. Add a `ProviderProtocol` variant in `registry.rs` (or wire a backend-string match in `lib.rs` for non-registry providers like `nearai`/`bedrock`/`openai_codex`)
 3. Wire into the factory dispatch in `lib.rs` (`create_registry_provider` for registry-backed protocols, top-level `create_llm_provider` for backend-string-keyed providers)
 4. Add env vars to `.env.example` and to whichever crate reads them (✎ the v1 `src/config/llm.rs` is gone — deleted with the monolith)

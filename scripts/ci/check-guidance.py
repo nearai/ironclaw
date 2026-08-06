@@ -176,58 +176,6 @@ class Suppression:
 # the line — or by rewording it. Real drift never belongs here.
 # ---------------------------------------------------------------------------
 KNOWN_MISSING: tuple[Suppression, ...] = (
-    Suppression(
-        doc="CLAUDE.md",
-        token=".codebase-memory/artifact.json",
-        reason="the same sentence declares it git-ignored per-environment "
-        "state; deliberately untracked, so the tracked-set check can never "
-        "see it",
-    ),
-    Suppression(
-        doc="crates/domains/ironclaw_llm/CLAUDE.md",
-        token="crates/domains/ironclaw_llm/src/myprovider.rs",
-        reason="instructional example — the surrounding step says to *create* "
-        "this file when adding a provider; it exists only while someone "
-        "follows the recipe",
-    ),
-    Suppression(
-        doc="crates/domains/ironclaw_llm/CLAUDE.md",
-        token="src/config/llm.rs",
-        reason="asserts absence: 'the v1 src/config/llm.rs is gone' — "
-        "historical mention that should carry the ✎ marker",
-    ),
-    Suppression(
-        doc="crates/domains/ironclaw_llm/CLAUDE.md",
-        token="src/llm_host.rs",
-        reason="asserts absence: listed among v1 names that 'went with the "
-        "monolith and resolve to nothing today'",
-    ),
-    Suppression(
-        doc="crates/domains/ironclaw_llm/CLAUDE.md",
-        token="src/setup/",
-        reason="asserts absence: listed among v1 names that 'went with the "
-        "monolith and resolve to nothing today'",
-    ),
-    Suppression(
-        doc="crates/app/ironclaw_composition/CLAUDE.md",
-        token="src/channels/web/",
-        reason="asserts absence: '(The v1 gateway and its src/channels/web/ "
-        "…' — historical v1 mention in the Reborn spec",
-    ),
-    Suppression(
-        doc="crates/loop/ironclaw_hooks/AGENTS.md",
-        token="crates/loop/ironclaw_turn_runner/tests/hooks_integration.rs",
-        reason="asserts absence: the '⚠ Read the history' correction block "
-        "says the section 'previously named' this file, which 'never' "
-        "existed as claimed",
-    ),
-    Suppression(
-        doc="crates/domains/ironclaw_trace_commons/CLAUDE.md",
-        token="tests/queue.rs",
-        reason="prescriptive placement — 'any other queue.rs test belongs in "
-        "tests/queue.rs' names the file a future queue test must create; "
-        "src/contribution/tests/queue.rs does not exist yet",
-    ),
 )
 
 

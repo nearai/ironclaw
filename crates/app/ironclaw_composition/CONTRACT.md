@@ -310,7 +310,7 @@ counterpart. "v1-only" means the v2 service does not yet expose this
 shape and a future native-surface ticket owns the migration — these
 rows are inventoried here, not implemented in the current PR.
 
-| Concern | v1 entrypoint (under `src/channels/web/`) | v2 native counterpart | Status |
+| Concern | v1 entrypoint (under `src/channels/web/`) | v2 native counterpart | Status | <!-- check-guidance: path-ok -->
 |---|---|---|---|
 | Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
 | Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
@@ -386,7 +386,7 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
 - No `ProductAdapter` wrapper around browser sessions.
 - No fake `ExternalActorRef` / `ProtocolAuthEvidence` /
   `OutboundDeliverySink` / declared egress.
-- No shared middleware with the deleted v1 `src/channels/web/` stack —
+- No shared middleware with the deleted v1 ✎ `src/channels/web/` stack —
   the v2 listener was built standalone and there is no v1 binary left to
   share with.
 
