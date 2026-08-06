@@ -54,7 +54,7 @@ test location.
 
 ```bash
 cargo fmt                                                    # format
-cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
+cargo clippy --all --benches --tests --examples --all-features  # lint (warnings surface here; the pre-PR block below denies them)
 cargo test                                                   # unit + integration suites (Postgres legs self-provision testcontainers; skipped when Docker is unavailable)
 ```
 
