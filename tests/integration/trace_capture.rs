@@ -5,7 +5,7 @@
 //! `build_reborn_runtime`'s recipe) into the group's ONE planned runtime with
 //! `.with_trace_capture()`, and proves the capture path end-to-end: policy
 //! read → transcript capture → redact → score → queue
-//! (`ironclaw_reborn_traces::contribution`, previously 0% on the lane).
+//! (`ironclaw_trace_commons::contribution`, previously 0% on the lane).
 //!
 //! Enrollment divergence from the plan (verified infeasible as written): a
 //! scripted `builtin.trace_commons.onboard` with `confirmed=true` can NEVER
@@ -36,7 +36,7 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_reborn_traces::contribution::{
+use ironclaw_trace_commons::contribution::{
     StandingTraceContributionPolicy, queued_trace_envelope_paths_for_scope, trace_scope_key,
     write_trace_policy_for_scope,
 };

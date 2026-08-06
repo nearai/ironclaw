@@ -2,7 +2,7 @@
 # Regression tests for the comm/sort collation mismatch fixed in
 # discover-reborn-package-crates.sh: inputs were sorted with LC_ALL=C but comm
 # ran in the ambient locale, so under a UTF-8 collation (which orders
-# "ironclaw_events" before "ironclaw_event_streams", unlike C) the pre-push
+# "ironclaw_event_log" before "ironclaw_event_streams", unlike C) the pre-push
 # coverage ratchet died with "comm: input is not in sorted order".
 
 set -euo pipefail
@@ -92,7 +92,7 @@ else
 fi
 
 # Case 2: the fixture pair that broke the ratchet. In C collation
-# "ironclaw_event_streams" < "ironclaw_events" ('_' 0x5f < 's' 0x73). The
+# "ironclaw_event_streams" < "ironclaw_event_log" ('_' 0x5f < 's' 0x73). The
 # sentinel second file ("zzz") forces comm to advance through file 1 and
 # check its order — with identical files the lines compare equal and comm
 # never notices the disorder. Select a locale by proving the mismatch:

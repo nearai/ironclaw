@@ -9,7 +9,7 @@ multiple independent connection groups:
 
 - `LibSqlRootFilesystem` owns an eight-connection pool.
 - `LibSqlTriggerRepository` opens fresh connections for each operation.
-- `ironclaw_reborn_event_store` reopens the configured path and creates another
+- `ironclaw_event_store` reopens the configured path and creates another
   `LibSqlRootFilesystem` with another eight-connection pool.
 
 SQLite WAL permits concurrent readers but still admits only one writer at a
@@ -237,7 +237,7 @@ failing test that is observed before production code changes.
 
 ### Architecture and parity
 
-- `cargo test -p ironclaw_architecture`
+- `cargo test -p ironclaw_architecture_tests`
 - Focused libSQL runtime/filesystem/trigger/event-store/turn tests.
 - PostgreSQL-focused contract tests that cover unchanged concurrent pool
   construction and generic `BackendBusy` mapping.

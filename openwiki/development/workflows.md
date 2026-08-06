@@ -97,7 +97,7 @@ grep -i "feature-name" FEATURE_PARITY.md
 
 # Decide where to build it:
 # - New runtime behavior? → crates/ironclaw_reborn*
-# - New tool? → crates/ironclaw_first_party_extensions or ironclaw_extensions
+# - New tool? → crates/ironclaw_first_party_extensions or ironclaw_extension_registry
 # - New gateway feature? → crates/ironclaw_gateway or ironclaw_reborn_webui_ingress
 # - New channel? → crates/ironclaw_*_adapter
 
@@ -202,7 +202,7 @@ cargo build
 cargo test
 
 # Test the feature manually
-cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "test"
+cargo run -p ironclaw_cli --bin ironclaw-reborn -- run --message "test"
 ```
 
 ### 4. Comment
@@ -241,7 +241,7 @@ export IRONCLAW_REBORN_HOME="$PWD/.reborn-debug"
 export OPENAI_API_KEY="sk-..."
 
 # Run the failing command
-cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "..."
+cargo run -p ironclaw_cli --bin ironclaw-reborn -- run --message "..."
 ```
 
 ### 2. Add Debug Output
@@ -251,7 +251,7 @@ cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "..."
 debug!("Variable: {:?}", variable);
 
 // Run with debug logging
-RUST_LOG=debug cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "..."
+RUST_LOG=debug cargo run -p ironclaw_cli --bin ironclaw-reborn -- run --message "..."
 ```
 
 ### 3. Use a Debugger

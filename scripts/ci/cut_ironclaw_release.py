@@ -168,15 +168,15 @@ def _checked_out_sha(candidate_root: Path) -> str:
 def _manifest_version(candidate_root: Path) -> str:
     # Resolved by crate NAME through the shared inventory
     # (scripts/ci/lib/crate_tree.py) against the CANDIDATE checkout, not a
-    # literal `crates/ironclaw_reborn_cli` path — the target-architecture
+    # literal `crates/ironclaw_cli` path — the target-architecture
     # family move (PROPOSAL §5) would otherwise make this raise FileNotFoundError
     # (or, worse, silently resolve nothing) once the candidate commit has moved
     # past the flat layout (docs/reborn/target-architecture/CHECKLIST.md WS10).
     try:
-        crate_dir = crate_directory("ironclaw_reborn_cli", candidate_root)
+        crate_dir = crate_directory("ironclaw_cli", candidate_root)
     except CrateTreeError as error:
         raise ReleaseTagError(
-            "cannot resolve the ironclaw_reborn_cli crate in the candidate "
+            "cannot resolve the ironclaw_cli crate in the candidate "
             f"checkout: {error}"
         ) from error
     manifest = candidate_root / crate_dir / "Cargo.toml"

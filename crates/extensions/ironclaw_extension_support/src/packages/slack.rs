@@ -47,14 +47,6 @@ pub(super) fn bundle() -> PackageBundle {
 }
 
 fn assets() -> Vec<super::PackageAsset> {
-    macro_rules! slack_schema_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("schemas/slack/", $path),
-                include_bytes!(concat!("../../../packages/slack/schemas/slack/", $path)),
-            )
-        };
-    }
     macro_rules! slack_prompt_asset {
         ($operation:literal) => {
             bytes_asset(
@@ -68,32 +60,26 @@ fn assets() -> Vec<super::PackageAsset> {
         };
     }
 
-    // One schema + prompt pair PER manifest [[tools]] entry — the host
-    // runtime's hot capability catalog reads every model-visible tool's
-    // `input_schema_ref`/`prompt_doc_ref` from the materialized package root
-    // at surface publish, so an omitted pair does not fail install or
-    // activation but kills every post-activation turn
-    // (`host_stage_unavailable_capability`). Pinned catalog-wide by
-    // `bundled_first_party_manifest_asset_refs_are_packaged` in
-    // `ironclaw_reborn_composition::extension_host::available_extensions`.
+    // All 8 [[tools]] entries are standard_op-bound (standardized messaging
+    // framework): the host resolves their input/output schemas from the
+    // compiled-in `ironclaw_host_api::messaging` registry via the
+    // synthesized `standard:messaging/<op>.v1` refs, never from a package
+    // asset — so no `schemas/slack/*.json` embed exists or is needed. Each
+    // entry keeps a package-owned prompt doc (`prompt_doc_ref`), still read
+    // from the materialized package root at surface publish. Pinned
+    // catalog-wide by `bundled_first_party_manifest_asset_refs_are_packaged`
+    // in `ironclaw_extension_host::available_extensions` (that function's
+    // `validate_bundled_package_assets` is the production-critical sibling
+    // of the same check).
     vec![
         bytes_asset("manifest.toml", MANIFEST.as_bytes()),
-        slack_schema_asset!("raw_output.v1.json"),
-        slack_schema_asset!("search_messages.input.v1.json"),
         slack_prompt_asset!("search_messages"),
-        slack_schema_asset!("list_conversations.input.v1.json"),
         slack_prompt_asset!("list_conversations"),
-        slack_schema_asset!("get_conversation_info.input.v1.json"),
         slack_prompt_asset!("get_conversation_info"),
-        slack_schema_asset!("get_conversation_history.input.v1.json"),
         slack_prompt_asset!("get_conversation_history"),
-        slack_schema_asset!("get_thread_replies.input.v1.json"),
         slack_prompt_asset!("get_thread_replies"),
-        slack_schema_asset!("get_user_info.input.v1.json"),
         slack_prompt_asset!("get_user_info"),
-        slack_schema_asset!("whoami.input.v1.json"),
         slack_prompt_asset!("whoami"),
-        slack_schema_asset!("send_message.input.v1.json"),
         slack_prompt_asset!("send_message"),
         bytes_asset("wasm/slack_user_tool.wasm", WASM),
     ]
