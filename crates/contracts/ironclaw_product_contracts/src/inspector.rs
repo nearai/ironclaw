@@ -443,21 +443,6 @@ impl PromptDiagnostic {
         effective_model: Option<String>,
         context_limit: Option<u64>,
     ) -> Self {
-        let original_component_count = components.len();
-        let mut remaining = PROMPT_COMPONENT_TOTAL_MAX_BYTES;
-        let mut bounded_components =
-            Vec::with_capacity(original_component_count.min(MAX_PROMPT_COMPONENTS));
-        for mut component in components.into_iter().take(MAX_PROMPT_COMPONENTS) {
-            if remaining == 0 {
-                break;
-            }
-            let retained = component.content.content().len().min(remaining);
-            component.content = component.content.rebound(retained);
-            remaining = remaining.saturating_sub(component.content.content().len());
-            bounded_components.push(component);
-        }
-        let components_truncated = bounded_components.len() < original_component_count;
-
         let active_skills_truncated = active_skills.len() > MAX_ACTIVE_SKILLS;
         let active_skills = active_skills
             .into_iter()
@@ -467,8 +452,8 @@ impl PromptDiagnostic {
 
         Self {
             captured_at,
-            components: bounded_components,
-            components_truncated,
+            components,
+            components_truncated: false,
             reconstructed_prompt: BoundedDiagnosticText::reconstructed_prompt(reconstructed_prompt),
             total_estimated_tokens,
             message_count,
@@ -481,6 +466,53 @@ impl PromptDiagnostic {
             effective_model: effective_model.map(BoundedDiagnosticText::label),
             context_limit,
         }
+        .into_bounded()
+    }
+
+    /// Reapplies every owning prompt limit at a trust boundary.
+    ///
+    /// The fields remain public wire DTO fields, so callers may construct this
+    /// type without using [`Self::new`]. Store and transport boundaries should
+    /// call this method before retaining an externally constructed value.
+    pub fn into_bounded(mut self) -> Self {
+        let original_component_count = self.components.len();
+        let mut remaining = PROMPT_COMPONENT_TOTAL_MAX_BYTES;
+        let mut bounded_components =
+            Vec::with_capacity(original_component_count.min(MAX_PROMPT_COMPONENTS));
+        for mut component in self.components.into_iter().take(MAX_PROMPT_COMPONENTS) {
+            if remaining == 0 {
+                break;
+            }
+            component.label = component.label.rebound(DIAGNOSTIC_LABEL_MAX_BYTES);
+            component.content = component
+                .content
+                .rebound(PROMPT_COMPONENT_CONTENT_MAX_BYTES);
+            let retained = component.content.content().len().min(remaining);
+            component.content = component.content.rebound(retained);
+            remaining = remaining.saturating_sub(component.content.content().len());
+            bounded_components.push(component);
+        }
+        self.components_truncated |= bounded_components.len() < original_component_count;
+        self.components = bounded_components;
+
+        let original_skill_count = self.active_skills.len();
+        self.active_skills = self
+            .active_skills
+            .into_iter()
+            .take(MAX_ACTIVE_SKILLS)
+            .map(|skill| skill.rebound(DIAGNOSTIC_LABEL_MAX_BYTES))
+            .collect();
+        self.active_skills_truncated |= self.active_skills.len() < original_skill_count;
+        self.reconstructed_prompt = self
+            .reconstructed_prompt
+            .rebound(RECONSTRUCTED_PROMPT_MAX_BYTES);
+        self.requested_model = self
+            .requested_model
+            .map(|model| model.rebound(DIAGNOSTIC_LABEL_MAX_BYTES));
+        self.effective_model = self
+            .effective_model
+            .map(|model| model.rebound(DIAGNOSTIC_LABEL_MAX_BYTES));
+        self
     }
 
     pub fn any_content_truncated(&self) -> bool {

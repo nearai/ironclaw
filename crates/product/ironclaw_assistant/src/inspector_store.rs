@@ -320,6 +320,7 @@ impl InMemoryDiagnosticStore {
         scope: DiagnosticScope,
         prompt: PromptDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        let prompt = prompt.into_bounded();
         let update = DiagnosticUpdateKind::PromptUpdated {
             component_count: u32::try_from(prompt.components.len()).unwrap_or(u32::MAX),
             total_estimated_tokens: prompt.total_estimated_tokens,
@@ -445,6 +446,7 @@ impl InMemoryDiagnosticStore {
             (Some(after), Some(floor)) => {
                 after.sequence.as_u64().saturating_add(1) < floor.sequence.as_u64()
             }
+            (None, Some(floor)) => floor.sequence.as_u64() > 1,
             _ => false,
         };
         let updates = run
@@ -576,8 +578,11 @@ mod tests {
         turn::TurnRunId,
     };
     use ironclaw_product_contracts::inspector::{
-        DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticModelCallId, DiagnosticScope,
-        InspectorModelCallStatus, ModelCallDiagnostic, PromptDiagnostic, ToolExecutionDiagnostic,
+        BoundedDiagnosticText, DIAGNOSTIC_LABEL_MAX_BYTES, DiagnosticActivityEvent,
+        DiagnosticActivityKind, DiagnosticModelCallId, DiagnosticScope, InspectorModelCallStatus,
+        MAX_ACTIVE_SKILLS, MAX_PROMPT_COMPONENTS, ModelCallDiagnostic,
+        PROMPT_COMPONENT_CONTENT_MAX_BYTES, PROMPT_COMPONENT_TOTAL_MAX_BYTES,
+        PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, ToolExecutionDiagnostic,
         ToolExecutionStatus,
     };
 
@@ -795,6 +800,93 @@ mod tests {
     }
 
     #[test]
+    fn record_prompt_reapplies_limits_to_a_literal_dto() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let oversized_label = "l".repeat(DIAGNOSTIC_LABEL_MAX_BYTES + 1);
+        let oversized_content = "x".repeat(PROMPT_COMPONENT_CONTENT_MAX_BYTES + 1);
+        let prompt = PromptDiagnostic {
+            captured_at: Utc::now(),
+            components: (0..=MAX_PROMPT_COMPONENTS)
+                .map(|index| PromptComponentDiagnostic {
+                    kind: PromptComponentKind::Instruction,
+                    label: BoundedDiagnosticText::reconstructed_prompt(oversized_label.clone()),
+                    content: BoundedDiagnosticText::reconstructed_prompt(if index < 5 {
+                        oversized_content.clone()
+                    } else {
+                        "x".to_string()
+                    }),
+                    estimated_tokens: None,
+                })
+                .collect(),
+            components_truncated: false,
+            reconstructed_prompt: BoundedDiagnosticText::reconstructed_prompt("prompt"),
+            total_estimated_tokens: None,
+            message_count: 1,
+            identity_message_count: 0,
+            instruction_snippet_count: 1,
+            active_skills: (0..=MAX_ACTIVE_SKILLS)
+                .map(|_| BoundedDiagnosticText::reconstructed_prompt(oversized_label.clone()))
+                .collect(),
+            active_skills_truncated: false,
+            capability_count: 0,
+            requested_model: Some(BoundedDiagnosticText::reconstructed_prompt(
+                oversized_label.clone(),
+            )),
+            effective_model: Some(BoundedDiagnosticText::reconstructed_prompt(oversized_label)),
+            context_limit: None,
+        };
+
+        store.record_prompt(scope.clone(), prompt).expect("prompt");
+
+        let prompt = store
+            .snapshot(&scope)
+            .expect("snapshot")
+            .expect("run")
+            .prompt
+            .expect("prompt");
+        assert!(prompt.components_truncated);
+        assert!(prompt.components.len() <= MAX_PROMPT_COMPONENTS);
+        assert!(
+            prompt
+                .components
+                .iter()
+                .all(|component| component.label.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+        assert!(prompt.components.iter().all(
+            |component| component.content.content().len() <= PROMPT_COMPONENT_CONTENT_MAX_BYTES
+        ));
+        assert!(
+            prompt
+                .components
+                .iter()
+                .map(|component| component.content.content().len())
+                .sum::<usize>()
+                <= PROMPT_COMPONENT_TOTAL_MAX_BYTES
+        );
+        assert!(prompt.active_skills_truncated);
+        assert_eq!(prompt.active_skills.len(), MAX_ACTIVE_SKILLS);
+        assert!(
+            prompt
+                .active_skills
+                .iter()
+                .all(|skill| skill.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+        assert!(
+            prompt
+                .requested_model
+                .as_ref()
+                .is_some_and(|model| model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+        assert!(
+            prompt
+                .effective_model
+                .as_ref()
+                .is_some_and(|model| model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+    }
+
+    #[test]
     fn session_eviction_is_deterministic_and_write_lru() {
         let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
         let first = scope("tenant", "user-1", "thread", TurnRunId::new());
@@ -886,6 +978,35 @@ mod tests {
         assert_eq!(
             batch.latest_cursor,
             Some(DiagnosticCursor::new(stream_id, DiagnosticSequence::new(3),))
+        );
+    }
+
+    #[test]
+    fn fresh_reader_requires_rebase_after_the_stream_prefix_is_evicted() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        for index in 1..=2 {
+            store
+                .record_activity(scope.clone(), activity(&format!("entry-{index}")))
+                .expect("record");
+        }
+        let complete = store.updates_after(&scope, None).expect("complete updates");
+        assert!(!complete.rebase_required);
+
+        store
+            .record_activity(scope.clone(), activity("entry-3"))
+            .expect("record");
+
+        let batch = store.updates_after(&scope, None).expect("updates");
+
+        assert!(batch.rebase_required);
+        assert_eq!(
+            batch
+                .updates
+                .iter()
+                .map(|update| update.sequence.as_u64())
+                .collect::<Vec<_>>(),
+            vec![2, 3]
         );
     }
 
