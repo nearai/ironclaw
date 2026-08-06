@@ -508,5 +508,37 @@ mod tests {
             "a partial in-ceiling request from Settings must still consent to the \
              shared-vendor ceiling; got {scope}"
         );
+
+        // An EMPTY ceiling must omit the scope parameter entirely rather than
+        // emit it present-but-empty. RFC 6749 §3.3 makes `scope` optional but
+        // requires at least one token when it appears, and real authorization
+        // servers enforce that: Attio answers `scope=` with
+        // `400 invalid_scope` while accepting the same request with the
+        // parameter absent (#7308). Two callers produce an empty ceiling — any
+        // hosted-MCP registration, whose dynamically registered vendor has no
+        // manifest-declared scopes, and the bundled `notion-mcp` manifest,
+        // which ships `scopes = []`.
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let state = engine_backed_route_state(
+            shared.clone(),
+            "acme-messenger",
+            Vec::new(),
+            vec![vendor_recipe("acmevendor", &[])],
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let response = start(app).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let url = url::Url::parse(json["authorization_url"].as_str().expect("url")).expect("parse");
+        assert!(
+            !url.query_pairs().any(|(key, _)| key == "scope"),
+            "an empty scope ceiling must omit the scope parameter, not send it \
+             empty; got {url}"
+        );
     }
 }
