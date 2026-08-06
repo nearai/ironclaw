@@ -29,16 +29,9 @@ use thiserror::Error;
 /// Maximum number of first-party skills selected for one turn by default.
 /// How many skills may be active at once.
 ///
-/// Raised from 4 to 8. Four was low enough to make correct routing IMPOSSIBLE on real tasks:
-/// on the SkillsBench routing set, 3 of 31 tasks expect five skills and 4 more expect four, so
-/// a perfectly-routing agent could not satisfy them and recall was capped below 100% by the
-/// constant rather than by anything the model did. Measuring against a ceiling you imposed
-/// yourself tells you nothing.
-///
-/// The real guard on skill context is `max_context_tokens`, which bounds how much body text
-/// can load regardless of how many skills are named -- a large skill still consumes the budget
-/// and pushes the effective count back down. This constant only stops a model from naming an
-/// unbounded list.
+/// 4 -> 8: on the SkillsBench routing set 7 of 31 tasks expect four or more skills, so the old
+/// constant capped recall below 100% regardless of the model. `max_context_tokens` is the real
+/// guard; this only stops a model naming an unbounded list.
 pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 8;
 
 /// Maximum estimated skill prompt tokens selected for one turn by default.
@@ -59,15 +52,9 @@ const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
 const SKILL_LISTING_HEADER: &str = include_str!("../../prompts/skill_listing_header.md");
 /// Total character budget for the rendered listing, excluding its header.
 ///
-/// Sized so a real catalog lists in FULL, because that is what claude-code does and what the
-/// measurement says matters. An earlier version of this kept the old 100-skill cap's budget
-/// (`100 * (250 + 64)`) and shrank per-entry descriptions to fit more names in -- 90 chars each
-/// at 227 skills. That traded the wrong thing away: the model activated on 52% of tasks with 88
-/// full-length entries and on 0% with 227 shrunken ones. Names make a skill addressable;
-/// descriptions are what let the model judge relevance, and a 90-char description does not.
-///
-/// claude-code pays this cost outright -- it lists every skill with its whole one-line
-/// description and no cap -- and reaches 60% correct activation on the same tasks and catalog.
+/// Replaces a flat 100-skill cap, which dropped whole alphabetical tails, and sized so a real
+/// catalog lists at full description length. Shrinking descriptions to fit more names in was
+/// measured worse: 52% activation with 88 full-length entries against 0% with 227 shrunken ones.
 ///
 /// BOUNDED BY THE SNIPPET CAP, which is not a nicety. The listing ships as ONE model-visible
 /// snippet, and `skill_context.rs` rejects a snippet over

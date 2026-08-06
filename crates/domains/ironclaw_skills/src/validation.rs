@@ -315,17 +315,11 @@ const NON_SPECIFIC_TERMS: &[&str] = &[
 /// dead weight. The catalog's longest is 338.
 const MAX_DESCRIPTION_CHARS: usize = 250;
 
-/// Lint a skill's routing metadata, returning one message per problem (empty = clean).
+/// Lint a skill's routing metadata, one message per problem (empty = clean).
 ///
-/// This is the discipline half of skill routing, and on the measured evidence it matters more
-/// than the scorer: over 328 real prompts, boundary matching cut false activations by 18%
-/// while fixing the catalog cut them by 68%. Hermes -- the reference bar in epic #6565 --
-/// gets its routing accuracy from exactly this, "metadata discipline and eligibility
-/// filtering, not retrieval and reranking".
-///
-/// Deliberately advisory in shape (`Vec<String>`, like `validate_credential_spec`) rather than
-/// a hard parse error: the caller decides whether a lint failure blocks a write. A learned
-/// skill that fails should not be written; a checked-in skill that fails should fail CI.
+/// Matters more than the scorer on the measured evidence: over 328 real prompts, boundary matching
+/// cut false activations by 18% where fixing the catalog cut them by 68%. Advisory in shape so the
+/// caller decides whether a failure blocks the write.
 pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = lint_skill_routing_metadata_blocking(manifest);
     problems.extend(lint_skill_routing_metadata_advisory(manifest));
@@ -334,14 +328,9 @@ pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
 
 /// The subset that may REFUSE a write, because it poisons routing for *other* skills.
 ///
-/// A generic keyword is not merely low quality: `coding` declares `file` and `change`, and on the
-/// reviewed baseline corpus it was being selected for security audits, QA plans and commit
-/// staging. That cost is paid by every later request, not by the skill that declared it, so
-/// refusing to write it is proportionate.
-///
-/// Measured against the skills agents actually write: 26 authored skills from the self-creation
-/// runs, of which only 4 declare keywords or tags at all — so this can gate the write path
-/// without blocking self-creation, while still stopping a model that tries to declare `file`.
+/// `coding` declaring `file` and `change` was selected for security audits, QA plans and commit
+/// staging; that cost lands on every later request, not on the skill that declared it. Safe to gate
+/// on: of 26 self-authored skills only 4 declare keywords or tags at all.
 pub fn lint_skill_routing_metadata_blocking(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = Vec::new();
     let activation = &manifest.activation;
@@ -349,17 +338,11 @@ pub fn lint_skill_routing_metadata_blocking(manifest: &SkillManifest) -> Vec<Str
     problems
 }
 
-/// The subset that must only WARN, because it describes the skill's own quality.
+/// The subset that must only WARN, because it describes the skill's OWN quality.
 ///
-/// An empty or over-long description hurts that skill's discoverability and nothing else.
-/// Refusing the write hurts it strictly more: the agent authored a working skill and ends up with
-/// no skill at all, which is the failure this epic exists to remove.
-///
-/// This is not hypothetical. **19 of 26 skills agents actually wrote fail these rules — 15 have no
-/// description whatsoever.** Gating the write path on them would have silently returned
-/// self-creation to a ~0pp effect, and the self-creation measurement could not have caught it,
-/// because it re-runs the *use* phase against previously-authored skills and never exercises the
-/// write path.
+/// Not hypothetical: 19 of 26 agent-authored skills fail these rules and 15 carry no description at
+/// all, so gating the write on them returns self-creation to a ~0pp effect. The self-creation
+/// measurement could not catch that -- it re-runs the use phase and never exercises the write.
 pub fn lint_skill_routing_metadata_advisory(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = Vec::new();
     if manifest.description.trim().is_empty() {

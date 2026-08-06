@@ -1,18 +1,9 @@
-//! Requirement gating for skill activation: does the environment actually have what a skill
-//! declares it needs (`requires.bins` / `requires.env` / `requires.config`)?
+//! Requirement gating for skill activation: does the environment have what a skill declares it
+//! needs (`requires.bins` / `requires.env` / `requires.config`)?
 //!
-//! **Restored after main deleted this module as verified-dead (#6943).** It was genuinely dead, and
-//! the reason is the bug: `requires` was parsed into the manifest and then never consulted on the
-//! activation path. `check_requirements_sync` existed and its only callers were inside
-//! `SkillRegistry`, which has no consumers outside its own crate — so a skill declaring a binary it
-//! needs was offered, activated cleanly, and failed later in the shell with nothing connecting the
-//! failure back to the unmet requirement.
-//!
-//! This PR adds the first real caller (`unmet_requirements_refusal` in
-//! `ironclaw_loop_host::activation`), which refuses activation and names the
-//! missing requirement so the model can adapt instead of meeting it as an unexplained shell error
-//! several steps later. Deleting the module was correct at the time; it is not correct once the
-//! requirement is enforced.
+//! Restored after main deleted it as verified-dead (#6943). It WAS dead, and that is the bug:
+//! `requires` was parsed and never consulted, so a skill declaring a missing binary activated
+//! cleanly and failed later in the shell. `unmet_requirements_refusal` is the first real caller.
 
 //! Requirements gating for skills.
 //!
@@ -30,16 +21,9 @@ pub struct GatingResult {
     pub failures: Vec<String>,
 }
 
-/// Async wrapper around [`check_requirements_sync`] that offloads blocking
-/// subprocess calls (`which`/`where`) to a blocking thread pool via
-/// `tokio::task::spawn_blocking`.
-///
-/// Fast path: if the requirements contain no bins, env vars, or config
-/// paths to check, return `passed: true` immediately without spawning a
-/// blocking task. Companion `skills` entries are advisory-only and do not
-/// affect gating, so they don't block the fast path. This avoids a
-/// `which` subprocess call per skill load for skills with no
-/// subprocess-checkable requirements (the common case).
+/// Async wrapper around [`check_requirements_sync`], offloading the blocking `which`/`where` calls
+/// via `spawn_blocking`. Returns immediately when there is nothing to check, which is the common
+/// case and avoids a subprocess per skill load.
 pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResult {
     if requirements.bins.is_empty() && requirements.env.is_empty() && requirements.config.is_empty()
     {
@@ -68,16 +52,8 @@ pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResu
         })
 }
 
-/// Check whether gating requirements are satisfied (synchronous).
-///
-/// - `bins`: checks that each binary is findable via `which` (PATH lookup).
-/// - `env`: checks that each environment variable is set.
-/// - `config`: checks that each config file path exists.
-///
-/// Skills that fail gating should be logged and skipped, not loaded.
-///
-/// This is the synchronous implementation; prefer the async [`check_requirements`]
-/// wrapper when calling from async contexts to avoid blocking the tokio runtime.
+/// Whether gating requirements are satisfied: `bins` findable via `which`, `env` set, `config`
+/// paths present. Prefer the async [`check_requirements`] from an async context.
 pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResult {
     let mut failures = Vec::new();
 
