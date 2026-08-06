@@ -4258,14 +4258,15 @@ def _current_turn_capability_evidence(
             and capability_id in wanted
             and isinstance(input_summary, dict)
         ):
-            # Persist only the routing argument needed for exact-conversation
-            # assertions, never message text or other model-supplied content.
-            conversation = input_summary.get("conversation")
-            input_arguments_by_invocation[invocation_id] = (
-                {"conversation": conversation}
-                if isinstance(conversation, str)
-                else {}
-            )
+            # Persist only non-content arguments used by exact contract
+            # assertions, never message text, query text, or other
+            # model-supplied content.
+            safe_arguments = {
+                field: value
+                for field in ("conversation", "sort")
+                if isinstance((value := input_summary.get(field)), str)
+            }
+            input_arguments_by_invocation[invocation_id] = safe_arguments
 
     terminal_events: dict[str, tuple[str, str, int]] = {}
     for raw_seq, raw_payload in event_rows:
@@ -8098,6 +8099,10 @@ async def case_qa_10g_slack_last_message_sent_global(
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.search_messages",
+            expected_capability_arguments={
+                "slack.search_messages": {"sort": "timestamp"}
+            },
         )
         if not chat.success:
             return chat

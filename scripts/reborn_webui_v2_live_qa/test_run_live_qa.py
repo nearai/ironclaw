@@ -2835,7 +2835,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(completed_call.details["non_member_channels_claimed"], [])
 
     def test_slack_correctness_capability_evidence_is_bound_to_submitted_turn(self):
-        capability_id = "slack.get_conversation_history"
+        capability_id = "slack.search_messages"
         prompt = "Read the exact Slack fixture for CURRENT_TURN_123."
 
         def create_store(reborn_home: Path) -> Path:
@@ -2925,7 +2925,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "capability_id": capability_id,
                     "status": "completed",
                     "input_summary": json.dumps(
-                        {"conversation": "C0CURRENT1"}, indent=2
+                        {
+                            "conversation": "C0CURRENT1",
+                            "query": "private query must not persist",
+                            "sort": "timestamp",
+                        },
+                        indent=2,
                     ),
                 }
                 thread_message = {
@@ -3052,7 +3057,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "invocation_ids": {capability_id: ["invocation-current"]},
                 "statuses": {capability_id: ["completed"]},
                 "input_arguments": {
-                    capability_id: [{"conversation": "C_REDACTED"}]
+                    capability_id: [
+                        {
+                            "conversation": "C_REDACTED",
+                            "sort": "timestamp",
+                        }
+                    ]
                 },
                 "terminal_sequence": [
                     {
@@ -7365,7 +7375,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             f"Include the exact marker {global_calls[0]['answer_marker']} in your answer.",
         )
         self.assertNotIn("D0FIXTURE1", global_calls[0]["prompt"])
-        self.assertIsNone(global_calls[0].get("expected_capability"))
+        self.assertEqual(
+            global_calls[0]["expected_capability"],
+            "slack.search_messages",
+        )
+        self.assertEqual(
+            global_calls[0]["expected_capability_arguments"],
+            {"slack.search_messages": {"sort": "timestamp"}},
+        )
 
         # When the seeded marker never becomes searchable within the deadline,
         # the GLOBAL arm must NOT drive the agent turn or red on answer

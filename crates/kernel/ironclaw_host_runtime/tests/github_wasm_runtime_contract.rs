@@ -3396,7 +3396,7 @@ async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
         .invoke_capability(wasm_runtime_request_for_scope(
             capability_id.clone(),
             scope,
-            json!({"query": "deploy", "cursor": "3"}),
+            json!({"query": "deploy", "sort": "timestamp", "cursor": "3"}),
         ))
         .await
         .unwrap();
@@ -3413,6 +3413,12 @@ async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
     assert!(
         search_request.url.contains("page=3"),
         "input cursor must decode to Slack's page paging: {}",
+        search_request.url
+    );
+    assert!(
+        search_request.url.contains("sort=timestamp")
+            && search_request.url.contains("sort_dir=desc"),
+        "canonical timestamp sort must map to Slack newest-first ordering: {}",
         search_request.url
     );
 

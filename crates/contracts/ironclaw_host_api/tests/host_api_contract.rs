@@ -30,6 +30,7 @@ use ironclaw_host_api::{
         ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
     },
     ingress::{IngressPolicy, IngressRouteDescriptor},
+    messaging::StandardMessagingOp,
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
     resource::{
@@ -42,6 +43,27 @@ use ironclaw_host_api::{
 };
 use rust_decimal_macros::dec;
 use serde_json::json;
+
+#[test]
+fn search_messages_accepts_portable_sort_modes() {
+    let contract = StandardMessagingOp::SearchMessages
+        .contract()
+        .expect("search_messages has a contract");
+    let schema: serde_json::Value =
+        serde_json::from_str(contract.input_schema).expect("schema parses");
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .expect("schema compiles");
+
+    for sort in ["relevance", "timestamp"] {
+        assert!(
+            validator.is_valid(&json!({"query": "from:me", "sort": sort})),
+            "search_messages must accept the canonical {sort} sort mode",
+        );
+    }
+    assert!(!validator.is_valid(&json!({"query": "from:me", "sort": "newest"})));
+}
 
 #[test]
 fn dispatch_input_issue_code_wire_strings_cover_all_variants() {

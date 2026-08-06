@@ -488,7 +488,7 @@ drop is checkable.
 | `get_conversation_history` | `{ conversation*, limit?, cursor? }` | `{ messages*: [message], next_cursor?, vendor? }` |
 | `get_thread_replies` | `{ conversation*, thread*, limit?, cursor? }` | `{ messages*: [message], next_cursor?, vendor? }` |
 | `get_message` | `{ message_ref* }` | `{ message*: message, vendor? }` |
-| `search_messages` | `{ query*, limit?, cursor? }` | `{ matches*: [message], next_cursor?, total?: integer, vendor? }` |
+| `search_messages` | `{ query*, sort?: "relevance"\|"timestamp", limit?, cursor? }` | `{ matches*: [message], next_cursor?, total?: integer, vendor? }` |
 
 `limit` is `integer >= 1`; adapters clamp to vendor maxima. History ordering is
 newest-first; thread replies return oldest-first (chronological) — both pinned
@@ -496,6 +496,10 @@ in the core descriptions. (**Amended 2026-07-29 post-audit**, W9/W12: this
 paragraph previously read "History ordering is newest-first" without
 distinguishing `get_thread_replies`, which is oldest-first — the core itself
 carried the same error until W9/W12 fixed it.)
+
+Search defaults to vendor relevance ranking. `sort: "timestamp"` requests
+newest-first results for latest/most-recent questions; adapters map that
+portable semantic onto their vendor's ordering controls.
 
 **People:**
 
