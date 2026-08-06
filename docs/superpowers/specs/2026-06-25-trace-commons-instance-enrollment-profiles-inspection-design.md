@@ -25,7 +25,7 @@ must coexist with the new instance-wide model on the same instance.
 
 ### IronClaw side
 - **Onboarding wire contract already matches the server.**
-  `crates/ironclaw_reborn_traces/src/onboarding/protocol.rs` defines
+  `crates/ironclaw_trace_commons/src/onboarding/protocol.rs` defines
   `ONBOARD_REQUEST_SCHEMA_VERSION = "trace_commons.onboard_request.v1"` and the
   response constant, identical to the server, with matching fields
   (`invite_code`, `device_public_key`, `client_info`).
@@ -145,7 +145,7 @@ Server-side validation requirements:
 ## IronClaw changes
 
 ### 1. Trace-credential resolver (new seam)
-A single function (in `ironclaw_reborn_traces`, host-side) that, given the
+A single function (in `ironclaw_trace_commons`, host-side) that, given the
 authenticated user/scope, returns `{ device_key_id, tenant, ingest_url,
 issuer_url, subject: Option<String> }` by:
 1. checking for a per-scope (personal-invite) `StandingTraceContributionPolicy`

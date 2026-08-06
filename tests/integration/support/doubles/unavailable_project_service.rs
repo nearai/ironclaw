@@ -8,13 +8,14 @@
 //! genuinely dispatches `project_create` supplies its own real
 //! `Arc<dyn ProjectService>` via `project_service_for_test` instead.
 use async_trait::async_trait;
-use ironclaw_product::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectMemberInfo, RebornProjectResponse,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+use ironclaw_assistant::{
+    ProjectCaller, RebornAddMemberRequest, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 
 pub(crate) struct UnavailableProjectService;
 

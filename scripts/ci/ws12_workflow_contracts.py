@@ -108,7 +108,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("crates/ironclaw_webui/src/lib.rs", True),
     # The target-architecture layout. A `crates/ironclaw_[^/]+/` filter misses
     # every one of these.
-    ("crates/substrates/ironclaw_events/src/lib.rs", True),
+    ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
     ("docs/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
@@ -183,6 +183,141 @@ CODE_STYLE_WORKFLOW = ".github/workflows/code_style.yml"
 PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 
+# ---------------------------------------------------------------------------
+# Per-package clippy target selection (#6965)
+#
+# `Check production-target lints` runs `cargo clippy -p <changed package> …`,
+# so its command has to hold for every package shape in the workspace. Explicit
+# target filters do not:
+#
+#   * `--lib` is a hard error on a bin-only package ("no library targets found
+#     in package `ironclaw`"), so a PR whose only changed package is
+#     crates/ironclaw_cli fails the lane on the flag, not on a lint;
+#   * `--bins` on a lib-only package is "target filter `bins` specified, but no
+#     targets matched; this is a no-op" — the lane reports green having linted
+#     nothing, which is the worse failure of the two;
+#   * `--bin`/`--example`/`--test`/`--bench` and their plurals swap the
+#     package's default production targets for a hand-picked set.
+#
+# Cargo's default target set is already lib + bins, tests/examples/benches
+# excluded, so the lane needs no filter at all — and this contract keeps it
+# that way.
+#
+# The check reads the whole step body rather than locating the command and
+# parsing its arguments. That is deliberate: a matcher is a thing to fool, and
+# every attempt to write one leaked (a wrapper binary, a prefixed command, a
+# continuation line). Scanning the body has no match position to displace and
+# no formatting to get wrong. The trade is that a command deliberately written
+# to look inert — `echo cargo clippy … -- -D warnings` — would pass. This file
+# is repo-controlled and changed through reviewed PRs; the regression worth
+# catching is a flag added back by hand, not a disguise.
+#
+# Known gap, deliberately unguarded: a package with neither a lib nor a bin
+# target (today only `ironclaw_integration_tests`) lints nothing and
+# exits 0 without even the `no targets matched` warning. Unreachable while
+# `changed_workspace_packages.py` only selects the root package for a
+# `Cargo.toml`/`Cargo.lock` change — which selects every other package too — so
+# the assertion would have no failing case to pin.
+# ---------------------------------------------------------------------------
+
+PRODUCTION_LINT_STEP = "Check production-target lints"
+
+# One `- name:` step heading. The scan is bounded to its own step because the
+# neighbouring `Check all-target lints` legitimately passes `--tests
+# --examples`; unbounded, this contract would blame this step for them.
+STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
+
+# `${{ matrix.flags }}` is the lane's other flag channel: `clippy_matrix` is
+# defined in this same workflow and expands into the command, so a target
+# filter added there widens the lane exactly as one on the command line would.
+# Scoped to the lines defining that matrix — `clippy_matrix` is the only
+# `flags`-bearing matrix here today, and an unrelated one that legitimately
+# passes `--tests` should not be read as widening this lane.
+CLIPPY_MATRIX_ASSIGNMENT = "clippy_matrix"
+MATRIX_FLAGS = re.compile(r'"flags"[ \t]*:[ \t]*"(?P<flags>[^"]*)"')
+
+# Ways to keep the command intact while throwing away its verdict. These are
+# not the disguised-command case the block above rules out of scope: each is a
+# plausible edit someone makes on purpose and for a stated reason ("unblock the
+# queue", "this lane is flaky"), and each leaves a lane that runs clippy and
+# ignores it — the silent-green failure this contract exists to prevent.
+EXIT_STATUS_MASKS = (
+    ("|| true", "swallows a failing lint"),
+    ("|| :", "swallows a failing lint"),
+    ("set +e", "stops the shell failing on a failing lint"),
+    ("continue-on-error", "lets the job report success with the lane red"),
+)
+
+# Matched on word boundaries so `--bins` is not also reported as `--bin`, and
+# so value-bearing forms (`--bin ironclaw`, `--bench=throughput`) are caught.
+FORBIDDEN_PRODUCTION_LINT_FLAGS = tuple(
+    (flag, why, re.compile(rf"(?<![\w-]){re.escape(flag)}(?![\w-])"))
+    for flag, why in (
+        ("--lib", "is a hard error on a bin-only package"),
+        ("--bins", "silently lints nothing on a lib-only package"),
+        ("--bin", "pins the lane to one binary and skips the package's other targets"),
+        ("--all-targets", "widens the lane past production targets"),
+        ("--tests", "widens the lane past production targets"),
+        ("--test", "widens the lane past production targets"),
+        ("--examples", "widens the lane past production targets"),
+        ("--example", "widens the lane past production targets"),
+        ("--benches", "widens the lane past production targets"),
+        ("--bench", "widens the lane past production targets"),
+    )
+)
+
+
+def step_body(text: str, step_name: str) -> str | None:
+    """Return one workflow step's body, bounded by the next step heading."""
+    for heading in STEP_HEADING.finditer(text):
+        if heading.group("name").strip() != step_name:
+            continue
+        following = STEP_HEADING.search(text, heading.end())
+        return text[heading.end() : following.start() if following else len(text)]
+    return None
+
+
+def validate_production_lint_targets(text: str) -> list[str]:
+    """Return every way the per-package clippy lane could error or no-op."""
+    body = step_body(text, PRODUCTION_LINT_STEP)
+    if body is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: could not find the {PRODUCTION_LINT_STEP!r} step "
+            "— it is the only clippy gate on pull requests and must stay assertable"
+        ]
+    # Comments in the step explain which flags are absent and why, so they name
+    # the very strings being rejected.
+    command = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+    if "cargo clippy" not in command:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} no longer runs "
+            "`cargo clippy` — this contract can only pin a command it can see"
+        ]
+    errors = [
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not pass {flag} — it {why}"
+        for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
+        if pattern.search(command)
+    ]
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not mask the lint's "
+        f"exit status with `{mask}` — it {why}"
+        for mask, why in EXIT_STATUS_MASKS
+        if mask in command
+    )
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: clippy_matrix flags {match.group('flags')!r} must not "
+        f"contain {flag} — it {why}, and the matrix expands into "
+        f"{PRODUCTION_LINT_STEP!r}"
+        for line in text.splitlines()
+        if CLIPPY_MATRIX_ASSIGNMENT in line
+        for match in MATRIX_FLAGS.finditer(line)
+        for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
+        if pattern.search(match.group("flags"))
+    )
+    return errors
+
 # Every single-quoted ERE in a workflow that looks like a path scope filter.
 # Both spellings in use are covered: `grep -Eq '^(...)'` and the `has_match
 # '^(...)'` helper. A filter is selected out of the result by an anchor
@@ -231,7 +366,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         in_scope=(
             "crates/ironclaw_llm/src/lib.rs",
-            f"crates/{NESTED_FAMILY}/ironclaw_events/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
@@ -240,16 +375,16 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
         name="has_reborn_cli",
-        anchor="ironclaw_reborn_cli",
+        anchor="ironclaw_cli",
         kind="regex",
         crates=(
-            ("ironclaw_runner", "src/lib.rs"),
+            ("ironclaw_turn_runner", "src/lib.rs"),
             # WS3 runner sheds: the model gateway and the tool-disclosure
             # decorator live here now, so the lane must follow them.
             ("ironclaw_loop_host", "src/model_gateway.rs"),
-            ("ironclaw_reborn_cli", "src/main.rs"),
-            ("ironclaw_reborn_config", "src/lib.rs"),
-            ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
+            ("ironclaw_cli", "src/main.rs"),
+            ("ironclaw_config", "src/lib.rs"),
+            ("ironclaw_architecture_tests", "tests/reborn_dependency_boundaries.rs"),
         ),
         in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
         out_of_scope=(
@@ -257,7 +392,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # and is deliberately NOT triggered by every crate.
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
-            "crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs",
+            "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
         ),
     ),
@@ -524,7 +659,7 @@ def validate_crate_scope_filters(
 # directly: a `cache-dependency-path:` value (12), a `cd` inside a `run:`
 # block (12), and a `working-directory:` key (4). Two more workflows spelled a
 # single crate's Cargo.toml / source path directly: docker.yml's release
-# VERSION extraction (`ironclaw_reborn_cli`) and nightly-deep-ci.yml's
+# VERSION extraction (`ironclaw_cli`) and nightly-deep-ci.yml's
 # mutation-audit target (`ironclaw_capabilities`). All of these break the
 # moment their crate moves into a family directory (crates/<family>/
 # ironclaw_*, PROPOSAL §5).
@@ -555,8 +690,14 @@ DOCKER_WORKFLOW = ".github/workflows/docker.yml"
 NIGHTLY_DEEP_CI_WORKFLOW = ".github/workflows/nightly-deep-ci.yml"
 
 WEBUI_FRONTEND_CRATE = "ironclaw_webui"
+# One directory level deeper than the crate sits TODAY. WS7 moved the crate
+# into `crates/product/`, so the single-`*` form now matches its real location
+# and stopped being a depth probe — the gate below rejects exactly that ("not
+# depth-tolerant, just broad"). Two `*` segments keep the spare one level below
+# wherever the crate actually is; `*` does not cross `/` in a GitHub glob, so
+# this cannot collapse back onto the flat line.
 WEBUI_NESTED_LOCKFILE_PATTERN = (
-    f"crates/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+    f"crates/*/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
 )
 
 
@@ -611,8 +752,12 @@ def validate_webui_frontend_sites(
         )
     flat_pattern = github_glob_to_regex(flat_lockfile)
     nested_pattern = github_glob_to_regex(WEBUI_NESTED_LOCKFILE_PATTERN)
+    # Two family segments, matching WEBUI_NESTED_LOCKFILE_PATTERN's depth: the
+    # probe has to be one level below where the crate sits today, and today it
+    # already sits inside a family directory (WS7).
     nested_probe = (
-        f"crates/{NESTED_FAMILY}/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+        f"crates/{NESTED_FAMILY}/{NESTED_FAMILY}/"
+        f"{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
     )
     if not flat_pattern.match(flat_lockfile):
         errors.append(
@@ -672,7 +817,7 @@ def validate_webui_frontend_sites(
 # once fixed (B1/B2 in #7155); this is the pin that catches the workflow TEXT
 # itself going stale — a rename or deletion the workflow never followed.
 CRATE_NAME_RESIDUE: tuple[tuple[str, str], ...] = (
-    (DOCKER_WORKFLOW, "ironclaw_reborn_cli"),
+    (DOCKER_WORKFLOW, "ironclaw_cli"),
     (NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities"),
 )
 
@@ -722,6 +867,9 @@ def validate_workflow_texts(
     e2e = workflows.get(E2E_WORKFLOW)
     if e2e is not None:
         errors.extend(validate_e2e_scope_filters(e2e))
+    code_style = workflows.get(CODE_STYLE_WORKFLOW)
+    if code_style is not None:
+        errors.extend(validate_production_lint_targets(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))

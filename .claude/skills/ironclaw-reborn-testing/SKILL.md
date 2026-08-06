@@ -19,7 +19,7 @@ Pick the tier first; everything else follows. The repo's tier knowledge lives in
 
 - **Regression-per-fix is mechanically checked for conventionally marked fix/high-risk changes** (commit-msg hook + `regression-test-check.yml`). Escape hatch `[skip-regression-check]` exists — using it on a real fix will be questioned in review.
 - **Consolidate, don't proliferate**: extend the existing test that already drives the path (a case, a scripted turn, an assertion) before standing up a new file. Say why an existing test couldn't absorb a genuinely new scenario.
-- **Persistence = both backends.** PostgreSQL + libSQL parity where production-facing; the model is `ironclaw_hooks`' dual-backend shape (`crates/ironclaw_hooks/src/postgres_backend/` + `crates/ironclaw_hooks/src/libsql_backend/`, proved equivalent by `crates/ironclaw_hooks/tests/parity_matrix.rs` and `crates/ironclaw_hooks/tests/multi_host_adversarial.rs`). Feature-gate integration tests (`check-boundaries.sh` enforces the gating for root `tests/`).
+- **Persistence = both backends.** PostgreSQL + libSQL parity where production-facing; the model is `ironclaw_hooks`' dual-backend shape (`crates/loop/ironclaw_hooks/src/postgres_backend/` + `crates/loop/ironclaw_hooks/src/libsql_backend/`, proved equivalent by `crates/loop/ironclaw_hooks/tests/parity_matrix.rs` and `crates/loop/ironclaw_hooks/tests/multi_host_adversarial.rs`). Feature-gate integration tests (`check-boundaries.sh` enforces the gating for root `tests/`).
 - **The integration tier is NOT a PR gate unless the workflow says so** (re-verify: `grep -n integration .github/workflows/platform-and-compat.yml`): full `--features integration`/Postgres coverage may run post-merge or nightly. A green PR does not prove the integration tier ran; run it locally when your change is DB/runtime-shaped: `cargo test --features integration`.
 - **Never add a silent self-skip to PR-gated tests.** `if docker_missing { return }` hides the suite from CI. Existing Docker sandbox canaries still need migration; new tests should skip loudly via feature gates or explicit env opt-outs.
 - **Capability results and terminal errors have their own test shape** — recoverable failures must remain model-visible outcomes, while host failures are terminal; test the caller against the capability-access contract and its real redaction/evidence validation.
@@ -27,6 +27,6 @@ Pick the tier first; everything else follows. The repo's tier knowledge lives in
 
 ## Verify
 
-`cargo test -p <crate>` → `cargo test --test reborn_<harness>` (offline) → `cargo test -p ironclaw_architecture` if edges changed → `cargo test --features integration` locally for DB-shaped changes → `bash scripts/reborn-e2e-rust.sh` when touching contract behavior.
+`cargo test -p <crate>` → `cargo test --test reborn_<harness>` (offline) → `cargo test -p ironclaw_architecture_tests` if edges changed → `cargo test --features integration` locally for DB-shaped changes → `bash scripts/reborn-e2e-rust.sh` when touching contract behavior.
 
 **Exemplar tests to open and imitate, per tier**: [references/exemplar-tests.md](references/exemplar-tests.md) — the living copies; update as the suite evolves.

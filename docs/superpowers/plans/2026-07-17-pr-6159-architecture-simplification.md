@@ -4,7 +4,7 @@
 
 **Goal:** Preserve PR #6159's Telegram behavior while moving delivery and Telegram runtime policy to their proper owners, deleting test-only abstraction layers and mirror DTOs, and pinning the resulting architecture with executable ratchets.
 
-**Architecture:** `ironclaw_channel_delivery` becomes the product-neutral delivery engine and `ironclaw_product` owns reusable auth/approval projection and extension account-setup contracts. `ironclaw_telegram_extension` owns one concrete filesystem-backed host state, its concrete Bot API/egress clients, revision-aware runtime construction, and focused setup/pairing/ingress/delivery modules; composition supplies already-built neutral services and mounts/registers the returned facades only.
+**Architecture:** `ironclaw_channel_delivery` becomes the product-neutral delivery engine and `ironclaw_assistant` owns reusable auth/approval projection and extension account-setup contracts. `ironclaw_telegram_extension` owns one concrete filesystem-backed host state, its concrete Bot API/egress clients, revision-aware runtime construction, and focused setup/pairing/ingress/delivery modules; composition supplies already-built neutral services and mounts/registers the returned facades only.
 
 **Tech Stack:** Rust 2024, Tokio, Axum, `async-trait`, `ScopedFilesystem<dyn RootFilesystem>`, host-mediated HTTP egress, Cargo workspace tests, Clippy, repository architecture tests.
 
@@ -81,7 +81,7 @@ crates/ironclaw_channel_delivery/
   src/triggered.rs
   src/tests.rs
 
-crates/ironclaw_product/src/
+crates/ironclaw_assistant/src/
   auth_prompt.rs
   approval_prompt.rs
   extension_account_setup.rs
@@ -106,9 +106,9 @@ The existing `telegram_*` public module names are re-exported only where downstr
 ### Task 1: Add all eight architecture ratchets in their red state
 
 **Files:**
-- Modify: `crates/ironclaw_architecture/tests/telegram_extension_gates.rs`
-- Modify: `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
-- Modify: `crates/ironclaw_architecture/tests/reborn_composition_boundaries.rs`
+- Modify: `crates/ironclaw_architecture_tests/tests/telegram_extension_gates.rs`
+- Modify: `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
+- Modify: `crates/ironclaw_architecture_tests/tests/reborn_composition_boundaries.rs`
 
 **Interfaces:**
 - Consumes: repository paths and workspace Cargo metadata.
@@ -152,16 +152,16 @@ fn telegram_production_files_meet_the_line_budget() { /* enumerate touched .rs f
 fn telegram_composition_is_assembly_only() { /* enforce symbol denylist and 450-line production budget */ }
 ```
 
-Add `ironclaw_channel_delivery` to `SUBSTRATE_CRATES`, and add a `BoundaryRule` forbidding dependencies on `ironclaw_reborn_composition`, `ironclaw_reborn_cli`, `ironclaw_webui_v2`, `ironclaw_slack_v2_adapter`, and `ironclaw_telegram_extension`.
+Add `ironclaw_channel_delivery` to `SUBSTRATE_CRATES`, and add a `BoundaryRule` forbidding dependencies on `ironclaw_composition`, `ironclaw_cli`, `ironclaw_webui_v2`, `ironclaw_slack_v2_adapter`, and `ironclaw_telegram_extension`.
 
 - [x] **Step 2: Run each ratchet and record the intended baseline failure**
 
 Run:
 
 ```bash
-cargo test -p ironclaw_architecture --test telegram_extension_gates
-cargo test -p ironclaw_architecture --test reborn_dependency_boundaries
-cargo test -p ironclaw_architecture --test reborn_composition_boundaries
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates
+cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
+cargo test -p ironclaw_architecture_tests --test reborn_composition_boundaries
 ```
 
 Observed: the new Telegram gate tests fail on the old composition delivery path, lifecycle Telegram symbols, deleted-symbol set, in-memory store fakes, oversized files, and composition behavior. The dependency tests pass because their rules activate only for workspace crates; adding `ironclaw_channel_delivery` in Task 3 activates its already-declared rule.
@@ -169,7 +169,7 @@ Observed: the new Telegram gate tests fail on the old composition delivery path,
 - [x] **Step 3: Commit the red ratchets**
 
 ```bash
-git add crates/ironclaw_architecture/tests
+git add crates/ironclaw_architecture_tests/tests
 git commit -m "test(reborn): pin PR 6159 simplification boundaries"
 ```
 
@@ -178,13 +178,13 @@ git commit -m "test(reborn): pin PR 6159 simplification boundaries"
 ### Task 2: Move reusable auth and approval projection contracts to product workflow
 
 **Files:**
-- Create: `crates/ironclaw_product/src/auth_prompt.rs`
-- Create: `crates/ironclaw_product/src/approval_prompt.rs`
-- Modify: `crates/ironclaw_product/src/lib.rs`
-- Modify: `crates/ironclaw_product/src/auth_prompt.rs`
+- Create: `crates/ironclaw_assistant/src/auth_prompt.rs`
+- Create: `crates/ironclaw_assistant/src/approval_prompt.rs`
+- Modify: `crates/ironclaw_assistant/src/lib.rs`
+- Modify: `crates/ironclaw_assistant/src/auth_prompt.rs`
 - Modify: `crates/ironclaw_auth/src/product_auth/api/mod.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/projection/turn_events.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/lib.rs`
+- Modify: `crates/ironclaw_composition/src/projection/turn_events.rs`
+- Modify: `crates/ironclaw_composition/src/lib.rs`
 - Modify: composition projection and product-auth tests importing these types.
 
 **Interfaces:**
@@ -231,8 +231,8 @@ Move the existing requirement-fallback and approval-context cases to module test
 Run:
 
 ```bash
-cargo test -p ironclaw_product auth_prompt
-cargo test -p ironclaw_product approval_prompt
+cargo test -p ironclaw_assistant auth_prompt
+cargo test -p ironclaw_assistant approval_prompt
 ```
 
 Expected: compilation fails because the new modules/exports do not exist.
@@ -246,9 +246,9 @@ Move the existing bodies without changing error mapping. Delete `BlockedAuthProm
 Run:
 
 ```bash
-cargo test -p ironclaw_product auth_prompt
-cargo test -p ironclaw_product approval_prompt
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib projection
+cargo test -p ironclaw_assistant auth_prompt
+cargo test -p ironclaw_assistant approval_prompt
+cargo test -p ironclaw_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib projection
 ```
 
 Expected: all selected tests pass with composition implementing and re-exporting the product-workflow ports.
@@ -256,7 +256,7 @@ Expected: all selected tests pass with composition implementing and re-exporting
 - [x] **Step 5: Commit the contract move**
 
 ```bash
-git add crates/ironclaw_product crates/ironclaw_reborn_composition
+git add crates/ironclaw_assistant crates/ironclaw_composition
 git commit -m "refactor(reborn): move prompt projection contracts below composition"
 ```
 
@@ -269,9 +269,9 @@ git commit -m "refactor(reborn): move prompt projection contracts below composit
 - Create: `crates/ironclaw_channel_delivery/AGENTS.md`
 - Create: `crates/ironclaw_channel_delivery/src/{lib,services,observer,actionable,routing,hooks,triggered,tests}.rs`
 - Modify: root `Cargo.toml`
-- Modify: `crates/ironclaw_reborn_composition/Cargo.toml`
-- Modify: `crates/ironclaw_reborn_composition/src/outbound/mod.rs`
-- Delete: `crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs`
+- Modify: `crates/ironclaw_composition/Cargo.toml`
+- Modify: `crates/ironclaw_composition/src/outbound/mod.rs`
+- Delete: `crates/ironclaw_composition/src/outbound/channel_delivery.rs`
 - Modify: all Slack, Telegram, runtime, and test imports of `crate::outbound::channel_delivery`.
 
 **Interfaces:**
@@ -280,7 +280,7 @@ git commit -m "refactor(reborn): move prompt projection contracts below composit
 
 - [x] **Step 1: Create the crate manifest and a failing public API compile test**
 
-The manifest has layer `products`, no default features, and only neutral production dependencies: `async-trait`, `chrono`, `ironclaw_channel_host`, `ironclaw_conversations`, `ironclaw_host_api`, `ironclaw_outbound`, `ironclaw_product_adapters`, `ironclaw_product`, `ironclaw_run_state`, `ironclaw_threads`, `ironclaw_triggers`, `ironclaw_turns`, `ironclaw_wasm_product_adapters`, `tokio`, and `tracing`. The two additional authority/conversation crates are required by the preserved gate-route and fallback-agent signatures; neither owns a concrete channel or composition policy.
+The manifest has layer `products`, no default features, and only neutral production dependencies: `async-trait`, `chrono`, `ironclaw_channel_host`, `ironclaw_conversations`, `ironclaw_host_api`, `ironclaw_outbound`, `ironclaw_product_adapters`, `ironclaw_assistant`, `ironclaw_run_state`, `ironclaw_threads`, `ironclaw_triggers`, `ironclaw_turns`, `ironclaw_wasm_product_adapters`, `tokio`, and `tracing`. The two additional authority/conversation crates are required by the preserved gate-route and fallback-agent signatures; neither owns a concrete channel or composition policy.
 
 Add a crate test that constructs `FinalReplyDeliverySettings::default()` and asserts all four bounds are non-zero. Run `cargo test -p ironclaw_channel_delivery`; expected compilation failure because the exported types are absent.
 
@@ -297,7 +297,7 @@ Move generic unit tests into `src/tests.rs`. Replace composition-owned Slack fix
 Re-export only factory-local target registry items from composition `outbound`; import delivery engine types directly from `ironclaw_channel_delivery`. Confirm:
 
 ```bash
-test ! -e crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs
+test ! -e crates/ironclaw_composition/src/outbound/channel_delivery.rs
 rg -n "outbound::channel_delivery" crates
 ```
 
@@ -307,9 +307,9 @@ Expected: first command succeeds and second command prints no production referen
 
 ```bash
 cargo test -p ironclaw_channel_delivery
-cargo test -p ironclaw_architecture --test reborn_dependency_boundaries
-cargo test -p ironclaw_architecture --test reborn_composition_boundaries
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib channel_delivery
+cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
+cargo test -p ironclaw_architecture_tests --test reborn_composition_boundaries
+cargo test -p ironclaw_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib channel_delivery
 ```
 
 Expected: all pass; generic code contains no `slack` or `telegram` branch.
@@ -319,7 +319,7 @@ Observed: `cargo test -p ironclaw_channel_delivery` passed 87 unit tests plus th
 - [x] **Step 6: Commit the delivery owner**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/ironclaw_channel_delivery crates/ironclaw_reborn_composition crates/ironclaw_architecture
+git add Cargo.toml Cargo.lock crates/ironclaw_channel_delivery crates/ironclaw_composition crates/ironclaw_architecture_tests
 git commit -m "refactor(reborn): extract generic channel delivery engine"
 ```
 
@@ -328,9 +328,9 @@ git commit -m "refactor(reborn): extract generic channel delivery engine"
 ### Task 4: Replace the Telegram lifecycle slot with an ExtensionId-keyed registry
 
 **Files:**
-- Create: `crates/ironclaw_product/src/extension_account_setup.rs`
-- Modify: `crates/ironclaw_product/src/lib.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
+- Create: `crates/ironclaw_assistant/src/extension_account_setup.rs`
+- Modify: `crates/ironclaw_assistant/src/lib.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
 - Modify: Telegram host assembly and lifecycle tests.
 - Delete: `crates/ironclaw_channel_host/src/paired_status.rs`
 - Modify: `crates/ironclaw_channel_host/src/lib.rs`
@@ -375,7 +375,7 @@ impl ExtensionAccountSetupRegistry {
 
 - [x] **Step 1: Add registry state-transition tests**
 
-Test undeclared extension, declared-but-unconnected fail-closed, connected/disconnected users, duplicate declaration, duplicate connection, and status outage. Run `cargo test -p ironclaw_product extension_account_setup`; expected compile failure.
+Test undeclared extension, declared-but-unconnected fail-closed, connected/disconnected users, duplicate declaration, duplicate connection, and status outage. Run `cargo test -p ironclaw_assistant extension_account_setup`; expected compile failure.
 
 - [x] **Step 2: Implement the registry with a bounded owner-controlled map**
 
@@ -392,9 +392,9 @@ Telegram exports `telegram_account_setup_descriptor() -> Result<ExtensionAccount
 - [x] **Step 5: Delete the old channel-host slot and run lifecycle regressions**
 
 ```bash
-cargo test -p ironclaw_product extension_account_setup
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,telegram-v2-host-beta,libsql --lib extension_lifecycle
-cargo test -p ironclaw_architecture --test telegram_extension_gates generic_extension_lifecycle_has_no_telegram_knowledge
+cargo test -p ironclaw_assistant extension_account_setup
+cargo test -p ironclaw_composition --features test-support,webui-v2-beta,telegram-v2-host-beta,libsql --lib extension_lifecycle
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates generic_extension_lifecycle_has_no_telegram_knowledge
 ```
 
 Expected: all pass, including fail-closed and transient-error caller tests.
@@ -402,7 +402,7 @@ Expected: all pass, including fail-closed and transient-error caller tests.
 - [x] **Step 6: Commit the registry**
 
 ```bash
-git add crates/ironclaw_product crates/ironclaw_channel_host crates/ironclaw_reborn_composition crates/ironclaw_telegram_extension
+git add crates/ironclaw_assistant crates/ironclaw_channel_host crates/ironclaw_composition crates/ironclaw_telegram_extension
 git commit -m "refactor(reborn): generalize extension account setup gating"
 ```
 
@@ -464,7 +464,7 @@ Implement a test-only `RootFilesystem` decorator that delegates all methods and 
 cargo test -p ironclaw_telegram_extension state
 cargo test -p ironclaw_telegram_extension telegram_setup
 cargo test -p ironclaw_telegram_extension telegram_pairing
-cargo test -p ironclaw_architecture --test telegram_extension_gates telegram_tests_use_the_real_filesystem_state
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates telegram_tests_use_the_real_filesystem_state
 ```
 
 Expected: all pass and `rg -n "(TelegramInstallationSetupStore|TelegramPairingStore|TelegramUserBindingStore|TelegramDmTargetStore|struct InMemory.*Store)" crates/ironclaw_telegram_extension` prints nothing.
@@ -478,7 +478,7 @@ and read-barrier behavior below the concrete state at the `RootFilesystem` seam.
 - [x] **Step 6: Commit concrete state**
 
 ```bash
-git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition
+git add crates/ironclaw_telegram_extension crates/ironclaw_composition
 git commit -m "refactor(telegram): use one concrete filesystem host state"
 ```
 
@@ -517,7 +517,7 @@ Change `TelegramIngressService` and route state to hold `Arc<DynamicTelegramInst
 cargo test -p ironclaw_telegram_extension bot_api
 cargo test -p ironclaw_telegram_extension egress
 cargo test -p ironclaw_telegram_extension ingress
-cargo test -p ironclaw_architecture --test telegram_extension_gates deleted_telegram_abstractions_and_dtos_stay_deleted
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates deleted_telegram_abstractions_and_dtos_stay_deleted
 ```
 
 Expected: all pass; `rg -n "(trait TelegramBotApi|TelegramEgressCredentialProvider|TelegramInstallationResolver|ResolvedTelegramIngress)" crates` prints nothing.
@@ -531,7 +531,7 @@ only `TelegramPairingStatusResponse`, intentionally removed by Task 7.
 - [x] **Step 6: Commit concrete clients/resolver**
 
 ```bash
-git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition
+git add crates/ironclaw_telegram_extension crates/ironclaw_composition
 git commit -m "refactor(telegram): remove test-only client and resolver traits"
 ```
 
@@ -568,8 +568,8 @@ Use `pub(crate)` for cross-module-only helpers. `lib.rs` exports focused modules
 
 ```bash
 cargo test -p ironclaw_telegram_extension
-cargo test -p ironclaw_architecture --test telegram_extension_gates telegram_production_files_meet_the_line_budget
-cargo test -p ironclaw_architecture --test telegram_extension_gates deleted_telegram_abstractions_and_dtos_stay_deleted
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates telegram_production_files_meet_the_line_budget
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates deleted_telegram_abstractions_and_dtos_stay_deleted
 ```
 
 Expected: all pass; every touched production Telegram `.rs` file is at most 999 lines.
@@ -582,7 +582,7 @@ only on the intentionally red Task 8 composition-ownership ratchet.
 - [x] **Step 6: Commit the focused layout**
 
 ```bash
-git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition crates/ironclaw_architecture
+git add crates/ironclaw_telegram_extension crates/ironclaw_composition crates/ironclaw_architecture_tests
 git commit -m "refactor(telegram): split host by domain responsibility"
 ```
 
@@ -594,7 +594,7 @@ git commit -m "refactor(telegram): split host by domain responsibility"
 - Create: `crates/ironclaw_telegram_extension/src/host/{mod,builder,revision}.rs`
 - Create/modify: `crates/ironclaw_telegram_extension/src/delivery/triggered.rs`
 - Modify: `crates/ironclaw_telegram_extension/Cargo.toml`
-- Reduce: `crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`
+- Reduce: `crates/ironclaw_composition/src/telegram/telegram_host_beta.rs`
 - Modify: composition Telegram host tests.
 
 **Interfaces:**
@@ -653,8 +653,8 @@ Composition constructs the scoped filesystem, conversation/idempotency services,
 
 ```bash
 cargo test -p ironclaw_telegram_extension host
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,telegram-v2-host-beta,libsql --lib telegram
-cargo test -p ironclaw_architecture --test telegram_extension_gates telegram_composition_is_assembly_only
+cargo test -p ironclaw_composition --features test-support,webui-v2-beta,telegram-v2-host-beta,libsql --lib telegram
+cargo test -p ironclaw_architecture_tests --test telegram_extension_gates telegram_composition_is_assembly_only
 ```
 
 Expected: all pass and composition's production Telegram module stays within the ratcheted assembly budget.
@@ -667,7 +667,7 @@ Telegram architecture ratchets pass, and composition's production adapter is 286
 - [x] **Step 6: Commit behavior ownership**
 
 ```bash
-git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition crates/ironclaw_architecture
+git add crates/ironclaw_telegram_extension crates/ironclaw_composition crates/ironclaw_architecture_tests
 git commit -m "refactor(telegram): own revision and delivery runtime behavior"
 ```
 
@@ -734,8 +734,8 @@ cargo test -p ironclaw_channel_delivery
 cargo test -p ironclaw_channel_host --features webhook-serve
 cargo test -p ironclaw_telegram_extension
 cargo test -p ironclaw_telegram_v2_adapter --lib
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib
+cargo test -p ironclaw_architecture_tests
 cargo test --test telegram_v2_default_off_integration
 bash scripts/reborn-e2e-rust.sh
 ```
@@ -755,7 +755,7 @@ passes all 50 deterministic contract binaries. No external service was required 
 cargo clippy -p ironclaw_channel_delivery --all-targets --all-features -- -D warnings
 cargo clippy -p ironclaw_channel_host --all-targets --all-features -- -D warnings
 cargo clippy -p ironclaw_telegram_extension --all-targets --all-features -- -D warnings
-cargo clippy -p ironclaw_reborn_composition --all-targets --all-features -- -D warnings
+cargo clippy -p ironclaw_composition --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 

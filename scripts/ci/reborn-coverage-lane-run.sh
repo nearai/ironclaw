@@ -139,9 +139,9 @@ if [[ "${collect_coverage}" == "true" ]]; then
       --lcov --output-path "${output_lcov}" \
       --ignore-rust-version -- --nocapture
 else
-  echo "::group::cargo test -p ironclaw_reborn_integration_tests ${test_args[*]}"
+  echo "::group::cargo test -p ironclaw_integration_tests ${test_args[*]}"
   timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" \
+    cargo test -p ironclaw_integration_tests "${test_args[@]}" \
       --ignore-rust-version -- --nocapture
 fi
 echo "::endgroup::"

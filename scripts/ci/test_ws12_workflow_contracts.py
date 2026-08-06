@@ -25,9 +25,11 @@ from ws12_workflow_contracts import (
     crate_directory,
     github_glob_to_regex,
     load_workflows,
+    step_body,
     validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
+    validate_production_lint_targets,
     validate_webui_frontend_sites,
     validate_workflow_texts,
 )
@@ -97,7 +99,7 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         errors = validate_e2e_scope_filters(sabotaged)
 
         self.assertTrue(
-            any("substrates/ironclaw_events" in error for error in errors), errors
+            any("substrates/ironclaw_event_log" in error for error in errors), errors
         )
 
     def test_flat_tree_paths_glob_fails_loudly(self) -> None:
@@ -140,6 +142,169 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             any("could not find the `changes` job scope regex" in e for e in errors),
             errors,
         )
+
+    def test_production_lint_passes_as_checked_in_without_reading_its_neighbour(
+        self,
+    ) -> None:
+        """Passing here is itself the proof that the scan stays in its step.
+
+        `Check all-target lints` sits directly below and legitimately passes
+        the flags this contract forbids, so a scan that overran its own step
+        would fail on the checked-in workflow. The first assertion keeps that
+        proof honest: if the neighbour ever stops passing `--tests`, this test
+        would still pass while having stopped testing anything.
+        """
+        neighbour = step_body(
+            self.workflows[CODE_STYLE_WORKFLOW], "Check all-target lints"
+        )
+        self.assertIsNotNone(neighbour)
+        self.assertIn("--tests", neighbour or "")
+
+        self.assertEqual(
+            validate_production_lint_targets(self.workflows[CODE_STYLE_WORKFLOW]), []
+        )
+
+    def test_target_filters_on_the_production_lint_fail_loudly(self) -> None:
+        """Every explicit target selector, in bare and value-bearing form.
+
+        Regression for PR #6965: the lane ran `cargo clippy -p <pkg> --lib
+        --bins`, and the first PR whose only changed package was the bin-only
+        `ironclaw` died on `no library targets found in package` — exit 101,
+        no lint ever run. `--bins` alone is the quieter half of the same bug:
+        on a lib-only package cargo warns "no targets matched; this is a
+        no-op" and the lane reports green having linted nothing. The rest swap
+        the package's default production targets for a hand-picked set.
+
+        Exact-count, so `--bins` is never also reported as `--bin` — a
+        substring match would do exactly that.
+        """
+        for injected, flag in (
+            ("--lib", "--lib"),
+            ("--bins", "--bins"),
+            ("--bin ironclaw", "--bin"),
+            ("--all-targets", "--all-targets"),
+            ("--tests", "--tests"),
+            ("--test smoke", "--test"),
+            ("--examples", "--examples"),
+            ("--example demo", "--example"),
+            ("--benches", "--benches"),
+            ("--bench=throughput", "--bench"),
+        ):
+            with self.subTest(injected=injected):
+                sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+                    'cargo clippy "${package_args[@]}" \\',
+                    f'cargo clippy "${{package_args[@]}}" {injected} \\',
+                )
+                self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+                errors = validate_production_lint_targets(sabotaged)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"must not pass {flag} ", errors[0])
+
+    def test_widening_the_clippy_matrix_flags_fails_loudly(self) -> None:
+        """`${{ matrix.flags }}` is the lane's other flag channel."""
+        sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            '"flags":"--all-features"', '"flags":"--all-features --all-targets"'
+        )
+        self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+        errors = validate_production_lint_targets(sabotaged)
+        self.assertTrue(
+            any("clippy_matrix flags" in e and "--all-targets" in e for e in errors),
+            errors,
+        )
+
+        # …and only that matrix. Some other matrix in this workflow may
+        # legitimately carry `--tests`; reading it as widening *this* lane
+        # would be a false failure on an unrelated change.
+        unrelated = self.workflows[CODE_STYLE_WORKFLOW] + (
+            '\n          echo \'doc_matrix=[{"name":"docs","flags":"--tests"}]\''
+            ' >> "$GITHUB_OUTPUT"\n'
+        )
+        self.assertEqual(validate_production_lint_targets(unrelated), [])
+
+    def test_losing_the_step_or_its_command_fails_loudly(self) -> None:
+        """A contract that cannot see the command must say so, not pass."""
+        renamed = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            "name: Check production-target lints", "name: Check nothing at all"
+        )
+        self.assertTrue(
+            any(
+                "could not find the 'Check production-target lints' step" in e
+                for e in validate_production_lint_targets(renamed)
+            )
+        )
+
+        moved = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            'cargo clippy "${package_args[@]}" \\\n            ${{ matrix.flags }} -- -D warnings',
+            "bash scripts/ci/production-clippy.sh",
+        )
+        self.assertNotEqual(moved, self.workflows[CODE_STYLE_WORKFLOW])
+        self.assertTrue(
+            any(
+                "no longer runs `cargo clippy`" in e
+                for e in validate_production_lint_targets(moved)
+            )
+        )
+
+    def test_masking_the_production_lint_exit_status_fails_loudly(self) -> None:
+        """A lane that runs clippy and ignores it is the silent-green case.
+
+        Distinct from a disguised command, which this contract deliberately
+        does not chase: each of these is a plausible edit made on purpose and
+        for a stated reason — unblock the queue, quiet a flaky lane — and each
+        leaves the lint running and its verdict discarded.
+        """
+        for mask, injected in (
+            ("|| true", '${{ matrix.flags }} -- -D warnings || true'),
+            ("|| :", '${{ matrix.flags }} -- -D warnings || :'),
+            ("set +e", 'set +e\n          ${{ matrix.flags }} -- -D warnings'),
+        ):
+            with self.subTest(mask=mask):
+                sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+                    "${{ matrix.flags }} -- -D warnings", injected
+                )
+                self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+                errors = validate_production_lint_targets(sabotaged)
+                self.assertTrue(
+                    any(f"must not mask the lint's exit status with `{mask}`" in e
+                        for e in errors),
+                    errors,
+                )
+
+        # The YAML-level equivalent: the command runs, fails, and the job
+        # reports success anyway.
+        tolerated = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            "      - name: Check production-target lints\n",
+            "      - name: Check production-target lints\n        continue-on-error: true\n",
+        )
+        self.assertNotEqual(tolerated, self.workflows[CODE_STYLE_WORKFLOW])
+        self.assertTrue(
+            any(
+                "continue-on-error" in e
+                for e in validate_production_lint_targets(tolerated)
+            ),
+            validate_production_lint_targets(tolerated),
+        )
+
+    def test_production_lint_failures_reach_the_top_level_contract(self) -> None:
+        """The validator must stay wired into `validate_workflow_texts`.
+
+        Every assertion above calls it directly, so without this the guard
+        could be unhooked from the entry point CI runs and stay green.
+        """
+        sabotaged = dict(self.workflows)
+        sabotaged[CODE_STYLE_WORKFLOW] = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            'cargo clippy "${package_args[@]}" \\',
+            'cargo clippy "${package_args[@]}" --lib \\',
+        )
+        self.assertNotEqual(
+            sabotaged[CODE_STYLE_WORKFLOW], self.workflows[CODE_STYLE_WORKFLOW]
+        )
+
+        errors = validate_workflow_texts(sabotaged)
+        self.assertTrue(any("must not pass --lib" in e for e in errors), errors)
 
     def test_code_style_runs_workflow_and_shard_sabotage_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/code_style.yml").read_text(
@@ -221,8 +386,8 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         for workflow, flat, nested_probe in (
             (
                 CODE_STYLE_WORKFLOW,
-                "crates/([^/]+/)*ironclaw_runner/",
-                "crates/substrates/ironclaw_runner/src/lib.rs",
+                "crates/([^/]+/)*ironclaw_turn_runner/",
+                "crates/substrates/ironclaw_turn_runner/src/lib.rs",
             ),
             (
                 PLATFORM_WORKFLOW,
@@ -284,21 +449,25 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
     def test_dropping_a_governed_crate_name_fails_loudly(self) -> None:
         errors = validate_crate_scope_filters(
             self.sabotage(
-                CODE_STYLE_WORKFLOW, "crates/([^/]+/)*ironclaw_reborn_config/|", ""
+                CODE_STYLE_WORKFLOW, "crates/([^/]+/)*ironclaw_config/|", ""
             ),
             ROOT,
         )
 
         self.assertTrue(
-            any("ironclaw_reborn_config" in error for error in errors), errors
+            any("ironclaw_config" in error for error in errors), errors
         )
 
     def test_over_broadening_a_filter_fails_loudly(self) -> None:
         """Matching everything is not a fix — the dist-build and stress lanes
         are deliberately scoped and must stay scoped."""
         for workflows in (
-            self.sabotage(CODE_STYLE_WORKFLOW, "^(crates/([^/]+/)*ironclaw_runner/", "^(crates/"),
-            self.sabotage(STRESS_WORKFLOW, '- "crates/ironclaw_turns/**"', '- "crates/**"'),
+            self.sabotage(CODE_STYLE_WORKFLOW, "^(crates/([^/]+/)*ironclaw_turn_runner/", "^(crates/"),
+            self.sabotage(
+                STRESS_WORKFLOW,
+                '- "crates/kernel/ironclaw_turns/**"',
+                '- "crates/**"',
+            ),
         ):
             errors = validate_crate_scope_filters(workflows, ROOT)
             self.assertTrue(
@@ -310,7 +479,7 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
             (
                 self.sabotage(
                     CODE_STYLE_WORKFLOW,
-                    "grep -Eq '^(crates/([^/]+/)*ironclaw_runner/",
+                    "grep -Eq '^(crates/([^/]+/)*ironclaw_turn_runner/",
                     "true #",
                 ),
                 "expected exactly one scope regex",
@@ -366,13 +535,13 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         """The pin is only worth anything if `main()`'s entry point sees it."""
         flattened = self.sabotage(
             CODE_STYLE_WORKFLOW,
-            "crates/([^/]+/)*ironclaw_runner/",
-            "crates/ironclaw_runner/",
+            "crates/([^/]+/)*ironclaw_turn_runner/",
+            "crates/ironclaw_turn_runner/",
         )
 
         self.assertTrue(
             any(
-                "crates/substrates/ironclaw_runner" in error
+                "crates/substrates/ironclaw_turn_runner" in error
                 for error in validate_workflow_texts(flattened, ROOT)
             )
         )
@@ -595,14 +764,14 @@ class CrateNameResidueSabotageTests(unittest.TestCase):
 
     def test_dropping_the_docker_crate_name_fails_loudly(self) -> None:
         sabotaged = self.sabotage(
-            DOCKER_WORKFLOW, "ironclaw_reborn_cli", "ironclaw_renamed_cli"
+            DOCKER_WORKFLOW, "ironclaw_cli", "ironclaw_renamed_cli"
         )
         errors = validate_crate_name_residue(sabotaged, ROOT)
 
         self.assertTrue(
             any(
                 DOCKER_WORKFLOW in error
-                and "ironclaw_reborn_cli" in error
+                and "ironclaw_cli" in error
                 and "no longer names" in error
                 for error in errors
             ),
@@ -632,7 +801,7 @@ class CrateNameResidueSabotageTests(unittest.TestCase):
         # Make the workflow text contain the stale name too, so the "no
         # longer names" branch does not fire first and mask this one.
         workflows = self.sabotage(
-            DOCKER_WORKFLOW, "ironclaw_reborn_cli", "ironclaw_reborn_cli_renamed"
+            DOCKER_WORKFLOW, "ironclaw_cli", "ironclaw_reborn_cli_renamed"
         )
         with self.patched_residue(stale):
             errors = validate_crate_name_residue(workflows, ROOT)

@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging whoami output",
+  "type": "object",
+  "required": ["user_ref"],
+  "properties": {
+    "user_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque user id from this extension's people operations; never derived from a conversation id."
+    },
+    "display_name": { "type": "string" },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -1,5 +1,5 @@
 //! In-process `OutboundPreferencesProductService` double for the C-SYNTH seam
-//! (`ironclaw_reborn_composition::runtime::standalone::outbound_delivery`). Fixed
+//! (`ironclaw_composition::runtime::standalone::outbound_delivery`). Fixed
 //! in-memory inventory: succeeds for a known target, `NotFound` otherwise — one
 //! double drives both the happy path and the reject route without per-test
 //! config. Distinct from `delivery::RecordingOutboundDeliverySink` (the
@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_product::{
+use ironclaw_assistant::{
     OutboundPreferencesProductService, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,

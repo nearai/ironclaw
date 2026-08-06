@@ -409,7 +409,7 @@ decision.
 ## 7. Comparison with IronClaw's Reborn loop — and what to adopt
 
 Based on a matching deep-read of `crates/ironclaw_agent_loop`, `ironclaw_loop_host`,
-`ironclaw_runner`, `ironclaw_llm`, and `ironclaw_reborn_composition` (all `file:line`
+`ironclaw_turn_runner`, `ironclaw_llm`, and `ironclaw_composition` (all `file:line`
 refs below into the IronClaw tree, verified 2026-08-01).
 
 ### 7.1 Side-by-side
@@ -429,7 +429,7 @@ refs below into the IronClaw tree, verified 2026-08-01).
 | Compaction content | Structured checkpoint summary, iterative delta updates, `<read-files>` carryover, verbatim 20k tail | Structured summary (fresh + update prompts in `ironclaw_loop_host/prompts/`), 8k verbatim tail, injection-scanned and leak-redacted; no file-op carryover |
 | Prompt caching | 3 explicit `cache_control` breakpoints; prefix stability engineered everywhere | Single top-level ephemeral marker relying on automatic caching (`ironclaw_llm/src/rig_adapter.rs:1086-1095`); **OAuth path has no caching at all** (`anthropic_oauth.rs:485-490`) |
 | Prefix stability | Timestamp-free system prompt, byte-identical tool array (deferred refs), append-only history | Unstable: inline nudges prepended *before* identity, minute-precision timestamp in runtime context, per-run memory retrieval, mid-run tool promotion, sliding-window eviction, provider-switch history rewrite |
-| Cache telemetry | Per-turn cache-waste meter with $ attribution | Better: break detection attributed to `tool_definitions_changed`/`system_prompt_changed` (`ironclaw_runner/src/model_gateway/prompt_cache_activity.rs`) — which recorded the 82% → 29% hit-rate collapse |
+| Cache telemetry | Per-turn cache-waste meter with $ attribution | Better: break detection attributed to `tool_definitions_changed`/`system_prompt_changed` (`ironclaw_turn_runner/src/model_gateway/prompt_cache_activity.rs`) — which recorded the 82% → 29% hit-rate collapse |
 | Tool output limits | 2000 lines/50KB, continuation-naming messages | Comparable and already good: 2000 lines/64KiB reads, 16KiB shell preview + disk spill, `result_read` continuation over reference envelopes |
 | Fixed per-request tax | ~1.3k tokens (prompt + 4 tool schemas) | ~15–25k tokens: 24 core tools / ~12k schema tokens + base prompt + up to 8k identity + skills/memory — and unreliably cached |
 | Cost accounting | Per-request cost from shared rate table; session totals include summarization | Cumulative usage in loop state, USD reserve/settle via `ResourceGovernor`, priced at product edge — richer, but budget reservation estimates tokens from the content *reference string*, not content (`ironclaw_loop_contracts/src/model_work.rs:38-45`) |
@@ -530,8 +530,8 @@ and every pi mechanism is directly transplantable. Filed as #6984 (breakpoints),
 
 - Code: `/data/illia/research/pi-mono` (clone of github.com/badlogic/pi-mono, 2026-08-01)
 - IronClaw comparison (§7): deep-read of `crates/ironclaw_agent_loop`,
-  `ironclaw_loop_host`, `ironclaw_runner`, `ironclaw_llm`,
-  `ironclaw_reborn_composition` at commit `fe8f5c245` (2026-08-01)
+  `ironclaw_loop_host`, `ironclaw_turn_runner`, `ironclaw_llm`,
+  `ironclaw_composition` at commit `fe8f5c245` (2026-08-01)
 - Mario Zechner, *What I learned building an opinionated and minimal coding agent*
   (mariozechner.at, 2025-11-30) + Terminal-Bench 2.0 results gist
 - Databricks Engineering, *Benchmarking Coding Agents on Databricks' Multi-Million
