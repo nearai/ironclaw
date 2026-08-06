@@ -288,12 +288,15 @@ impl BoundedDiagnosticText {
         value: impl Into<String>,
         original_bytes: u64,
     ) -> Result<Self, &'static str> {
-        let mut bounded = Self::bounded(value.into(), TOOL_RESULT_MAX_BYTES);
+        let value = value.into();
+        let source_bytes = u64::try_from(value.len())
+            .map_err(|_| "diagnostic text source byte length is not representable")?;
+        if original_bytes < source_bytes {
+            return Err("diagnostic text original byte length is smaller than source text");
+        }
+        let mut bounded = Self::bounded(value, TOOL_RESULT_MAX_BYTES);
         let retained_bytes = u64::try_from(bounded.content.len())
             .map_err(|_| "diagnostic text retained byte length is not representable")?;
-        if original_bytes < retained_bytes {
-            return Err("diagnostic text original byte length is smaller than retained text");
-        }
         bounded.original_bytes = original_bytes;
         bounded.truncated = original_bytes > retained_bytes;
         Ok(bounded)
@@ -1518,6 +1521,21 @@ mod tests {
         );
         assert!(tool.result_truncated());
         assert_eq!(tool.output_bytes, Some((TOOL_RESULT_MAX_BYTES + 1) as u64));
+    }
+
+    #[test]
+    fn retained_tool_result_rejects_original_size_smaller_than_source() {
+        let source = "x".repeat(TOOL_RESULT_MAX_BYTES + 100);
+        let error = BoundedDiagnosticText::retained_tool_result(
+            source,
+            u64::try_from(TOOL_RESULT_MAX_BYTES + 50).expect("size"),
+        )
+        .expect_err("source size cannot be understated after truncation");
+
+        assert_eq!(
+            error,
+            "diagnostic text original byte length is smaller than source text",
+        );
     }
 
     #[test]
