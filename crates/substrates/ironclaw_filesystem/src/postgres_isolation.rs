@@ -123,10 +123,15 @@ impl IsolatedPostgresProvisioner {
             Ok(config) => config,
             Err(error) => match self.unreachable {
                 PostgresUnreachable::Panic => {
+                    // This module is gated behind `test-support`; its only entry
+                    // point is a contract suite's provisioner and no production path
+                    // constructs one. Failing loud is the contract: a suite whose
+                    // backend is configured but unusable must red, never silently
+                    // skip its Postgres leg (the inert-guard rule).
                     panic!(
                         "{} does not parse as a postgres connection string: {error}",
                         self.env_var
-                    )
+                    ) // safety: test-only provisioning; a misconfigured suite must fail loud
                 }
                 PostgresUnreachable::Skip => {
                     eprintln!("skipping {}: invalid url ({error})", self.suite);
@@ -138,7 +143,7 @@ impl IsolatedPostgresProvisioner {
             Ok(connected) => connected,
             Err(error) => match self.unreachable {
                 PostgresUnreachable::Panic => {
-                    panic!("connect to the configured postgres server: {error}")
+                    panic!("connect to the configured postgres server: {error}") // safety: test-only provisioning; a configured-but-unreachable server must fail the suite, never degrade it to a skip
                 }
                 PostgresUnreachable::Skip => {
                     eprintln!("skipping {}: database unavailable ({error})", self.suite);
@@ -198,7 +203,7 @@ impl IsolatedPostgresProvisioner {
         admin
             .execute(&format!("CREATE DATABASE {name}"), &[])
             .await
-            .expect("create the isolated database (the role needs CREATEDB)");
+            .expect("create the isolated database (the role needs CREATEDB)"); // safety: test-only provisioning; without CREATEDB there is no per-test isolation, which is exactly what the absolute-cursor asserts depend on
         let mut config = admin_config;
         config.dbname(&name);
         Some(IsolatedPostgresDatabase {
@@ -241,7 +246,7 @@ impl IsolatedPostgresDatabase {
 fn unix_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is after the UNIX epoch")
+        .expect("system clock is after the UNIX epoch") // safety: test-only provisioning; a pre-1970 clock would make the age-gated stale-database sweep meaningless
         .as_secs()
 }
 
