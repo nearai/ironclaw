@@ -472,6 +472,34 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             )
         ).to_have_count(1)
 
+        await page.locator("[data-testid='inspector-tab-activity']").click()
+        activity = page.locator("[data-testid='inspector-activity-content']")
+        await expect(activity).to_be_visible()
+        await expect(
+            activity.locator("[data-activity-kind='turn_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='prompt_prepared']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
+        activity_kinds = await activity.locator("[data-activity-kind]").evaluate_all(
+            "entries => entries.map(entry => entry.dataset.activityKind)"
+        )
+        assert activity_kinds.index("turn_started") < activity_kinds.index(
+            "prompt_prepared"
+        )
+        assert activity_kinds.index("model_call_started") < activity_kinds.index(
+            "model_call_completed"
+        )
+        await expect(activity.get_by_text("Turn 1 of 1", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+
         await page.locator("[data-testid='inspector-tab-stats']").click()
         stats = page.locator("[data-testid='inspector-stats-content']")
         await expect(stats).to_be_visible()
