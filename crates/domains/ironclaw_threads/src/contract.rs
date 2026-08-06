@@ -495,7 +495,7 @@ pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
 /// opt-in override, so the observation envelope and every default stay exactly where they
 /// were. A deployment that raises the cap accepts larger single reads; it does not change
 /// anything for a deployment that does not.
-pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
+pub const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
 
 /// Effective per-request cap: 24 KiB — unchanged from the historical default.
 ///
@@ -521,7 +521,7 @@ pub(crate) const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_RE
 ///
 /// Unparseable or out-of-range values fall back to the default rather than
 /// failing the run — a malformed tuning knob must not take down an agent.
-pub(crate) fn effective_tool_result_read_max_bytes() -> usize {
+pub fn effective_tool_result_read_max_bytes() -> usize {
     match std::env::var(TOOL_RESULT_READ_MAX_BYTES_ENV) {
         Ok(raw) => match raw.trim().parse::<usize>() {
             // floor mirrors `tool_result_records::TOOL_RESULT_RECORD_READ_MIN_BYTES`
