@@ -62,6 +62,10 @@ fn search_messages_accepts_portable_sort_modes() {
             "search_messages must accept the canonical {sort} sort mode",
         );
     }
+    assert!(
+        validator.is_valid(&json!({"query": "from:me"})),
+        "search_messages must preserve provider-default ordering when sort is omitted",
+    );
     assert!(!validator.is_valid(&json!({"query": "from:me", "sort": "newest"})));
 }
 

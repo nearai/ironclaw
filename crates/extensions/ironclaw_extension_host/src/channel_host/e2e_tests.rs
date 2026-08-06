@@ -4724,6 +4724,16 @@ async fn generic_dm_target_rejects_record_from_a_different_workspace() {
             .all(|entry| !entry.summary.target_id.as_str().contains("personal-dm")),
         "a DM record from another workspace must fail closed: {listed:?}"
     );
+
+    let active_workspace_binding = dm_reply_target_binding_ref();
+    assert!(
+        provider
+            .resolve_reply_target_binding(&operator_caller(), &active_workspace_binding)
+            .await
+            .expect("reply-target resolution succeeds")
+            .is_none(),
+        "an active-workspace binding must not resolve through a stored record from another workspace"
+    );
 }
 
 /// REGRESSION (migration tolerance): stored beta preferences embed the
