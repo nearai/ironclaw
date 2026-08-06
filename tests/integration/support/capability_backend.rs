@@ -258,29 +258,3 @@ impl RebornCapabilityBackend {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn sandbox_shell_rejects_scripted_process_overrides_before_startup() {
-        let result = RebornCapabilityBackend::SandboxShellTools
-            .install(
-                ShellMode::Scripted(ScriptedProcessResult::Timeout),
-                CapabilityScriptingInputs::default(),
-                None,
-            )
-            .await;
-
-        let error = match result {
-            Ok(_) => panic!("sandbox shell accepted an unsupported process override"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("sandbox shell harness executes real containers")
-        );
-    }
-}

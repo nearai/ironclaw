@@ -81,6 +81,25 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
     });
 }
 
+#[tokio::test]
+async fn sandbox_shell_harness_rejects_scripted_process_overrides_before_startup() {
+    let result = RebornIntegrationHarness::test_default()
+        .with_shell_timeout()
+        .with_sandbox_shell_tools()
+        .build()
+        .await;
+
+    let error = match result {
+        Ok(_) => panic!("sandbox shell accepted an unsupported process override"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("sandbox shell harness executes real containers")
+    );
+}
+
 fn run_with_larger_stack<F>(test: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
