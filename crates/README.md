@@ -1,140 +1,120 @@
 # IronClaw crates
 
-This directory contains the Rust crates that split IronClaw into smaller, reviewable boundaries. Most crates are Reborn system-service crates: they hold one slice of host authority, storage, policy, runtime composition, or product UI glue.
+`crates/` is the whole IronClaw Reborn production stack: one Cargo workspace
+arranged as **ten family directories**, each owning one kind of
+responsibility. There is no legacy tier — the v1 monolith and its crates are
+gone.
 
-Use this page as a human map before opening individual crate docs or source files.
+This page is the human map. For agent routing and the enforced dependency
+matrix use [`AGENTS.md`](./AGENTS.md); for the runtime narrative (how a turn
+actually executes) read [`Architecture.md`](./Architecture.md); for the
+design record — per-family specs, the frozen proposal, the live checklist —
+read
+[`docs/reborn/target-architecture/`](../docs/reborn/target-architecture/README.md).
 
 ## Mental model
 
-IronClaw Reborn keeps authority narrow and explicit:
+Authority is narrow and explicit, and the tree mirrors it:
 
-1. **Contracts describe authority**: `ironclaw_host_api` and adjacent contract crates define scoped identities, policies, requests, decisions, and DTOs.
-2. Policy gates decide: authorization, trust, runtime policy, resources, approvals, secrets, safety, filesystem, network, hooks, and prompt-envelope crates each own one kind of decision, label, or side effect.
-3. Capability hosts coordinate: capabilities, dispatcher, processes, scripts, MCP, WASM, shared WASM limiting, and host-runtime crates compose validated requests into sandboxed execution.
-4. State is durable and replayable: events, event streams, run state, threads, conversations, memory, outbound, product storage, traces, and event projections keep the host observable without leaking secrets.
-5. Product surfaces adapt: agent loop, loop host, WebChat, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
+1. **`contracts/` describe** — shared vocabulary and ports every tier may
+   see. Nothing here executes, persists, or names a vendor.
+2. **`kernel/` decides** — the authority perimeter: trust, authorization,
+   approvals, resources, runtime policy, the capability membrane, process
+   lifecycle, turn admission, and the mediated host services.
+3. **`substrates/`, `events/`, `domains/` hold mechanism and state** —
+   privileged mechanisms (files, secrets, network), append-only evidence and
+   read models, and typed record owners. All of it is mediated by the kernel.
+4. **`lanes/` execute** — already-authorized work runs in isolation (WASM,
+   MCP, the container sandbox) and returns normalized outcomes.
+5. **`loop/` decides agent behavior** — deliberately untrusted; it can only
+   *request* effects through typed ports.
+6. **`extensions/` package integrations** — manifests, the generic host, and
+   one self-contained directory per installable package.
+7. **`product/` owns the experience** — the assistant, the operator control
+   plane, the WebUI, the OpenAI-compatible API.
+8. **`app/` assembles and enforces** — composition wires it, the `ironclaw`
+   binary boots it, the architecture tests keep the rules mechanical.
 
-A good rule of thumb: if a change adds new authority or persistence, put it in the crate that owns that boundary instead of threading it through a UI or runtime crate.
+One request stitches them together: the **loop** chooses a tool, the
+**kernel** permits it, a **lane** runs it, and **domains** and **events**
+remember it. If a change adds authority or persistence, put it in the family
+that owns that boundary — never thread it through a UI or runtime crate.
 
-## Crate groups
+## The ten families
 
-### Core vocabulary and shared contracts
+Counts measured 2026-08-05 (`cargo metadata --no-deps`; the enforcing gate is
+`python3 scripts/ci/check-target-tree.py`). Every family has an `AGENTS.md`
+(its boundary and crate table) and an in-depth spec in
+[`docs/reborn/target-architecture/families/`](../docs/reborn/target-architecture/families/);
+every crate has a `README.md`.
 
-| Crate directory | Package | Human context |
+| Directory | Crates | What lives there |
 | --- | --- | --- |
-| `ironclaw_common` | `ironclaw_common` | Shared workspace types and utilities that are not authority-bearing enough to belong in `ironclaw_host_api`. Keep this small. |
-| `ironclaw_host_api` | `ironclaw_host_api` | Canonical Reborn authority vocabulary: actors, scopes, policies, capability requests, decisions, obligations, and host-facing data contracts. Runtime behavior belongs elsewhere. |
-| `ironclaw_prompt_envelope` | `ironclaw_prompt_envelope` | Leaf helper for wrapping trusted or untrusted prompt snippets with closed-vocabulary source/trust labels and rejecting instruction-hijack markers. |
-| `ironclaw_runtime_policy` | `ironclaw_runtime_policy` | Resolves runtime profiles from host configuration and policy inputs. Use it when choosing what runtime shape a capability may use. |
-| `ironclaw_architecture_tests` | `ironclaw_architecture_tests` | Workspace architecture contract tests. It has no production role; it fails builds when crate dependency boundaries drift. |
+| [`contracts/`](./contracts/AGENTS.md) | 6 | `host_api`, `common`, `prompt_envelope`, `loop_contracts`, `extension_contracts`, `product_contracts` |
+| [`substrates/`](./substrates/AGENTS.md) | 6 | `filesystem`, `libsql_runtime`, `secrets`, `network`, `safety`, `observability` |
+| [`events/`](./events/AGENTS.md) | 4 | `event_log`, `event_store`, `event_projections`, `event_streams` |
+| [`domains/`](./domains/AGENTS.md) | 12 | `threads`, `conversations`, `triggers`, `memory`, `skills`, `auth`, `attachments`, `extractors`, `identity`, `llm`, `trace_commons`, `outbound` |
+| [`kernel/`](./kernel/AGENTS.md) | 9 | `trust`, `authorization`, `approvals`, `resources`, `runtime_policy`, `capabilities`, `processes`, `turns`, `host_runtime` |
+| [`lanes/`](./lanes/AGENTS.md) | 4 | `wasm`, `wasm_limiter`, `mcp`, `sandbox` |
+| [`loop/`](./loop/AGENTS.md) | 4 | `agent_loop`, `loop_host`, `turn_runner`, `hooks` |
+| [`extensions/`](./extensions/AGENTS.md) | 8 | `extension_registry`, `extension_host`, `extension_manager`, `extension_support`, plus the 4 crates under `packages/` (below) |
+| [`product/`](./product/AGENTS.md) | 5 | `assistant`, `operator`, `openai_compat`, `webui`, `host_ingress` |
+| [`app/`](./app/AGENTS.md) | 4 | `composition`, `cli` (package `ironclaw` — the binary), `config`, `architecture_tests` |
 
-### Authority, safety, and policy gates
+Crate directories carry the full package name
+(`crates/kernel/ironclaw_turns` → package `ironclaw_turns`), so moving a
+crate between families is never a rename. The exceptions are
+`app/ironclaw_cli` (package `ironclaw`) and the extension packages below.
 
-| Crate directory | Package | Human context |
-| --- | --- | --- |
-| `ironclaw_authorization` | `ironclaw_authorization` | Evaluates host API authority contracts before capability execution. It should not execute work, reserve resources, or prompt users. |
-| `ironclaw_approvals` | `ironclaw_approvals` | Owns durable approval requests, gate records, policy, resolution, and scoped authorization leases. |
-| `ironclaw_trust` | `ironclaw_trust` | Host-controlled trust-class policy engine. Use it for decisions about how much trust a runtime, extension, or input receives. |
-| `ironclaw_resources` | `ironclaw_resources` | Resource reservation governor. Owns budget/reservation mechanics, not runtime dispatch. |
-| `ironclaw_auth` | `ironclaw_auth` | Product-facing Reborn auth setup contracts: auth-flow records, secure manual-token interactions, credential accounts, provider exchange, continuations, cleanup, and fakes. |
-| `ironclaw_safety` | `ironclaw_safety` | Prompt-injection defense, input validation, secret-leak detection, and safety policy enforcement. |
-| `ironclaw_secrets` | `ironclaw_secrets` | Tenant-scoped secret storage and leasing behind opaque `SecretHandle` values. It stores/leases material; other crates decide when leases are allowed and where to inject them. |
-| `ironclaw_network` | `ironclaw_network` | Network policy and HTTP egress boundary. Resolves DNS, rejects disallowed/private targets when configured, and owns host-mediated outbound HTTP. |
-| `ironclaw_filesystem` | `ironclaw_filesystem` | Scoped filesystem service. Use it for host-controlled path access, not direct runtime path handling. |
-| `ironclaw_hooks` | `ironclaw_hooks` | Reborn loop hook framework. Owns trust-tiered hook contracts, predicates, ordering, dispatch, and failure policy; hooks cannot grant authority. |
+### Extension packages
 
-### Capability execution and runtime lanes
+`crates/extensions/packages/` holds 14 self-contained package directories —
+the only place in the workspace where vendor names may appear. Four are
+workspace crates: `slack` and `telegram` (channel adapters),
+`memory-native` and `mem0` (memory providers). Ten are data-only packages
+(manifest + prompts/schemas, some with prebuilt WASM): `github`, `gmail`,
+`google-calendar`, `google-docs`, `google-drive`, `google-sheets`,
+`google-slides`, `nearai-mcp`, `notion-mcp`, `web-access`. Each package
+directory has its own `README.md`, crate or not.
 
-| Crate directory | Package | Human context |
-| --- | --- | --- |
-| `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, process transitions, and neutral runtime dispatch. |
-| `ironclaw_processes` | `ironclaw_processes` | Host-tracked background process lifecycle. Owns lifecycle mechanics, not capability policy. |
-| `ironclaw_sandbox` | `ironclaw_sandbox` | The sandboxed-process lane: `SandboxProcessPlan` validation, the Docker/broker/credential-firewall/CA machinery behind `SandboxCommandTransport`, and the script/CLI capability runner. |
-| `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
-| `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface plus the folded domain-free `wasm_sandbox_core` primitives. |
-| `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
-| `ironclaw_extension_registry` | `ironclaw_extension_registry` | Extension manifest, lifecycle, and registration contracts. Owns install/readiness/remove semantics; runtime crates consume validated descriptors from here. |
-| `ironclaw_extension_host` | `ironclaw_extension_host` | Generic channel-host assembly: binds installed extensions to inbound/outbound channel surfaces (ingress registration, delivery, per-extension idempotency ledgers) for the Reborn product surface. |
-| `ironclaw_extension_manager` | `ironclaw_extension_manager` | The product face of extensions: lifecycle capabilities and commands, the lifecycle product service, admin/operator/skill capability handlers, credential views, and the IronHub extension hub. Calls the host's authority; the host never calls back. |
-| `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow service upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
+### The workspace beyond `crates/`
 
-### Durable state, eventing, and read models
+62 of the workspace's **64 packages** live under `crates/`. The other two are
+the root package `ironclaw_integration_tests` (the in-process integration
+suite driving `tests/integration/`) and `tools/ironclaw_stress`. One package
+is deliberately excluded from the workspace: `tools/ironclaw_silk_decoder`,
+a standalone helper with its own toolchain requirements.
 
-| Crate directory | Package | Human context |
-| --- | --- | --- |
-| `ironclaw_event_log` | `ironclaw_event_log` | Redacted runtime/audit vocabulary plus durable append-log traits. Use it for observable history, not current state. |
-| `ironclaw_event_store` | `ironclaw_event_store` | Concrete Reborn event/audit store backends and backend-profile validation. Depends on `ironclaw_event_log`; keeps storage adapters out of event vocabulary. |
-| `ironclaw_event_projections` | `ironclaw_event_projections` | Product-facing read models over durable runtime and audit logs. Upper layers should consume these DTOs rather than parse event rows directly. |
-| `ironclaw_event_streams` | `ironclaw_event_streams` | Transport-neutral projection stream manager: admission, bounded subscription buffers, replay/live updates, lag signals, and redaction validation. |
-| `ironclaw_threads` | `ironclaw_threads` | Canonical session thread and transcript service contracts. Use it for durable thread/transcript ownership. |
-| `ironclaw_conversations` | `ironclaw_conversations` | Conversation binding and session-thread contracts that connect product conversation concepts to Reborn threads. |
-| `ironclaw_memory` | `ironclaw_memory` | Memory document service adapters. This is for workspace/memory document semantics, not arbitrary transcript deletion. |
-| `ironclaw_outbound` | `ironclaw_outbound` | Metadata-only outbound state: notification policy, projection subscription cursors, and delivery status. It does not own transport delivery or payload content. |
-| `ironclaw_trace_commons` | `ironclaw_trace_commons` | Trace Commons / TraceDAO client surface: contribution pipeline, trace client, redaction helpers, and conversation-message compatibility type. |
+Family directories are ownership, not compile-time trust units — the
+enforced dependency ladder is the seven-layer matrix in
+[`AGENTS.md`](./AGENTS.md).
 
-### Product, agent loop, and user surfaces
+## Where to make a change
 
-| Crate directory | Package | Human context |
-| --- | --- | --- |
-| `ironclaw_turn_runner` | `ironclaw_turn_runner` | Standalone Reborn composition and adapters. This is the high-level Reborn composition crate. |
-| `ironclaw_composition` | `ironclaw_composition` | Wiring layer that assembles Reborn services into the host runtime. Composition-only; no policy or persistence logic of its own. |
-| `ironclaw_config` | `ironclaw_config` | Reborn boot-config boundary: typed configuration, profiles, and validation consumed before services start. |
-| `ironclaw_cli` | `ironclaw` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
-| `ironclaw_webui` | `ironclaw_webui` | The whole WebChat v2 HTTP surface: route surface and route descriptors, host-owned listener binding, authenticator implementations, and serve loop. |
-| `ironclaw_openai_compat` | `ironclaw_openai_compat` | OpenAI-compatible Chat/Responses DTOs, route descriptors, sanitized errors, fail-closed route fragment, and feature-gated durable ref/idempotency storage. |
-| `ironclaw_llm` | `ironclaw_llm` | LLM provider routing and abstraction used by Reborn product surfaces and the agent loop. |
-| `ironclaw_agent_loop` | `ironclaw_agent_loop` | Agent-loop framework state, planner/executor, strategy/family contracts, and test support. |
-| `ironclaw_loop_host` | `ironclaw_loop_host` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
-| `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
-| `ironclaw_extension_support` | `ironclaw_extension_support` | Concrete first-party userland extension implementations behind scoped handles. |
-| `ironclaw_assistant` | `ironclaw_assistant` | Product contracts and orchestration: adapter shapes, inbound turns, idempotency, binding resolution, ProductSurface descriptors, and the durable ledger adapters (unconditional — the crate's only feature is `test-support`; the `host-auth-mint` mint gate went with WS1.5's sealed-evidence consolidation). |
-| `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
-| `ironclaw_slack_extension` | `ironclaw_slack_extension` | Slack v2 channel extension for the Reborn product surface: protocol parsing and rendering (payloads, mrkdwn, delivery DTOs). |
-| `ironclaw_telegram_extension` | `ironclaw_telegram_extension` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
+Pick the family with the table above, then follow the read order in
+[`AGENTS.md`](./AGENTS.md): family `AGENTS.md` → crate `README.md` → crate
+working rules / module spec → `docs/reborn/contracts/`. Two program-wide
+rules to know before starting:
 
-## Where to make common changes
-
-- **New capability type or host API contract**: start in `ironclaw_host_api`, then update authorization/capability/runtime crates that consume it.
-- **Authorization or approval behavior**: use `ironclaw_authorization` for policy decisions and `ironclaw_approvals` for approval lease resolution.
-- **Secret storage or leasing**: use `ironclaw_secrets`; do not put SQL or crypto details in runtime lanes.
-- **Network or filesystem access**: use `ironclaw_network` or `ironclaw_filesystem`; runtimes should ask host services instead of bypassing them.
-- **WASM, MCP, or script execution**: use the corresponding runtime-lane crate plus `ironclaw_capabilities` for coordination.
-- **Hook behavior or prompt snippet trust labeling**: use `ironclaw_hooks` for hook contracts/dispatch and `ironclaw_prompt_envelope` for model-facing snippet wrapping.
-- **Extension lifecycle (install/readiness/remove)**: use `ironclaw_extension_registry`; do not parse manifests or reimplement registration in runtime or UI crates.
-- **Reborn composition or boot config**: use `ironclaw_composition` and `ironclaw_config`; keep `main.rs`/CLI entry points thin.
-- **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into product or UI crates.
-- **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_extension`); keep authority in lower host crates.
-- **Durable event history**: use `ironclaw_event_log` for contracts and `ironclaw_event_store` for backend adapters.
-- **Current invocation state**: query the `ironclaw_processes` journal projection.
-- **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_assistant` over parsing storage rows in UI code.
-- **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_assistant`; concrete adapters implement the `IdempotencyLedger` port without adding backend compile features.
-- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, or `ironclaw_turn_runner` depending on layer.
-- **Web UI**: use `ironclaw_webui`; keep authority and persistence in lower crates.
-
-## Boundary rules
-
-- Keep crate-owned logic in the owning crate. Avoid reimplementing module-specific setup in the CLI binary or in UI code.
-- Prefer extending existing traits and service boundaries over adding one-off integration paths.
-- Do not give runtime lanes ambient access to secrets, filesystem, network, or process control. Route through host services.
-- Treat `ironclaw_host_api` as the shared contract layer. It may define authority-bearing shapes; it should not perform side effects.
-- Use `ironclaw_architecture_tests` tests when dependency boundaries need to become enforceable.
-- If behavior changes, check `../CLAUDE.md`, `../AGENTS.md`, and `../FEATURE_PARITY.md` for test/doc update expectations.
+- Product handlers, channels, scheduled triggers, and agent callers go
+  through `ProductSurface` and the capability contracts — never around
+  authorization, approvals, or the owning domain operation (root `CLAUDE.md`,
+  "Capability dispatch").
+- LLM data is never deleted. Durable state goes through the `RootFilesystem`
+  mount catalog; in-memory maps are caches, never the source of truth (root
+  `CLAUDE.md`).
 
 ## Quick commands
 
 From the repository root:
 
 ```bash
-cargo fmt
-cargo clippy --all --benches --tests --examples --all-features
-cargo test
+cargo test -p <crate_name>                  # narrowest first
+cargo test -p ironclaw_architecture_tests   # dependency/layer gates
+python3 scripts/ci/check-target-tree.py     # tree vs documented package set
 ```
 
-For targeted crate work, prefer the narrowest command first:
-
-```bash
-cargo test -p ironclaw_secrets
-cargo clippy -p ironclaw_network --tests -- -D warnings
-```
-
-Some crates are feature-gated or test backends conditionally. Read the crate-level docs and tests before assuming a command covers PostgreSQL, libSQL, WASM, or integration behavior.
+The full gate (`cargo fmt`, workspace clippy, workspace tests) is documented
+in the root `CLAUDE.md`. Some crates test backends conditionally (PostgreSQL,
+libSQL, WASM) — read the crate's `README.md` and module spec before assuming
+a command covers them.

@@ -1,40 +1,19 @@
-# Agent Map — ironclaw_filesystem
+# ironclaw_filesystem — guidance pointer
 
-## Start Here
+Canonical guidance for this crate lives in:
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
-- Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/filesystem.md`
-- `docs/reborn/contracts/storage-placement.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- [`CLAUDE.md`](./CLAUDE.md) — the crate's **module spec** (this crate is in
+  the root `CLAUDE.md` Module Specs table; code follows spec, spec is the
+  tiebreaker).
+- [`README.md`](./README.md) — orientation: what the crate is, public surface,
+  measured edges, tests.
+- [`../AGENTS.md`](../AGENTS.md) — the `substrates/` family boundary and its
+  gates.
 
-## What This Crate Owns
+Contracts of record: `docs/reborn/contracts/filesystem.md`,
+`docs/reborn/contracts/storage-placement.md`,
+`docs/reborn/contracts/kernel-boundary.md`.
 
-- The universal storage-dispatch fabric: one trait, one entry type, one mount table behind which every persistence concern in the workspace lives. Currently:
-- The single `RootFilesystem` trait (`root`) — every backend *and* the composite dispatcher implement it; no parallel "backend" trait.
-- The universal stored value `Entry`/`VersionedEntry` and its primitives `RecordKind`/`RecordVersion`/`SeqNo`/`CasExpectation`/`ContentType` (`record`).
-- Declarative index/query primitives `IndexSpec`/`IndexName`/`IndexKey`/`IndexValue`/`IndexKind`/`Filter`/`Page` (`index`) — no SQL strings cross the boundary; plus shared brute-force vector ranking helpers (`vector`).
-- Filesystem vocabulary in `types`: `BackendCapabilities`/`BackendId`/`BackendKind`/`Capability`/`TxnCapability`, `FileStat`/`DirEntry`/`FileType`/`ContentKind`, `StorageClass`, `IndexPolicy`/`IndexConflictReason`, `FilesystemError`/`FilesystemOperation`; supporting handles `StorageTxn`/`EventRecord` (`backend`).
-- Mount table + catalog: `CompositeRootFilesystem`, `MountDescriptor`, `PathPlacement` (`catalog`) — longest-prefix mount routing and inherent catalog inspection.
-- Invocation-scoped view `ScopedFilesystem` + `MountViewResolver` (`scoped`) — checks permission against `MountView` before any backend dispatch.
-- Backends, all implementing `RootFilesystem`: `DiskFilesystem`, `PostgresRootFilesystem`, `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`; plus backend containment (symlink traversal, mount escape, raw-host-path prevention).
-- Crate-local public API, tests, and fixtures needed to prove that ownership.
-- Note: this supersedes the older "bytes mount; structured records stay typed" boundary. The legacy bytes-plane methods and `src/db.rs` are transitional and slated for removal — do not add new consumers.
-
-## Do Not Move In Here
-
-- memory-domain path grammar, network/secrets/dispatcher behavior, and product workflow.
-- Secrets, raw host paths, backend error details, and unredacted user content in errors, events, snapshots, logs, or docs.
-
-## Validation
-
-- Fast local check: `cargo test -p ironclaw_filesystem`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
-- If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
-
-## Agent Notes
-
-- Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
-- Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
-- If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.
+Consolidated 2026-08-05 per `docs/reborn/guidance-conventions.md` rule 1 (one
+canonical home per fact); this file previously duplicated the spec's ownership
+and validation content.
