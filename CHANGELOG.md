@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.1] - 2026-08-03
+## [1.1.0] - 2026-08-06
 
-First release candidate since 1.0.0. The headline work is extension reach —
+First stable release since 1.0.0, promoting `1.1.0-rc.1` plus the fixes listed
+under "Fixed since 1.1.0-rc.1". The headline work is extension reach —
 registering arbitrary hosted MCP servers, installing from IronHub deep links,
 durable file attachments that cross channels, and Slack `/ironclaw` slash
 commands — plus a broad pass on making failures legible: to the model, which
@@ -182,6 +183,17 @@ one behavioral removal is the `/webhooks/slack/events` compatibility alias
   `/webhooks/slack/events` forwarding alias. Slack Event Subscriptions must use
   `/webhooks/extensions/slack/events`; generic product-auth OAuth callbacks are
   unchanged.
+
+### Fixed since 1.1.0-rc.1
+
+- **1.0 state is preserved across the 1.1 startup migration:** the release-pair
+  migration keeps existing rc1 workspace, extension, and Railway artifacts
+  intact, recovers across restarts, and bounds extension secret discovery.
+- **Hosted MCP egress target** is preserved for registered MCP servers.
+- **Readable text logs stay writable:** `write_file`'s read-before-edit
+  backstop uses the same lenient binary classification as `read_file`, on both
+  the owning executor and host-runtime caller paths (`apply_patch` stays
+  strict).
 
 ## [1.0.0] - 2026-07-27
 
