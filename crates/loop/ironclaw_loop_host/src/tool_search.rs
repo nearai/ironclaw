@@ -626,7 +626,7 @@ mod tests {
     struct CorpusIntent {
         class: String,
         query: String,
-        expected: Vec<String>,
+        relevance: BTreeMap<String, u8>,
     }
 
     #[derive(Debug, Default)]
@@ -635,7 +635,18 @@ mod tests {
         recall_at_5: f64,
         recall_at_10: f64,
         mrr: f64,
-        no_match_precision: f64,
+        ndcg_at_10: f64,
+        no_match_accuracy: f64,
+    }
+
+    #[derive(Debug)]
+    struct QueryQuality {
+        class: String,
+        query: String,
+        relevance: BTreeMap<String, u8>,
+        recall_at_5: f64,
+        ndcg_at_10: f64,
+        ranking: Vec<String>,
     }
 
     #[test]
@@ -649,6 +660,31 @@ mod tests {
                 kinds.contains(required),
                 "corpus is missing {required} tools"
             );
+        }
+        assert!(
+            corpus.tools.len() >= 50,
+            "quality corpus must contain at least 50 tools, found {}",
+            corpus.tools.len()
+        );
+        assert!(
+            (60..=100).contains(&corpus.intents.len()),
+            "quality corpus must contain 60-100 judged queries, found {}",
+            corpus.intents.len()
+        );
+        let tool_names: BTreeSet<_> = corpus.tools.iter().map(|tool| tool.name.as_str()).collect();
+        for intent in &corpus.intents {
+            for (name, grade) in &intent.relevance {
+                assert!(
+                    tool_names.contains(name.as_str()),
+                    "query {:?} judges unknown tool {name:?}",
+                    intent.query
+                );
+                assert!(
+                    (1..=3).contains(grade),
+                    "query {:?} has invalid relevance grade {grade} for {name:?}",
+                    intent.query
+                );
+            }
         }
         let definitions: Vec<_> = corpus
             .tools
@@ -687,16 +723,18 @@ mod tests {
         let baseline_query_micros = baseline_started.elapsed().as_micros();
         let candidate = quality_metrics(&corpus.intents, &candidate_rankings);
         let baseline = quality_metrics(&corpus.intents, &baseline_rankings);
+        let candidate_queries = query_quality(&corpus.intents, &candidate_rankings);
 
         eprintln!(
             "tool-search corpus: baseline={baseline:?} candidate={candidate:?} index_build_us={index_build_micros} baseline_query_us={baseline_query_micros} candidate_query_us={candidate_query_micros}"
         );
+        report_worst_queries(&candidate_queries);
         assert!(
-            candidate.recall_at_1 >= 0.80,
+            candidate.recall_at_1 >= 0.75,
             "candidate recall@1 gate: {candidate:?}"
         );
         assert!(
-            candidate.recall_at_5 >= 0.95,
+            candidate.recall_at_5 >= 0.90,
             "candidate recall@5 gate: {candidate:?}"
         );
         assert!(
@@ -704,12 +742,64 @@ mod tests {
             "candidate recall@10 gate: {candidate:?}"
         );
         assert!(candidate.mrr >= 0.85, "candidate MRR gate: {candidate:?}");
+        assert!(
+            candidate.ndcg_at_10 >= 0.90,
+            "candidate nDCG@10 gate: {candidate:?}"
+        );
         assert_eq!(
-            candidate.no_match_precision, 1.0,
+            candidate.no_match_accuracy, 1.0,
             "no-match gate: {candidate:?}"
         );
         assert!(candidate.recall_at_5 >= baseline.recall_at_5);
         assert!(candidate.recall_at_10 >= baseline.recall_at_10);
+        assert!(candidate.mrr >= baseline.mrr);
+        assert!(candidate.ndcg_at_10 >= baseline.ndcg_at_10);
+        assert!(
+            candidate.ndcg_at_10 - baseline.ndcg_at_10 >= 0.15,
+            "candidate must materially improve nDCG@10 over baseline: baseline={baseline:?} candidate={candidate:?}"
+        );
+
+        let classes: BTreeSet<_> = corpus
+            .intents
+            .iter()
+            .map(|intent| intent.class.as_str())
+            .collect();
+        for required in [
+            "exact_name",
+            "alias",
+            "canonical_id",
+            "parameter",
+            "nested",
+            "ambiguous",
+            "provider",
+            "hard_negative",
+            "no_match",
+        ] {
+            assert!(
+                classes.contains(required),
+                "corpus is missing {required} intents"
+            );
+        }
+        for class in classes.into_iter().filter(|class| *class != "no_match") {
+            let class_queries: Vec<_> = candidate_queries
+                .iter()
+                .filter(|query| query.class == class)
+                .collect();
+            let class_recall_at_5 = mean(class_queries.iter().map(|query| query.recall_at_5));
+            let class_ndcg_at_10 = mean(class_queries.iter().map(|query| query.ndcg_at_10));
+            eprintln!(
+                "tool-search class: class={class} queries={} recall@5={class_recall_at_5:.3} ndcg@10={class_ndcg_at_10:.3}",
+                class_queries.len()
+            );
+            assert!(
+                class_recall_at_5 >= 0.80,
+                "class {class:?} recall@5 gate: {class_recall_at_5:.3}"
+            );
+            assert!(
+                class_ndcg_at_10 >= 0.75,
+                "class {class:?} nDCG@10 gate: {class_ndcg_at_10:.3}"
+            );
+        }
     }
 
     fn legacy_rank(
@@ -755,23 +845,25 @@ mod tests {
         let relevant: Vec<_> = intents
             .iter()
             .zip(rankings)
-            .filter(|(intent, _)| !intent.expected.is_empty())
+            .filter(|(intent, _)| !intent.relevance.is_empty())
             .collect();
         let no_match: Vec<_> = intents
             .iter()
             .zip(rankings)
-            .filter(|(intent, _)| intent.expected.is_empty())
+            .filter(|(intent, _)| intent.relevance.is_empty())
             .collect();
         let recall = |at: usize| {
             relevant
                 .iter()
-                .filter(|(intent, ranking)| {
-                    ranking
+                .map(|(intent, ranking)| {
+                    let retrieved = ranking
                         .iter()
                         .take(at)
-                        .any(|name| intent.expected.contains(name))
+                        .filter(|name| intent.relevance.contains_key(*name))
+                        .count();
+                    retrieved as f64 / intent.relevance.len() as f64
                 })
-                .count() as f64
+                .sum::<f64>()
                 / relevant.len() as f64
         };
         let mrr = relevant
@@ -779,13 +871,18 @@ mod tests {
             .map(|(intent, ranking)| {
                 ranking
                     .iter()
-                    .position(|name| intent.expected.contains(name))
+                    .position(|name| intent.relevance.contains_key(name))
                     .map(|rank| 1.0 / (rank.saturating_add(1) as f64))
                     .unwrap_or(0.0)
             })
             .sum::<f64>()
             / relevant.len() as f64;
-        let no_match_precision = if no_match.is_empty() {
+        let ndcg_at_10 = relevant
+            .iter()
+            .map(|(intent, ranking)| ndcg(intent, ranking, 10))
+            .sum::<f64>()
+            / relevant.len() as f64;
+        let no_match_accuracy = if no_match.is_empty() {
             1.0
         } else {
             no_match
@@ -794,28 +891,94 @@ mod tests {
                 .count() as f64
                 / no_match.len() as f64
         };
-        let classes: BTreeSet<_> = intents.iter().map(|intent| intent.class.as_str()).collect();
-        for required in [
-            "exact_name",
-            "alias",
-            "canonical_id",
-            "parameter",
-            "nested",
-            "ambiguous",
-            "provider",
-            "no_match",
-        ] {
-            assert!(
-                classes.contains(required),
-                "corpus is missing {required} intents"
-            );
-        }
         QualityMetrics {
             recall_at_1: recall(1),
             recall_at_5: recall(5),
             recall_at_10: recall(10),
             mrr,
-            no_match_precision,
+            ndcg_at_10,
+            no_match_accuracy,
         }
+    }
+
+    fn ndcg(intent: &CorpusIntent, ranking: &[String], at: usize) -> f64 {
+        let dcg = ranking
+            .iter()
+            .take(at)
+            .enumerate()
+            .map(|(rank, name)| {
+                let grade = intent.relevance.get(name).copied().unwrap_or_default();
+                discounted_gain(grade, rank)
+            })
+            .sum::<f64>();
+        let mut ideal: Vec<_> = intent.relevance.values().copied().collect();
+        ideal.sort_unstable_by(|left, right| right.cmp(left));
+        let ideal_dcg = ideal
+            .into_iter()
+            .take(at)
+            .enumerate()
+            .map(|(rank, grade)| discounted_gain(grade, rank))
+            .sum::<f64>();
+        if ideal_dcg == 0.0 {
+            0.0
+        } else {
+            dcg / ideal_dcg
+        }
+    }
+
+    fn discounted_gain(grade: u8, zero_based_rank: usize) -> f64 {
+        (2_f64.powi(i32::from(grade)) - 1.0) / (zero_based_rank as f64 + 2.0).log2()
+    }
+
+    fn query_quality(intents: &[CorpusIntent], rankings: &[Vec<String>]) -> Vec<QueryQuality> {
+        intents
+            .iter()
+            .zip(rankings)
+            .filter(|(intent, _)| !intent.relevance.is_empty())
+            .map(|(intent, ranking)| {
+                let retrieved = ranking
+                    .iter()
+                    .take(5)
+                    .filter(|name| intent.relevance.contains_key(*name))
+                    .count();
+                QueryQuality {
+                    class: intent.class.clone(),
+                    query: intent.query.clone(),
+                    relevance: intent.relevance.clone(),
+                    recall_at_5: retrieved as f64 / intent.relevance.len() as f64,
+                    ndcg_at_10: ndcg(intent, ranking, 10),
+                    ranking: ranking.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn report_worst_queries(queries: &[QueryQuality]) {
+        let mut worst: Vec<_> = queries.iter().collect();
+        worst.sort_by(|left, right| {
+            left.ndcg_at_10
+                .total_cmp(&right.ndcg_at_10)
+                .then_with(|| left.query.cmp(&right.query))
+        });
+        for query in worst.into_iter().take(5) {
+            eprintln!(
+                "tool-search worst query: class={} query={:?} relevance={:?} recall@5={:.3} ndcg@10={:.3} ranking={:?}",
+                query.class,
+                query.query,
+                query.relevance,
+                query.recall_at_5,
+                query.ndcg_at_10,
+                query.ranking
+            );
+        }
+    }
+
+    fn mean(values: impl Iterator<Item = f64>) -> f64 {
+        let values: Vec<_> = values.collect();
+        assert!(
+            !values.is_empty(),
+            "metric class must contain judged queries"
+        );
+        values.iter().sum::<f64>() / values.len() as f64
     }
 }
