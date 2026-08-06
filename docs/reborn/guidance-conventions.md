@@ -98,6 +98,79 @@ The exact commands.
 Family `AGENTS.md`; the module spec or `CONTRACT.md` if the crate has one.
 ```
 
+## How the files actually load — measured, not assumed
+
+This section exists because the first version of this convention got it wrong:
+it made crate `AGENTS.md` canonical and `CLAUDE.md` a pointer, which moved the
+working rules *out* of the path Claude Code auto-injects.
+
+Measured 2026-08-06 with canary files and a discriminating control:
+
+- Claude Code loads ancestor `CLAUDE.md` files at launch and **lazily injects a
+  subtree `CLAUDE.md` when a file in that directory is read**. It does **not**
+  read `AGENTS.md` natively.
+- A **symlinked** nested `CLAUDE.md` injects its target's content. An
+  `@AGENTS.md` import inside a nested `CLAUDE.md` also expands at lazy-load.
+- Nested injection fires only for directories **below the session's cwd**, and
+  appears **not to fire in subagent sessions at all**.
+
+Two rules follow, and they are load-bearing:
+
+1. **Wherever an `AGENTS.md` exists, a `CLAUDE.md` symlink sits beside it.**
+   Same bytes, zero maintenance, no second document to drift. The root is the
+   one exception: it keeps a real `CLAUDE.md` file because it carries a genuine
+   Claude-only tail, so it uses `@AGENTS.md` plus that tail.
+2. **Every document must stand alone when read deliberately.** Auto-injection is
+   a convenience for interactive sessions, not a guarantee — subagents and
+   out-of-tree reads get nothing. Never write a family or crate doc that only
+   makes sense because something else was auto-loaded.
+
+## Size budgets
+
+Auto-loaded content is a tax on every turn; routed content is not. Budgets, not
+hard gates — exceed one deliberately and say why:
+
+| Tier | Budget |
+|---|---|
+| Root `AGENTS.md` | ≤200 lines |
+| Family `AGENTS.md` | ≤150 lines |
+| Crate `AGENTS.md` | ≤80 lines — and only where the crate has a **named trap** |
+| `.claude/rules/*.md` firing on a broad glob | ~10KB for the set; narrow the glob before adding |
+
+A line earns its place by answering: *would removing this cause a mistake?* and
+*can the tree answer this itself?* If the tree can, state the command instead.
+
+## Scope
+
+This convention governs `crates/**` guidance **and** `.claude/rules/*.md`,
+`.claude/skills/*/SKILL.md`, and the root pair. The rules layer is in scope
+because that is where the worst drift was found: a rule whose `paths:` trigger
+named a nonexistent file never fired at all.
+
+## What enforces this
+
+`scripts/ci/check-guidance.py` asserts that every path referenced in guidance
+resolves, every rule/skill `paths:` glob matches at least one tracked file,
+every crate appears in its family's table, and every crate has a `README.md`.
+Mark a deliberately historical reference with the dated-correction glyph `✎` or
+`<!-- check-guidance: path-ok -->`; its `KNOWN_MISSING` table is a last resort
+and shrinks only.
+
+⚠ **Some guidance is parsed by tests.** Before editing, run
+`rg -l '<filename>' crates/app/ironclaw_architecture_tests/tests crates/*/*/tests scripts/ci`.
+Two traps found the hard way: `ironclaw_wasm`/`ironclaw_mcp` pin exact phrases
+including retired vocabulary that must **not** be "cleaned up"; and prose that
+names a machine-parsed heading verbatim can shadow the parser's split anchor
+(an `ironclaw_auth` charter test went red for exactly this).
+
+## When you remove or rename a crate
+
+The mirror of the checklist below: delete its `README.md`, `AGENTS.md` and the
+`CLAUDE.md` symlink beside it, remove its row from the family table and from
+`crates/AGENTS.md`, drop any Module Specs row, and re-run
+`check-guidance.py` — the family-table and README checks fail closed on a crate
+the tree still has and the docs forgot, and on a doc row whose crate is gone.
+
 ## When you add a crate
 
 A new crate lands with its `README.md`, its family's `AGENTS.md` crate table
