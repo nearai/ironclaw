@@ -398,7 +398,7 @@ proxy endpoints, so they are deliberately excluded; they are irrelevant to the
 host-mediated transport because it disables ambient proxy discovery.
 
 The diagnostic reflects the host-mediated network behavior established by
-#7016: `ReqwestNetworkTransport` ignores ambient proxy discovery so an approved,
+#7027: `ReqwestNetworkTransport` ignores ambient proxy discovery so an approved,
 pinned destination remains authoritative. It does not imply support for an
 explicit proxy configuration. LLM-provider clients and sandbox egress have
 separate proxy policies and are outside this check.
