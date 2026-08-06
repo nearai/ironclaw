@@ -21,8 +21,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
-    SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadScope,
-    ToolResultReferenceEnvelope, effective_tool_result_read_max_bytes,
+    SessionThreadService, ThreadHistoryRequest, ThreadScope, ToolResultReferenceEnvelope,
+    effective_tool_result_read_max_bytes,
 };
 
 /// Test-support wrap: layers the synthetic `result_read` capability onto

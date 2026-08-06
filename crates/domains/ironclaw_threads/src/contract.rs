@@ -495,7 +495,7 @@ pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
 /// opt-in override, so the observation envelope and every default stay exactly where they
 /// were. A deployment that raises the cap accepts larger single reads; it does not change
 /// anything for a deployment that does not.
-pub const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
+pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
 
 /// Effective per-request cap: 24 KiB — unchanged from the historical default.
 ///
