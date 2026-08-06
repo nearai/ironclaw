@@ -273,12 +273,36 @@ use ironclaw_product_contracts::delivery::{
 };
 use tokio::sync::Barrier;
 
+// `OutboundError` intentionally does not derive `Clone` in production (see its
+// doc comments on `CasConflict`), so a scripted-failure map can't hold owned
+// `OutboundError` values without cloning them out on lookup. This mirror
+// carries just enough of the variant to reconstruct a fresh `OutboundError`
+// per lookup, so two attempts in the same scan can be scripted to fail with
+// two distinct, identifiable errors.
+#[derive(Clone, Copy)]
+enum ScriptedRecoveryFailure {
+    Backend,
+    Serialization,
+}
+
+impl From<ScriptedRecoveryFailure> for OutboundError {
+    fn from(failure: ScriptedRecoveryFailure) -> Self {
+        match failure {
+            ScriptedRecoveryFailure::Backend => OutboundError::Backend,
+            ScriptedRecoveryFailure::Serialization => OutboundError::Serialization,
+        }
+    }
+}
+
 // Keep this decorator local despite the contract file's size: it exercises recovery-only
 // store seams, and extracting the two uses would prematurely create shared test support.
 struct RecoveryTestStore {
     inner: Arc<OutboundStateStore<InMemoryBackend>>,
     pause_after_snapshot: Option<(Arc<Barrier>, Arc<Barrier>)>,
-    fail_recovery_for: Option<ironclaw_outbound::OutboundDeliveryId>,
+    // Maps a delivery_id to the typed store error that recovery should surface for
+    // that attempt, so a single test can script distinct failures on distinct
+    // attempts (e.g. to prove the coordinator returns the *first* one).
+    fail_recovery_for: HashMap<ironclaw_outbound::OutboundDeliveryId, ScriptedRecoveryFailure>,
 }
 
 #[async_trait]
@@ -426,8 +450,8 @@ impl OutboundStateStorePort for RecoveryTestStore {
         &self,
         request: RecoverInterruptedDeliveryRequest,
     ) -> Result<bool, OutboundError> {
-        if self.fail_recovery_for == Some(request.delivery_id) {
-            return Err(OutboundError::Backend);
+        if let Some(failure) = self.fail_recovery_for.get(&request.delivery_id) {
+            return Err((*failure).into());
         }
         self.inner
             .recover_interrupted_delivery_attempt(request)
@@ -1860,7 +1884,10 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
     let recovery_store = Arc::new(RecoveryTestStore {
         inner: Arc::clone(&store),
         pause_after_snapshot: None,
-        fail_recovery_for: Some(seeded[1].delivery_id),
+        fail_recovery_for: HashMap::from([(
+            seeded[1].delivery_id,
+            ScriptedRecoveryFailure::Backend,
+        )]),
     });
     let coordinator = DeliveryCoordinator::new(
         recovery_store as Arc<dyn OutboundStateStorePort>,
@@ -1884,6 +1911,105 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
     assert_eq!(attempts[0].status, OutboundDeliveryStatus::Unknown);
     assert_eq!(attempts[1].status, OutboundDeliveryStatus::Sending);
     assert_eq!(attempts[2].status, OutboundDeliveryStatus::Unknown);
+}
+
+#[tokio::test]
+async fn coordinator_recovery_returns_the_first_store_error_not_a_later_one() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let first_attempted_at = Utc::now();
+    let mut seeded = Vec::new();
+    for index in 0..3 {
+        let attempt = OutboundDeliveryAttempt {
+            delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+            scope: scope.clone(),
+            candidate: ironclaw_outbound::OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: None,
+                target: validated_reply_target(),
+                kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+                projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(format!(
+                    "projection:recovery-scan-first-error:{index}"
+                ))
+                .expect("projection ref"),
+                requires_reply_target_revalidation: false,
+            },
+            status: OutboundDeliveryStatus::Sending,
+            attempted_at: first_attempted_at + chrono::Duration::milliseconds(index),
+            failure_kind: None,
+        };
+        store
+            .record_delivery_attempt(attempt.clone())
+            .await
+            .expect("seed ordered sending attempt");
+        seeded.push(attempt);
+    }
+    let listed_ids: Vec<_> = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("load ordered recovery snapshot")
+        .into_iter()
+        .map(|attempt| attempt.delivery_id)
+        .collect();
+    assert_eq!(
+        listed_ids,
+        seeded
+            .iter()
+            .map(|attempt| attempt.delivery_id)
+            .collect::<Vec<_>>()
+    );
+
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    // Two distinct attempts fail with two distinct typed errors: the earlier
+    // attempt (index 0) fails with `Serialization`, the later attempt
+    // (index 2) fails with `Backend`. Recovery must still process every
+    // captured attempt (including the middle, successfully recovered one)
+    // and must surface the earlier error, not the later one.
+    let recovery_store = Arc::new(RecoveryTestStore {
+        inner: Arc::clone(&store),
+        pause_after_snapshot: None,
+        fail_recovery_for: HashMap::from([
+            (
+                seeded[0].delivery_id,
+                ScriptedRecoveryFailure::Serialization,
+            ),
+            (seeded[2].delivery_id, ScriptedRecoveryFailure::Backend),
+        ]),
+    });
+    let coordinator = DeliveryCoordinator::new(
+        recovery_store as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter,
+            unavailable: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let result = coordinator
+        .recover_interrupted_deliveries(scope.clone())
+        .await;
+    assert!(
+        matches!(result, Err(OutboundError::Serialization)),
+        "recovery must return the earlier (Serialization) error, not the later (Backend) one: {result:?}"
+    );
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempts after recovery scan");
+    assert_eq!(attempts.len(), 3);
+    // The failing attempts are untouched by their own failed recovery calls...
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
+    // ...but recovery still gave the attempt between them its opportunity.
+    assert_eq!(attempts[1].status, OutboundDeliveryStatus::Unknown);
+    assert_eq!(attempts[2].status, OutboundDeliveryStatus::Sending);
 }
 
 async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
@@ -1923,7 +2049,7 @@ async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
     let pausing_store = Arc::new(RecoveryTestStore {
         inner: Arc::clone(&store),
         pause_after_snapshot: Some((Arc::clone(&snapshot_listed), Arc::clone(&resume_recovery))),
-        fail_recovery_for: None,
+        fail_recovery_for: HashMap::new(),
     });
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
