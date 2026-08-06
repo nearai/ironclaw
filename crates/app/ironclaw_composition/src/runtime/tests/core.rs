@@ -352,14 +352,8 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     );
 }
 
-/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the
-/// unset one.
-///
-/// The unset branch is the product default and was previously unreachable from a
-/// test: it sits behind `std::env::var`, and unsetting the key in-process would
-/// race the other tests in this binary. `skill_injection_mode_from_env_value`
-/// takes the lookup's `Result` so the decision can be exercised without touching
-/// process state.
+/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the unset one --
+/// previously unreachable, since unsetting the key in-process races the other tests here.
 #[test]
 fn skill_injection_mode_resolves_every_env_branch() {
     use ironclaw_loop_host::SkillInjectionMode;
