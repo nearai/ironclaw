@@ -730,8 +730,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         for path in (
             "wit/tool.wit",
             "wit/channel.wit",
-            "crates/ironclaw_wasm/wit/tool.wit",
-            "crates/ironclaw_wasm/wit/channel.wit",
+            "crates/lanes/ironclaw_wasm/wit/tool.wit",
+            "crates/lanes/ironclaw_wasm/wit/channel.wit",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -817,7 +817,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             planner._wasm_wit_prefix.cache_clear()
 
     def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
-        for wit_path in ("wit/tool.wit", "crates/ironclaw_wasm/wit/tool.wit"):
+        for wit_path in ("wit/tool.wit", "crates/lanes/ironclaw_wasm/wit/tool.wit"):
             with self.subTest(wit_path=wit_path):
                 plan = self.plan(
                     "pull_request",
