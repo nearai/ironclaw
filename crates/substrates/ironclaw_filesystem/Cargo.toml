@@ -19,7 +19,9 @@ layer = "substrates"
 # so downstream crates can drive their *real* filesystem-backed stores against
 # injected backend faults, instead of substituting a hand-rolled fault fake for
 # the whole store trait (which never exercises the production store code path).
-# Never enabled by a shipped artifact.
+# Also compiles the shared per-test isolated-Postgres-database provisioner
+# (`postgres_isolation`), so contract suites in other crates stop copying the
+# stale-sweep scaffolding. Never enabled by a shipped artifact.
 test-support = []
 
 [dependencies]

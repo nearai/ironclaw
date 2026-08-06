@@ -306,6 +306,17 @@ PR_STATIC_CONTROL_PATHS = {
     "ironclaw.png",
     "LICENSE-APACHE",
     "LICENSE-MIT",
+    # The Reborn container entrypoint is shell, not Rust: no Reborn test lane
+    # executes it. Code Style owns it end to end — `code_style.yml`'s `has_code`
+    # filter names `docker/reborn/entrypoint.sh` and its "Self-test CI scripts"
+    # step runs `scripts/ci/test-reborn-docker-entrypoint.sh`, which drives the
+    # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
+    # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
+    # and owns the image build, not the entrypoint's behaviour. `docker/` stays
+    # per-file, never a prefix: `docker/reborn/config.*.toml` and
+    # `docker/process-sandbox-entrypoint.sh` have no owning lane and must keep
+    # refusing.)
+    "docker/reborn/entrypoint.sh",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents

@@ -69,9 +69,10 @@ impl EdgeTerminalKind {
 }
 
 /// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus
-/// four additive fields beyond the design doc's exact list (`gate_ref`, the
+/// five additive fields beyond the design doc's exact list (`gate_ref`, the
 /// `source_binding_ref`/`reply_target_binding_ref` pair, `parent_run_context`,
-/// and `terminal_reason`), each named as a spec deviation in the PR:
+/// `spawn_provider_call_id`, and `terminal_reason`), each named as a spec
+/// deviation in the PR:
 ///
 /// - `gate_ref` (D3): the pre-existing shared-batch-gate mechanism (one
 ///   `TurnGateRef` covering N children spawned in one call, parent resumes once
@@ -88,6 +89,8 @@ impl EdgeTerminalKind {
 ///   recomputed, to avoid duplicating that private format-string logic
 ///   across the crate boundary and the drift risk of two copies going stale
 ///   independently.
+/// - `spawn_provider_call_id`: pins settlement updates to the original spawn
+///   transcript row when later `result_read` calls share its result reference.
 ///
 /// Identity (`parent_run_id`, `child_run_id`) lives in the path (§4.2), not
 /// here.
@@ -116,6 +119,8 @@ pub struct AwaitEdge {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub subagent_kind: SubagentKindId,
     pub spawn_capability_id: CapabilityId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_provider_call_id: Option<String>,
     pub result_ref: LoopResultRef,
     pub mode: SpawnSubagentMode,
     pub state: AwaitEdgeState,
