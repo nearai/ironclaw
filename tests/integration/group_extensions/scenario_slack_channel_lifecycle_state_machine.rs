@@ -309,12 +309,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             RebornScriptedReply::text("searched slack"),
             RebornScriptedReply::tool_call(
                 "slack.send_message",
-                json!({"channel": "C-ITEST", "text": "hello after remove?"}),
+                json!({"conversation": "C-ITEST", "text": "hello after remove?"}),
             ),
             RebornScriptedReply::text("slack unavailable"),
             RebornScriptedReply::tool_call(
                 "slack.send_message",
-                json!({"channel": "C-ITEST", "text": "hello again"}),
+                json!({"conversation": "C-ITEST", "text": "hello again"}),
             ),
             RebornScriptedReply::text("sent slack message"),
         ])

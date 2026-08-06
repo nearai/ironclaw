@@ -188,6 +188,9 @@ def _is_package_prompt(path: str) -> bool:
         return False
     return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
+    "tests/fixtures/extensions/acme-messenger/manifest.toml": (
+        "tests/integration/extension_runtime.rs"
+    ),
     "tests/support/hosted_mcp_registration_server.rs": (
         "tests/integration/hosted_mcp_registration.rs"
     ),

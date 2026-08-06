@@ -241,8 +241,17 @@ async fn activate_acme(group: &RebornIntegrationGroup) -> ExtensionIngressParts 
         .build()
         .await
         .expect("lifecycle thread builds");
+    // Every `[[tools]]` credential referencing `vendor = "acme"` merges into
+    // one whole-package OAuth requirement (same provider + setup), so the
+    // seeded account must cover the union of every declared scope — both
+    // the write ops' `notes:write` and the 16 standard ops' `notes:read`
+    // reads/people scope (standardized messaging framework, task 7).
     lifecycle
-        .seed_capability_credential_account("acme", "acme ingress account", &["notes:write"])
+        .seed_capability_credential_account(
+            "acme",
+            "acme ingress account",
+            &["notes:write", "notes:read"],
+        )
         .await
         .expect("seed acme account");
     lifecycle

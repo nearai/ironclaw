@@ -82,11 +82,13 @@ const WS0_CROSS_CRATE_INCLUDE_SITES: usize = 19;
 /// §11.2.7 that can be enforced before the flip.
 ///
 /// Measured 2026-08-05 on this checkout by running this test: **104 escaping
-/// sites, 17 cross-crate**. The 17 sit with three owners, none of them WS10's,
-/// and each needs a design decision rather than a path repoint (CHECKLIST WS2's
-/// disposition 3, filed as #7093):
+/// sites, 16 cross-crate** (17 before #6831 retired the slack schema-asset
+/// embed — standard_op-bound tools resolve schemas from the compiled-in
+/// `ironclaw_host_api::messaging` registry, not package assets). The 16 sit
+/// with three owners, none of them WS10's, and each needs a design decision
+/// rather than a path repoint (CHECKLIST WS2's disposition 3, filed as #7093):
 ///
-///   * `ironclaw_extension_support` → the slack/telegram package crates (5).
+///   * `ironclaw_extension_support` → the slack/telegram package crates (4).
 ///     The obvious inversion is an **upward** `runtimes → products` edge, so it
 ///     may not be fixable as stated.
 ///   * `ironclaw_host_runtime` → `memory-native`/`mem0` (7) — five of them in
@@ -102,7 +104,7 @@ const WS0_CROSS_CRATE_INCLUDE_SITES: usize = 19;
 /// that removes a reach-in must lower this constant in the same change and a PR
 /// that adds one is red. When it reaches **0**, flip `REPORT_ONLY` and delete
 /// this constant with the gate that reads it.
-const CROSS_CRATE_INCLUDE_SITES: usize = 17;
+const CROSS_CRATE_INCLUDE_SITES: usize = 16;
 
 /// This file's own fixtures are include-shaped strings; skip it the way the
 /// shared type-def scanner skips the ratchet files (defense in depth).

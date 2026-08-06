@@ -8,6 +8,7 @@ use ironclaw_host_api::{
     approval::{canonical_json_v1, sha256_digest_token},
     capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, EffectKind},
     decision::Decision,
+    messaging::{STANDARD_SCHEMA_REF_PREFIX, resolve_standard_schema_ref},
     resource::ResourceEstimate,
     runtime::RuntimeKind,
     runtime_policy::EffectiveRuntimePolicy,
@@ -388,6 +389,32 @@ impl<'a> CapabilityCatalog<'a> {
             return Ok(descriptor);
         }
 
+        // A standard-bound tool's schema lives in the compiled-in messaging
+        // registry (`ironclaw_host_api::messaging`), the same always-on lane
+        // as builtin/native-memory above — but gated on the ref itself, not
+        // on `descriptor.provider`, since any extension can bind a
+        // `standard_op`. Must run before the package-asset read below: a
+        // `standard:` ref can never exist on a package's filesystem root, so
+        // falling through would hit the filesystem for a path that can never
+        // resolve there instead of failing closed with the ref named.
+        if let Some(schema_ref) = reference.as_deref()
+            && schema_ref.starts_with(STANDARD_SCHEMA_REF_PREFIX)
+        {
+            let schema = resolve_standard_schema_ref(schema_ref).ok_or_else(|| {
+                HostRuntimeError::invalid_request(format!(
+                    "capability {} references unknown standard schema {schema_ref}",
+                    descriptor.id
+                ))
+            })?;
+            descriptor.parameters_schema = serde_json::from_str(schema).map_err(|error| {
+                HostRuntimeError::invalid_request(format!(
+                    "capability {} standard schema {schema_ref} must contain valid JSON: {error}",
+                    descriptor.id
+                ))
+            })?;
+            return Ok(descriptor);
+        }
+
         let Some(reference) = reference else {
             return Ok(descriptor);
         };
@@ -686,6 +713,7 @@ mod tests {
             max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
+            standard_op: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -728,6 +756,7 @@ mod tests {
             max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
+            standard_op: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -744,6 +773,91 @@ mod tests {
         assert!(
             matches!(error, HostRuntimeError::InvalidRequest { ref reason }
                 if reason.contains("must publish from an input schema ref")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    /// Standard-bound descriptors resolve from the compiled-in messaging
+    /// registry regardless of which extension owns them, and never touch the
+    /// filesystem/package root: this `CapabilityCatalog` has an empty
+    /// registry and no `.with_filesystem(...)` call, so a fallthrough to the
+    /// package-asset path would fail rather than resolve.
+    #[tokio::test]
+    async fn standard_messaging_schema_ref_resolves_from_registry() {
+        let descriptor = CapabilityDescriptor {
+            id: CapabilityId::new("zeta.send_message").unwrap(),
+            provider: ExtensionId::new("zeta").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "send a standard message".to_string(),
+            parameters_schema: json!({"$ref": "standard:messaging/send_message.input.v1"}),
+            effects: vec![EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+            standard_op: None,
+        };
+        let registry = ExtensionRegistry::new();
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let resolved = catalog
+            .surface_descriptor(&descriptor)
+            .await
+            .expect("standard schema ref resolves without a filesystem or package root");
+
+        let properties = resolved
+            .parameters_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("resolved schema has properties");
+        assert!(properties.contains_key("conversation"));
+        assert!(properties.contains_key("text"));
+    }
+
+    /// An unresolvable `standard:` ref (typo, reserved op) must fail closed
+    /// the same way a missing package-asset schema does today — never a
+    /// silent fallthrough to the package-asset path, which can never find a
+    /// `standard:` ref on disk.
+    #[tokio::test]
+    async fn unknown_standard_ref_fails_closed() {
+        let descriptor = CapabilityDescriptor {
+            id: CapabilityId::new("zeta.bogus").unwrap(),
+            provider: ExtensionId::new("zeta").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "bogus standard-bound descriptor".to_string(),
+            parameters_schema: json!({"$ref": "standard:messaging/bogus.input.v1"}),
+            effects: vec![EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+            standard_op: None,
+        };
+        let registry = ExtensionRegistry::new();
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let error = catalog
+            .surface_descriptor(&descriptor)
+            .await
+            .expect_err("unresolvable standard ref must fail closed, not fall through");
+
+        assert!(
+            matches!(error, HostRuntimeError::InvalidRequest { ref reason }
+                if reason.contains("standard:messaging/bogus.input.v1")),
             "unexpected error: {error:?}"
         );
     }
