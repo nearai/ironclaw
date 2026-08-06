@@ -778,6 +778,74 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
         .unwrap();
     assert_eq!(results.len(), 2);
 }
+
+#[tokio::test]
+async fn libsql_fts_treats_free_form_queries_as_plain_text() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/plain-query").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_plain_query").unwrap(),
+        vec![content.clone()],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    let entry = Entry::record(kind, &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(
+            content.clone(),
+            IndexValue::Text("launch-code-plum-42 unlocks staging".into()),
+        );
+    filesystem
+        .put(
+            &VirtualPath::new("/memory/plain-query/a").unwrap(),
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    for query in [
+        "What is the staging launch code?",
+        "launch-code-plum-42?",
+        "staging (unlocks)",
+        "launch AND code",
+        "launch OR code",
+        "launch NOT code",
+    ] {
+        let results = filesystem
+            .query(
+                &prefix,
+                &Filter::Fts {
+                    key: content.clone(),
+                    query: query.into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("plain FTS query {query:?} failed: {error:?}"));
+        assert_eq!(
+            results.len(),
+            1,
+            "plain FTS query {query:?} must match literal terms"
+        );
+    }
+
+    let punctuation_only = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content,
+                query: "?!()".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .expect("punctuation-only FTS is a valid empty query");
+    assert!(punctuation_only.is_empty());
+}
+
 #[tokio::test]
 async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
     // After ensure_index, inserting a new row through put() updates the
@@ -3738,7 +3806,7 @@ mod postgres_tests {
             .query(
                 &prefix_path,
                 &Filter::Fts {
-                    key: content,
+                    key: content.clone(),
                     query: "brown".into(),
                 },
                 Page::default(),
@@ -3746,6 +3814,19 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+
+        let natural_language = fs
+            .query(
+                &prefix_path,
+                &Filter::Fts {
+                    key: content,
+                    query: "What is the brown fox?".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(natural_language.len(), 1);
     }
 
     #[tokio::test]

@@ -833,9 +833,11 @@ fn filter_matches(
 /// in-memory reference; the SQL backends use the real engines.
 fn fts_naive_matches(stored: &str, query: &str) -> bool {
     let stored_lower = stored.to_lowercase();
-    query
-        .split_whitespace()
-        .all(|token| stored_lower.contains(&token.to_lowercase()))
+    let terms = crate::index::plain_fts_terms(query);
+    !terms.is_empty()
+        && terms
+            .iter()
+            .all(|term| stored_lower.contains(&term.to_lowercase()))
 }
 
 /// If `filter` is a top-level `VectorNearest` (the only shape the SQL
@@ -1513,7 +1515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fts_filter_matches_naive_substring_tokens() {
+    async fn fts_filter_matches_plain_text_terms() {
         let fs = InMemoryBackend::new();
         let kind = RecordKind::new("chunk").unwrap();
         for (path, text) in [
@@ -1540,6 +1542,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+
+        let natural_language = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "What is the quick-brown fox?".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(natural_language.len(), 1);
+
+        let punctuation_only = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "?!()".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(punctuation_only.is_empty());
     }
 
     #[tokio::test]

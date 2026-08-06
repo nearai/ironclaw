@@ -2765,7 +2765,21 @@ fn translate_filter(
                     operation: FilesystemOperation::Query,
                 });
             };
-            params.push(libsql::Value::Text(query.clone()));
+            // `Filter::Fts` is a plain-text contract, not an FTS5-expression
+            // escape hatch. Quote every normalized term so punctuation and
+            // reserved words from an untrusted user query can never alter the
+            // MATCH grammar. An empty quoted phrase is a valid no-match query.
+            let terms = crate::index::plain_fts_terms(query);
+            let fts_query = if terms.is_empty() {
+                "\"\"".to_string()
+            } else {
+                terms
+                    .into_iter()
+                    .map(|term| format!("\"{term}\""))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            params.push(libsql::Value::Text(fts_query));
             out.push_str(&format!(
                 "(path IN (SELECT path FROM {fts_table} WHERE {fts_table} MATCH ?{}))",
                 params.len()

@@ -114,6 +114,9 @@ libsql = { version = "0.9", default-features = false, features = ["core", "repli
 # propagate reliably into an integration-test dependency graph.
 ironclaw_host_api = { path = "crates/contracts/ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
 ironclaw_memory = { path = "crates/domains/ironclaw_memory", version = "0.1.0" }
+# The production-backend memory integration scenario binds the native provider
+# over the same libSQL composite used by memory tool dispatch.
+ironclaw_memory_native = { path = "crates/extensions/packages/memory-native", version = "0.1.0" }
 ironclaw_host_ingress = { path = "crates/product/ironclaw_host_ingress", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/kernel/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_common = { path = "crates/contracts/ironclaw_common" }

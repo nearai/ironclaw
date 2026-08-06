@@ -290,9 +290,12 @@ pub enum Filter {
         hi: IndexValue,
     },
     /// Full-text search on a text-valued indexed `key`. Requires the index
-    /// to be `IndexKind::Fts`. `query` is a free-form search string; each
-    /// backend translates to its native query language (FTS5 MATCH on
-    /// libSQL, `plainto_tsquery` on PostgreSQL).
+    /// to be `IndexKind::Fts`. `query` is plain user text, never backend query
+    /// language: punctuation separates terms, common English function words
+    /// do not become required matches, and words such as `AND`/`OR`/`NOT`
+    /// cannot become operators. Each backend translates those semantics to
+    /// its native query language (FTS5 on libSQL, `plainto_tsquery` on
+    /// PostgreSQL).
     Fts {
         key: IndexKey,
         query: String,
@@ -314,6 +317,81 @@ pub enum Filter {
     },
     And(Vec<Filter>),
     Or(Vec<Filter>),
+}
+
+/// Normalize a plain-text FTS query into the required content terms shared by
+/// the in-memory and libSQL backends. PostgreSQL's fixed `english`
+/// `plainto_tsquery` path already performs the equivalent punctuation and
+/// high-frequency function-word handling.
+///
+/// Keeping this parser outside the libSQL translator is important: the
+/// reference backend and the shipping embedded backend must agree on whether
+/// a query is empty and which terms are required. The returned strings contain
+/// only Unicode alphanumeric characters, so the libSQL backend can quote every
+/// term as an FTS5 literal without exposing caller text as FTS syntax.
+pub(crate) fn plain_fts_terms(query: &str) -> Vec<String> {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .filter(|term| !is_plain_fts_stop_word(term))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_plain_fts_stop_word(term: &str) -> bool {
+    matches!(
+        term.to_ascii_lowercase().as_str(),
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "been"
+            | "being"
+            | "but"
+            | "by"
+            | "can"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "for"
+            | "from"
+            | "had"
+            | "has"
+            | "have"
+            | "how"
+            | "i"
+            | "in"
+            | "is"
+            | "it"
+            | "me"
+            | "my"
+            | "not"
+            | "of"
+            | "on"
+            | "or"
+            | "please"
+            | "should"
+            | "tell"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "was"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "would"
+            | "you"
+            | "your"
+    )
 }
 
 /// Pagination cursor for [`list_dir`](crate::RootFilesystem::list_dir) and
@@ -576,6 +654,19 @@ mod tests {
     fn index_value_orders_within_variant() {
         assert!(IndexValue::I64(1) < IndexValue::I64(2));
         assert!(IndexValue::Text("a".into()) < IndexValue::Text("b".into()));
+    }
+
+    #[test]
+    fn plain_fts_terms_make_natural_language_backend_safe() {
+        assert_eq!(
+            plain_fts_terms("What is the launch-code-plum-42?"),
+            ["launch", "code", "plum", "42"]
+        );
+        assert_eq!(plain_fts_terms("launch AND code"), ["launch", "code"]);
+        assert_eq!(plain_fts_terms("launch OR code"), ["launch", "code"]);
+        assert_eq!(plain_fts_terms("launch NOT code"), ["launch", "code"]);
+        assert_eq!(plain_fts_terms("héllo, wörld!"), ["héllo", "wörld"]);
+        assert!(plain_fts_terms("?! AND the").is_empty());
     }
 
     #[test]
