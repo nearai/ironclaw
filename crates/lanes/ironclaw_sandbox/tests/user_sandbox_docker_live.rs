@@ -92,6 +92,17 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     assert!(first.output.contains("LOCAL_DOCKER_SANDBOX_OK"));
     assert!(first.sandboxed);
 
+    let nonzero = transport
+        .run_command(request(
+            scope("user-a", "project-a", "thread-a"),
+            "echo EXPECTED_NONZERO_STDERR >&2; exit 7",
+        ))
+        .await
+        .expect("non-zero command exit remains a sandbox result");
+    assert_eq!(nonzero.exit_code, 7);
+    assert!(nonzero.output.contains("EXPECTED_NONZERO_STDERR"));
+    assert!(nonzero.sandboxed);
+
     let same_user = transport
         .run_command(request(
             scope("user-a", "project-b", "thread-b"),

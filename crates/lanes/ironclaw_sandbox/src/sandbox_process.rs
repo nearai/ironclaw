@@ -539,6 +539,11 @@ async fn wait_for_container(
     );
     match stream.next().await {
         Some(Ok(result)) => Ok(result.status_code),
+        // Bollard 0.18 represents every positive container exit status as a
+        // `DockerContainerWaitError`. That is command evidence, not a Docker
+        // transport failure; preserve the status so callers can inspect the
+        // command's bounded stdout/stderr like any other sandbox result.
+        Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => Ok(code),
         Some(Err(error)) => Err(RuntimeProcessError::ExecutionFailed(format!(
             "sandbox container wait failed: {error}"
         ))),
