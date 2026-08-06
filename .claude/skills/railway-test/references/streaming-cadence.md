@@ -29,7 +29,12 @@ await railwayTab.playwright.getByRole("button", {
   name: "Send message",
 }).click();
 var railwayStarted = Date.now();
-var railwayPrevious = "";
+// Baseline AFTER submission: the user message and static post-submit DOM
+// markup are not streaming evidence. Only growth after this signature counts
+// as assistant response streaming.
+var railwayPrevious = (
+  await railwayTab.playwright.locator("main p").allTextContents()
+).join("\n");
 var railwayChanges = [];
 while (Date.now() - railwayStarted < 55_000) {
   var railwayParts = await railwayTab.playwright

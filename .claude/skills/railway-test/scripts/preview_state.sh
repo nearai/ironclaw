@@ -6,32 +6,43 @@ if [[ $# -lt 1 || $# -gt 3 ]]; then
   exit 2
 fi
 
-pr="$1"
-repo="${2:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+pr="${1%/}"
+repo="${2:-nearai/ironclaw}"
 preview_url="${3:-}"
 
+# Accept a PR number or a PR URL. The preview hostname fallback needs the
+# numeric PR number, so extract it before building any hostname.
+pr_num=""
+if [[ "$pr" =~ ^[0-9]+$ ]]; then
+  pr_num="$pr"
+elif command -v gh >/dev/null 2>&1; then
+  pr_num="$(gh pr view "$pr" --repo "$repo" --json number --jq .number 2>/dev/null || true)"
+fi
+
 head_sha="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)"
-check_line="$(
-  gh pr checks "$pr" --repo "$repo" 2>/dev/null \
-    | awk -F '\t' '
-        tolower($1) ~ /railway/ ||
-        $1 ~ /^ironclaw-ci-preview/ ||
-        tolower($5) ~ /railway/ {
-          print
-          exit
-        }
-      ' \
+
+# Match the Railway check by name or description through the structured
+# --json interface instead of parsing the human-readable check table.
+railway_check="$(
+  gh pr checks "$pr" --repo "$repo" --json name,state,description 2>/dev/null \
+    --jq '.[] |
+      select(
+        (.name | ascii_downcase | contains("railway")) or
+        (.description // "" | ascii_downcase | contains("railway"))
+      ) |
+      "\(.state)\t\(.description)"' \
+    | head -1 \
     || true
 )"
 
 railway_state="missing"
 railway_description=""
-if [[ -n "$check_line" ]]; then
-  IFS=$'\t' read -r _ railway_state _ _ railway_description <<<"$check_line"
+if [[ -n "$railway_check" ]]; then
+  IFS=$'\t' read -r railway_state railway_description <<<"$railway_check"
 fi
 
-if [[ -z "$preview_url" && "$repo" == "nearai/ironclaw" ]]; then
-  preview_url="https://ironclaw-ironclaw-pr-${pr}.up.railway.app"
+if [[ -z "$preview_url" && "$repo" == "nearai/ironclaw" && "$pr_num" =~ ^[0-9]+$ ]]; then
+  preview_url="https://ironclaw-ironclaw-pr-${pr_num}.up.railway.app"
 fi
 if [[ -z "$preview_url" && "$railway_description" =~ ([A-Za-z0-9.-]+\.up\.railway\.app) ]]; then
   preview_url="https://${BASH_REMATCH[1]}"

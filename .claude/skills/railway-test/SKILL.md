@@ -13,7 +13,9 @@ Derive the browser plan from the PR instead of running a fixed chat scenario.
 Resolve from the request or current repository:
 
 - PR number or URL. If omitted, use `gh pr view`.
-- Repository. Default to the current `gh` repository.
+- Repository. Default to `nearai/ironclaw`; the preview URL fallback is
+  repo-specific, so an explicit repository must be supplied when testing
+  another repo.
 - Preview URL. Resolve it from the request or Railway status. For
   `nearai/ironclaw`, fall back to
   `https://ironclaw-ironclaw-pr-<PR>.up.railway.app`.
@@ -60,9 +62,14 @@ Run (resolve the path against this skill's `scripts/` directory):
 scripts/preview_state.sh <PR> [REPO] [PREVIEW_URL]
 ```
 
-Record `head_sha`, `railway_state`, and `asset`. Poll every 30–45 seconds until
-the head-specific Railway check passes. Send a concise progress update at least
-once per minute.
+Record `head_sha`, `railway_state`, and `asset`. Poll every 30–45 seconds,
+up to 20 attempts (roughly 15 minutes), until the head-specific Railway check
+passes. Send a concise progress update at least once per minute.
+
+If the Railway check is still `missing` or `pending` after the attempt limit,
+stop polling and report BLOCKED with the latest check diagnostics; never test
+a partial build. A failing Railway check is BLOCKED as well until the
+intended build is live.
 
 For frontend changes, compare the asset hash with the pre-deploy baseline.
 For backend-only changes, an unchanged asset is acceptable after the
@@ -71,7 +78,17 @@ head-specific Railway check passes. Do not test a stale build.
 If Railway fails, inspect the linked check/deployment and stop browser testing
 until the intended build is live.
 
+The PR head can move while this skill runs. Re-read `headRefOid` immediately
+before opening the preview (step 3) and again immediately before publishing
+(step 7). If either read differs from `head_sha`, restart build confirmation
+for the new head, or report BLOCKED for the stale build; never run or publish
+browser evidence against a head you did not confirm.
+
 ### 3. Open and authenticate the preview
+
+Re-read `headRefOid` and confirm it still equals the `head_sha` recorded in
+step 2 before opening the preview; if it changed, return to step 2 for the new
+head instead of testing a stale build.
 
 Read and follow the `browser:control-in-app-browser` skill. Announce that this
 skill is opening the preview and will use the supplied token only for UI login.
@@ -139,45 +156,66 @@ When a case fails:
 If the PR claim conflicts with live behavior, report the conflict rather than
 weakening the test.
 
-### 7. Report, clean up, and publish PR evidence
+### 7. Build evidence, clean up, and publish PR evidence
 
-Report:
-
-- PR, tested head SHA, Railway status, and preview URL;
-- test matrix with pass/fail and concise evidence;
-- exact regression result;
-- state read-back or refresh result when applicable;
-- skipped cases with reasons;
-- remaining risks or blockers.
-
-Never include the bearer. Finalize browser tabs with:
-
-```js
-await browser.tabs.finalize({ keep: [] })
-```
-
-After cleanup and browser finalization, always publish the evidence as a
-comment on the tested pull request. Post evidence for PASS, FAIL, and BLOCKED
-runs; a failed or blocked test is still useful PR evidence. Include:
+Build the full evidence body FIRST, before any cleanup, so a browser or
+cleanup failure can never lose the PASS/FAIL/BLOCKED result. Include:
 
 - a `Railway preview QA — PASS|FAIL|BLOCKED` heading;
 - the tested head SHA, Railway state, preview URL, and relevant route;
 - the Given/When/Then matrix with concise observed evidence;
 - the exact regression result and any refresh or read-back result;
-- cleanup status, skipped cases with reasons, and remaining risks;
+- skipped cases with reasons and remaining risks or blockers;
+- cleanup status;
 - `<!-- railway-test:evidence head=<HEAD_SHA> -->` as a hidden marker.
 
-Use `gh pr comment <PR> --repo <REPO> --body-file -` or the equivalent GitHub
-API. Never put the bearer, credentials, sensitive browser state, or secrets in
-the comment. Capture the created comment URL and include it in the final
-response.
+Never include the bearer, credentials, sensitive browser state, or secrets.
 
-Before creating a comment, check for an evidence comment with the same hidden
-head marker authored by the current GitHub user. Update that comment instead
-of adding a duplicate for the same head. A new deployed head gets a new
-evidence comment.
+Then clean up, guarded so failures cannot skip publication:
 
-Do not report the Railway test as fully delivered until the PR comment URL is
+1. Remove tracked `railway-test-` test data in a `finally`-equivalent step;
+   record cleanup status in the evidence regardless of outcome.
+2. Finalize browser tabs best effort:
+
+```js
+await browser.tabs.finalize({ keep: [] })
+```
+
+3. Re-read `headRefOid` once more. If it differs from the tested head, append
+   a BLOCKED note to the evidence instead of publishing evidence for a stale
+   build.
+4. Publish the prepared evidence as a comment on the tested pull request.
+   Post evidence for PASS, FAIL, and BLOCKED runs; a failed or blocked test is
+   still useful PR evidence. Never put the bearer, credentials, sensitive
+   browser state, or secrets in the comment.
+
+   Find the existing evidence comment for this exact head — the one whose
+   body contains the hidden marker AND whose author is the current GitHub
+   user:
+
+   ```bash
+   GH_USER="$(gh api user --jq .login)"
+   gh api repos/<REPO>/issues/<PR>/comments \
+     --jq ".[] | select(.user.login == \"$GH_USER\") | select(.body | contains(\"railway-test:evidence head=<HEAD_SHA>\")) | .id"
+   ```
+
+   - If found, update it instead of adding a duplicate for the same head:
+
+     ```bash
+     gh api repos/<REPO>/issues/comments/<COMMENT_ID> -F body=@<evidence-file>
+     ```
+
+   - Otherwise create a new comment:
+
+     ```bash
+     gh pr comment <PR> --repo <REPO> --body-file <evidence-file>
+     ```
+
+   A new deployed head gets a new evidence comment; the same head is never
+   published twice.
+5. Capture the resulting comment URL and include it in the final response.
+
+Do not report the Railway test as fully delivered until the comment URL is
 available. If GitHub authentication, permissions, or connectivity prevents
 posting, retry once, then report the publication failure explicitly and return
 the complete copy-ready Markdown evidence. Never claim PR evidence was posted
