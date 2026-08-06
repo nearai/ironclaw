@@ -40,7 +40,7 @@ frontend edit. This is the single biggest gap and the clearest win.
 | 1.3 | Codify the **token rule**: no raw hex at call sites; every custom color ships light+dark; `ironclaw`-prefixed semantic tokens. Reconcile with the existing `theme-colors.test.ts`. | `DESIGN.md` §2 + rule |
 | 1.4 | Add a CLAUDE.md pointer: "UI work conforms to `docs/design/DESIGN.md`; its REJECT list is a hard gate." | `CLAUDE.md` |
 | 1.5 | Consolidate the **embedded-AI-agent invariants** into a single referenced "What NOT to do" list, mapping **every** invariant named in EVALUATION §1 to its IronClaw home so none is lost: **keys encrypted at rest** (secrets/credential-storage path), **per-agent config in the DB not env vars** (`RootFilesystem`-persisted config), **tenant/scoped context on every LLM call** (capability-dispatch + scoped-filesystem isolation), **LLM-data-never-deleted**, and **credential/extension identity** — cross-linking existing CLAUDE.md/safety rules, not duplicating them. | `CLAUDE.md` / `.claude/rules/` |
-| 1.6 | Add the **cross-functional-review trigger** (see PROPOSAL §3): (a) a *"Cross-functional review required: security / data / design / none"* field in the feature-spec template; (b) extend `review-discipline.md` so a diff crossing a **trust / persistence / capability** boundary names the required partner and links the PR *Reborn Trust-Boundary Checklist* — reusing IronClaw's existing signals, not the kit's generic §8 gate. Adopt spec **§5 Architecture Impact** + plan **§4 Dependencies & Sequencing** verbatim in the templates while you're there. | feature-spec template + `.claude/rules/review-discipline.md` |
+| 1.6 | Add the **cross-functional-review trigger** (see PROPOSAL §3): (a) a *"Cross-functional review required: security / data / design / none"* field in the feature-spec template; (b) extend `review-discipline.md` so a diff crossing a **trust / persistence / capability** boundary names the required partner **role** and links the PR *Reborn Trust-Boundary Checklist* — reusing IronClaw's existing signals, not the kit's generic §8 gate. (`review-discipline.md` supplies the boundary *checks*, not reviewer identity — it names no people; leave role→person mapping to `CODEOWNERS`/team process.) Adopt spec **§5 Architecture Impact** + plan **§4 Dependencies & Sequencing** verbatim in the templates while you're there. | feature-spec template + `.claude/rules/review-discipline.md` |
 
 **Exit:** editing a frontend file surfaces the design rule; `DESIGN.md` is
 concrete enough to reject a raw-hex or unlabeled-control diff; a
@@ -202,19 +202,25 @@ independently revertible in this way.
    half-reverted `vite.config.ts` still naming the browser project is the
    likeliest miss).
 
-Use a search that is **hidden-file-aware and ignore-disabled**, because plain
-`rg` skips dotfiles/dirs (`.claude/`, `.github/`) *and* gitignored build output
-by default:
+Use a **hidden-file-aware** search that still honors `.gitignore` — so it scans
+`.claude/` and `.github/` but skips `node_modules/` and build output, which
+retain the Storybook/Playwright packages on disk until a fresh install and would
+only add noise:
 
 ```bash
-rg -uu --glob '!.git' --glob '!docs/plans/apdd-governance-kit/**' -n \
-  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md|@vitest/browser|playwright|storybook'
+rg --hidden --glob '!.git' --glob '!**/node_modules/**' --glob '!docs/plans/apdd-governance-kit/**' -n \
+  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md|@vitest/browser'
 ```
 
-(`-uu` = search hidden and gitignored files.) **Exclude the proposal docs
-themselves** (`docs/plans/apdd-governance-kit/**`) — they enumerate every
-removed path and dependency by design, so they would swamp the output with
-expected self-matches. **Keep the edited production files in scope**
+(`--hidden` scans dotfiles/dirs but honors `.gitignore`; the explicit
+`!**/node_modules/**` is belt-and-suspenders.) The pattern **deliberately drops
+bare `playwright`/`storybook`** — IronClaw's existing e2e suite already uses
+Playwright, so `playwright` would match legitimate coverage and drown the
+signal; `@vitest/browser` and the `.storybook` dir are the specific identifiers
+a half-reverted Storybook browser project would actually leave behind.
+**Exclude the proposal docs themselves** (`docs/plans/apdd-governance-kit/**`) —
+they enumerate every removed path and dependency by design, so they would swamp
+the output with expected self-matches. **Keep the edited production files in scope**
 (`CLAUDE.md`, `package.json`, `vite.config.ts`, `code_style.yml`): after a
 correct revert they name none of these, so a match *there* is a real leftover
 (an incomplete revert) — precisely what this check should surface. As a
