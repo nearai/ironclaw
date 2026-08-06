@@ -290,7 +290,7 @@ Every item in this section corresponds to a reported failure. Checking a box mea
 
 ## 5. Dedicated architecture-conformance audit
 
-This is an independent merge gate against the current host/product contracts, not a style review and not satisfied solely by `cargo test -p ironclaw_architecture`. The document describes a multi-slice end state: untouched pre-existing debt may be recorded as baseline, but this PR must not grow any frozen debt, and every new or substantially rewritten path must follow the target architecture now.
+This is an independent merge gate against the current host/product contracts, not a style review and not satisfied solely by `cargo test -p ironclaw_architecture_tests`. The document describes a multi-slice end state: untouched pre-existing debt may be recorded as baseline, but this PR must not grow any frozen debt, and every new or substantially rewritten path must follow the target architecture now.
 
 ### 5.1 Audit setup and output
 
@@ -341,7 +341,7 @@ This is an independent merge gate against the current host/product contracts, no
 
 ### 5.5 Composition-root audit: assembly only
 
-- [ ] Every changed file under `crates/ironclaw_reborn_composition` is reviewed symbol-by-symbol and classified as assembly, adapter registration, configuration selection, or misplaced domain/product behavior.
+- [ ] Every changed file under `crates/ironclaw_composition` is reviewed symbol-by-symbol and classified as assembly, adapter registration, configuration selection, or misplaced domain/product behavior.
 - [ ] Composition does not own extension lifecycle state transitions, readiness policy, OAuth continuation policy, MCP discovery classification, channel ingress/egress policy, delivery retries/idempotency, automation policy, or membership authorization.
 - [ ] Composition wires owner-crate factories/builders/ports; conditionals that decide domain outcomes live behind a factory or service in the owning crate.
 - [ ] New host-generic auth behavior lives in one auth engine/service with manifest recipe data; composition does not add vendor-specific OAuth flow logic.
@@ -354,7 +354,7 @@ This is an independent merge gate against the current host/product contracts, no
 
 ### 5.6 Extension, channel, and trust-boundary audit
 
-- [ ] Declarative extension metadata lives in `ironclaw_extensions` or first-party manifest assets, not composition/frontend switch statements.
+- [ ] Declarative extension metadata lives in `ironclaw_extension_registry` or first-party manifest assets, not composition/frontend switch statements.
 - [ ] MCP execution remains in the MCP runtime lane, receives only mediated ports, and crosses host network/secret boundaries without exposing ambient authority.
 - [ ] Channel protocol mechanics remain in adapters; generic ingress, lifecycle, identity, membership, and delivery policy are provider-neutral.
 - [ ] Runtime-lane output, MCP schemas, provider responses, channel payloads, and worker metadata remain untrusted, bounded, validated, invocation-bound, and redacted before reaching trusted flow or the model.
@@ -377,7 +377,7 @@ This is an independent merge gate against the current host/product contracts, no
 
 ### 5.8 Mechanical evidence and sign-off
 
-- [ ] `cargo test -p ironclaw_architecture` passes on the exact PR head.
+- [ ] `cargo test -p ironclaw_architecture_tests` passes on the exact PR head.
 - [ ] The specific ratchets for capability DTO collapse, facade methods, origin/gate matrices, in-memory stores, LocalDev/deployment-mode types, and deployment-mode branching pass.
 - [ ] `scripts/pre-commit-safety.sh` passes after the architecture audit fixes.
 - [ ] The audit report includes a before/after table for changed mirror DTOs, changed production `dyn` seams, changed local/mode-specific types, and changed composition-owned policy symbols.
@@ -511,13 +511,13 @@ Run fast-to-slow. Record exact outputs against the final PR SHA.
 
 ### 8.2 Owning crate suites
 
-- [ ] `cargo test -p ironclaw_extensions --no-fail-fast`
+- [ ] `cargo test -p ironclaw_extension_registry --no-fail-fast`
 - [ ] `cargo test -p ironclaw_extension_host --no-fail-fast`
 - [ ] `cargo test -p ironclaw_auth --no-fail-fast`
 - [ ] `cargo test -p ironclaw_mcp --no-fail-fast`
 - [ ] `cargo test -p ironclaw_conversations --no-fail-fast`
 - [ ] `cargo test -p ironclaw_product_workflow --no-fail-fast`
-- [ ] `cargo test -p ironclaw_reborn_composition --all-features --no-fail-fast`
+- [ ] `cargo test -p ironclaw_composition --all-features --no-fail-fast`
 - [ ] `cargo test -p ironclaw_webui --all-features --no-fail-fast`
 - [ ] `cargo test -p ironclaw_host_runtime --all-features --no-fail-fast`
 - [ ] `cargo test -p ironclaw_dispatcher --all-features --no-fail-fast`
@@ -544,7 +544,7 @@ Run fast-to-slow. Record exact outputs against the final PR SHA.
 ### 8.4 Focused load-bearing contracts
 
 - [ ] `cargo test -p ironclaw_product_workflow --test run_delivery_contract`
-- [ ] `cargo test -p ironclaw_reborn_composition external_channel_delivers_final_after_oauth_outlives_delivery_poll_window --features test-support`
+- [ ] `cargo test -p ironclaw_composition external_channel_delivers_final_after_oauth_outlives_delivery_poll_window --features test-support`
 - [ ] MCP contract includes and passes `concrete_mcp_http_client_discovers_bounded_deep_openapi_schema`.
 - [ ] WebUI descriptor contracts prove the activate route is absent and lifecycle/admin routes have correct auth, rate, body, audit, and effect metadata.
 - [ ] Product command registry contract proves `extension_activate` is absent.
@@ -555,7 +555,7 @@ Run fast-to-slow. Record exact outputs against the final PR SHA.
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - [ ] `cargo clippy --all --tests --examples -- -D warnings`
 - [ ] `cargo clippy --all --tests --examples --all-features -- -D warnings`
-- [ ] `cargo test -p ironclaw_architecture`
+- [ ] `cargo test -p ironclaw_architecture_tests`
 - [ ] `scripts/pre-commit-safety.sh`
 - [ ] `scripts/ci/check-reborn-qa-fixtures.sh`
 - [ ] `cargo build`

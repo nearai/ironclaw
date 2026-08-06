@@ -31,6 +31,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_composition::{
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
+};
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -47,11 +52,6 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
-};
-use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig, TriggerRunStatus, TriggerState};
 use ironclaw_turns::TurnStatus;
@@ -569,7 +569,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
     // `detail.preview` so the model does not need a follow-up `result_read`
     // call; the marker here is well under the cap. Mirrors
     // `assert_standalone_result_reference` in
-    // `crates/ironclaw_reborn_composition/src/runtime.rs`.
+    // `crates/ironclaw_composition/src/runtime.rs`.
     assert!(
         tool_result.content.contains(QA_DM_ACTION_MARKER),
         "a result under the first-look preview cap should appear inline in model replay: {}",

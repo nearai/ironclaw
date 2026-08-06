@@ -511,7 +511,7 @@ async def start_reborn_webui_v2_server(
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
+            "RUST_LOG": "ironclaw=warn,ironclaw_turn_runner=warn",
             "RUST_BACKTRACE": "1",
         }
         if extra_env:
@@ -778,7 +778,7 @@ async def reborn_v2_first_run_server(
     provider_log_filter = (
         "warn,"
         "ironclaw_webui=debug,"
-        "ironclaw_reborn_composition=debug,"
+        "ironclaw_composition=debug,"
         "ironclaw_operator=debug,"
         "ironclaw_llm=debug"
     )

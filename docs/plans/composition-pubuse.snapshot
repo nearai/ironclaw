@@ -15,8 +15,8 @@ pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretSto
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
-pub use ironclaw_product::LifecycleProductResponse;
-pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use ironclaw_assistant::LifecycleProductResponse;
+pub use ironclaw_turn_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 pub use ironclaw_skills::{
     SkillSummary as RebornSkillSummary, skill_summary_json as reborn_skill_summary_json,
 };
@@ -71,11 +71,9 @@ pub use runtime::{
 };
 pub use runtime_input::{
     KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
-    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
-    TurnRunnerSettings,
+    TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings, TurnRunnerSettings,
 };
-pub use ironclaw_reborn_identity::{
+pub use ironclaw_identity::{
     ExternalSubjectId, ProviderKind, RebornIdentityError, RebornIdentityResolver,
     ResolveExternalIdentity, SurfaceKind,
 };

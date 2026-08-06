@@ -18,14 +18,14 @@
 > 2. **`ExternalActorRef` / `ExternalConversationRef` are no longer owned here.**
 >    Their one home is `ironclaw_extension_contracts::external`;
 >    `ironclaw_conversations` consumes them. It used to declare a second,
->    field-divergent copy, and `ironclaw_product` bridged the two with
+>    field-divergent copy, and `ironclaw_assistant` bridged the two with
 >    hand-written translators that are now deleted.
 > 3. **The route's third field is `topic_id`, not `thread_id`** — it is the
 >    *channel's* sub-conversation, never a canonical `ThreadId`. Only the Rust
 >    spelling changed: the durable record keeps `thread_id`, deliberately, so a
 >    rollback can still read it. See `ironclaw_conversations::stored_refs`.
 >
-> `crates/ironclaw_architecture/tests/reborn_conversations_threads_attachments.rs`
+> `crates/app/ironclaw_architecture_tests/tests/reborn_conversations_threads_attachments.rs`
 > pins 1 and 2 — the first rule by discovery, not enumeration.
 
 ---
@@ -63,7 +63,7 @@ Reply-target binding is separate from external ingress identity. This contract b
 
 ## 3. Implemented semantic slice
 
-`crates/ironclaw_conversations` provides the first contract slice:
+`crates/domains/ironclaw_conversations` provides the first contract slice:
 
 - adapter-scoped typed refs it declares: `AdapterKind`, `AdapterInstallationId`, `ExternalEventId`
   (the external actor/conversation pair — `ExternalActorRef`, `ExternalConversationRef` —
@@ -103,6 +103,7 @@ This is not the final durable transcript store. The conversation contract stores
 22. Host-trusted trigger fires are submitted only through the conversation-owned submitter trait object returned by `trusted_trigger_fire_submitter(...)` and wired by host-owned composition services from durable host state. Channel adapters cannot build this submitter or submit trusted trigger requests under workspace architecture rules. Trusted trigger ingress details live in [`triggers.md`](triggers.md); this contract owns only the replay-first trusted-scope adapter. No delivery target data belongs in `ExternalConversationRef`, `TurnActor`, `adapter_kind`, or any trusted ingress identity.
 23. Resolver-backed external actor pairings may carry a provider-neutral opaque binding epoch scoped to the full actor key. Conditional teardown compares both the canonical user and that epoch under the conversation-state mutation lock; a missing pairing is idempotent, and a changed user or epoch is preserved. Ordinary epoch-less pairing remains compatible and explicitly clears an older epoch for the same actor key.
 24. Lookup-only product binding resolution revalidates resolver-backed direct and shared routes immediately before returning them. The current resolver result must match both the stored canonical actor and the requesting actor key's stored epoch. A revoked actor or newer generation fails closed without returning the stale route; shared-route subject ownership remains a separate subject-scoped decision and is not overwritten by a participant's epoch.
+25. A non-destructive conversation reset atomically compare-and-rotates an existing external route to a fresh canonical thread. It must revalidate the actor, route, participant, and expected current thread under the conversation-state mutation boundary; preserve the old thread, messages, scope, owner, and participant records; and revoke the old binding-level source/reply targets before exposing the replacement. The reset event id is a durable idempotency key: replay returns the original replacement, while a different event carrying a stale expected thread fails closed. Product workflows may invoke this only after command admission and an active-run preflight; transports do not mint replacement threads or mutate bindings directly.
 
 ---
 
@@ -111,13 +112,19 @@ This is not the final durable transcript store. The conversation contract stores
 Current semantic coverage lives in:
 
 ```text
-crates/ironclaw_conversations/tests/inbound_contract.rs
+crates/domains/ironclaw_conversations/tests/inbound_contract.rs
+crates/domains/ironclaw_conversations/tests/conversation_state_store_contract.rs
+crates/product/ironclaw_assistant/tests/product_surface_contract.rs
+crates/product/ironclaw_assistant/tests/product_command_surface_contract.rs
 ```
 
 Run:
 
 ```bash
 cargo test -p ironclaw_conversations --test inbound_contract
+cargo test -p ironclaw_conversations --test conversation_state_store_contract
+cargo test -p ironclaw_assistant --test product_surface_contract
+cargo test -p ironclaw_assistant --test product_command_surface_contract
 ```
 
 The planned trusted ingress implementation must add a caller-level regression

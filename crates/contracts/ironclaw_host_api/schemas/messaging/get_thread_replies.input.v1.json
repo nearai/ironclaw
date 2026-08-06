@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging get_thread_replies input",
+  "type": "object",
+  "required": ["conversation", "thread"],
+  "properties": {
+    "conversation": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Conversation ref for this extension, from list_conversations / open_dm / get_conversation_info or an earlier result. Never invented; never valid on another extension."
+    },
+    "thread": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque thread anchor from a message or message_ref, to operate in-thread."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Maximum replies to return. The host rejects values above 1000; adapters may clamp further to vendor maxima."
+    },
+    "cursor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque pagination cursor from a previous call's next_cursor."
+    }
+  },
+  "additionalProperties": false
+}

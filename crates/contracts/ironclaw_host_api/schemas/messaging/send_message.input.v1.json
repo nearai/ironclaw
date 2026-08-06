@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging send_message input",
+  "type": "object",
+  "required": ["conversation", "text"],
+  "properties": {
+    "conversation": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Conversation ref for this extension, from list_conversations / open_dm / get_conversation_info or an earlier result. Never invented; never valid on another extension."
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Message text (markdown baseline; rendered per channel)."
+    },
+    "thread": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque thread anchor from a message or message_ref — the thread/topic container to post into. Distinct from reply_to, which quotes one specific message rather than posting into a container."
+    },
+    "reply_to": {
+      "type": "object",
+      "required": ["conversation", "message_id"],
+      "properties": {
+        "conversation": { "type": "string", "minLength": 1 },
+        "message_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "description": "The exact message_ref of the specific message being quoted or replied to — distinct from thread, which is the thread/topic container to post into. Each vendor maps this onto its own reply/quote mechanism; where a vendor has only one such mechanism, thread and reply_to both resolve to it."
+    }
+  },
+  "additionalProperties": false
+}

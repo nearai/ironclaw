@@ -2,7 +2,7 @@
 #
 # Composition mass ratchet gate.
 #
-# Fails when ironclaw_reborn_composition breaches any of the three committed
+# Fails when ironclaw_composition breaches any of the three committed
 # bounds in scripts/ci/composition-budget.toml:
 #   [mass]     its SHARE of production crate code            (relative)
 #   [abs]      its ABSOLUTE production LOC                   (relative to nothing)
@@ -27,7 +27,7 @@
 #
 # Test/override env vars (used by test-check-composition-budget.sh; unset in prod):
 #   COMPOSITION_SRC   numerator dir      (default: discovered from COMPOSITION_CRATE)
-#   COMPOSITION_CRATE numerator crate    (default: ironclaw_reborn_composition)
+#   COMPOSITION_CRATE numerator crate    (default: ironclaw_composition)
 #   CRATES_ROOT       crates directory   (default: crates) -> its parent is the
 #                     discovery root; the basename must be `crates`
 #   BUDGET_FILE       budget TOML path   (default: scripts/ci/composition-budget.toml)
@@ -40,7 +40,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
 CRATES_ROOT="${CRATES_ROOT:-crates}"
-COMPOSITION_CRATE="${COMPOSITION_CRATE:-ironclaw_reborn_composition}"
+COMPOSITION_CRATE="${COMPOSITION_CRATE:-ironclaw_composition}"
 BUDGET_FILE="${BUDGET_FILE:-scripts/ci/composition-budget.toml}"
 
 print_only=false
@@ -225,7 +225,7 @@ if [ "${observed_bp}" -gt "${effective_ceiling}" ]; then
     prefix=""; [ "${enforce}" = true ] || prefix="[dry-run, would FAIL] "
     echo "  ${prefix}MASS EXCEEDED: composition is $(fmt_pct "${observed_bp}")% of production crate code," \
          "$(fmt_pct "${over}")pp over the effective ceiling of $(fmt_pct "${effective_ceiling}")%."
-    echo "    Move behavior OUT of ironclaw_reborn_composition into an owning crate (charter is"
+    echo "    Move behavior OUT of ironclaw_composition into an owning crate (charter is"
     echo "    assembly-only). See .claude/skills/ironclaw-reborn-architecture-review (item 2)."
     echo "    If justified, raise ceiling_bp in ${BUDGET_FILE} with a PR rationale."
     breached=1

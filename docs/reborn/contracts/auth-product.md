@@ -2,7 +2,7 @@
 
 - **Status:** contract and production auth service
 - **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883 / #3884
-- **Crate:** `crates/ironclaw_auth`
+- **Crate:** `crates/domains/ironclaw_auth`
 - **Service facade:** `ironclaw_auth::RebornProductAuthServices`
 - **HTTP routes:** `ironclaw_webui::product_auth_route_mount`
 
@@ -19,7 +19,7 @@ This slice is contract-first. `ironclaw_auth` defines Reborn-native vocabulary,
 traits, validation helpers, fake services, the production filesystem-backed
 product-auth service, provider-account selection/refresh, continuations, and
 cleanup. `ironclaw_webui` owns the host HTTP route serving surface.
-`ironclaw_reborn_composition` wires `AuthEngine`, stores, secrets, network, and
+`ironclaw_composition` wires `AuthEngine`, stores, secrets, network, and
 product/runtime adapters into those crates; it must not grow a parallel
 product-auth service tree. #3811 adds the Reborn service seam, #3812 adds
 callback completion handling, #3881 mounts the first Reborn-native OAuth
@@ -132,7 +132,7 @@ need host-only client metadata; the Google setup route builds the Google
 authorization URL from configured Reborn product-auth client metadata and keeps
 the static redirect URI aligned with the provider exchange client.
 
-`ironclaw_product::ProductAuthTurnGateResumeDispatcher` is the
+`ironclaw_assistant::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
 that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
 using the canonical turn scope, actor, run id, and gate ref carried by the auth
@@ -143,7 +143,7 @@ composition only fills and wires that decorator. It does not define auth state
 or credential vocabulary, and the provider callback route itself never owns
 those side effects.
 
-`ironclaw_product::AuthInteractionService` owns the product/WebUI
+`ironclaw_assistant::AuthInteractionService` owns the product/WebUI
 blocked-auth interaction loop from #3094. It reads auth-required gates from
 scoped blocked run-state plus auth-flow records, returns redacted
 adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
@@ -519,7 +519,7 @@ pretending cleanup succeeded.
 
 The WebUI crate owns and mounts host-owned HTTP routes that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_webui/src/product_auth/mod.rs`). All mutation
+`crates/product/ironclaw_webui/src/product_auth/mod.rs`). All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied
@@ -570,10 +570,16 @@ Rules:
   `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
   also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
   `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
-  the redirect URI opt-in is present. The hint only adds Google's `hd=`
-  authorization parameter; product-auth setup does not treat it as a server-side
-  domain allowlist. The redirect URI must match the static Google callback route
-  exposed by the WebUI listener.
+  the redirect URI opt-in is present. **The hosted-domain hint is currently
+  inert** (measured 2026-08-05): it resolves into
+  `OAuthClientConfig::hosted_domain_hint`, which no production code reads — the
+  auth engine builds its authorization parameters from the vendor recipe's
+  manifest `extra_authorize_params`, and the Google recipes declare no `hd`. So
+  setting it adds nothing to the authorization URL, and product-auth has never
+  treated it as a server-side domain allowlist either. Server-side `hd`
+  enforcement exists only for **WebChat login**, via the separate
+  `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` provider config. The redirect URI
+  must match the static Google callback route exposed by the WebUI listener.
 - All routes project only adapter-safe DTOs (`CredentialAccountProjection`,
   `CredentialAccountListPage`, `CredentialRecoveryProjection`,
   `CredentialRefreshReport`, `SecretCleanupReport`). Raw secret handles,
@@ -632,7 +638,7 @@ Rules:
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.
 
-`ironclaw_reborn_composition` caller-level tests additionally cover:
+`ironclaw_composition` caller-level tests additionally cover:
 
 - an incomplete provider redirect `scope` echo still reaching exchange with the
   server-owned requested scopes
@@ -645,7 +651,7 @@ Rules:
 
 ## AuthPromptView v2 enrichment (issue #4112)
 
-`AuthPromptView` in `crates/ironclaw_extension_contracts/src/auth_prompt.rs` carries
+`AuthPromptView` in `crates/contracts/ironclaw_extension_contracts/src/auth_prompt.rs` carries
 five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
 
 | Field | Type | Present when |
@@ -690,7 +696,7 @@ token, `interaction_id`.
 
 ### Wire-shape tests
 
-`crates/ironclaw_reborn_composition/tests/webui_v2_product_auth_4201.rs`
+`crates/app/ironclaw_composition/tests/webui_v2_product_auth_4201.rs`
 covers:
 - Serialisation of the new optional fields when present.
 - Omission of all new fields when absent (backward-compat check).

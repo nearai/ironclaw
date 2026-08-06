@@ -60,8 +60,8 @@ PATH_ATTR_PATTERN = re.compile(
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
 # The scope anchor is the shipping package's *name*, not its directory. The
-# package is `ironclaw` whether its manifest sits at crates/ironclaw_reborn_cli/
-# (today) or at crates/app/ironclaw_cli/ (the target layout, which keeps the
+# package is `ironclaw` wherever its manifest sits (crates/app/ironclaw_cli/
+# since the WS7 family move, which keeps the
 # package name and only renames the directory — PROPOSAL §5.1). Keying on the
 # path meant a move turned the whole gate into a crash or, worse, a shrunken
 # scan. See docs/reborn/target-architecture/CHECKLIST.md WS10.
@@ -556,7 +556,7 @@ def is_test_only_path(path: str) -> bool:
     ``src/**/test_support.rs`` is the repo-wide convention for a
     ``#[cfg(feature = "test-support")] pub mod test_support;`` module
     (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
-    ``ironclaw_product``, ``ironclaw_reborn_composition``). The
+    ``ironclaw_assistant``, ``ironclaw_composition``). The
     ``test-support`` feature is enabled
     only via ``[dev-dependencies]``, so these modules ship zero bytes in
     production binaries — the same "never compiled in production" rationale that
@@ -1213,9 +1213,14 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(is_test_only_path("crates/foo/src/nested/tests.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/auth_test.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/auth_tests.rs"))
+        # A real repository path, because this branch of `is_test_only_path`
+        # READS the file to confirm the `#[cfg(test)] mod` declaration. It
+        # therefore has to name where the crate actually sits — the family
+        # directory (PROPOSAL §5) — or the assertion silently measures a
+        # missing file.
         self.assertTrue(
             is_test_only_path(
-                "crates/ironclaw_processes/src/journal_store/state_tests.rs"
+                "crates/kernel/ironclaw_processes/src/journal_store/state_tests.rs"
             )
         )
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
@@ -1224,7 +1229,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
         # gated, ships zero bytes in production. Exempt by exact filename only.
         self.assertTrue(
-            is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
+            is_test_only_path("crates/app/ironclaw_composition/src/test_support.rs")
         )
         # Directory-module form: src/test_support/**.rs is also exempt, so
         # growing a test_support module never needs another change here.
@@ -1684,7 +1689,7 @@ class CheckNoPanicsTests(unittest.TestCase):
     def _shipping_metadata(
         normal_dependency_dir: str = "crates/normal_dependency",
         members: tuple[str, ...] | None = None,
-        shipping_dir: str = "crates/ironclaw_reborn_cli",
+        shipping_dir: str = "crates/app/ironclaw_cli",
     ) -> dict:
         shipping_id = "shipping"
         normal_id = "normal"
@@ -1754,8 +1759,8 @@ class CheckNoPanicsTests(unittest.TestCase):
             roots,
             sorted(
                 [
-                    (REPO_ROOT / "crates/ironclaw_reborn_cli/src/lib.rs").resolve(),
-                    (REPO_ROOT / "crates/ironclaw_reborn_cli/src/main.rs").resolve(),
+                    (REPO_ROOT / "crates/app/ironclaw_cli/src/lib.rs").resolve(),
+                    (REPO_ROOT / "crates/app/ironclaw_cli/src/main.rs").resolve(),
                     (REPO_ROOT / "crates/normal_dependency/src/lib.rs").resolve(),
                     (REPO_ROOT / "crates/normal_dependency/src/main.rs").resolve(),
                 ]
@@ -1771,26 +1776,26 @@ class CheckNoPanicsTests(unittest.TestCase):
         """
         roots = shipping_reborn_source_roots(
             self._shipping_metadata(
-                normal_dependency_dir="crates/substrates/ironclaw_events"
+                normal_dependency_dir="crates/substrates/ironclaw_event_log"
             )
         )
 
         self.assertIn(
-            (REPO_ROOT / "crates/substrates/ironclaw_events/src/lib.rs").resolve(),
+            (REPO_ROOT / "crates/substrates/ironclaw_event_log/src/lib.rs").resolve(),
             roots,
         )
 
     def test_shipping_package_is_found_by_name_after_a_directory_rename(self) -> None:
-        """The scope anchor survives `crates/ironclaw_reborn_cli` -> `crates/app/ironclaw_cli`.
+        """The scope anchor survives `crates/app/ironclaw_cli` -> `crates/app/ironclaw_cli`.
 
         The package keeps its name (`ironclaw`) across that rename, so resolving
         by name keeps the whole gate pointed at the right dependency closure.
         """
         roots = shipping_reborn_source_roots(
-            self._shipping_metadata(shipping_dir="crates/app/ironclaw_cli")
+            self._shipping_metadata(shipping_dir="crates/ironclaw_cli")
         )
 
-        self.assertIn((REPO_ROOT / "crates/app/ironclaw_cli/src/main.rs").resolve(), roots)
+        self.assertIn((REPO_ROOT / "crates/ironclaw_cli/src/main.rs").resolve(), roots)
 
     def test_shipping_crate_outside_the_crate_tree_fails_closed(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "not under"):
