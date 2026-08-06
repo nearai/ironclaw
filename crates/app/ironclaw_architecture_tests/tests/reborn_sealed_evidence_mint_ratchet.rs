@@ -68,6 +68,20 @@
 //! `AuthRequirement`'s channel half as a second enum. Recorded as a bounded
 //! residual, not silently passed: the crate-level seam that a *package* or a
 //! *product handler* cannot mint at all is the property this row exists for.
+//!
+//! ## The test seam, governed too (WS12 security audit, F1)
+//!
+//! `ProtocolAuthEvidence::test_verified` / `::test_verified_for_tenant` mint
+//! verified evidence with **no grant at all**, gated only by
+//! `#[cfg(any(test, feature = "test-support"))]`. §12.1a's own generalizable
+//! finding — a cargo feature any sibling manifest can unify on is not a
+//! privilege boundary — applies to that gate verbatim: in every workspace
+//! build that enables `test-support` anywhere, a production-source call to the
+//! seam compiles green, and before F1 nothing scanned for it and nothing
+//! pinned the feature to `[dev-dependencies]`. Closed paths #12 and #13 below
+//! are the audit's two remedies: a production call site is now an offender,
+//! and the feature can reach a manifest's normal dependency resolution
+//! nowhere.
 
 // Each integration-test binary compiles the shared module independently; this
 // binary uses only the comment/string stripper.
@@ -78,7 +92,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ratchet_support::{crate_path, strip_comments_and_strings, workspace_root};
+use ratchet_support::{
+    cfg_test_only_files, crate_path, strip_cfg_test_blocks, strip_comments_and_strings,
+    workspace_root,
+};
 
 /// The retired cargo feature. It must not come back under any spelling that a
 /// manifest, a CI script, or guidance could re-enable.
@@ -135,6 +152,27 @@ const RETIRED_MINT_FNS: &[&str] = &[
     "mark_session_verified_for_tenant",
     "mark_shared_secret_header_verified_for_tenant",
 ];
+
+/// The sanctioned test seam, governed by name (WS12 security audit, F1).
+///
+/// These `ProtocolAuthEvidence` constructors are the one way test code obtains
+/// verified evidence without a grant, gated by
+/// `#[cfg(any(test, feature = "test-support"))]` in `ironclaw_host_api`. They
+/// are deliberately NOT in `CHANNEL_MINT_FNS`/`HOST_MINT_FNS`: their permitted
+/// caller set is different (no crate at all, from production text), and their
+/// legitimate call sites are inline `#[cfg(test)]` modules — code the live
+/// tables' scan does not model because no `mark_*` function ever had a test
+/// caller inside `src/**` (tests use this seam instead, which is exactly why
+/// this seam needs its own scan). Governed by
+/// `test_seam_mint_constructors_have_no_production_call_sites` (call sites),
+/// `test_support_feature_is_confined_to_dev_dependency_tables` (the feature
+/// gate's placement), and `each_mint_half_is_defined_only_in_the_crate_that_owns_it`
+/// (the definitions stay in the evidence owner).
+const TEST_SEAM_MINT_FNS: &[&str] = &["test_verified", "test_verified_for_tenant"];
+
+/// The one sanctioned dev-seam feature name (`.claude/rules/cargo-features.md`
+/// bar #4). Closed path #13 pins where manifests may reach for it.
+const TEST_SUPPORT_FEATURE: &str = "test-support";
 
 /// This ratchet's own file, skipped so its own frozen-name tables and doc
 /// examples do not read as offending call sites.
@@ -271,6 +309,41 @@ fn collect_workspace_production_rs(root: &Path) -> Vec<PathBuf> {
         collect_production_rs(&member_root, &mut files);
     }
     files
+}
+
+/// The file set for the test-seam call-site scan (closed path #12): the
+/// production walk minus the two test shapes a directory walk cannot see —
+/// files whose *name* marks them as test modules (`tests.rs`, `*_tests.rs`,
+/// e.g. `channel_host/e2e_tests.rs`), and production-named files reachable
+/// only through a `#[cfg(test)] mod …;` declaration
+/// ([`cfg_test_only_files`]'s census). The `mark_*` scans above skip neither,
+/// and need not: no mint function has a test caller inside `src/**`. The test
+/// seam's legitimate callers are *exactly* such in-src test code, so scanning
+/// it with the plain walk would flag every sanctioned use; scanning it with
+/// this one flags only text a production build could compile.
+fn collect_test_seam_scan_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for member_root in member_roots(root) {
+        let test_only = cfg_test_only_files(&member_root);
+        let mut member_files = Vec::new();
+        collect_production_rs(&member_root, &mut member_files);
+        files.extend(
+            member_files
+                .into_iter()
+                .filter(|path| !is_test_module_file_name(path) && !test_only.contains(path)),
+        );
+    }
+    files
+}
+
+/// Whether `path`'s file name is one of the conventional in-src test-module
+/// shapes (`src/inbound/tests.rs`, `src/channel_host/e2e_tests.rs`).
+fn is_test_module_file_name(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    name == "tests.rs" || name.ends_with("_tests.rs")
 }
 
 /// The crate that owns `path`, by crate-directory basename.
@@ -1017,6 +1090,10 @@ fn each_mint_half_is_defined_only_in_the_crate_that_owns_it() {
     for (family, owner) in [
         (CHANNEL_MINT_FNS, CHANNEL_MINT_OWNER),
         (HOST_MINT_FNS, EVIDENCE_TYPE_OWNER),
+        // The test seam's constructors are mint entry points too (F1); their
+        // definitions moving out of the evidence owner would put an ungranted
+        // mint next to code closed path #12 does not exempt.
+        (TEST_SEAM_MINT_FNS, EVIDENCE_TYPE_OWNER),
     ] {
         for name in family {
             let definition = format!("pub fn {name}(");
@@ -1096,20 +1173,270 @@ fn retired_mint_functions_do_not_return() {
     );
 }
 
-/// The two tables are a partition, not overlapping sets: a name that is both
+/// Closed path #12 — a production call site of the ungranted test seam
+/// (WS12 security audit, F1 remedy a).
+///
+/// The WS12 audit planted a production source file calling
+/// `ProtocolAuthEvidence::test_verified` and every scan in this file stayed
+/// green: the constructors were absent from all three mint-name tables, so the
+/// scan half of §12.1a simply did not know them. In any lane where
+/// `test-support` unifies on (workspace `cargo test`,
+/// `cargo clippy --all-features`) such a call also *compiles* green — the
+/// vacuous-feature-seal shape this file's header documents, one level over.
+///
+/// The scan strips comments/strings, then `#[cfg(test)]`-gated blocks, and
+/// walks [`collect_test_seam_scan_files`] — so every sanctioned caller (an
+/// inline test module, a `tests.rs`/`*_tests.rs` sibling, a `#[cfg(test)]
+/// mod`-declared file) is invisible, and anything left naming the seam outside
+/// the crate that defines it is text a production build could compile. That
+/// includes a `#[cfg(feature = "test-support")]`-gated helper in production
+/// namespace: the stripper deliberately keeps those (the feature compiles
+/// into real `--all-features` builds), so parking a mint helper behind the
+/// bare feature gate is an offense, not an evasion. Tests that need verified
+/// evidence call the seam from test code; there is no third place.
+#[test]
+fn test_seam_mint_constructors_have_no_production_call_sites() {
+    let root = workspace_root();
+    let files = collect_test_seam_scan_files(&root);
+    assert!(
+        files.len() > 500,
+        "test-seam walk found only {} files — the walk is broken, not the workspace",
+        files.len()
+    );
+
+    let mut offenders = Vec::new();
+    let mut sighted = 0usize;
+    for file in &files {
+        let source = read_source(file);
+        let owner = owning_crate(&root, file);
+        let production_text = strip_cfg_test_blocks(&strip_comments_and_strings(&source));
+        for raw in production_text.lines() {
+            let line = raw.trim();
+            for name in TEST_SEAM_MINT_FNS {
+                if !mentions_symbol(line, name) {
+                    continue;
+                }
+                sighted += 1;
+                if owner != EVIDENCE_TYPE_OWNER {
+                    offenders.push(format!("{}: {line}", render(&root, file)));
+                }
+            }
+        }
+    }
+
+    // The definitions in `ironclaw_host_api` guarantee at least one sighting
+    // per name; zero means the family was renamed without updating
+    // TEST_SEAM_MINT_FNS and this scan now measures nothing.
+    assert!(
+        sighted >= TEST_SEAM_MINT_FNS.len(),
+        "the test-seam scan sighted only {sighted} mentions — the constructors were renamed \
+         without updating TEST_SEAM_MINT_FNS, and this ratchet is now measuring an empty set"
+    );
+    assert!(
+        offenders.is_empty(),
+        "`ProtocolAuthEvidence::test_verified` / `::test_verified_for_tenant` mint verified \
+         evidence with NO grant and exist for test code only (the `test-support` seam). A \
+         production call site is a forgery path in every build that unifies the feature on — \
+         the exact class §12.1a proved is not sealed by a cargo feature (WS12 audit, F1). Move \
+         the call into a `#[cfg(test)]` module or a `tests/` tree; if host code needs verified \
+         evidence for real, it implements the granted witness traits instead. \
+         Offenders: {offenders:?}"
+    );
+}
+
+/// Closed path #13 — the `test-support` feature reaching a normal dependency
+/// table (WS12 security audit, F1 remedy b).
+///
+/// The constructors above are gated by `#[cfg(any(test, feature =
+/// "test-support"))]`, and prose in manifest comments ("never enabled by a
+/// shipped artifact") was the only thing keeping that feature out of
+/// production builds — contrast the retired `host-auth-mint`, refuted across
+/// every manifest and script by the two tests at the top of this file. One
+/// manifest line moving a `test-support` enablement from `[dev-dependencies]`
+/// to `[dependencies]` would compile the ungranted mint seam into the shipped
+/// binary workspace-wide, and no test would fail. Now one does.
+///
+/// Offending shapes, all measured at zero when this gate landed:
+/// - any naming of `test-support` inside `[dependencies]`,
+///   `[build-dependencies]`, their `[target.*]` variants, or
+///   `[workspace.dependencies]` — a `features = ["test-support"]` enablement,
+///   a `workspace = true` inheritance carrier, or a dependency literally
+///   named `test-support`;
+/// - a `[features]` entry other than `test-support` itself forwarding to the
+///   seam (`default = ["ironclaw_host_api/test-support"]`,
+///   `full = ["test-support"]`) — the laundering shape that would let a plain
+///   `features = ["full"]` in a normal dependency table enable the seam
+///   without ever spelling its name where the table scan looks.
+///
+/// Legal and unscanned: `[dev-dependencies]` enablements (the sanctioned
+/// dev-seam shape, `.claude/rules/cargo-features.md` bar #4), a crate's own
+/// `[features] test-support = [...]` declaration forwarding to its
+/// dependencies' `test-support`, and `required-features` on test targets.
+#[test]
+fn test_support_feature_is_confined_to_dev_dependency_tables() {
+    let root = workspace_root();
+    let mut manifests = Vec::new();
+    collect_manifests(&root, &mut manifests);
+    assert!(
+        manifests.len() > 50,
+        "manifest walk found only {} Cargo.toml files — the walk is broken, not the workspace",
+        manifests.len()
+    );
+
+    let mut offenders = Vec::new();
+    let mut declaring = 0usize;
+    for manifest in &manifests {
+        let source = read_source(manifest);
+        let parsed: toml::Value = toml::from_str(&source).unwrap_or_else(|error| {
+            panic!(
+                "{} does not parse — a manifest this gate cannot read must fail it, not scan \
+                 as empty: {error}",
+                render(&root, manifest)
+            )
+        });
+        if parsed
+            .get("features")
+            .and_then(|features| features.get(TEST_SUPPORT_FEATURE))
+            .is_some()
+        {
+            declaring += 1;
+        }
+        for offense in manifest_test_support_offenses(&parsed) {
+            offenders.push(format!("{}: {offense}", render(&root, manifest)));
+        }
+    }
+
+    // Dozens of crates declare the dev seam today. A collapse to single digits
+    // means the feature was renamed or retired wholesale — either way this
+    // gate must be re-pointed in the same change, not left green over nothing.
+    assert!(
+        declaring > 10,
+        "only {declaring} manifests declare a `{TEST_SUPPORT_FEATURE}` feature — the dev seam \
+         was renamed or retired without updating this gate, which now confines nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "the `{TEST_SUPPORT_FEATURE}` feature is the dev-only seam that gates the ungranted \
+         `ProtocolAuthEvidence::test_verified*` constructors (and every other crate's test \
+         fixtures). It may be enabled from `[dev-dependencies]` and forwarded by a feature \
+         itself named `{TEST_SUPPORT_FEATURE}` — nowhere else. A normal-dependency enablement \
+         or an alias feature compiles test seams into shipped artifacts workspace-wide \
+         (WS12 audit, F1; `.claude/rules/cargo-features.md` bar #4). Offenders: {offenders:?}"
+    );
+}
+
+/// Every place one parsed manifest lets `test-support` reach a production
+/// build's feature resolution — the offender census behind closed path #13.
+fn manifest_test_support_offenses(manifest: &toml::Value) -> Vec<String> {
+    let mut offenses = Vec::new();
+
+    for section in ["dependencies", "build-dependencies"] {
+        if let Some(table) = manifest.get(section) {
+            collect_test_support_reaches(table, section, &mut offenses);
+        }
+    }
+    if let Some(table) = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+    {
+        collect_test_support_reaches(table, "workspace.dependencies", &mut offenses);
+    }
+    if let Some(targets) = manifest.get("target").and_then(|target| target.as_table()) {
+        for (target_name, tables) in targets {
+            for section in ["dependencies", "build-dependencies"] {
+                if let Some(table) = tables.get(section) {
+                    collect_test_support_reaches(
+                        table,
+                        &format!("target.{target_name}.{section}"),
+                        &mut offenses,
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(features) = manifest
+        .get("features")
+        .and_then(|features| features.as_table())
+    {
+        for (feature, values) in features {
+            if feature == TEST_SUPPORT_FEATURE {
+                continue;
+            }
+            for value in values.as_array().into_iter().flatten() {
+                if value.as_str().is_some_and(names_test_support) {
+                    offenses.push(format!(
+                        "[features] `{feature}` forwards to `{}`",
+                        value.as_str().unwrap_or_default()
+                    ));
+                }
+            }
+        }
+    }
+
+    offenses
+}
+
+/// Whether a manifest string names the dev seam: the bare feature
+/// (`"test-support"`) or a dependency forward to it
+/// (`"ironclaw_host_api/test-support"`, weak `"ironclaw_processes?/test-support"`).
+fn names_test_support(value: &str) -> bool {
+    value == TEST_SUPPORT_FEATURE || value.ends_with("/test-support")
+}
+
+/// Recursive census over one dependency table: a key named `test-support`
+/// (a dependency literally so named) or any string naming the seam
+/// (`features = ["test-support"]`) is an offense wherever it sits.
+fn collect_test_support_reaches(value: &toml::Value, location: &str, out: &mut Vec<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, nested) in table {
+                if key == TEST_SUPPORT_FEATURE {
+                    out.push(format!("[{location}] key `{key}`"));
+                }
+                collect_test_support_reaches(nested, &format!("{location}.{key}"), out);
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                collect_test_support_reaches(item, location, out);
+            }
+        }
+        toml::Value::String(text) if names_test_support(text) => {
+            out.push(format!("[{location}] -> `{text}`"));
+        }
+        _ => {}
+    }
+}
+
+/// The tables are a partition, not overlapping sets: a name that is both
 /// live and retired would make `#10` and `#11` contradict each other, and
-/// whichever ran first would decide. Also pins that neither table is empty —
-/// an empty live table silently disarms every census in this file, and an
-/// empty retired table would mean this ratchet governs nothing WS8 deleted.
+/// whichever ran first would decide; a name that is both live and test-seam
+/// would be governed by two scans with different permitted sets. Also pins
+/// that no table is empty — an empty live table silently disarms every census
+/// in this file, an empty retired table would mean this ratchet governs
+/// nothing WS8 deleted, and an empty test-seam table would disarm closed
+/// path #12.
 #[test]
 fn live_and_retired_mint_tables_are_disjoint_and_populated() {
     let live: BTreeSet<&str> = all_mint_fns().into_iter().collect();
     let retired: BTreeSet<&str> = RETIRED_MINT_FNS.iter().copied().collect();
+    let test_seam: BTreeSet<&str> = TEST_SEAM_MINT_FNS.iter().copied().collect();
 
     let both: Vec<&&str> = live.intersection(&retired).collect();
     assert!(
         both.is_empty(),
         "a mint function cannot be both live and retired: {both:?}"
+    );
+    let live_and_seam: Vec<&&str> = live.intersection(&test_seam).collect();
+    assert!(
+        live_and_seam.is_empty(),
+        "a mint function cannot be both live and the test seam: {live_and_seam:?}"
+    );
+    let retired_and_seam: Vec<&&str> = retired.intersection(&test_seam).collect();
+    assert!(
+        retired_and_seam.is_empty(),
+        "a mint function cannot be both retired and the test seam: {retired_and_seam:?}"
     );
     assert_eq!(
         live.len(),
@@ -1121,10 +1448,19 @@ fn live_and_retired_mint_tables_are_disjoint_and_populated() {
         RETIRED_MINT_FNS.len(),
         "RETIRED_MINT_FNS contains a duplicate name"
     );
+    assert_eq!(
+        test_seam.len(),
+        TEST_SEAM_MINT_FNS.len(),
+        "TEST_SEAM_MINT_FNS contains a duplicate name"
+    );
     assert!(!live.is_empty(), "the live mint family cannot be empty");
     assert!(
         !retired.is_empty(),
         "RETIRED_MINT_FNS cannot be empty while WS8's deletion stands"
+    );
+    assert!(
+        !test_seam.is_empty(),
+        "TEST_SEAM_MINT_FNS cannot be empty while the test-support seam exists"
     );
 }
 
@@ -1175,6 +1511,127 @@ fn symbol_matcher_respects_word_boundaries() {
         "let x = premark_session_verifiedly;",
         "mark_session_verified"
     ));
+    // Same boundary for the test-seam pair closed path #12 scans with.
+    assert!(!mentions_symbol(
+        "ProtocolAuthEvidence::test_verified_for_tenant(a, b, c)",
+        "test_verified"
+    ));
+    assert!(mentions_symbol(
+        "ProtocolAuthEvidence::test_verified(a, b)",
+        "test_verified"
+    ));
+}
+
+/// The test-seam census for one source, as closed path #12 runs it per file:
+/// strip comments/strings, strip `#[cfg(test)]` blocks, then look for the
+/// governed names. Self-tests drive this rather than reimplementing the
+/// pipeline, so a case cannot pass against logic the gate does not use.
+fn source_names_test_seam_constructor(source: &str) -> bool {
+    let production_text = strip_cfg_test_blocks(&strip_comments_and_strings(source));
+    production_text.lines().any(|raw| {
+        let line = raw.trim();
+        TEST_SEAM_MINT_FNS
+            .iter()
+            .any(|name| mentions_symbol(line, name))
+    })
+}
+
+/// Closed path #12's census must fire on every production shape that reaches
+/// the seam and stay silent on every sanctioned test shape — a census that
+/// flags the sanctioned callers would outlaw the seam it exists to protect.
+#[test]
+fn test_seam_census_flags_production_calls_and_ignores_test_code() {
+    for offending in [
+        // The audit's planted shape: a plain production call.
+        "fn admit() { let e = ProtocolAuthEvidence::test_verified(req, \"attacker\"); }",
+        // Renaming the TYPE at the import cannot hide the method name.
+        "use ironclaw_host_api::product_adapter::auth::ProtocolAuthEvidence as E;\n\
+         fn admit() { let e = E::test_verified(req, \"attacker\"); }",
+        // The tenant-scoped sibling is governed identically.
+        "fn admit() { ProtocolAuthEvidence::test_verified_for_tenant(t, req, \"x\"); }",
+        // A helper parked behind the bare feature gate is production text in
+        // every `--all-features` build; the stripper deliberately keeps it.
+        "#[cfg(feature = \"test-support\")]\n\
+         pub fn fixture() { ProtocolAuthEvidence::test_verified(req, \"x\"); }",
+        "#[cfg(any(test, feature = \"test-support\"))]\n\
+         pub fn fixture() { ProtocolAuthEvidence::test_verified(req, \"x\"); }",
+    ] {
+        assert!(
+            source_names_test_seam_constructor(offending),
+            "test-seam census missed a production-reachable call:\n{offending}"
+        );
+    }
+
+    for benign in [
+        // The sanctioned home: an inline `#[cfg(test)]` module.
+        "#[cfg(test)]\nmod tests {\n    fn fixture() {\n        let e = \
+         ProtocolAuthEvidence::test_verified(req, \"subject\");\n    }\n}",
+        // A gated bare test fn, same stripper path.
+        "#[cfg(test)]\nfn fixture() { ProtocolAuthEvidence::test_verified(a, b); }",
+        // Prose and string literals are stripped before the scan.
+        "// tests use ProtocolAuthEvidence::test_verified instead",
+        "/// See `ProtocolAuthEvidence::test_verified` (the `test-support` seam).",
+        "fn f() { let msg = \"use ProtocolAuthEvidence::test_verified\"; }",
+        // Near-miss identifiers sit on word boundaries.
+        "fn my_test_verified_helper() {}",
+    ] {
+        assert!(
+            !source_names_test_seam_constructor(benign),
+            "test-seam census fired on sanctioned source, which would outlaw the seam \
+             itself:\n{benign}"
+        );
+    }
+}
+
+/// Closed path #13's manifest census must flag every smuggling shape and none
+/// of the sanctioned dev-seam shapes. Fixture-driven through
+/// [`manifest_test_support_offenses`] — the same function the gate runs.
+#[test]
+fn manifest_scan_flags_every_smuggling_shape_and_ignores_dev_seams() {
+    for offending in [
+        // The F1 sentence: one line moved from [dev-dependencies] to
+        // [dependencies] and the seam ships.
+        "[dependencies]\nironclaw_host_api = { path = \"x\", features = [\"test-support\"] }",
+        "[build-dependencies]\nironclaw_llm = { path = \"x\", features = [\"test-support\"] }",
+        "[workspace.dependencies]\nironclaw_turns = { path = \"x\", features = [\"test-support\"] }",
+        "[target.'cfg(unix)'.dependencies]\nx = { path = \"y\", features = [\"test-support\"] }",
+        "[target.'cfg(unix)'.build-dependencies]\nx = { path = \"y\", features = [\"test-support\"] }",
+        // A dependency literally named for the seam.
+        "[dependencies.test-support]\npath = \"x\"",
+        // Feature laundering: a differently-named feature forwarding to the
+        // seam, enable-able from any normal dependency table by its own name.
+        "[features]\ndefault = [\"ironclaw_host_api/test-support\"]",
+        "[features]\nfull = [\"test-support\"]",
+        "[features]\nextra = [\"ironclaw_processes?/test-support\"]",
+    ] {
+        let parsed: toml::Value = toml::from_str(offending).expect("fixture parses");
+        assert!(
+            !manifest_test_support_offenses(&parsed).is_empty(),
+            "manifest census missed a smuggling shape:\n{offending}"
+        );
+    }
+
+    for benign in [
+        // The sanctioned dev-seam shapes (`.claude/rules/cargo-features.md`).
+        "[dev-dependencies]\nironclaw_host_api = { path = \"x\", features = [\"test-support\"] }",
+        "[target.'cfg(unix)'.dev-dependencies]\nx = { path = \"y\", features = [\"test-support\"] }",
+        // A crate declaring its own seam and forwarding it downward.
+        "[features]\ntest-support = [\"ironclaw_host_api/test-support\", \"dep:jsonschema\"]",
+        // Feature selection on a test target.
+        "[[test]]\nname = \"lifecycle_contract\"\nrequired-features = [\"test-support\"]",
+        // Near-miss names are different features/crates.
+        "[dependencies]\nx = { path = \"y\", features = [\"not-test-support\"] }",
+        "[dependencies]\ntest-support-shim = { path = \"y\" }",
+        // Prose never reaches the parser's value tree.
+        "# test-support is enabled from [dev-dependencies] only\n[dependencies]\nx = { path = \"y\" }",
+    ] {
+        let parsed: toml::Value = toml::from_str(benign).expect("fixture parses");
+        let offenses = manifest_test_support_offenses(&parsed);
+        assert!(
+            offenses.is_empty(),
+            "manifest census fired on a sanctioned shape ({offenses:?}):\n{benign}"
+        );
+    }
 }
 
 /// Both traits are unsealed with *provided* mint methods, so `impl Trait for X
