@@ -10,7 +10,7 @@
   - `delivery.rs`, `attachment_transfer.rs`, `preference_targets.rs` — delivery DTOs, attachment transfer, reply-target codec.
   - Re-derive this list with `ls crates/extensions/packages/slack/src/`.
 - Read upstream contracts before changing adapter behavior:
-  - `crates/ironclaw_assistant/AGENTS.md`
+  - `crates/product/ironclaw_assistant/AGENTS.md`
 
 ## What This Crate Owns
 

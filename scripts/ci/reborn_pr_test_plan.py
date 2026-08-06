@@ -88,8 +88,24 @@ DEDICATED_WORKFLOW_PREFIXES = (
     # `harness/latency/runner` is a standalone cargo project with its own
     # Cargo.lock, excluded from the workspace. No Reborn test lane builds
     # it, so it selects nothing rather than failing the planner closed.
+    # (Same *class* as WORKSPACE_EXCLUDED_PREFIXES below; kept here because
+    # renaming its reason string would churn nothing useful.)
     "harness/",
 )
+# Cargo projects this workspace deliberately does not build, with no workflow
+# of their own either. No lane can be selected for them, so they select nothing
+# — the honest answer, and not the same claim as "a dedicated workflow owns it".
+#
+# `tools/ironclaw_silk_decoder` is `[workspace]`-rooted and named in the root
+# `exclude`: `cargo build --workspace` never sees it and `cargo metadata` never
+# lists it. It was reachable only through the `crates/**` arm until WS7 moved
+# it to `tools/` (PROPOSAL §12.13 D-O), and that arm answered **badly** — a
+# one-line edit to the excluded helper's `main.rs` selected the ENTIRE
+# workspace, because the crate-attribution fall-through treats a path under
+# `crates/` with no owning member as broad risk. So this entry does not merely
+# restore the old behaviour; it replaces a silent over-selection with an
+# explicit "nothing builds this".
+WORKSPACE_EXCLUDED_PREFIXES = ("tools/ironclaw_silk_decoder/",)
 DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
     # ⚠ `scripts/live-canary/` and `scripts/live_canary/` are BOTH real
@@ -120,7 +136,7 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
-# `crates/ironclaw_architecture_tests/tests/reborn_cross_crate_include_scan.rs`).
+# `crates/app/ironclaw_architecture_tests/tests/reborn_cross_crate_include_scan.rs`).
 # Cargo's package directories cannot see them, so the `crates/` arm below
 # resolves no package and the planner used to fail closed on every PR that
 # touched a first-party extension package.
@@ -172,9 +188,15 @@ def _is_package_prompt(path: str) -> bool:
         return False
     return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
+    "tests/fixtures/extensions/acme-messenger/manifest.toml": (
+        "tests/integration/extension_runtime.rs"
+    ),
     "tests/support/hosted_mcp_registration_server.rs": (
         "tests/integration/hosted_mcp_registration.rs"
     ),
+}
+INTEGRATION_SNAPSHOT_PREFIX_OWNERS = {
+    "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
 }
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
@@ -592,6 +614,9 @@ def build_plan(
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated workflow owns: {path}")
             continue
+        if path.startswith(WORKSPACE_EXCLUDED_PREFIXES):
+            reasons.append(f"workspace-excluded project, built by no lane: {path}")
+            continue
         if path.startswith(DEDICATED_E2E_PREFIX):
             reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
             continue
@@ -633,6 +658,18 @@ def build_plan(
             owner = INTEGRATION_SUPPORT_OWNERS[path]
             integration_lanes.add(integration_inventory[owner])
             reasons.append(f"integration test support changed: {path}")
+            continue
+        snapshot_owner = next(
+            (
+                owner
+                for prefix, owner in INTEGRATION_SNAPSHOT_PREFIX_OWNERS.items()
+                if path.startswith(prefix)
+            ),
+            None,
+        )
+        if snapshot_owner is not None:
+            integration_lanes.add(integration_inventory[snapshot_owner])
+            reasons.append(f"integration test snapshot changed: {path}")
             continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)

@@ -2,7 +2,7 @@
 
 - **Status:** contract and production auth service
 - **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883 / #3884
-- **Crate:** `crates/ironclaw_auth`
+- **Crate:** `crates/domains/ironclaw_auth`
 - **Service facade:** `ironclaw_auth::RebornProductAuthServices`
 - **HTTP routes:** `ironclaw_webui::product_auth_route_mount`
 
@@ -519,7 +519,7 @@ pretending cleanup succeeded.
 
 The WebUI crate owns and mounts host-owned HTTP routes that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_webui/src/product_auth/mod.rs`). All mutation
+`crates/product/ironclaw_webui/src/product_auth/mod.rs`). All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied
@@ -570,10 +570,16 @@ Rules:
   `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
   also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
   `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
-  the redirect URI opt-in is present. The hint only adds Google's `hd=`
-  authorization parameter; product-auth setup does not treat it as a server-side
-  domain allowlist. The redirect URI must match the static Google callback route
-  exposed by the WebUI listener.
+  the redirect URI opt-in is present. **The hosted-domain hint is currently
+  inert** (measured 2026-08-05): it resolves into
+  `OAuthClientConfig::hosted_domain_hint`, which no production code reads — the
+  auth engine builds its authorization parameters from the vendor recipe's
+  manifest `extra_authorize_params`, and the Google recipes declare no `hd`. So
+  setting it adds nothing to the authorization URL, and product-auth has never
+  treated it as a server-side domain allowlist either. Server-side `hd`
+  enforcement exists only for **WebChat login**, via the separate
+  `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` provider config. The redirect URI
+  must match the static Google callback route exposed by the WebUI listener.
 - All routes project only adapter-safe DTOs (`CredentialAccountProjection`,
   `CredentialAccountListPage`, `CredentialRecoveryProjection`,
   `CredentialRefreshReport`, `SecretCleanupReport`). Raw secret handles,
@@ -645,7 +651,7 @@ Rules:
 
 ## AuthPromptView v2 enrichment (issue #4112)
 
-`AuthPromptView` in `crates/ironclaw_extension_contracts/src/auth_prompt.rs` carries
+`AuthPromptView` in `crates/contracts/ironclaw_extension_contracts/src/auth_prompt.rs` carries
 five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
 
 | Field | Type | Present when |
@@ -690,7 +696,7 @@ token, `interaction_id`.
 
 ### Wire-shape tests
 
-`crates/ironclaw_composition/tests/webui_v2_product_auth_4201.rs`
+`crates/app/ironclaw_composition/tests/webui_v2_product_auth_4201.rs`
 covers:
 - Serialisation of the new optional fields when present.
 - Omission of all new fields when absent (backward-compat check).

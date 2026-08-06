@@ -206,12 +206,15 @@ jobs:
           # (verified against the pinned commit's bundled dist/setup/index.js:
           # `hashFiles` walks one globber built from every newline-separated
           # pattern and only throws when the COMBINED walk finds nothing), so
-          # the flat line stays live for today's tree and the nested line picks
-          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
-          # without either one needing to be conditional.
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm

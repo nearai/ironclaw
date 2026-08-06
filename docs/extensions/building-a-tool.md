@@ -74,9 +74,9 @@ Pick one lane first. Do not blend lanes to make a tool work.
 | Lane | Use when | Current examples | Main files |
 | --- | --- | --- | --- |
 | WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
-| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
+| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/app/ironclaw_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
 | Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
-| Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_sandbox` script runtime path plus manifest runtime `script` |
+| Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/lanes/ironclaw_sandbox` script runtime path plus manifest runtime `script` |
 
 For a new provider API like Linear, Jira, or a small internal SaaS API, start
 with WASM unless you have a concrete reason not to.
@@ -92,20 +92,20 @@ Usually touch:
 - `crates/extensions/packages/<extension>/manifest.toml`
 - `crates/extensions/packages/<extension>/schemas/<extension>/*.json`
 - `crates/extensions/packages/<extension>/prompts/<extension>/*.md`
-- `crates/ironclaw_composition/src/available_extensions.rs` only when adding
+- `crates/app/ironclaw_composition/src/available_extensions.rs` only when adding
   a host-bundled available extension to the built-in install catalog.
 
 Do not touch for ordinary tools:
 
-- `crates/ironclaw_extension_registry/src/v2.rs`, unless changing the manifest contract
+- `crates/extensions/ironclaw_extension_registry/src/v2.rs`, unless changing the manifest contract
   itself.
-- `crates/ironclaw_host_api/src/*`, unless adding a new shared host API type.
-- `crates/ironclaw_capabilities`, unless changing authorization/approval
+- `crates/contracts/ironclaw_host_api/src/*`, unless adding a new shared host API type.
+- `crates/kernel/ironclaw_capabilities`, unless changing authorization/approval
   orchestration for all capabilities.
-- `crates/ironclaw_approvals`, unless changing approval lease semantics.
-- `crates/ironclaw_secrets`, unless changing low-level secret storage/lease
+- `crates/kernel/ironclaw_approvals`, unless changing approval lease semantics.
+- `crates/substrates/ironclaw_secrets`, unless changing low-level secret storage/lease
   semantics.
-- `crates/ironclaw_network`, unless changing global network policy/HTTP egress
+- `crates/substrates/ironclaw_network`, unless changing global network policy/HTTP egress
   semantics.
 - agent loop crates for tool-specific routing. Tool selection must come from the
   published capability surface, not hardcoded model-routing logic.
@@ -117,14 +117,14 @@ Usually touch:
 - `crates/extensions/packages/<extension>/wasm-src/`
 - `crates/extensions/packages/<extension>/wasm/<tool>.wasm`
 - the extension manifest, schemas, and prompts.
-- `crates/ironclaw_composition/src/available_extensions.rs` to package
+- `crates/app/ironclaw_composition/src/available_extensions.rs` to package
   the manifest, schemas, prompts, and WASM bytes if host-bundled.
 
 Use as references:
 
 - `crates/extensions/packages/github/wasm-src/src/lib.rs`
 - `crates/extensions/packages/github/wasm-src/src/request.rs`
-- `crates/ironclaw_host_runtime/src/wasm_credentials.rs`
+- `crates/kernel/ironclaw_host_runtime/src/wasm_credentials.rs`
 
 Do not add a direct `reqwest`/HTTP client inside the WASM tool. Use the WIT host
 HTTP import (`near::agent::host::http_request`) so Reborn can enforce egress,
@@ -137,17 +137,17 @@ Usually touch:
 - `crates/extensions/packages/<provider>-mcp/manifest.toml`
 - `schemas/<provider>/...`
 - `prompts/<provider>/...`
-- `crates/ironclaw_composition/src/available_extensions.rs` if
+- `crates/app/ironclaw_composition/src/available_extensions.rs` if
   host-bundled.
 
 Use as references:
 
 - `crates/extensions/packages/notion-mcp/manifest.toml`
-- `crates/ironclaw_composition/src/mcp.rs`
-- `crates/ironclaw_auth/src/engine/`
-- composition provider wiring in `crates/ironclaw_composition/src/factory.rs`
+- `crates/app/ironclaw_composition/src/mcp.rs`
+- `crates/domains/ironclaw_auth/src/engine/`
+- composition provider wiring in `crates/app/ironclaw_composition/src/factory.rs`
 
-Only touch `crates/ironclaw_composition/src/mcp.rs` if the hosted MCP
+Only touch `crates/app/ironclaw_composition/src/mcp.rs` if the hosted MCP
 runtime policy needs a new generic rule. Notion already demonstrates the common
 shape: HTTPS-only endpoint, exact host/path match, no URL credentials, no query,
 no fragment, host-mediated egress, staged product-auth token.
@@ -156,15 +156,15 @@ no fragment, host-mediated egress, staged product-auth token.
 
 Usually touch only when adding a new product-auth provider:
 
-- `crates/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
+- `crates/domains/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
   must be shared and durable.
-- `crates/ironclaw_auth/src/engine/` for generic recipe-driven OAuth/API-key
+- `crates/domains/ironclaw_auth/src/engine/` for generic recipe-driven OAuth/API-key
   exchange behavior.
 - `crates/extensions/packages/<extension>/manifest.toml`
   for bundled first-party provider recipe data.
-- `crates/ironclaw_composition/src/factory.rs` for composition-time
+- `crates/app/ironclaw_composition/src/factory.rs` for composition-time
   provider recipe wiring.
-- `crates/ironclaw_webui/src/product_auth/` only for product auth HTTP
+- `crates/product/ironclaw_webui/src/product_auth/` only for product auth HTTP
   setup/callback route surfaces.
 
 Do not create extension-local OAuth maps or store OAuth tokens in runtime code.
@@ -176,14 +176,14 @@ Credential accounts and secrets belong to `ironclaw_auth` /
 For a normal extension, do not touch these:
 
 - `src/agent/*` or Reborn loop strategy code to special-case your tool.
-- `crates/ironclaw_llm/*` to teach the model your tool name.
+- `crates/domains/ironclaw_llm/*` to teach the model your tool name.
 - `crates/ironclaw_engine/*` V1 runtime paths.
 - `src/tools/*` V1 tools.
-- `crates/ironclaw_host_api` for one provider's fields.
-- `crates/ironclaw_extension_registry/src/v2.rs` to allow a one-off manifest shortcut.
-- `crates/ironclaw_network` to allow one provider host.
-- `crates/ironclaw_secrets` to fetch one provider token.
-- `crates/ironclaw_approvals` to make one write operation easier.
+- `crates/contracts/ironclaw_host_api` for one provider's fields.
+- `crates/extensions/ironclaw_extension_registry/src/v2.rs` to allow a one-off manifest shortcut.
+- `crates/substrates/ironclaw_network` to allow one provider host.
+- `crates/substrates/ironclaw_secrets` to fetch one provider token.
+- `crates/kernel/ironclaw_approvals` to make one write operation easier.
 
 If your implementation appears to require one of these, stop and identify the
 missing Reborn contract or composition seam first.
@@ -342,13 +342,13 @@ Do not:
 Network policy belongs in host/runtime planning:
 
 - WASM credential injection is derived from manifest descriptors in
-  `crates/ironclaw_host_runtime/src/wasm_credentials.rs`.
+  `crates/kernel/ironclaw_host_runtime/src/wasm_credentials.rs`.
 - Hosted MCP policy is planned in
-  `crates/ironclaw_composition/src/mcp.rs`.
+  `crates/app/ironclaw_composition/src/mcp.rs`.
 - GSuite WASM tools should declare narrow credential audiences and use host
   HTTP egress for Google API hosts.
 - Shared HTTP enforcement and redaction live in
-  `crates/ironclaw_host_runtime/src/egress/` and `crates/ironclaw_network`.
+  `crates/kernel/ironclaw_host_runtime/src/egress/` and `crates/substrates/ironclaw_network`.
 
 Provider requests should set ordinary provider headers like `Accept`,
 `Content-Type`, API version, and User-Agent in runtime code. Credential headers
@@ -431,7 +431,7 @@ failure and not a model-visible token prompt.
 
 ## WASM implementation pattern
 
-WASM tools implement `crates/ironclaw_wasm/wit/tool.wit`:
+WASM tools implement `crates/lanes/ironclaw_wasm/wit/tool.wit`:
 
 ```rust
 wit_bindgen::generate!({
@@ -520,7 +520,7 @@ agent-loop path. Let the MCP runtime and host egress planner own it.
 
 Host-bundled extension packages are included in:
 
-- `crates/ironclaw_composition/src/available_extensions.rs`
+- `crates/app/ironclaw_composition/src/available_extensions.rs`
 
 That file:
 
@@ -549,7 +549,7 @@ manifest host API path.
 
 Hot model-facing publication happens in:
 
-- `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+- `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs`
 
 It resolves input schema refs, output schema refs, and optional prompt docs
 under the extension root. It does not grant authority and does not execute
@@ -614,9 +614,9 @@ Minimum tests for a Reborn tool:
 
 Useful existing test areas:
 
-- `crates/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
-- `crates/ironclaw_composition/src/available_extensions.rs` tests
-- `crates/ironclaw_host_runtime/src/capability_catalog.rs` tests
+- `crates/extensions/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
+- `crates/app/ironclaw_composition/src/available_extensions.rs` tests
+- `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs` tests
 
 ### Runtime behavior
 
@@ -682,15 +682,15 @@ shape before extending it.
 - Notion hosted MCP credential/effect semantics:
   `crates/extensions/packages/notion-mcp/manifest.toml`
 - Hosted MCP egress planner:
-  `crates/ironclaw_composition/src/mcp.rs`
+  `crates/app/ironclaw_composition/src/mcp.rs`
 - Notion OAuth provider wiring:
-  `crates/ironclaw_composition/src/factory.rs`
+  `crates/app/ironclaw_composition/src/factory.rs`
 - Hot capability catalog:
-  `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+  `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs`
 - Host HTTP egress service:
-  `crates/ironclaw_host_runtime/src/egress/`
+  `crates/kernel/ironclaw_host_runtime/src/egress/`
 - Manifest v2 contract:
-  `crates/ironclaw_extension_registry/src/v2.rs`
+  `crates/extensions/ironclaw_extension_registry/src/v2.rs`
 
 ## Quick implementation checklist
 
@@ -705,3 +705,4 @@ shape before extending it.
 8. Add manifest, packaging, runtime, auth/approval, and integration tests.
 9. Run targeted tests.
 10. Check docs/specs and `FEATURE_PARITY.md` for behavior-status updates.
+11. When your tool is packaged and tested, submit it to IronHub so other agents can discover and install it. See [Contributing](/hub/contributing).

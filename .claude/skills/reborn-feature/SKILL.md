@@ -32,8 +32,8 @@ Run the graph status check once. If it is missing or stale, use targeted
 
 ```bash
 bash scripts/codebase-graph.sh status
-rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/ironclaw_assistant crates/ironclaw_host_api crates/ironclaw_webui
-rg -n "descriptor|webui_v2_routes|ProductSurface" crates/ironclaw_webui/src/webui_v2
+rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/product/ironclaw_assistant crates/contracts/ironclaw_host_api crates/product/ironclaw_webui
+rg -n "descriptor|webui_v2_routes|ProductSurface" crates/product/ironclaw_webui/src/webui_v2
 ```
 
 Read the owning crate's `AGENTS.md`, then `CLAUDE.md` or `CONTRACT.md` when
@@ -42,7 +42,7 @@ present. Find the nearest existing descriptor and copy its narrow pattern.
 ## Default implementation
 
 1. Add or reuse a typed `ProductView<Params, Output>` in
-   `crates/ironclaw_assistant/src/reborn_services.rs` or its owning submodule.
+   `crates/product/ironclaw_assistant/src/reborn_services.rs` or its owning submodule.
 2. Add or reuse a `ProductSurfaceCommandDescriptor` for typed product
    commands, or a `ProductCapabilityDescriptor` for API-only side effects.
 3. Implement the backing behavior inside `ironclaw_assistant` or the owning
@@ -51,7 +51,7 @@ present. Find the nearest existing descriptor and copy its narrow pattern.
 4. Add the route descriptor and thin handler in `ironclaw_webui`. Handlers
    receive `ProductSurfaceCaller` and use `BoundProductSurface`; they do not
    reach into composition, stores, dispatchers, or runtime lanes.
-5. Add the frontend code under `crates/ironclaw_webui/frontend/src` and use
+5. Add the frontend code under `crates/product/ironclaw_webui/frontend/src` and use
    the existing API client and page patterns.
 6. Wire only genuinely new production dependencies through composition and
    the CLI. Do not add a builder or `Arc` field when an existing surface can
@@ -84,7 +84,7 @@ cargo clippy -p ironclaw_assistant --all-targets --all-features -- -D warnings
 cargo test -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-targets --all-features -- -D warnings
 cargo test -p ironclaw_architecture_tests  # when ownership or dependencies change
-pnpm --dir crates/ironclaw_webui/frontend test
+pnpm --dir crates/product/ironclaw_webui/frontend test
 ```
 
 Use a caller-level test for every new route or side effect. Add a whole-path

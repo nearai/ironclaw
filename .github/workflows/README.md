@@ -343,7 +343,7 @@ points, including their existing optional DIND dispatch. The manual
   (feature-gated cfg errors).
 - **Benchmark compilation** (`cargo bench --no-run`) runs on push and nightly
   only, and the clippy lanes do not pass `--benches`. Bench targets exist only
-  in `crates/ironclaw_safety` today.
+  in `crates/substrates/ironclaw_safety` today.
 - **Replay Snapshot Gate** runs on push + via the nightly legacy suite; it
   covers the retiring v1 engine.
 - **The legacy v1 suites are deliberately invoked nowhere** — v1 (`src/`) is

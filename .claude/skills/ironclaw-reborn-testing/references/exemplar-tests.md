@@ -25,10 +25,10 @@ The in-process harness (code in `tests/integration/support/`, spec in `tests/int
 
 Two tests lock the WebChat v2 surface from opposite sides — copy the pairing whenever policy is declared in one crate and enforced in another:
 
-- `crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
-- `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
+- `crates/product/ironclaw_webui/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
+- `crates/product/ironclaw_webui/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
 
-The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) lives in `crates/ironclaw_composition/tests/webui_v2_serve.rs` — caller-level, not middleware unit tests.
+The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) lives in `crates/app/ironclaw_composition/tests/webui_v2_serve.rs` — caller-level, not middleware unit tests.
 
 ## 4. Helper-only coverage: the cautionary shape
 
@@ -42,4 +42,4 @@ When a predicate selects what goes out the wire, the test must construct the rea
 
 ## 6. Naming your contract's tests
 
-`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.
+`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/domains/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.

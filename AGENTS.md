@@ -9,7 +9,7 @@ present. Cross-crate behavior is specified under `docs/reborn/contracts/`.
 
 All product work belongs in the Reborn workspace under `crates/`. The shipping
 binary is `ironclaw` from the `ironclaw` package in
-`crates/ironclaw_cli`. Start with:
+`crates/app/ironclaw_cli`. Start with:
 
 - `.claude/skills/ironclaw-reborn-orientation/SKILL.md` for ownership and flow.
 - `.claude/skills/reborn-feature/SKILL.md` for cross-layer product work.
@@ -63,8 +63,10 @@ dependencies and public contracts:
 
 ```bash
 rg -n "CONCEPT_OR_TRAIT_OR_TYPE" crates
-rg -n "ironclaw_CANDIDATE" crates/*/Cargo.toml Cargo.toml
-find crates/ironclaw_CANDIDATE -maxdepth 2 \
+rg -n "ironclaw_CANDIDATE" --glob '**/Cargo.toml' crates Cargo.toml
+# Crates live under a family directory (crates/<family>/ironclaw_*, PROPOSAL §5),
+# so resolve the crate by name rather than assuming a fixed depth:
+find "$(python3 scripts/ci/lib/crate_tree.py . | grep -E '/ironclaw_CANDIDATE$')" -maxdepth 2 \
   \( -name AGENTS.md -o -name CLAUDE.md -o -name CONTRACT.md -o -name README.md \)
 ```
 

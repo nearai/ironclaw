@@ -21,7 +21,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
-use ironclaw_assistant::{ProductOutboundEnvelope, ProductOutboundPayload};
 use ironclaw_assistant::{RebornServices, RebornStreamEventsRequest};
 use ironclaw_composition::test_support::BudgetTestGateway;
 use ironclaw_composition::{
@@ -45,6 +44,7 @@ use ironclaw_product_contracts::admin_users::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProductOutboundPayload};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
 };
@@ -2200,8 +2200,8 @@ impl AdminUserService for StaticAdminUserService {
 }
 
 /// `GET /commands` filters the registry by the caller's command-admin
-/// audience (member sees only the two `User`-audience commands; admin sees
-/// the full 12-entry registry, including the `Lifecycle` family), and
+/// audience (member sees only the five `User`-audience commands; admin sees
+/// the full 15-entry registry, including the `Lifecycle` family), and
 /// executing an `Admin`-audience action (`/model set ...`) as a member is
 /// rejected at the audience gate before the LLM-config seam ever runs — a 200
 /// response carrying a body-level `rejection`, never a transport error. See
@@ -2242,7 +2242,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
         .collect();
     assert_eq!(
         member_names,
-        vec!["model", "status"],
+        vec!["model", "status", "new", "stop", "interrupt"],
         "member must see only the User-audience commands: {body}"
     );
 
@@ -2260,7 +2260,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
         .collect();
     assert_eq!(
         admin_names.len(),
-        12,
+        15,
         "admin must see the full registry including the Lifecycle family: {body}"
     );
     assert!(

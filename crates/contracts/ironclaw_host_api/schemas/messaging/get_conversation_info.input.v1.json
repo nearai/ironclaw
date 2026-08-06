@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging get_conversation_info input",
+  "type": "object",
+  "required": ["conversation"],
+  "properties": {
+    "conversation": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Conversation ref for this extension, from list_conversations / open_dm / get_conversation_info or an earlier result. Never invented; never valid on another extension."
+    }
+  },
+  "additionalProperties": false
+}

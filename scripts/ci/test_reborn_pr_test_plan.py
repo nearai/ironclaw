@@ -160,7 +160,7 @@ def real_owner_metadata() -> dict:
         ),
         package(
             "ironclaw_extension_host",
-            "crates/ironclaw_extension_host/Cargo.toml",
+            "crates/extensions/ironclaw_extension_host/Cargo.toml",
             ("ironclaw_extension_support",),
         ),
         package(
@@ -617,6 +617,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "none")
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
+
+    def test_workspace_excluded_helper_selects_nothing(self) -> None:
+        """`tools/ironclaw_silk_decoder/**` is `[workspace]`-rooted and named in
+        the root `exclude`, and has no workflow of its own either.
+
+        Two things are pinned here, and the second is the interesting one.
+        First, it must be *classified* — WS7 moved it out of `crates/`
+        (PROPOSAL §12.13 D-O), and an unclassified path fails the planner
+        closed, skipping every downstream Reborn lane. Second, it must select
+        **nothing**: under its old `crates/` home the crate-attribution
+        fall-through selected the ENTIRE workspace for a one-line edit to a
+        helper nothing builds. Asserting emptiness is what stops a future
+        "classification" from quietly restoring that over-selection.
+        """
+        for path in (
+            "tools/ironclaw_silk_decoder/src/main.rs",
+            "tools/ironclaw_silk_decoder/Cargo.toml",
+            "tools/ironclaw_silk_decoder/AGENTS.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["affected_packages"], [])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["integration_lanes"], [])
 
     def test_repo_root_metadata_class_is_owned_by_other_lanes(self) -> None:
         """The repo-root metadata class de-escalates instead of failing closed.
@@ -1267,14 +1292,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
-    def test_hosted_mcp_support_selects_its_owning_integration_lane(self) -> None:
-        owner = planner.INTEGRATION_SUPPORT_OWNERS[
-            "tests/support/hosted_mcp_registration_server.rs"
+    def test_owned_integration_support_selects_its_exact_lane(self) -> None:
+        for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
+            with self.subTest(path=path):
+                expected_lane = planner._integration_test_lanes()[owner]
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["integration_lanes"], [expected_lane])
+
+    def test_golden_payload_snapshot_selects_its_owning_integration_lane(self) -> None:
+        owner = planner.INTEGRATION_SNAPSHOT_PREFIX_OWNERS[
+            "tests/snapshots/golden_payload__"
         ]
+        self.assertEqual(owner, "tests/integration/golden_payload.rs")
         expected_lane = planner._integration_test_lanes()[owner]
 
         plan = self.plan(
-            "pull_request", ["tests/support/hosted_mcp_registration_server.rs"]
+            "pull_request", ["tests/snapshots/golden_payload__tool_call.snap"]
         )
 
         self.assertEqual(plan["integration_lanes"], [expected_lane])

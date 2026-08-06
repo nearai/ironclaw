@@ -1,0 +1,37 @@
+[package]
+name = "ironclaw_extension_registry"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Extension manifest and registry contracts for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+toml = "1.1"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+deadpool-postgres = "0.14"
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0", features = ["test-support"] }
+libsql = { version = "0.9", default-features = false, features = ["core"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+tokio-postgres = "0.7"

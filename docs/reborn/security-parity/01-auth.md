@@ -9,9 +9,9 @@ session, OIDC, and the query-token exception). Sibling files
 - **v1** auth lives in `src/channels/web/platform/auth.rs` (wired by
   `src/channels/web/platform/router.rs`).
 - **v2** auth is the three `WebuiAuthenticator` impls in
-  `crates/ironclaw_webui/` (`lib.rs`, `session.rs`,
+  `crates/product/ironclaw_webui/` (`lib.rs`, `session.rs`,
   `oidc.rs`), selected by the host and enforced by the composition
-  middleware in `crates/ironclaw_composition/src/webui/webui_serve.rs`.
+  middleware in `crates/app/ironclaw_composition/src/webui/webui_serve.rs`.
   v2 shares **zero** code with v1 by contract (#3886).
 
 Decision legend: **Keep** = behavior preserved (possibly different
@@ -45,7 +45,7 @@ relocates, linked to a tracking issue.
   session cookie on the OAuth callback; v2 never sets a cookie — it
   returns a short-lived single-use `login_ticket` in the redirect, which
   the SPA exchanges for a bearer over same-origin JSON. Rationale and
-  regression coverage are in `crates/ironclaw_composition/CLAUDE.md`
+  regression coverage are in `crates/app/ironclaw_composition/CLAUDE.md`
   ("Session transport decision"), tracked under **#4116**.
 
 Both breaks inherit the v1-routes hard non-goal (**#3886**): the v2
@@ -53,7 +53,7 @@ listener never re-introduces v1 `/auth/*` handlers.
 
 ## Test coverage
 
-- **v2 route-layer** (`crates/ironclaw_webui/tests/`):
+- **v2 route-layer** (`crates/product/ironclaw_webui/tests/`):
   - `auth_route_contract.rs` — env-bearer accept/reject, missing /
     empty-token / no-prefix → 401, case-insensitive prefix parity,
     revoke-then-reject, expired-session rejection, `?token=` SSE shim
