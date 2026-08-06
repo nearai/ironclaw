@@ -2523,6 +2523,25 @@ mod tests {
             })
         ));
     }
+
+    #[tokio::test]
+    async fn sandbox_shell_rejects_scripted_process_overrides_during_build() {
+        let result = RebornIntegrationHarness::test_default()
+            .with_shell_timeout()
+            .with_sandbox_shell_tools()
+            .build()
+            .await;
+
+        let error = match result {
+            Ok(_) => panic!("sandbox shell accepted an unsupported process override"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("sandbox shell harness executes real containers")
+        );
+    }
 }
 
 // The shared planned-runtime assembly (`RebornIntegrationGroupBuilder::into_group`)
