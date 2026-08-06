@@ -67,3 +67,33 @@ test("login page omits the local-dev hint on a non-local origin even with no OAu
   assert.doesNotMatch(JSON.stringify(rendered), /login\.localDevHint/);
   assert.doesNotMatch(JSON.stringify(rendered), /ironclaw status/);
 });
+
+// The OAuth providers (e.g. "Continue with Google") render above the gateway
+// token form, separated by the "or continue with" divider. The divider is
+// page-owned (it separates two sibling auth methods), so it is visible even
+// though `OAuthProviderButtons` itself is mocked out here.
+test("login page renders the OAuth providers above the gateway token form", () => {
+  const serialized = JSON.stringify(
+    renderLoginPage({ providers: ["google"], isLocalDev: false }),
+  );
+
+  const dividerIndex = serialized.indexOf("login.oauthDivider");
+  const tokenIndex = serialized.indexOf("login.tokenLabel");
+
+  assert.notEqual(dividerIndex, -1, "expected the OAuth divider to render");
+  assert.notEqual(tokenIndex, -1, "expected the gateway token field to render");
+  assert.ok(
+    dividerIndex < tokenIndex,
+    "expected the OAuth section to render above the gateway token form",
+  );
+});
+
+// With no OAuth providers configured (single-user local install), there is
+// nothing to place above the token form and no divider to draw.
+test("login page omits the OAuth divider when no providers are configured", () => {
+  const serialized = JSON.stringify(
+    renderLoginPage({ providers: [], isLocalDev: true }),
+  );
+
+  assert.doesNotMatch(serialized, /login\.oauthDivider/);
+});

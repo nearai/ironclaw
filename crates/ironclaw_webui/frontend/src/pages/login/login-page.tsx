@@ -59,6 +59,22 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
           </p>
         </div>
 
+        {/* OAuth providers sit above the gateway token form; the divider
+            separates the two sibling auth methods and is page-owned because
+            it belongs to neither the provider buttons nor the token form. */}
+        {oauthProviders.length > 0 &&
+          (<div className="mb-6 space-y-3">
+            <OAuthProviderButtons
+              providers={oauthProviders}
+              redirectAfter={oauthRedirectAfter}
+            />
+            <div className="flex items-center gap-3 text-[11px] uppercase text-[var(--v2-text-faint)]">
+              <span className="h-px flex-1 bg-[var(--v2-panel-border)]"></span>
+              <span>{t("login.oauthDivider")}</span>
+              <span className="h-px flex-1 bg-[var(--v2-panel-border)]"></span>
+            </div>
+          </div>)}
+
         <form
           className="space-y-4"
           onSubmit={handleSubmit(({ token }) => onSubmit(token))}
@@ -100,11 +116,6 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
             {t("login.connect")}
           </Button>
         </form>
-
-        <OAuthProviderButtons
-          providers={oauthProviders}
-          redirectAfter={oauthRedirectAfter}
-        />
 
         {/* No OAuth providers configured is the local single-user desktop
             signal (`/auth/providers` returns an empty list when no SSO is
