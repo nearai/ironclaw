@@ -4,10 +4,6 @@ use super::turn_events::{
 };
 use super::*;
 
-use crate::{
-    CapabilityActivityStatusView, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductProjectionItem,
-};
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_event_log::{InMemoryDurableEventLog, RuntimeEvent};
@@ -33,6 +29,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
     SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionItem,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor, GetRunStateRequest,

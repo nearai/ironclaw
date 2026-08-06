@@ -116,40 +116,29 @@ observed_date = "2026-07-16"
 # eviction (-2,189) and the WS6 policy eviction (-2,439) are disjoint; on the
 # merged tree the deltas add exactly: 45,127 - 2,189 - 2,439 = 40,499.
 #
-# RAISED 40499 -> 40711 on 2026-08-05 by the skills stack's base layer (#6745). A raise, not a
-# re-ratchet, so it is the reviewed decision this file's own rule requires — flagged in the
-# PR body for the owner. The growth is skill-summary and product-surface assembly wiring, which is composition's charter.
-# Measured with `bash scripts/ci/check-composition-budget.sh --print`; set to current, not
-# padded. main sat only 54 LOC under the effective ceiling, so this gate currently reds any
-# PR adding more than that to composition; the next wave close should re-ratchet.
+# Re-ratcheted 40499 -> 40419 on 2026-08-05 by the WS6 OpenAI-compat eviction
+# (the re-scoped clause: the router-state assembly behind a ports params
+# struct, the `/v1/models` LlmConfig catalog + its error map, the projection
+# streamer + envelope decode, and the scope->caller projection all move to
+# `ironclaw_openai_compat::mount`). MEASURED on this tree with
+# `bash scripts/ci/check-composition-budget.sh --print`, not derived from the
+# diff: the post-eviction branch reads 40419, where the same command on the
+# branch's own base (ws7/wasm-and-closeout @ 22e73de89) read 40595 -- i.e. the
+# base was already 96 LOC above the 40499 ceiling and passing on tolerance
+# alone, so this ratchet reclaims that drift as well as the eviction. Set to
+# current, not padded. (The eviction itself removed 199 lines; 9 came back as
+# the module doc-comment that records what stayed behind and why, which is the
+# honest number to bank.)
 #
-# RAISED 40,711 -> 40,995 on 2026-08-05 by the skills stack (#6745 -> #6938 ->
-# #7171). This is a raise, not a re-ratchet, so it is the reviewed decision the
-# rule below requires and not routine wiring -- flagged in #7171's body for the
-# owner to push back on. Measured on the merged tree with
-# `bash scripts/ci/check-composition-budget.sh --print`; set to current, not
-# padded.
-#
-# (Two earlier revisions said 41,414 and 41,096. The first was measured on a tree a
-# bad `git stash pop` had polluted -- the gate's own C11 self-test caught it as 318
-# LOC of unclaimed headroom. The second was correct at the time and came down again
-# when 346 lines of comment prose were cut from this stack.)
-#
-# WHY IT IS COMPOSITION'S TO CARRY. The counted growth is +447 production LOC
-# and every line of it is service-graph assembly, which is this crate's charter
-# rather than behavior that belongs elsewhere:
-#   runtime.rs +160          skill-bundle staging + process-execution wiring
-#   standalone_bootstrap +131 one-shot host-disk -> database skill import
-#   capability_host.rs +47   read-only skill paths merged into the tools view
-#   filesystem_assembly +46  database file read/write seams
-#   runtime_mounts.rs +30    the single db_backed_skill_grants decision, which
-#                            REPLACED three divergent views (net of -41 deleted)
-#   the remaining ~33        per-gate approval mount derivation, production seeding
-# The behavior these wire up lives in ironclaw_skills, ironclaw_loop_host and
-# ironclaw_first_party_extension_ports. Note main sat only 54 LOC under the
-# effective ceiling, so this gate currently reds ANY PR adding more than that to
-# composition; the next wave close should re-ratchet rather than inherit this.
-loc_ceiling = 40995
+# RAISED 40419 -> 40822 on 2026-08-05 by the skills stack's top layer (#7171). A raise, not a
+# re-ratchet, so it is the reviewed decision this file's own rule requires -- flagged in the PR body
+# for the owner. Main re-ratcheted to 40419 after its own eviction and this layer measures 253 over
+# the effective ceiling; the growth is service-graph assembly (skill-bundle staging and
+# process-execution wiring, the one-shot host-disk -> database skill import, read-only skill paths in
+# the filesystem-tools view, and the single db_backed_skill_grants decision that replaced three
+# divergent mount views). Measured with `check-composition-budget.sh --print`; set to current, not
+# padded. The next wave close should re-ratchet rather than inherit this.
+loc_ceiling = 40822
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -160,7 +149,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40995
+loc_observed = 40822
 loc_observed_date = "2026-08-05"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

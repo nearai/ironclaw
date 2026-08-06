@@ -5,9 +5,10 @@
 //! are authored in markdown (`**bold**`, backticks) so adapters can render
 //! them into their native markup.
 
-use crate::{ApprovalPromptContextView, AuthPromptChallengeKind, AuthPromptView, GatePromptView};
+use ironclaw_extension_contracts::auth_prompt::{AuthPromptChallengeKind, AuthPromptView};
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
 use ironclaw_outbound::RunNotificationEventKind;
+use ironclaw_product_contracts::outbound::{ApprovalPromptContextView, GatePromptView};
 
 use crate::is_approval_gate_ref;
 

@@ -5,8 +5,8 @@
 
 pub(super) use ironclaw_approvals::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    CapabilityPermissionOverrideStorePort, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };

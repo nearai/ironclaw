@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use ironclaw_assistant::{AuthRequirement, ProductInboundPayload, ProtocolAuthEvidence};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs,
     OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatRouterState,
@@ -25,6 +25,7 @@ use ironclaw_openai_compat::{
     OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
     openai_compat_router_with_state,
 };
+use ironclaw_product_contracts::inbound::ProductInboundPayload;
 use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
 use support::{

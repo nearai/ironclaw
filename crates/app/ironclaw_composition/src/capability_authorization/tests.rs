@@ -374,6 +374,7 @@ fn local_host_shell_authorization_inputs(
         max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
+        standard_op: None,
     };
     let policy = builtin_capability_policy().expect("capability policy");
     let grants = policy.builtin_grants(
@@ -427,6 +428,7 @@ async fn trace_commons_authorize_decision(
         max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
+        standard_op: None,
     };
     let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let provider_id = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id");

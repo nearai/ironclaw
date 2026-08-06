@@ -262,9 +262,10 @@ impl RebornRuntimeStores {
         else {
             return Ok(None);
         };
-        let installation_id =
-            ironclaw_assistant::AdapterInstallationId::new(authenticated_installation_id)
-                .map_err(|error| error.to_string())?;
+        let installation_id = ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+            authenticated_installation_id,
+        )
+        .map_err(|error| error.to_string())?;
         let outcome = service
             .consume(
                 &installation_id,
@@ -556,8 +557,8 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn standalone_tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
-        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+    ) -> Option<Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>> {
+        let overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort> =
             self.tool_permission_overrides.clone();
         Some(overrides)
     }
@@ -949,7 +950,7 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
     storage_root: &Path,
 ) -> Result<
     (
-        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
         Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ),
@@ -958,10 +959,11 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
     let mut composite = CompositeRootFilesystem::new();
     mount_default_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
-        Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
-            &scoped,
-        )));
+    let tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
+    > = Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
+        &scoped,
+    )));
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
         Arc::new(ComposedAutoApproveSettingStore::new(Arc::clone(&scoped)));
     let persistent_approval_policies: Arc<

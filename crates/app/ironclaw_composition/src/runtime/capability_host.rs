@@ -8,7 +8,7 @@ use std::{
 use chrono::Utc;
 use uuid::Uuid;
 
-use ironclaw_assistant::{OutboundPreferencesProductService, ProjectService};
+use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
     capability::EffectKind,
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
@@ -28,6 +28,7 @@ use ironclaw_loop_host::{
     HostManagedModelGateway, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ThreadScopeResolver, loop_driver_execution_extension_id,
 };
+use ironclaw_product_contracts::project_service::ProjectService;
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -70,10 +71,10 @@ pub(crate) use ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID;
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use ironclaw_first_party_extension_ports::SKILL_ACTIVATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
 pub(crate) use ironclaw_loop_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingCapabilityPortConfig, create_refreshing_capability_port,
 };
@@ -121,8 +122,9 @@ pub(super) fn capability_wiring(
         services.approval_requests.clone();
     let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
         services.capability_leases.clone();
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
-        services.tool_permission_overrides.clone();
+    let tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
+    > = services.tool_permission_overrides.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
         services.auto_approve_settings.clone();
     let approval_settings: Arc<dyn ApprovalSettingsProvider> =

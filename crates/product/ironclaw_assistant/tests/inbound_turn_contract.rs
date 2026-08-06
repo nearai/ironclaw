@@ -8,17 +8,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_assistant::{
-    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload,
-};
-use ironclaw_assistant::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
     InboundTurnService, ProductSurfaceFailure,
 };
 use ironclaw_composition::ProductLiveCapabilityIo;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_loop_contracts::LoopInput;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
@@ -38,6 +38,10 @@ use ironclaw_loop_host::{
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
+};
+use ironclaw_product_contracts::inbound::{
+    ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
+    UserMessagePayload,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
@@ -506,9 +510,12 @@ fn test_safety_context() -> InstructionSafetyContext {
         .expect("test safety context")
 }
 
-fn binding_with_user(user: &str, thread: &str) -> ironclaw_assistant::ResolvedBinding {
+fn binding_with_user(
+    user: &str,
+    thread: &str,
+) -> ironclaw_product_contracts::binding::ResolvedBinding {
     let user_id = UserId::new(user).expect("valid user");
-    ironclaw_assistant::ResolvedBinding {
+    ironclaw_product_contracts::binding::ResolvedBinding {
         tenant_id: TenantId::new("tenant:install_alpha").expect("valid tenant"),
         actor_user_id: user_id.clone(),
         subject_user_id: Some(user_id),
@@ -518,7 +525,9 @@ fn binding_with_user(user: &str, thread: &str) -> ironclaw_assistant::ResolvedBi
     }
 }
 
-fn turn_scope_for_binding(binding: &ironclaw_assistant::ResolvedBinding) -> TurnScope {
+fn turn_scope_for_binding(
+    binding: &ironclaw_product_contracts::binding::ResolvedBinding,
+) -> TurnScope {
     TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),

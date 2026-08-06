@@ -16,10 +16,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStorePort, CapabilityPermissionStoreError, PersistentApprovalAction,
-    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    AutoApproveSettingStorePort, CapabilityPermissionOverrideStorePort,
+    CapabilityPermissionStoreError, PersistentApprovalAction, PersistentApprovalPolicy,
+    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyStorePort, ToolPermissionOverride, ToolPermissionOverrideInput,
+    ToolPermissionOverrideKey,
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_assistant::{
@@ -59,19 +60,15 @@ use ironclaw_assistant::{
     PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductCancelRunRequest, ProductCapabilityInvoker, ProductCreateThreadRequest,
-    ProductListAutomationsRequest, ProductListThreadsRequest, ProductNewCommandInput,
-    ProductNewCommandOutput, ProductRejectionKind, ProductRenameAutomationRequest,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
+    ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
+    ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
     RebornExecuteProductCommandResponse, RebornExtensionListResponse, RebornExtensionSurface,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
     RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
@@ -105,12 +102,6 @@ use ironclaw_assistant::{
     TriggerRunThreadScope, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_assistant::{
-    AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStreamSubscription,
-    ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
-};
-use ironclaw_assistant::{
     RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
     RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
@@ -124,12 +115,17 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
     CredentialAccountId, CredentialAccountProjection, CredentialAccountStatus,
 };
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
 };
 use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
+    ProtocolAuthFailure, RedactedString,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
     SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
@@ -153,6 +149,12 @@ use ironclaw_product_contracts::admin_users::{
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::inbound::ProductRejectionKind;
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
     IronhubInstallDeliveryResult, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
@@ -172,6 +174,9 @@ use ironclaw_product_contracts::operator_service::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProjectionCursor,
+};
 use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
 use ironclaw_product_contracts::product_wire::{
     RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorStatusCheck,
@@ -179,7 +184,11 @@ use ironclaw_product_contracts::product_wire::{
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::projection::{
+    ProjectionStreamSubscription, ProjectionSubscriptionRequest,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
@@ -11212,7 +11221,7 @@ type OperatorConfigServices = RebornServices<OperatorConfigAutoApproveInvoker>;
 #[derive(Clone)]
 struct OperatorConfigAutoApproveInvoker {
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tools: Arc<Vec<RebornOperatorToolInfo>>,
 }
@@ -11435,7 +11444,7 @@ fn services_with_operator_approval_config_stores(
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
 ) -> OperatorConfigServices {
-    let overrides: Arc<dyn ToolPermissionOverrideStorePort> = Arc::new(
+    let overrides: Arc<dyn CapabilityPermissionOverrideStorePort> = Arc::new(
         ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
     );
     let tools = Arc::new(operator_config_test_tools());

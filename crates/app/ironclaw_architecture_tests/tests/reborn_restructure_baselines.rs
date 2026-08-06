@@ -101,19 +101,24 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print`, not derived by subtracting the diff.
 /// ✎ Union re-record 2026-08-04: the two WS6 evictions above are disjoint and
 /// their deltas add exactly on the merged batch — 45_127 − 2_189 − 2_439 = 40_499.
-/// ✎ Re-recorded 40_711 → 40_995 on 2026-08-05 by the skills stack
-/// (#6745 → #6938 → #7171), paired with the `[gate].loc_ceiling` raise in the
-/// same commit. This is a RAISE, not a re-ratchet, so it is the reviewed
-/// decision the manifest's own rule requires and is flagged in #7171's body for
-/// the owner. The counted +447 is all service-graph assembly: skill-bundle
-/// staging and process-execution wiring, the one-shot host-disk → database skill
-/// import, read-only skill paths merged into the filesystem-tools view, and the
-/// single `db_backed_skill_grants` decision that replaced three divergent mount
-/// views. Measured with `bash scripts/ci/check-composition-budget.sh --print`
-/// on the merged tree, not derived by adding the diff. Note main sat only 54 LOC
-/// under the effective ceiling, so the next wave close should re-ratchet rather
-/// than inherit this number.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_995;
+/// ✎ Re-recorded 40_499 → 40_405 on 2026-08-05 by the WS6 OpenAI-compat
+/// eviction (the re-scoped clause: `openai_compat_serve.rs`'s router-state
+/// assembly, `/v1/models` catalog + error map, projection streamer + envelope
+/// decode, and scope→caller projection move to
+/// `ironclaw_openai_compat::mount`). Measured on the post-eviction tree with
+/// `bash scripts/ci/check-composition-budget.sh --print`; the same command on
+/// this branch's base read **40_595**, so the −94 recorded here is a −190 net
+/// eviction (−199 moved out, +9 back as the module doc-comment recording what
+/// stayed and why) against a base that had drifted +96 over the old ceiling
+/// and was passing on tolerance alone. `[gate].loc_ceiling`/`loc_observed`
+/// move in the same commit, which is what the nudge assertion below exists to
+/// force.
+/// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
+/// repoint added one line in composition; recorded at the measured figure.
+/// ✎ Re-recorded 40_419 → 40_822 on 2026-08-05 by the skills stack's top layer
+/// (#7171), paired with the `[gate].loc_ceiling` raise in the same commit -- this ratchet
+/// fails when the two disagree. The growth is service-graph assembly; see the manifest.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_822;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

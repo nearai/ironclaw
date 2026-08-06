@@ -19,16 +19,13 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use ironclaw_assistant::{
     DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
-    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
-};
-use ironclaw_assistant::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
 };
 use ironclaw_event_log::InMemoryDurableEventLog;
 use ironclaw_event_projections::{
     EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
     ProjectionSnapshot, ReplayEventProjectionService,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::turn::{
     IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
@@ -51,6 +48,12 @@ use ironclaw_loop_host::{
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+};
 use ironclaw_threads::{
     FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,

@@ -2,8 +2,8 @@
 //! channel conversation, remember which conversation fingerprints can carry
 //! a bare `approve`/`deny` reply back to the run's (possibly foreign) scope.
 
-use crate::ExternalConversationRef;
 use chrono::Utc;
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
 use ironclaw_turns::{TurnRunId, TurnScope};

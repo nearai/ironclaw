@@ -21,6 +21,39 @@ branch_percent = 0.0
 # issue = "https://github.com/nearai/ironclaw/issues/NNNN"
 # review_after = "2026-10-30"
 
+[[exemption]]
+path = "crates/contracts/ironclaw_host_api/src/capability.rs"
+lines = [265]
+owner = "@nearai/runtime"
+reason = "Serde-backed struct field declaration has no executable LLVM line record."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs"
+lines = [145, 146, 147, 149, 154, 155, 156, 158, 161, 162, 163, 164]
+owner = "@nearai/runtime"
+reason = "Fail-closed guards cover impossible invalid host-compiled schema states behind the typed standard schema ref constructor."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/standard_op_output.rs"
+lines = [91]
+branch_lines = [86]
+owner = "@nearai/runtime"
+reason = "Fail-closed validator-cache fallback is unreachable while the compile-checked canonical schema registry remains the sole cache source."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/surface.rs"
+lines = [386, 387, 390]
+owner = "@nearai/runtime"
+reason = "Fail-closed JSON parse guard is unreachable because resolution returns only compile-checked host schema constants."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
 # ---------------------------------------------------------------------------
 # WS1.1 turn-vocabulary move (PR #6967). These lines are a verbatim relocation
 # of existing bodies from `ironclaw_turns` into `ironclaw_host_api::turn`. No
@@ -405,7 +438,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_first_party_extension_ports/src/skill_activation_capability.rs"
+path = "crates/loop/ironclaw_loop_host/src/skill_activation/skill_activation_capability.rs"
 lines = [121]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."

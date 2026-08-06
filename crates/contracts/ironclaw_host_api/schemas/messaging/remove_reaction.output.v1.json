@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging remove_reaction output",
+  "type": "object",
+  "required": ["message_ref"],
+  "properties": {
+    "message_ref": {
+      "type": "object",
+      "required": ["conversation", "message_id"],
+      "properties": {
+        "conversation": { "type": "string", "minLength": 1 },
+        "message_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "description": "The exact object returned by a prior send or read on this extension."
+    },
+    "emoji": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The vendor's emoji token, echoed back only when known (e.g. it was supplied on input); absent when the vendor removed the connected account's reaction(s) without naming one."
+    },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

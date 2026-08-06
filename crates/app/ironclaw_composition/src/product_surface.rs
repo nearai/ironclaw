@@ -165,7 +165,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
         let auto_approve_settings = &runtime.auto_approve_settings;
         let persistent_approval_policies = &runtime.persistent_approval_policies;
         let tool_permission_overrides: Arc<
-            dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+            dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
         > = tool_permission_overrides.clone();
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
             auto_approve_settings.clone();

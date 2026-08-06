@@ -940,6 +940,7 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
+        standard_op: None,
     }
 }
 

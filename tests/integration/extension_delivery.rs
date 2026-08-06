@@ -57,16 +57,10 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_assistant::{
-    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
-    UserMessagePayload, VerifiedInbound,
-};
-use ironclaw_assistant::{
-    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-};
+use ironclaw_assistant::{RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings};
 use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{InboundOutcome, VerifiedInbound};
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -78,6 +72,8 @@ use ironclaw_extension_host::ingress::{
     InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
 };
 use ironclaw_host_api::product_adapter::auth::AuthRequirement;
+use ironclaw_host_api::product_adapter::auth::ProtocolAuthEvidence;
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -96,6 +92,11 @@ use ironclaw_loop_host::{
 use ironclaw_outbound::OutboundDeliveryStatus;
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::ResolveBindingRequest;
+use ironclaw_product_contracts::inbound::{
+    ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    UserMessagePayload,
+};
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
@@ -329,7 +330,7 @@ impl PostAdmissionObserver for RecordingForwardObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_assistant::ProductAdapterError,
+        error: ironclaw_host_api::product_adapter::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -413,13 +414,14 @@ async fn preresolve_vendor_turn_scope(
     };
     let message = messages.first().expect("one normalized message");
     // Mirror of the sink's envelope assembly (`extension_ingress.rs::admit`).
-    let context = ironclaw_assistant::TrustedInboundContext::from_verified_evidence(
-        ProductAdapterId::new(adapter_id).expect("adapter id"),
-        AdapterInstallationId::new(installation_id).expect("installation id"),
-        Utc::now(),
-        evidence,
-    )
-    .expect("trusted inbound context");
+    let context =
+        ironclaw_product_contracts::inbound::TrustedInboundContext::from_verified_evidence(
+            ProductAdapterId::new(adapter_id).expect("adapter id"),
+            AdapterInstallationId::new(installation_id).expect("installation id"),
+            Utc::now(),
+            evidence,
+        )
+        .expect("trusted inbound context");
     let payload = ProductInboundPayload::UserMessage(
         UserMessagePayload::new(message.text.clone(), Vec::new(), message.trigger)
             .expect("user message payload"),

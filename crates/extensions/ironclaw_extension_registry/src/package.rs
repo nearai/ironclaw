@@ -8,8 +8,8 @@ use ironclaw_host_api::{
 use std::collections::{BTreeSet, HashSet};
 
 use crate::{
-    CapabilityManifest, ExtensionError, ExtensionManifest, ExtensionRuntime, ManifestSource,
-    PackageRootBinding, PackageRootError,
+    CapabilityDeclV2, CapabilityManifest, ExtensionError, ExtensionManifest, ExtensionRuntime,
+    ManifestSource, PackageRootBinding, PackageRootError,
 };
 
 /// Validated package rooted under `/system/extensions/<extension>`.
@@ -370,7 +370,7 @@ fn capability_descriptors_from_manifest(
                 provider: manifest.id.clone(),
                 runtime: manifest.runtime_kind(),
                 trust_ceiling: manifest.descriptor_trust_default,
-                description: capability.description.clone(),
+                description: composed_capability_description(capability),
                 parameters_schema: descriptor_schema_ref(capability),
                 effects: capability.effects.clone(),
                 default_permission: capability.default_permission,
@@ -379,9 +379,31 @@ fn capability_descriptors_from_manifest(
                 max_egress_bytes: capability.max_egress_bytes,
                 resource_profile: capability.resource_profile.clone(),
                 origin_gate_matrix: capability.origin_gate_matrix.clone(),
+                standard_op: capability.standard_op,
             })
         })
         .collect()
+}
+
+/// Compose a capability's model-visible description at descriptor build.
+///
+/// Standard messaging bindings use the host-authored operation core followed
+/// by the extension's optional vendor addendum. Bespoke declarations preserve
+/// their manifest description verbatim. Composition happens here rather than
+/// in persisted manifest data so host wording updates take effect on restart
+/// without changing the manifest digest.
+pub fn composed_capability_description(decl: &CapabilityDeclV2) -> String {
+    match decl.standard_op.and_then(|op| op.contract()) {
+        Some(contract) => {
+            let addendum = decl.description.trim();
+            if addendum.is_empty() {
+                contract.description_core.trim().to_string()
+            } else {
+                format!("{}\n{}", contract.description_core.trim(), addendum)
+            }
+        }
+        None => decl.description.clone(),
+    }
 }
 
 fn invalid_package_root(root: &VirtualPath) -> ExtensionError {

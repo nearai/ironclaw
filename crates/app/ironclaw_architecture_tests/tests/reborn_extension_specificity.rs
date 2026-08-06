@@ -71,7 +71,8 @@ use serde_json::Value;
 // ~215 literals below without a lockstep edit. On today's tree resolution is
 // the identity - pinned by `reborn_crate_inventory.rs`.
 use ratchet_support::{
-    crate_dir, crate_directories, crate_path, try_resolve_crate_relative, workspace_root,
+    crate_dir, crate_directories, crate_path, strip_line_anchored_cfg_test_items,
+    try_resolve_crate_relative, workspace_root,
 };
 
 /// Resolve a listed path through the crate inventory, falling back to the
@@ -548,6 +549,52 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (issue-tracker profile); a safety denylist, not extension routing",
     ),
+    // Manifest inline-secret guard (`looks_like_inline_secret`,
+    // `ironclaw_extension_registry::host_api::product_adapter`): the vendor
+    // token *prefixes* a manifest field value is rejected for carrying.
+    //
+    // **Carved, not allowlisted, and CHECKLIST WS5's "slack/telegram token
+    // heuristics → the packages that own them" clause is REFUTED by the same
+    // measurement.** Two independent reasons, both mechanical:
+    //
+    // 1. It is a **superset of the bundled inventory**, exactly like the
+    //    trace-redaction classifier above. Of the eleven prefixes it carries,
+    //    five belong to no installed package at all — `sk-` (OpenAI/Anthropic
+    //    API keys), AWS `AKIA`/`ASIA`, JWTs (`eyJ…`), PEM private-key headers,
+    //    and URI userinfo — so sourcing the set from the packages would
+    //    *shrink* it and stop rejecting inline secrets the guard catches today.
+    //    A guard that only knows the vendors currently installed is a guard
+    //    that fails open on the next one.
+    // 2. The move is **layer-illegal in the named direction**.
+    //    `ironclaw_extension_registry` is `layer = "substrates"` and
+    //    `crates/extensions/packages/{slack,telegram}` are `layer = "products"`,
+    //    so `registry → package` is upward and needs a
+    //    `LAYER_MATRIX_EXCEPTION` the ratchet forbids. The only legal shape is
+    //    inversion — a package registers its prefixes with the parser — and
+    //    that is strictly worse here: the guard runs while parsing an
+    //    *arbitrary* manifest, including before any package is loaded, so a
+    //    registration-sourced list is unpopulated exactly when it matters.
+    //
+    // Pinned by `inline_secret_guard_is_a_safety_denylist_not_package_inventory`
+    // in `crates/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "github",
+        "manifest inline-secret guard token prefixes (`ghp_`/`gho_`/…); a safety \
+         denylist that is a superset of the package inventory, not extension routing",
+    ),
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "slack",
+        "manifest inline-secret guard token prefixes (`xoxb-`/`xoxp-`/…); a safety \
+         denylist that is a superset of the package inventory, not extension routing",
+    ),
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "telegram",
+        "manifest inline-secret guard bot-token shape (`looks_like_telegram_token`); a \
+         safety denylist that is a superset of the package inventory, not extension routing",
+    ),
     (
         "crates/ironclaw_webui/frontend/src/i18n/",
         "google",
@@ -903,45 +950,6 @@ fn is_test_source_path(path: &Path) -> bool {
         || name.contains(".spec.")
 }
 
-/// Remove `#[cfg(test)]` items (inline `mod tests { … }` blocks and
-/// `mod tests;` declarations) before matching: tests may name concrete
-/// products (overview §8). Line-based brace counting — the same heuristic
-/// `scripts/pre-commit-safety.sh` uses for its test-stripping.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    let mut kept = String::with_capacity(source.len());
-    let mut lines = source.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !line.trim_start().starts_with("#[cfg(test)]") {
-            kept.push_str(line);
-            kept.push('\n');
-            continue;
-        }
-        // Skip attribute lines, then the annotated item.
-        let mut depth: i64 = 0;
-        let mut opened = false;
-        for skipped in lines.by_ref() {
-            let trimmed = skipped.trim_start();
-            if !opened && trimmed.starts_with("#[") {
-                continue;
-            }
-            depth += skipped.matches('{').count() as i64;
-            depth -= skipped.matches('}').count() as i64;
-            if !opened {
-                if skipped.contains('{') {
-                    opened = true;
-                } else if trimmed.ends_with(';') {
-                    // `mod tests;` — single-line item, nothing else to skip.
-                    break;
-                }
-            }
-            if opened && depth <= 0 {
-                break;
-            }
-        }
-    }
-    kept
-}
-
 /// Mask non-extension references before matching:
 ///
 /// - GitHub *repository URLs* (issue/PR citations, upstream repo links) so
@@ -990,7 +998,7 @@ fn scan_file(path: &Path, kind: FileKind, terms: &BTreeSet<String>) -> Vec<Strin
         return Vec::new();
     };
     let contents = match kind {
-        FileKind::Rust => strip_cfg_test_blocks(&contents),
+        FileKind::Rust => strip_line_anchored_cfg_test_items(&contents),
         FileKind::Frontend | FileKind::Toml => contents,
     };
     let haystack = mask_non_extension_references(&contents).to_ascii_lowercase();
@@ -1161,25 +1169,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    // The inline-secret guard's vendor token prefixes. Repointed (not added)
-    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
-    // `ironclaw_extension_registry::host_api::product_adapter`; the guard stayed with
-    // the raw-TOML parse stage, so the entries moved file and nothing else.
-    // The schema half that went to `ironclaw_extension_contracts` carries no
-    // vendor name — its fixtures were rewritten generically rather than carved,
-    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "telegram",
-    ),
+    // The inline-secret guard's vendor token prefixes moved OUT of this list
+    // 2026-08-05 and into `PATH_TERM_COLLISIONS`, where the trace-redaction
+    // classifier already sits. They are a safety denylist, not extension
+    // routing, and CHECKLIST WS5's "slack/telegram token heuristics → the
+    // packages that own them" clause is refuted rather than owed — see the
+    // carve-out's own reason text for the measurement.
     (
         "crates/ironclaw_host_api/src/product_adapter/identity.rs",
         "slack",
@@ -1404,7 +1399,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
     ),
-    ("crates/ironclaw_projects/src/lib.rs", "github"),
+    // ✎ 2026-08-05: was `crates/ironclaw_projects/src/lib.rs`. The crate merged
+    // into `ironclaw_identity` as its `projects` module (WS10 / PROPOSAL
+    // §12.10), so the same doc-comment hit moved with the file. A 1-for-1
+    // repoint: the count is unchanged and this stays a `lane-4: doc-str` row
+    // awaiting the owner's reword-or-leave call, not a new debt.
+    ("crates/domains/ironclaw_identity/src/projects.rs", "github"),
     (
         "crates/ironclaw_composition/src/automation/trigger_poller.rs",
         "slack",
@@ -1662,7 +1662,20 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// only entries either side removed, and this branch's renames repoint entries
 /// in place without adding any. So the union is the batch's number, not ours —
 /// which is exactly why it is measured rather than reasoned.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
+///
+/// **122 → 119, 2026-08-05 (WS5 `product` narrows, token-heuristics clause).**
+/// The three `ironclaw_extension_registry/src/host_api/product_adapter.rs`
+/// rows left the allowlist and became `PATH_TERM_COLLISIONS` carve-outs with
+/// reasons. That is a re-classification, not a payment: allowlist entries are
+/// *debt* — vendor names that ought to leave — and the measurement on that row
+/// showed these three never can, because the guard they belong to is a safety
+/// denylist that is a superset of the package inventory and the move its clause
+/// named is layer-illegal besides. Keeping them in the debt column would have
+/// left a permanent entry the shrink ratchet can never retire; the carve-out
+/// list is where the trace-redaction classifier already records the identical
+/// disposition. Net vendor-name surface is unchanged: three rows moved list,
+/// zero terms appeared or vanished.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 119;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

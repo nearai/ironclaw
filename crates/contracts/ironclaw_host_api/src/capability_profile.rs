@@ -36,6 +36,10 @@ fn validate_schema_ref(value: &str) -> Result<(), HostApiError> {
             "NUL/control characters are not allowed",
         ));
     }
+    // Generic callers handle extension-declared refs, so even the host-owned
+    // `standard:` namespace is rejected here. Canonical messaging refs can
+    // only be constructed from a typed operation through the dedicated
+    // constructors below; an untrusted string can never claim that identity.
     for ch in value.chars() {
         if !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/')) {
             return Err(HostApiError::invalid_path(
@@ -64,6 +68,40 @@ impl CapabilityProfileSchemaRef {
         let value = value.into();
         validate_schema_ref(&value)?;
         Ok(Self(value))
+    }
+
+    /// Builds the host-owned canonical input schema ref for one implemented
+    /// standard messaging operation. The caller supplies a closed enum, not
+    /// an untrusted ref string, so the reserved namespace cannot be forged.
+    pub fn standard_messaging_input(
+        op: crate::messaging::StandardMessagingOp,
+    ) -> Result<Self, HostApiError> {
+        Self::standard_messaging(op, "input")
+    }
+
+    /// Builds the host-owned canonical output schema ref for one implemented
+    /// standard messaging operation.
+    pub fn standard_messaging_output(
+        op: crate::messaging::StandardMessagingOp,
+    ) -> Result<Self, HostApiError> {
+        Self::standard_messaging(op, "output")
+    }
+
+    fn standard_messaging(
+        op: crate::messaging::StandardMessagingOp,
+        direction: &'static str,
+    ) -> Result<Self, HostApiError> {
+        if op.contract().is_none() {
+            return Err(HostApiError::invalid_path(
+                op.op_name(),
+                "reserved standard messaging operation has no schema",
+            ));
+        }
+        Ok(Self(format!(
+            "{}{}.{direction}.v1",
+            crate::messaging::STANDARD_SCHEMA_REF_PREFIX,
+            op.op_name()
+        )))
     }
 
     pub fn as_str(&self) -> &str {
@@ -96,6 +134,12 @@ impl<'de> Deserialize<'de> for CapabilityProfileSchemaRef {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
+        // Resolved extension records are the trusted persistence boundary for
+        // this type. Accept only canonical refs that resolve to a compiled-in
+        // host schema; arbitrary or reserved `standard:` strings still fail.
+        if crate::messaging::resolve_standard_schema_ref(&value).is_some() {
+            return Ok(Self(value));
+        }
         Self::new(value).map_err(serde::de::Error::custom)
     }
 }

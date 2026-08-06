@@ -58,7 +58,7 @@ use std::path::Path;
 // the crate inventory, so the family move (PROPOSAL section 5) repoints them
 // without editing the literals. Identity on today's tree - pinned by
 // `reborn_crate_inventory.rs` (CHECKLIST WS10).
-use ratchet_support::{crate_path, workspace_root};
+use ratchet_support::{crate_path, strip_comments_and_strings, workspace_root};
 
 /// Production files under composition `src/` allowed to name a
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
@@ -80,83 +80,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          when it grows a memory-binding axis (#5264).",
     ),
 ];
-
-/// Remove line comments, block comments, and string literals so that prose and
-/// fixtures inside them cannot trip the scan.
-///
-/// Char literals are consumed too: a `"` (or `/`) inside a char literal such as
-/// `'"'` must not open a string/comment and swallow the rest of the file, which
-/// would silently hide a `DeploymentMode` branch from the scan. A char literal
-/// (`'x'` / `'\n'` / `'"'`) is dropped; a lifetime (`'a`) is emitted as-is.
-/// Uses char-indexed lookahead (a char literal needs to see two chars ahead),
-/// mirroring the shared `ratchet_support` stripper the other §10 ratchets use.
-fn strip_comments_and_strings(source: &str) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        // Line comment — drop to (not including) the newline, which the next
-        // iteration preserves.
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        // Block comment — drop through the closing `*/`.
-        if c == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
-                i += 1;
-            }
-            i += 2;
-            continue;
-        }
-        // String literal — drop through the closing `"`, honoring escapes.
-        if c == '"' {
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\\' {
-                    i += 2;
-                    continue;
-                }
-                if chars[i] == '"' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        // Char literal vs lifetime — only consume when it closes as a literal.
-        if c == '\'' {
-            // Escaped char literal `'\...'`: drop through the closing quote.
-            if chars.get(i + 1) == Some(&'\\') {
-                let mut k = i + 2;
-                while k < chars.len() && chars[k] != '\'' {
-                    k += 1;
-                }
-                i = k + 1;
-                continue;
-            }
-            // Single-char literal `'x'` (incl. `'"'`): the quote two chars ahead
-            // proves it is a literal, not a lifetime — drop all three.
-            if chars.get(i + 2) == Some(&'\'') {
-                i += 3;
-                continue;
-            }
-            // A lifetime (`'a`) — emit and move on.
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
 
 fn is_scanned_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {

@@ -31,10 +31,10 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use ironclaw_assistant::{
-    CREATE_THREAD_COMMAND, ProductCreateThreadRequest, RebornCreateThreadResponse,
-    rejecting_product_surface_error,
+    CREATE_THREAD_COMMAND, RebornCreateThreadResponse, rejecting_product_surface_error,
 };
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_product_contracts::inbound_requests::ProductCreateThreadRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceInvokeRequest,
     ProductSurfaceInvokeResponse, ProductSurfaceQueryPage, ProductSurfaceQueryRequest,

@@ -455,7 +455,7 @@ pub(super) async fn build_backend_production(
         as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>;
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
         Arc::clone(&tool_permission_overrides)
-            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+            as Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
         Arc::clone(&auto_approve_settings)
             as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         persistent_approval_policies_for_settings,
@@ -539,12 +539,13 @@ pub(super) async fn build_backend_production(
                 reason: format!("invalid project agent id: {error}"),
             }
         })?;
-    let project_repository: Arc<dyn ProjectRepository> =
-        Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
+    let project_repository: Arc<dyn ProjectRepository> = Arc::new(
+        ironclaw_identity::projects::FilesystemProjectRepository::new(
             Arc::clone(&stores.scoped_filesystem),
             owner_user_id.clone(),
             project_agent_id,
-        ));
+        ),
+    );
     let project_service: Arc<dyn ProjectService> =
         Arc::new(RebornProjectService::new(project_repository));
     let trigger_conversation_services =
@@ -1069,9 +1070,9 @@ pub(super) async fn build_backend_production(
         Arc::clone(&auto_approve_settings)
             as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>;
     let operator_tool_permission_overrides: Arc<
-        dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
     > = Arc::clone(&tool_permission_overrides)
-        as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>;
+        as Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>;
     let operator_persistent_approval_policies: Arc<
         dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     > = Arc::clone(&stores.persistent_approval_policies)

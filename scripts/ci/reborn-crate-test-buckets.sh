@@ -58,11 +58,9 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_product_contracts: "product-workflow",
 
       ironclaw_attachments: "webui-ingress",
-      ironclaw_projects: "webui-ingress",
       ironclaw_webui: "webui-ingress",
       ironclaw_resources: "webui-ingress",
 
-      ironclaw_first_party_extension_ports: "wasm-sandbox",
       ironclaw_extension_support: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",

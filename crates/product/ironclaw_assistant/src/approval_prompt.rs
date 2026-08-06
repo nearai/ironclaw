@@ -1,6 +1,5 @@
 //! Shared approval prompt lookup and redacted context projection.
 
-use crate::ApprovalPromptContextView;
 use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_approvals::ApprovalStoreError;
 use ironclaw_host_api::ids::{InvocationId, UserId};
@@ -9,6 +8,7 @@ use ironclaw_product_contracts::approval_prompt::{
     approval_prompt_context_for_request, approval_prompt_lookup_scope,
     approval_request_id_from_gate_ref,
 };
+use ironclaw_product_contracts::outbound::ApprovalPromptContextView;
 use thiserror::Error;
 
 #[derive(Debug, Default)]
