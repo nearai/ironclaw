@@ -53,6 +53,31 @@ The **two standing rules** are the spine that ties the layers together:
   diff.** Log it in the spec's *Critical Bug Fix Log*, revise the plan, and add
   a regression test that fails-before / passes-after.
 
+### Impact, dependency & review signalling (the part easy to miss)
+
+Layer ①'s templates carry three review-oriented sections that make a change's
+*blast radius* and *review needs* explicit before code is written:
+
+- **Feature impact** — `FEATURE_SPEC.md` **§5 "Architecture Impact"**: which
+  layers/files are touched, anything crossing an architectural boundary
+  (presentation ↔ logic ↔ service/data) or a client/server split, and the
+  standing invariants (incl. enabled modules) that apply. The `pr-review` skill
+  re-checks these boundary rules and module invariants on the diff.
+- **Implementation dependency** — `IMPLEMENTATION_PLAN.md` **§4 "Dependencies &
+  Sequencing"** (plus §3 migration ordering and the spec's §6 backward-compat
+  notes).
+- **Review requirement** — `FEATURE_SPEC.md` **§8 "Feedback & Decisions (team
+  review — resolve before next step)"** is a *hard gate*: the spec is circulated,
+  and the implementation plan may not begin until §8 is resolved. Plus a
+  design-specific escalation: *"ambiguous design? ask the designer."*
+
+**The limit worth naming:** this is **generic team review**, not a mechanism
+that classifies a change and *routes it to a named cross-functional partner*
+(security / data / backend / design) for required sign-off. The kit signals
+"circulate for review"; it never says "this diff touches X, so partner Y must
+review." That specific auto-routing is *not* in the kit — see the matrix (§3)
+and the adaptation proposed in [PROPOSAL.md](PROPOSAL.md).
+
 Running alongside is a **Design/UX governance track** treated as *core*, not an
 add-on (the kit is explicitly optimized for software with a UI):
 
@@ -170,6 +195,10 @@ informal / not wired as the kit does) · **❌ Gap** (absent).
 | Rule 1: docs-are-source-of-truth, read-spec-before-edit | ① | `reborn-feature` skill + `docs/plans/*` (ad-hoc, flat) | **◑ Partial** — no living per-feature set / registry |
 | `docs/<slug>/{SPEC,PLAN,TEST}` + FEATURE_REGISTRY | ① | dated single-file plans only | **❌ Gap** (structure) |
 | Code-to-feature mapping (`// Feature: <slug>` headers) | ① | knowledge graph + openwiki instead | **◑ Partial** — different, backend-oriented |
+| Feature-impact flag (spec §5 *Architecture Impact*) | ① | `architecture.md` rule + knowledge-graph blast-radius; no per-feature spec field | **◑ Partial** — different shape |
+| Dependency/sequencing section (plan §4) | ① | `docs/plans/*` note deps ad-hoc; not a structured field | **◑ Partial** |
+| Review gate (spec §8 *Feedback & Decisions*, hard gate) | ① | PR review + `review-discipline.md`; not a spec-embedded pre-code gate | **◑ Partial** |
+| **Cross-functional-partner review trigger** (auto-route to security/data/design) | ① | `review-discipline.md` + PR *Reborn Trust-Boundary Checklist* — strong, but **manual, not auto-routed** | **❌ Gap in both** — the kit has only a generic team gate; opportunity to wire IronClaw's boundary signals into an explicit trigger |
 | Critical User Journeys registry + `critical-flows` rule | ③ | e2e/Playwright exist; no CUJ catalog/rule | **❌ Gap** |
 | `DESIGN.md` design constitution | design | none | **❌ Gap** |
 | Design/UX auto-loading rules (styling, a11y, taxonomy) | design | none | **❌ Gap** |
@@ -184,7 +213,11 @@ backend/enforcement half (Layers ② and ④, plus Rule 2 and skills). The kit's
 new value for IronClaw is concentrated in **Layer ① (a living docs-first
 workflow), Layer ③ (a CUJ regression baseline), and the entire Design/UX
 track** — the last of which IronClaw lacks completely and which fits its
-frontend with unusually low friction.
+frontend with unusually low friction. One row is a gap *for both*: an **explicit
+cross-functional-partner review trigger**. The kit stops at generic team review;
+IronClaw has stronger raw material (`review-discipline.md`, the PR trust-boundary
+checklist) but no auto-routing — so this is an opportunity to build something
+neither has, not merely to adopt the kit (see [PROPOSAL.md](PROPOSAL.md)).
 
 ---
 

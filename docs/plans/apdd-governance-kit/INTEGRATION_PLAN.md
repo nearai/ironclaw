@@ -40,10 +40,12 @@ frontend edit. This is the single biggest gap and the clearest win.
 | 1.3 | Codify the **token rule**: no raw hex at call sites; every custom color ships light+dark; `ironclaw`-prefixed semantic tokens. Reconcile with the existing `theme-colors.test.ts`. | `DESIGN.md` §2 + rule |
 | 1.4 | Add a CLAUDE.md pointer: "UI work conforms to `docs/design/DESIGN.md`; its REJECT list is a hard gate." | `CLAUDE.md` |
 | 1.5 | Consolidate the **embedded-AI-agent invariants** into a single referenced "What NOT to do" list, mapping **every** invariant named in EVALUATION §1 to its IronClaw home so none is lost: **keys encrypted at rest** (secrets/credential-storage path), **per-agent config in the DB not env vars** (`RootFilesystem`-persisted config), **tenant/scoped context on every LLM call** (capability-dispatch + scoped-filesystem isolation), **LLM-data-never-deleted**, and **credential/extension identity** — cross-linking existing CLAUDE.md/safety rules, not duplicating them. | `CLAUDE.md` / `.claude/rules/` |
+| 1.6 | Add the **cross-functional-review trigger** (see PROPOSAL §3): (a) a *"Cross-functional review required: security / data / design / none"* field in the feature-spec template; (b) extend `review-discipline.md` so a diff crossing a **trust / persistence / capability** boundary names the required partner and links the PR *Reborn Trust-Boundary Checklist* — reusing IronClaw's existing signals, not the kit's generic §8 gate. Adopt spec **§5 Architecture Impact** + plan **§4 Dependencies & Sequencing** verbatim in the templates while you're there. | feature-spec template + `.claude/rules/review-discipline.md` |
 
 **Exit:** editing a frontend file surfaces the design rule; `DESIGN.md` is
-concrete enough to reject a raw-hex or unlabeled-control diff. **No runtime code
-changes** — pure governance.
+concrete enough to reject a raw-hex or unlabeled-control diff; a
+trust/persistence/capability-boundary diff surfaces the cross-functional-review
+trigger naming the partner. **No runtime code changes** — pure governance.
 
 **Risk:** over-specifying `DESIGN.md` before the design system is mature →
 mitigate by keeping §§ that IronClaw can honor today and marking aspirational
@@ -180,6 +182,7 @@ rollout's hunks — do not wholesale-revert a file that other work also touched)
 - `crates/product/ironclaw_webui/frontend/package.json` + `pnpm-lock.yaml` — the pinned Storybook `devDependencies`
 - `crates/product/ironclaw_webui/frontend/vite.config.ts` — the **browser-mode Vitest project** entry added in Phase 2.2 (or a new `vitest.config.ts` if split out — list it under added files in that case). Revert this together with the `@vitest/browser` / `playwright` deps so a rollback never leaves the browser project referencing removed packages.
 - `.github/workflows/code_style.yml` — the Storybook a11y/browser **step added to the existing `webui-v2-js-lint` job** (remove the step; do **not** delete the job)
+- `.claude/rules/review-discipline.md` — the cross-functional-review trigger addition (Phase 1.6); revert the hunk, keep the file
 
 **Compatibility / hidden side effects:** reverting `package.json` +
 `pnpm-lock.yaml` together keeps a `--frozen-lockfile` install reproducible; the
