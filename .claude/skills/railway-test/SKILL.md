@@ -1,6 +1,6 @@
 ---
 name: railway-test
-description: Verify any pull request on its Railway preview through browser-driven acceptance testing derived from the PR description and diff, then publish exact-head evidence on the pull request. Defaults to nearai/ironclaw and covers deployment freshness, bearer-token login, affected-route discovery, primary user journeys, regression reproduction, forms and state read-back, navigation, permissions, errors, and optional streaming cadence. Use when the user invokes /railway-test or $railway-test, asks to test a PR on Railway, or wants browser-based preview QA with PR evidence before merging.
+description: Triggered when the user invokes /railway-test or $railway-test, asks to test a pull request on Railway, or requests browser-based exact-head preview QA and pull-request evidence before merging.
 ---
 
 # Railway Test
@@ -51,8 +51,35 @@ Identify:
 - dependencies on external services, model behavior, or persisted data.
 
 Write a compact Given/When/Then test matrix before interacting with the
-preview. Use [references/test-recipes.md](references/test-recipes.md) to choose
-only relevant cases. Do not default to chat or streaming tests.
+preview. Give every row an `Acceptance` classification:
+
+- **Required**: directly proves an explicit user request, PR acceptance
+  criterion, or the exact regression claim.
+- **Supplemental**: deployment health, adjacent behavior, or a useful proxy
+  that does not itself prove the changed contract.
+
+Use [references/test-recipes.md](references/test-recipes.md) to choose only
+relevant cases. Do not default to chat or streaming tests. Never reclassify a
+required case as supplemental because the preview lacks its provider, model,
+credentials, role, feature flag, or test data; that makes the run BLOCKED.
+
+#### Mandatory status gate
+
+Compute the overall heading from required cases only:
+
+1. **FAIL** if any required case was executed against the intended contract
+   and the observed behavior contradicted the acceptance claim.
+2. Otherwise **BLOCKED** if any required case was not executed, was
+   inconclusive, or used a substitute provider, model, route, role, tool,
+   state transition, or pre-existing object instead of the intended one.
+3. **PASS** only if every required case was executed against the intended
+   contract and passed.
+
+Passing supplemental cases, a healthy deployment, local tests, recorded
+fixtures, or a nearest-caller check can add evidence but can never upgrade
+FAIL or BLOCKED to PASS. If no required case can run, stop after collecting
+bounded diagnostics and publish BLOCKED; do not invent a proxy journey merely
+to produce a browser PASS.
 
 ### 2. Confirm the intended build is live
 
@@ -111,9 +138,17 @@ For each selected case:
 
 1. Capture the starting URL and a focused DOM snapshot.
 2. Perform the smallest realistic user journey through visible controls.
-3. Assert the promised outcome from rendered state, not click success.
-4. Refresh, revisit, or read back when persistence matters.
-5. Record concise evidence: route, action, observed result, and pass/fail.
+3. Verify that the actual provider, model, route, role, tool, and starting
+   state match the required case before crediting the journey.
+4. Assert the promised outcome from rendered state, not click success.
+5. Refresh, revisit, or read back when persistence matters.
+6. Record concise evidence: acceptance classification, intended contract,
+   actual contract exercised, route, action, observed result, and status.
+
+Treat identity mismatches as **not executed**, not as successful fallbacks.
+For example, if a case requires `tool_search` but the model calls web search,
+or requires deferred-tool promotion but invokes a tool that was already
+advertised, the required case is BLOCKED even when the substitute call works.
 
 Prefer caller-facing verification:
 
@@ -141,7 +176,9 @@ user explicitly requested a fix or broader mutation.
 - Auth/session: verify login, refresh, logout, and denied access only to the
   extent the PR changes those contracts.
 - External provider/model: separate deterministic surface evidence from live
-  canary variability.
+  canary variability. If the PR requires a specific live provider/model and
+  the preview cannot run it, record deterministic tests as supplemental and
+  mark the required live case BLOCKED.
 
 Skip unrelated recipes and state why.
 
@@ -166,7 +203,10 @@ cleanup failure can never lose the PASS/FAIL/BLOCKED result. Include:
 
 - a `Railway preview QA — PASS|FAIL|BLOCKED` heading;
 - the tested head SHA, Railway state, preview URL, and relevant route;
-- the Given/When/Then matrix with concise observed evidence;
+- the Given/When/Then matrix with `Required`/`Supplemental`, intended versus
+  actual contract, and concise observed evidence;
+- a status derivation listing required cases passed, failed, blocked, or not
+  executed; verify the heading follows the mandatory status gate;
 - the exact regression result and any refresh or read-back result;
 - skipped cases with reasons and remaining risks or blockers;
 - cleanup status;

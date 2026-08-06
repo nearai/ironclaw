@@ -30,6 +30,17 @@ user-visible or durable outcome. Prefer:
 - downloaded or persisted content identity;
 - visible incremental changes for streaming.
 
+Before crediting a result, verify the journey exercised the intended contract,
+not merely a nearby successful behavior. Record the actual provider/model,
+route, role, tool or operation, and relevant starting state when any of those
+are part of the acceptance claim. A fallback provider, similarly named tool,
+different route, broader role, or already-existing state is supplemental
+evidence only. If it replaced a required journey, that journey was not
+executed and the overall Railway QA status is BLOCKED.
+
+Local tests and fixtures may prove deterministic protocol details, but they do
+not turn an unavailable required live canary into a browser PASS.
+
 ## Test-data discipline
 
 - Use names prefixed with `railway-test-` when creating temporary records.
@@ -37,4 +48,3 @@ user-visible or durable outcome. Prefer:
 - Resolve exact targets before deletion.
 - Clean up only records created by the current test.
 - State explicitly when cleanup was not authorized or could not be verified.
-
