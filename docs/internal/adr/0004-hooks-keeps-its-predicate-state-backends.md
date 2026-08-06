@@ -6,6 +6,12 @@
 libSQL/Postgres predicate backends"; **#6945** (the coverage gap the row's note
 attaches); PROPOSAL §6.7.4, §11.2.6, §12 item 10
 **Measured at:** `89080c5160`
+**Path note (2026-08-05):** crate paths and line numbers in this ADR are as of
+the measured commit, which predates the WS6/WS7 family restructure. Today
+`crates/ironclaw_X` lives at `crates/<family>/ironclaw_X` (e.g.
+`crates/ironclaw_hooks` → `crates/loop/ironclaw_hooks`,
+`crates/ironclaw_turn_runner` → `crates/loop/ironclaw_turn_runner`).
+The decision itself is unchanged.
 
 ## Context
 

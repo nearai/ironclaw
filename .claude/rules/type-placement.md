@@ -30,7 +30,7 @@ Placement decision, in order:
    format, timezone) → `ironclaw_common`. This is the ONLY thing common
    accepts.
 
-**`ironclaw_common` is not a DTO dumping ground.** 17 workspace crates depend on it — every
+**`ironclaw_common` is not a DTO dumping ground.** ~20 workspace crates depend on it — every
 type added there rebuilds most of the workspace on change and couples
 unrelated domains. A type belongs in common only if it is domain-free (would
 be equally at home in any subsystem). "Several crates use it" is NOT the
@@ -40,7 +40,10 @@ common.
 
 ## Why (measured 2026-07, semantically judged)
 
-The workspace has ~3,400 public structs/enums (`rg -c '^\s*pub (struct|enum) ' crates/*/src`).
+The workspace has ~3,500 public structs/enums (re-measured 2026-08:
+`rg -c '^\s*pub (struct|enum) ' --glob 'crates/**/src/**/*.rs' crates/` — note the
+family layout means `crates/*/src` no longer matches anything; crate sources are
+two levels down, plus `crates/extensions/packages/*/src`).
 A field/variant-signature scan (`scripts/check-type-duplicates.py`) reports
 **203** cross-crate structural candidates from 2,003 eligible types on this
 tree; the 2026-07 judging pass ran over a **178**-pair snapshot of that scan and
@@ -54,7 +57,7 @@ verbatim "for decoupling," plus an identity `From` that never diverges.
 The remaining complexity is contract *surface* (≈500 Request/Response/Config
 types, each defined once), which placement cannot reduce — only interface
 design (domain-port splits) and scaffolding do. Meanwhile compile ripple IS
-controlled by placement. Measured crate-level fan-in on this tree (`grep -l <crate> crates/*/Cargo.toml`): `host_api` **53**, `turns` **20**, `common` **17** — note this inverts the ordering an earlier version of this rule asserted, and `host_api` (the endorsed vocabulary home) carries the widest fan-in by design.
+controlled by placement. Measured crate-level fan-in on this tree (`grep -rl --include=Cargo.toml <crate> crates/`, count includes the crate's own manifest; re-measured 2026-08 after the WS6/WS7 renames): `host_api` **53**, `common` **20**, `turns` **12** — note this inverts the ordering an earlier version of this rule asserted, and `host_api` (the endorsed vocabulary home) carries the widest fan-in by design.
 Edit ripple is expensive and rare; don't fix it by maximizing compile ripple.
 
 ## Mirror structs and `From` chains — a mapping must earn its keep
@@ -134,9 +137,9 @@ examples: two `projection`s, `lifecycle.rs` that is skill management).
 The same discipline applies to traits. A trait is justified by exactly one of:
 
 1. **Polymorphism** — 2+ production implementors (the 2026-07 pass judged this
-   true of ~62% of traits; the workspace has **372** `pub trait` definitions
-   today, so re-count with
-   `rg -c '^\s*pub trait ' crates/*/src` before quoting a share).
+   true of ~62% of traits; the workspace has **385** `pub trait` definitions
+   as of 2026-08, so re-count with
+   `rg -c '^\s*pub trait ' --glob 'crates/**/src/**/*.rs' crates/` before quoting a share).
 2. **Dependency inversion** — a port defined in a lower crate, implemented by
    a higher one. Single-impl BY DESIGN; "only one implementor" is the wrong
    metric here — deleting it re-couples the layers the boundary tests protect.

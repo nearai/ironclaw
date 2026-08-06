@@ -895,8 +895,10 @@ async fn host_http_egress_rejects_path_placeholder_target_url_errors_before_tran
     for (url, expected_reason) in [
         ("not a url", "credential injection target URL is invalid"),
         (
+            // #7144 widened this guard from the path-placeholder arm to every
+            // injection kind, so the reason no longer names one of them.
             "mailto:security@example.test",
-            "credential injection path placeholder requires HTTPS",
+            "credential injection requires HTTPS",
         ),
     ] {
         let (error, network_recorder) =

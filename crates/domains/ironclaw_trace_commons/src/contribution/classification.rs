@@ -25,15 +25,46 @@ pub(crate) fn build_trace_card(
         .into_iter()
         .collect();
 
+    // Derived from `allowed_uses`, not hardcoded. Retention was computed twice
+    // by different rules: this card stamped `private_corpus_revocable`
+    // unconditionally while `retention_policy_for_trace` ranked the allowed uses
+    // — and they disagree for three of the five consent scopes (a
+    // ModelTraining-scoped trace is `training_revocable`/1095d, not
+    // `private_corpus_revocable`/730d). The card is what crosses the wire, so
+    // the wrong value was the one that shipped (#7144).
+    let allowed_uses = allowed_uses_for_scopes(consent_scopes);
+    let retention_policy = strongest_retention_policy_for_allowed_uses(&allowed_uses);
+
     TraceCard {
         consent_scope,
         redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
         source_channel: channel_label(channel).to_string(),
         tool_categories,
-        allowed_uses: allowed_uses_for_scopes(consent_scopes),
-        retention_policy: "private_corpus_revocable".to_string(),
+        allowed_uses,
+        retention_policy: retention_policy.name,
         revocation_handle: revocation_handle.to_string(),
     }
+}
+
+/// The retention policy implied by the strongest allowed use. Single source of
+/// the ranking, shared by [`build_trace_card`] and [`retention_policy_for_trace`]
+/// so the card and the derivation can no longer drift.
+fn strongest_retention_policy_for_allowed_uses(
+    allowed_uses: &[TraceAllowedUse],
+) -> TraceRetentionPolicy {
+    let strongest = allowed_uses
+        .iter()
+        .copied()
+        .max_by_key(|allowed_use| match allowed_use {
+            TraceAllowedUse::ModelTraining => 5,
+            TraceAllowedUse::RankingModelTraining => 4,
+            TraceAllowedUse::BenchmarkGeneration => 3,
+            TraceAllowedUse::Evaluation => 2,
+            TraceAllowedUse::Debugging => 1,
+            TraceAllowedUse::AggregateAnalytics => 0,
+        })
+        .unwrap_or(TraceAllowedUse::Debugging);
+    retention_policy_for_allowed_use(strongest)
 }
 
 pub(crate) fn allowed_uses_for_scopes(scopes: &[ConsentScope]) -> Vec<TraceAllowedUse> {
@@ -116,21 +147,7 @@ pub fn retention_policy_for_allowed_use(allowed_use: TraceAllowedUse) -> TraceRe
 }
 
 pub fn retention_policy_for_trace(envelope: &TraceContributionEnvelope) -> TraceRetentionPolicy {
-    let strongest = envelope
-        .trace_card
-        .allowed_uses
-        .iter()
-        .copied()
-        .max_by_key(|allowed_use| match allowed_use {
-            TraceAllowedUse::ModelTraining => 5,
-            TraceAllowedUse::RankingModelTraining => 4,
-            TraceAllowedUse::BenchmarkGeneration => 3,
-            TraceAllowedUse::Evaluation => 2,
-            TraceAllowedUse::Debugging => 1,
-            TraceAllowedUse::AggregateAnalytics => 0,
-        })
-        .unwrap_or(TraceAllowedUse::Debugging);
-    let mut policy = retention_policy_for_allowed_use(strongest);
+    let mut policy = strongest_retention_policy_for_allowed_uses(&envelope.trace_card.allowed_uses);
     if !envelope.consent.revocable {
         policy.revocable = false;
     }
@@ -202,13 +219,11 @@ pub fn trace_dataset_eligibility(
             reasons.push("high residual privacy risk is not dataset eligible".to_string());
         }
     }
-    if envelope
-        .privacy
-        .warnings
-        .iter()
-        .any(|warning| warning.to_ascii_lowercase().contains("quarantined"))
-    {
-        reasons.push("trace is quarantined by privacy warning".to_string());
+    // Keyed on the typed flag, never on warning prose (#7144). The
+    // `residual_pii_risk` fallback covers envelopes persisted before the flag
+    // existed, whose `quarantined` deserializes to its `false` default.
+    if envelope.privacy.quarantined || quarantines_trace(envelope.privacy.residual_pii_risk) {
+        reasons.push("trace is quarantined pending privacy review".to_string());
     }
 
     TraceDatasetEligibility {

@@ -50,10 +50,10 @@ cargo install cargo-mutants --locked
 
 # one file (start here — a file is a coffee break, not an overnight job)
 ./scripts/mutation-audit.sh -p ironclaw_event_projections \
-    crates/ironclaw_event_projections/src/runtime_projection.rs
+    crates/events/ironclaw_event_projections/src/runtime_projection.rs
 
 # a whole package
-./scripts/mutation-audit.sh -p ironclaw_dispatcher
+./scripts/mutation-audit.sh -p ironclaw_event_projections
 ```
 
 Output is `mutants.out/triage-queue.md`: one entry per survivor, with the
@@ -74,7 +74,7 @@ which the build script already honours:
 
 ```bash
 SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_composition \
-    crates/ironclaw_composition/src/extension_host/channel_outbound_targets.rs
+    crates/app/ironclaw_composition/src/capability_authorization.rs
 ```
 
 The frontend is not under mutation, so skipping it costs no coverage.
@@ -175,7 +175,7 @@ A fix for a `real-gap` survivor is accepted only when both hold:
 
 ```bash
 ./scripts/mutation-verify-fix.sh -p ironclaw_event_projections \
-  'crates/ironclaw_event_projections/src/runtime_projection.rs:80:5: replace sort_runs_for_projection with ()'
+  'crates/events/ironclaw_event_projections/src/runtime_projection.rs:80:5: replace sort_runs_for_projection with ()'
 ```
 
 Copy the mutant string verbatim from `missed.txt` or the triage queue. Exit 0

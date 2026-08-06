@@ -137,9 +137,12 @@ python scripts/telegram_smoke/run_smoke.py --list-cases
 
 ## Recommended Release Workflow
 
-1. Run the local Rust Telegram regression suite first.
+1. Run the local Rust Telegram regression suites first (the old
+   `telegram_auth_integration` target was deleted with the v1 monolith in
+   #6375):
    ```bash
-   cargo test --features integration --test telegram_auth_integration -- --nocapture
+   cargo test -p ironclaw_telegram_extension
+   cargo test --test reborn_integration_extension_delivery --test reborn_integration_channel_connection_projection
    ```
 2. Start the release-candidate IronClaw build.
 3. Run the real Telegram smoke script.
