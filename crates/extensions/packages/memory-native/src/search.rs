@@ -12,8 +12,10 @@ const MAX_LIMIT: usize = 1_000;
 /// FTS backends can match on. Every character that is not an alphanumeric is
 /// a token separator — the same treatment the unicode61 tokenizer applies to
 /// indexed content — so punctuation, quotes, parens, and the FTS5
-/// operators (`+ - " * ( ) : ^`) cannot leak into a backend MATCH
-/// expression and turn a natural-language query into a syntax error.
+/// punctuation operators (`+ - " * ( ) : ^`) cannot leak into a backend
+/// MATCH expression and turn a natural-language query into a syntax error.
+/// The libSQL filesystem backend separately quotes these tokens so uppercase
+/// barewords such as `AND`, `OR`, and `NOT` are literals rather than syntax.
 fn sanitize_fts_query(raw: impl Into<String>) -> String {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -67,8 +69,8 @@ impl MemorySearchRequest {
         // rejected as empty, and a natural-language query cannot carry FTS
         // syntax into a backend MATCH expression. The libSQL backend passes
         // the query verbatim to FTS5, which treats `+ - " * ( ) : ^` as
-        // operators: a raw user query containing them makes the MATCH
-        // expression invalid and the whole search FAILS (the tool surface
+        // punctuation operators: a raw user query containing them makes the
+        // MATCH expression invalid and the whole search FAILS (the tool surface
         // reports `OperationFailed` and the prompt lane degrades to empty)
         // — the #7275 production recall failure. The in-memory reference
         // matcher requires every whitespace token as a substring, so raw

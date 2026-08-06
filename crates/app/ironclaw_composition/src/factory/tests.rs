@@ -42,7 +42,7 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
-    MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceError,
 };
 
 use rust_decimal_macros::dec;
@@ -1080,6 +1080,9 @@ async fn memory_recall_across_conversations_on_production_path() {
         "unlocks staging!",
         "staging (unlocks)",
         "launch-code-plum-42?",
+        "AND staging",
+        "unlocks staging OR",
+        "staging NOT",
     ] {
         let found = invoke_json(
             &services,
@@ -1224,11 +1227,11 @@ async fn memory_recall_fails_closed_for_other_users_and_isolated_scope_axes() {
 ///
 /// - No match: the real tool surface returns a SUCCESSFUL invocation with
 ///   `result_count: 0`.
-/// - Input failure: the same tool surface FAILS the invocation (empty query
-///   is rejected before any retrieval) instead of returning an empty result
-///   set — distinguishable outcome shapes on the same caller surface.
-/// - Backend failure: the error contract carries `Err(Unavailable)`, never a
-///   fabricated empty `Ok` (the diagnostic capture for the lane lives in
+/// - Input failure: the same tool surface FAILS the invocation (a query with
+///   no searchable tokens is rejected before retrieval) instead of returning
+///   an empty result set — distinguishable outcome shapes on the same caller
+///   surface.
+/// - Backend failure: the diagnostic capture for the lane lives in
 ///   [`memory_prompt_lane_failure_emits_operator_diagnostic`], which needs a
 ///   current-thread runtime so the tracing subscriber sees the events).
 #[tokio::test]
@@ -1283,24 +1286,18 @@ async fn memory_retrieval_failure_is_distinct_from_no_matching_memory() {
         &services,
         MEMORY_SEARCH_CAPABILITY_ID,
         memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-c", None),
-        serde_json::json!({}),
+        // Sanitization removes every punctuation character, exercising the
+        // production `MemorySearchRequest::new` rejection path.
+        serde_json::json!({"query": "!!!???", "limit": 5}),
     )
     .await
-    .expect_err("an empty query must fail the search invocation, not return empty results");
+    .expect_err(
+        "a punctuation-only query must fail the search invocation, not return empty results",
+    );
     assert_eq!(
         input_failure,
         FailureKind::InputEncode,
         "invalid search input must surface as a distinct failure kind"
-    );
-
-    // The error contract itself: a backend failure is a typed
-    // `Err(Unavailable)`, never an empty `Ok` — the same distinction the
-    // caller-level surfaces above make observable.
-    let failing_error = MemoryServiceError::unavailable();
-    assert_eq!(
-        failing_error.kind(),
-        MemoryServiceErrorKind::Unavailable,
-        "backend failure is a typed Err(Unavailable), not an empty Ok"
     );
 }
 
@@ -1352,6 +1349,10 @@ async fn memory_prompt_lane_failure_emits_operator_diagnostic() {
     assert!(
         logs.contains("memory context lane retrieval failed"),
         "operator diagnostics must record the lane retrieval failure (distinct from a silent no-match): {logs}"
+    );
+    assert!(
+        logs.contains("kind=Unavailable"),
+        "operator diagnostics must carry the exact error kind: {logs}"
     );
 }
 
