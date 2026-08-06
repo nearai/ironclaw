@@ -53,9 +53,7 @@ pub use activation::{
     SkillInjectionMode,
 };
 pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
-pub use bundle_staging::{
-    STAGED_SKILLS_DIRNAME, SkillBundleStager, StagedBundleFile, WorkspaceSkillBundleStager,
-};
+pub use bundle_staging::{SkillBundleStager, StagedBundleFile, WorkspaceSkillBundleStager};
 pub use error::FirstPartySkillsExtensionError;
 pub use execution::{SkillExecutionAdapter, SkillExecutionAdapterError, SkillExecutionPlan};
 pub use skill_activation_capability::{SKILL_ACTIVATE_CAPABILITY_ID, skill_activation_capability};

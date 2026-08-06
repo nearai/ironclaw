@@ -18,7 +18,7 @@ use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 /// Dot-prefixed so it reads as machine-managed, but deliberately NOT in the coding tools'
 /// `DEFAULT_EXCLUDED_DIRS`: excluding it hides staged files from `glob`/`grep`/`list_dir`, and a
 /// model that looks for its skill's script instead of using the injected path would not find it.
-pub const STAGED_SKILLS_DIRNAME: &str = ".skills";
+pub(crate) const STAGED_SKILLS_DIRNAME: &str = ".skills";
 
 /// One file of a bundle, ready to stage.
 #[derive(Debug, Clone)]
