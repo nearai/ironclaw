@@ -314,8 +314,10 @@ call before recovery can advance the ordered chain.
 `reasoning.rs` does **not** contain an `IntentClassifier`, and it is **not** a
 reasoning *engine* — the v1 `Reasoning` struct and its planner/evaluator types
 were deleted in the WS8 dead-surface sweep. What survives is a provider-quirk
-cleanup module with exactly three public functions, all consumed by
-`ironclaw_turn_runner`'s model gateway on the live model-response path:
+cleanup module with exactly three public functions, all consumed by the model
+gateway in `crates/loop/ironclaw_loop_host/src/model_gateway.rs` on the live
+model-response path (the gateway moved out of `ironclaw_turn_runner`; this
+line used to cite the old home):
 - `clean_response()` — thinking-tag stripping: regex-based, code-region-aware removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, tool-call tags, and markdown-fenced/bracket tool-call residue from model responses before they reach the user
 - `contains_codex_text_tool_call_syntax()` — detects Codex textual tool-call syntax (`to=tool.name json\n{…}`) outside code regions
 - `recover_codex_text_tool_calls_from_tool_names()` — recovers those textual calls as structured `ToolCall`s when the name matches an advertised tool
