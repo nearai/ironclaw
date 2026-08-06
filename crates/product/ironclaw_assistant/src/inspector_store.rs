@@ -656,6 +656,16 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
                 Some(0),
             ));
         }
+        let active_skills = capture
+            .active_skills
+            .iter()
+            .map(|skill| diagnostic_prompt_text(&detector, skill))
+            .collect();
+        let requested_model = capture
+            .requested_model
+            .as_deref()
+            .map(|model| diagnostic_prompt_text(&detector, model));
+        let effective_model = diagnostic_prompt_text(&detector, &capture.effective_model);
         let prompt = PromptDiagnostic::new(
             Utc::now(),
             components,
@@ -664,10 +674,10 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             u32::try_from(capture.messages.len()).unwrap_or(u32::MAX),
             capture.identity_message_count,
             capture.instruction_snippet_count,
-            capture.active_skills,
+            active_skills,
             u32::try_from(capture.capability_ids.len()).unwrap_or(u32::MAX),
-            capture.requested_model,
-            Some(capture.effective_model),
+            requested_model,
+            Some(effective_model),
             Some(capture.context_limit),
         );
         if let Err(error) = InMemoryDiagnosticStore::record_prompt(self, scope, prompt) {
@@ -1232,10 +1242,10 @@ mod tests {
                 ],
                 identity_message_count: 1,
                 instruction_snippet_count: 2,
-                active_skills: vec!["workspace-search".to_string()],
+                active_skills: vec!["workspace-search".to_string(), secret.clone()],
                 capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
-                requested_model: Some("interactive_model".to_string()),
-                effective_model: "provider-model".to_string(),
+                requested_model: Some(secret.clone()),
+                effective_model: secret.clone(),
                 context_limit: 128_000,
             },
         );
@@ -1249,6 +1259,20 @@ mod tests {
         assert_eq!(prompt.instruction_snippet_count, 2);
         assert_eq!(prompt.capability_count, 1);
         assert_eq!(prompt.active_skills[0].content(), "workspace-search");
+        assert!(prompt.active_skills[1].content().contains("[REDACTED]"));
+        assert!(!prompt.active_skills[1].content().contains(&secret));
+        assert!(
+            prompt
+                .requested_model
+                .as_ref()
+                .is_some_and(|model| model.content().contains("[REDACTED]"))
+        );
+        assert!(
+            prompt
+                .effective_model
+                .as_ref()
+                .is_some_and(|model| model.content().contains("[REDACTED]"))
+        );
         assert!(prompt.components[0].content.truncated());
         assert!(!prompt.components[0].content.content().contains(&secret));
         assert!(!prompt.components[0].content.content().contains('\u{1b}'));
