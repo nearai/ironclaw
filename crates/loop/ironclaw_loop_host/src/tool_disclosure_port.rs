@@ -1485,12 +1485,14 @@ mod tests {
         invocations: Mutex<Vec<LoopRequest>>,
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     struct MutableDefinitionsPort {
         definitions: Mutex<Vec<ProviderToolDefinition>>,
         surface_version: Mutex<CapabilitySurfaceVersion>,
         tool_definition_reads: std::sync::atomic::AtomicUsize,
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[async_trait]
     impl LoopCapabilityPort for MutableDefinitionsPort {
         fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
