@@ -135,6 +135,13 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         response.safe_text_deltas,
         vec!["assistant response".to_string()]
     );
+    assert_eq!(
+        response
+            .diagnostic_effective_model
+            .as_ref()
+            .map(|model| model.as_str()),
+        Some("host-selected-model")
+    );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
@@ -3123,6 +3130,13 @@ async fn gateway_sanitizes_provider_errors() {
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(
+        error
+            .diagnostic_effective_model
+            .as_ref()
+            .map(|model| model.as_str()),
+        Some("host-selected-model")
+    );
     assert!(!error.safe_summary.contains("RAW_PROVIDER_SECRET"));
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
 }

@@ -1504,6 +1504,16 @@ where
             self.gateway.stream_model(host_request).await
         };
 
+        let diagnostic_effective_model = match &gateway_result {
+            Ok(response) => response
+                .diagnostic_effective_model
+                .as_ref()
+                .map(|model| model.as_str().to_string()),
+            Err(error) => error
+                .diagnostic_effective_model
+                .as_ref()
+                .map(|model| model.as_str().to_string()),
+        };
         let host_response_result = match gateway_result {
             Ok(response) => {
                 let HostManagedModelResponse {
@@ -1512,6 +1522,7 @@ where
                     output,
                     usage,
                     effective_fallback_index,
+                    diagnostic_effective_model: _,
                 } = response;
                 if effective_fallback_index != Some(request.fallback_index) {
                     let error = AgentLoopHostError::new(
@@ -1558,12 +1569,13 @@ where
                     Some(error.safe_summary.as_str().to_string()),
                 ),
             };
-            let effective_model = self
-                .gateway
-                .diagnostic_effective_model(
-                    &model_profile_id,
-                    self.run_context.resolved_model_route.as_ref(),
-                )
+            let effective_model = diagnostic_effective_model
+                .or_else(|| {
+                    self.gateway.diagnostic_effective_model(
+                        &model_profile_id,
+                        self.run_context.resolved_model_route.as_ref(),
+                    )
+                })
                 .unwrap_or_else(|| model_profile_id.as_str().to_string());
             sink.record_model_call(HostManagedModelCallDiagnosticCapture {
                 context: self.run_context.clone(),
@@ -2169,6 +2181,10 @@ pub struct HostManagedModelResponse {
     /// Authoritative ordered-chain index used for this successful call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_fallback_index: Option<u32>,
+    /// Concrete provider model that handled this call. This is runtime
+    /// diagnostic evidence, not an authority or routing input.
+    #[serde(skip)]
+    pub diagnostic_effective_model: Option<Arc<String>>,
 }
 
 impl HostManagedModelResponse {
@@ -2183,6 +2199,7 @@ impl HostManagedModelResponse {
             }),
             usage: None,
             effective_fallback_index: Some(0),
+            diagnostic_effective_model: None,
         }
     }
 
@@ -2210,6 +2227,7 @@ impl HostManagedModelResponse {
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
             effective_fallback_index: Some(0),
+            diagnostic_effective_model: None,
         }
     }
 
@@ -2232,6 +2250,11 @@ impl HostManagedModelResponse {
 
     pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
         self.effective_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_diagnostic_effective_model(mut self, model: impl Into<String>) -> Self {
+        self.diagnostic_effective_model = Some(Arc::new(model.into()));
         self
     }
 }
@@ -2290,7 +2313,7 @@ pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
-    pub gate_ref: Option<LoopGateRef>,
+    pub gate_ref: Option<Box<LoopGateRef>>,
     /// Provider-supplied retry delay. Typed so the recovery strategy does not
     /// have to parse model-visible detail text.
     pub retry_after_ms: Option<u64>,
@@ -2299,6 +2322,9 @@ pub struct HostManagedModelError {
     pub next_fallback_index: Option<u32>,
     /// Provider-reported usage for a call that consumed tokens before failing.
     pub usage: Option<LoopModelUsage>,
+    /// Concrete provider model that handled this failed call. This is runtime
+    /// diagnostic evidence, not an authority or routing input.
+    pub diagnostic_effective_model: Option<Arc<String>>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -2318,6 +2344,7 @@ impl HostManagedModelError {
             retry_after_ms: None,
             next_fallback_index: None,
             usage: None,
+            diagnostic_effective_model: None,
             detail: None,
         }
     }
@@ -2331,6 +2358,7 @@ impl HostManagedModelError {
             retry_after_ms: None,
             next_fallback_index: None,
             usage: None,
+            diagnostic_effective_model: None,
             detail: None,
         }
     }
@@ -2359,7 +2387,7 @@ impl HostManagedModelError {
     }
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
-        self.gate_ref = Some(gate_ref);
+        self.gate_ref = Some(Box::new(gate_ref));
         self
     }
 
@@ -2381,6 +2409,11 @@ impl HostManagedModelError {
 
     pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_diagnostic_effective_model(mut self, model: impl Into<String>) -> Self {
+        self.diagnostic_effective_model = Some(Arc::new(model.into()));
         self
     }
 }
@@ -2772,7 +2805,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
         host_error = host_error.with_reason_kind(reason_kind);
     }
     if let Some(gate_ref) = error.gate_ref {
-        host_error = host_error.with_gate_ref(gate_ref);
+        host_error = host_error.with_gate_ref(*gate_ref);
     }
     if let Some(retry_after_ms) = error.retry_after_ms {
         host_error = host_error.with_retry_after_ms(retry_after_ms);

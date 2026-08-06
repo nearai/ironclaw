@@ -299,7 +299,10 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
     assert_eq!(model_calls.len(), 1);
     assert_eq!(model_calls[0].iteration, 7);
     assert_eq!(model_calls[0].requested_model, "interactive_model");
-    assert_eq!(model_calls[0].effective_model, "provider-model");
+    assert_eq!(
+        model_calls[0].effective_model,
+        "provider-model-from-response"
+    );
     assert_eq!(
         model_calls[0].usage.map(|usage| usage.input_tokens),
         Some(21)
@@ -352,6 +355,7 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
         ironclaw_loop_host::HostManagedModelCallDiagnosticStatus::Failed
     );
     assert_eq!(model_calls[0].usage, Some(usage));
+    assert_eq!(model_calls[0].effective_model, "provider-model-from-error");
     assert_eq!(
         model_calls[0].failure_summary.as_deref(),
         Some("model provider unavailable")
@@ -6071,7 +6075,9 @@ impl RecordingGateway {
             calls: Mutex::new(Vec::new()),
             tool_definition_calls: Mutex::new(Vec::new()),
             response: Ok(
-                HostManagedModelResponse::assistant_reply(content.to_string()).with_usage(usage),
+                HostManagedModelResponse::assistant_reply(content.to_string())
+                    .with_usage(usage)
+                    .with_diagnostic_effective_model("provider-model-from-response"),
             ),
         }
     }
@@ -6135,7 +6141,9 @@ impl RecordingGateway {
         Self {
             calls: Mutex::new(Vec::new()),
             tool_definition_calls: Mutex::new(Vec::new()),
-            response: Err(HostManagedModelError::safe(kind, safe_summary).with_usage(usage)),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)
+                .with_usage(usage)
+                .with_diagnostic_effective_model("provider-model-from-error")),
         }
     }
 
