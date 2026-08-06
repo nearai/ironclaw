@@ -52,8 +52,11 @@
 enforce = true
 
 # Ceiling on composition's share of production crate code, in basis points.
-# 2398 bp = 23.98%, the observed value on the date below (a true ratchet: set to
-# current, not padded). tolerance_bp gives working slack for in-flight PRs.
+# 658 bp = 6.58%. Unlike the sibling metrics this ceiling is deliberately NOT
+# re-set to the current observation: reborn_restructure_baselines.rs asserts the
+# WS0 share record (658 bp) stays <= ceiling_bp + tolerance_bp, so the WS0
+# record is this ceiling's floor. tolerance_bp gives working slack for
+# in-flight PRs.
 # 2026-08-05 (program closure): 2398 -> 658 — locked to the WS0 baseline share
 # exactly (the arch-test WS0 record is this ceiling's floor by assertion;
 # observed today is 578 bp, inside the nudge window).

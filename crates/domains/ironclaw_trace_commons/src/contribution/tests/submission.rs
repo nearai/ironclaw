@@ -531,6 +531,14 @@ async fn submit_preserves_rejection_body_read_failure_cause_with_status() {
         TraceQueueTelemetryFailureKind::HttpRejection,
         "a rejection whose body read fails is still an HTTP rejection: {failure}"
     );
+    // The structured status is private by design (the failure's message is
+    // built from it in the same constructor); what it drives structurally is
+    // the kind above and the auth-retry split, so pin the split too: a 503
+    // must never read as an auth rejection and trigger a token refresh.
+    assert!(
+        !failure.auth_rejection(),
+        "a 503 rejection must not classify as an auth rejection: {failure}"
+    );
     assert!(
         failure.to_string().contains("503"),
         "the rejection must keep the received HTTP status, got: {failure}"
