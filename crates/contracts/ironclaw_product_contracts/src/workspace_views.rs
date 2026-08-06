@@ -2,14 +2,20 @@
 //! wire DTO homes").
 //!
 //! The WebUI Projects page and the read-only Workspace/Files explorer both
-//! serialize these. The read *ports* that serve them stayed in
-//! `ironclaw_assistant`, for two different reasons worth keeping straight:
-//! `ProjectFilesystemReader` **cannot** move — every method takes an
-//! `ironclaw_threads::ThreadScope`, outside this crate's allowlist — while
-//! `ProjectService` and `FilesystemBrowseReader` merely **have not**: §6.1.3's
-//! port list does not name them, and inverting a port without repointing its
-//! implementor (composition, in both cases) buys no dependency-edge removal.
-//! The WS5 `product` row owns that call.
+//! serialize these. Of the three ports that serve them, one is now here and two
+//! are still in `ironclaw_assistant`, for reasons worth keeping straight:
+//!
+//! - `ProjectService` **moved here** — [`project_service`](crate::project_service),
+//!   hoisted 2026-08-05 by PROPOSAL §12.13 D-P. Its implementing adapter sits
+//!   *below* product (`ironclaw_identity::projects`), which a `products`-tier
+//!   declaration made unplaceable; that is the dependency-edge removal the
+//!   earlier text here said the hoist did not buy.
+//! - `ProjectFilesystemReader` **cannot** move — every method takes an
+//!   `ironclaw_threads::ThreadScope`, outside this crate's allowlist.
+//! - `FilesystemBrowseReader` merely **has not**: §6.1.3's port list does not
+//!   name it, and its implementor (`ironclaw_composition`) stays put, so
+//!   hoisting it removes no edge. D-P deliberately did not take it — see the
+//!   §6.10.1 measurement of what the browse reader would drag with it.
 //!
 //! Never here: a repository, a path resolver, or any mount alias.
 

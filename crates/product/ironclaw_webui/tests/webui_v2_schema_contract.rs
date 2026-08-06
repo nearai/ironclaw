@@ -1,14 +1,17 @@
 use chrono::Utc;
 use ironclaw_assistant::{
-    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
-    ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase, ProgressKind,
-    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
-    RebornSubmitTurnResponse,
+    RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
 };
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, ThreadId},
     runtime::RuntimeKind,
+};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityDisplayPreviewView,
+    FinalReplyView, GatePromptView, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,

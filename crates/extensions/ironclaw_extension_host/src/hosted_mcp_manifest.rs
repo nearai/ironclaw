@@ -369,6 +369,7 @@ pub(crate) fn available_package(
             max_egress_bytes: capability.max_egress_bytes,
             resource_profile: capability.resource_profile.clone(),
             origin_gate_matrix: capability.origin_gate_matrix.clone(),
+            standard_op: capability.standard_op,
         })
         .collect();
     let package = ExtensionPackage::from_virtual_manifest(

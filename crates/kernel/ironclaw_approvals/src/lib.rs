@@ -73,10 +73,15 @@ pub type ToolPermissionState = CapabilityPermissionState;
 pub type ToolPermissionStoreError = CapabilityPermissionStoreError;
 pub type ToolPermissionOverrideStore<F> = CapabilityPermissionOverrideStore<F>;
 
-pub trait ToolPermissionOverrideStorePort: CapabilityPermissionOverrideStorePort {}
-
-impl<T> ToolPermissionOverrideStorePort for T where T: CapabilityPermissionOverrideStorePort + ?Sized
-{}
+// ✎ WS8, 2026-08-05 — `ToolPermissionOverrideStorePort` used to sit here as a
+// blanket-impl *trait* alias over `CapabilityPermissionOverrideStorePort`
+// (PROPOSAL §6.5.3's "still to do: delete", CHECKLIST WS8). Unlike the plain
+// `pub type` aliases above it was a second trait, so it minted a second
+// `dyn` vtable identity for one behavior and every `Arc<dyn …>` site had to
+// pick a spelling. All 44 sites across composition/product/extension_host and
+// the integration harness now name the capability trait directly. The `pub
+// type` aliases above are a different class — same type, one identity — and
+// belong to the `approvals` narrowing row, not here.
 
 pub struct ApprovalResolver<'a, A, L>
 where

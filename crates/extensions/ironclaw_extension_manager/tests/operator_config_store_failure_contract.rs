@@ -127,7 +127,7 @@ async fn every_store_failure_surfaces_as_backend_rather_than_a_silent_success() 
     ];
     for (case, state, overrides_fail, revoke_fails) in cases {
         let stores = approval_stores();
-        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+        let overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort> =
             if overrides_fail {
                 Arc::new(WriteFailsOverrideStore {
                     inner: Arc::clone(&stores.overrides),
@@ -262,7 +262,7 @@ fn authenticated_request(
 
 struct ApprovalStores {
     auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
-    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
 }
 
@@ -317,7 +317,7 @@ impl ironclaw_approvals::AutoApproveSettingStorePort for SetFailsAutoApproveStor
 /// An override store whose *mutations* fail while reads keep working, so a case
 /// can tell "the write failed" from "the store is gone".
 struct WriteFailsOverrideStore {
-    inner: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    inner: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
 }
 
 #[async_trait]

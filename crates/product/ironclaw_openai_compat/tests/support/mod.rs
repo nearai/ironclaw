@@ -145,7 +145,7 @@ impl FakeProductSurface {
 
     pub(crate) fn program_projection_resolution(
         &self,
-        _request: ironclaw_assistant::ProjectionSubscriptionRequest,
+        _request: ironclaw_product_contracts::projection::ProjectionSubscriptionRequest,
     ) {
     }
 
@@ -378,7 +378,7 @@ impl ProductSurface for FakeProductSurface {
         let thread_id = request.stream_id.ok_or_else(invalid_request)?;
         let after_cursor = request
             .after_cursor
-            .map(ironclaw_assistant::ProjectionCursor::new)
+            .map(ironclaw_product_contracts::outbound::ProjectionCursor::new)
             .transpose()
             .map_err(|_| invalid_request())?;
         let response = self

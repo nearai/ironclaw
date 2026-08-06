@@ -10,21 +10,23 @@
 use std::time::Duration;
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::{
-    ChannelAttachmentRef, ChannelError, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductSourceChannel,
-};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{ChannelAttachmentRef, ChannelError};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::attachment::InboundAttachment;
 #[cfg(test)]
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_loop_host::HostInputEnqueuePort;
 #[cfg(doc)]
 use ironclaw_loop_host::RejectingInputEnqueue;
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductSourceChannel,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
@@ -822,7 +824,7 @@ where
 }
 
 fn validate_attachment_sources(
-    descriptors: &[crate::ProductAttachmentDescriptor],
+    descriptors: &[ironclaw_extension_contracts::external::ProductAttachmentDescriptor],
     sources: &[ChannelAttachmentRef],
 ) -> Result<(), ProductSurfaceFailure> {
     if descriptors.len() != sources.len() {

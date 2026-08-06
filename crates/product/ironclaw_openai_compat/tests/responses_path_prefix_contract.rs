@@ -16,8 +16,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
 use http_body_util::BodyExt;
-use ironclaw_assistant::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs,
     OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatRouterState,

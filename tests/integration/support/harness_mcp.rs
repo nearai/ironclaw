@@ -142,6 +142,7 @@ pub(super) fn mock_mcp_extension_package(
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             visibility: CapabilityVisibility::Model,
+            standard_op: None,
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
@@ -174,6 +175,7 @@ pub(super) fn mock_mcp_extension_package(
         max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
+        standard_op: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

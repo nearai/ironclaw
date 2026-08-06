@@ -45,11 +45,9 @@ use ironclaw_assistant::{
     PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
-    PROJECT_VIEW, PROJECTS_VIEW, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductListAutomationsRequest, ProductListThreadsRequest, ProductResolveGateRequest,
-    ProductRetryRunRequest, ProductSubmitTurnRequest, ProjectFsEntry, ProjectFsEntryKind,
-    ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
+    PROJECT_VIEW, PROJECTS_VIEW, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
@@ -91,13 +89,9 @@ use ironclaw_assistant::{
     THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
     TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
-use ironclaw_assistant::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProgressKind, ProgressUpdateView, ProjectionCursor,
-};
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::state::LifecyclePublicState;
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::{
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
@@ -113,6 +107,11 @@ use ironclaw_host_api::{
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
 };
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductResolveGateRequest, ProductRetryRunRequest,
+    ProductSubmitTurnRequest,
+};
 use ironclaw_product_contracts::ironhub::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
@@ -120,6 +119,11 @@ use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult,
+};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_contracts::product_wire::{RebornLogQueryRequest, RebornLogQueryResponse};
 use ironclaw_product_contracts::surface::{
@@ -2812,9 +2816,11 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // the captured RebornStreamEventsRequest — if a future refactor flips
     // the `.or()` order, the service will see cursor-B and this test fails.
     let header_cursor =
-        ironclaw_assistant::ProjectionCursor::new("cursor-from-header").expect("cursor");
+        ironclaw_product_contracts::outbound::ProjectionCursor::new("cursor-from-header")
+            .expect("cursor");
     let query_cursor =
-        ironclaw_assistant::ProjectionCursor::new("cursor-from-query").expect("cursor");
+        ironclaw_product_contracts::outbound::ProjectionCursor::new("cursor-from-query")
+            .expect("cursor");
     let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
     let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
     let query_encoded = url_encode(&query_json);

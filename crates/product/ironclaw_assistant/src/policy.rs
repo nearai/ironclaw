@@ -6,11 +6,12 @@
 
 use ironclaw_product_contracts::action::SourceBindingKey;
 
-use crate::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
+use async_trait::async_trait;
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_product_contracts::inbound::{
     ProductInboundEnvelope, ProductRejection, UserMessagePayload,
 };
-use async_trait::async_trait;
 
 use crate::error::ProductSurfaceFailure;
 

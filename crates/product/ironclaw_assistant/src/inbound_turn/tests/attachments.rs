@@ -3,17 +3,18 @@
 use super::*;
 use ironclaw_loop_host::RejectingInputEnqueue;
 
-use crate::{
-    AuthRequirement, ExternalEventId, ParsedProductInbound, ProductInboundEnvelope,
-    ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
-};
 use ironclaw_attachments::{AttachmentCleanupReport, ProjectScopedAttachmentLander};
+use ironclaw_extension_contracts::external::ExternalEventId;
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemError, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
+};
+use ironclaw_product_contracts::inbound::{
+    ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_threads::{

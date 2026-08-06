@@ -9,8 +9,8 @@
 //! through, plus the shared workflow-error → delivery-failure classifier the
 //! coordinator uses.
 
-use crate::{ExternalActorRef, ExternalConversationRef};
 use async_trait::async_trait;
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_outbound::{DeliveryFailureKind, ValidatedReplyTargetBinding};
 
 use crate::ProductSurfaceFailure;

@@ -8,13 +8,10 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_assistant::{
-    AdapterInstallationId, AuthRequirement, ExternalConversationRef, FinalReplyView,
-    ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProjectionCursor,
-    ProjectionSubscriptionRequest, ProtocolAuthEvidence,
-};
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
@@ -24,6 +21,12 @@ use ironclaw_openai_compat::{
     OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseWaitRequest,
     OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_product_contracts::outbound::{
+    FinalReplyView, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProjectionCursor,
+};
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::json;
