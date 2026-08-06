@@ -2022,6 +2022,12 @@ pub trait HostManagedPromptDiagnosticSink: Send + Sync {
     fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture);
 
     fn record_model_call(&self, _capture: HostManagedModelCallDiagnosticCapture) {}
+
+    fn record_tool_input(&self, _capture: HostManagedToolInputDiagnosticCapture) {}
+
+    fn record_tool_started(&self, _capture: HostManagedToolStartedDiagnosticCapture) {}
+
+    fn record_tool_result(&self, _capture: HostManagedToolResultDiagnosticCapture) {}
 }
 
 #[derive(Debug, Clone)]
@@ -2063,6 +2069,39 @@ pub struct HostManagedModelCallDiagnosticCapture {
     pub duration_ms: Option<u64>,
     pub status: HostManagedModelCallDiagnosticStatus,
     pub usage: Option<LoopModelUsage>,
+    pub failure_summary: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct HostManagedToolInputDiagnosticCapture {
+    pub context: LoopRunContext,
+    pub input_ref: String,
+    pub capability_name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedToolStartedDiagnosticCapture {
+    pub context: LoopRunContext,
+    pub activity_id: Uuid,
+    pub input_ref: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostManagedToolResultDiagnosticStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone)]
+pub struct HostManagedToolResultDiagnosticCapture {
+    pub context: LoopRunContext,
+    pub activity_id: Uuid,
+    pub capability_name: String,
+    pub result: Option<String>,
+    pub result_original_bytes: Option<u64>,
+    pub status: HostManagedToolResultDiagnosticStatus,
+    pub failure_category: Option<String>,
     pub failure_summary: Option<String>,
 }
 

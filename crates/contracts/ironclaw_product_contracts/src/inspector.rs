@@ -284,6 +284,21 @@ impl BoundedDiagnosticText {
         Self::bounded(value.into(), TOOL_RESULT_MAX_BYTES)
     }
 
+    pub fn retained_tool_result(
+        value: impl Into<String>,
+        original_bytes: u64,
+    ) -> Result<Self, &'static str> {
+        let mut bounded = Self::bounded(value.into(), TOOL_RESULT_MAX_BYTES);
+        let retained_bytes = u64::try_from(bounded.content.len())
+            .map_err(|_| "diagnostic text retained byte length is not representable")?;
+        if original_bytes < retained_bytes {
+            return Err("diagnostic text original byte length is smaller than retained text");
+        }
+        bounded.original_bytes = original_bytes;
+        bounded.truncated = original_bytes > retained_bytes;
+        Ok(bounded)
+    }
+
     pub fn content(&self) -> &str {
         &self.content
     }

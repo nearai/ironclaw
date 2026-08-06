@@ -527,6 +527,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
 
@@ -655,6 +656,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -2599,6 +2601,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             Some(skill_context.activation_source),
+            None,
             None,
             None,
         )
@@ -4601,6 +4604,7 @@ mod tests {
             None,
             Some(outbound_preferences_service),
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -5398,6 +5402,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -5426,6 +5431,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -5544,6 +5550,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
         let port = wiring
@@ -5633,6 +5640,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,

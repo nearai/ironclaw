@@ -11,22 +11,26 @@ use ironclaw_host_api::{
     ids::{TenantId, ThreadId, UserId},
     turn::TurnRunId,
 };
+use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{
     HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticStatus,
     HostManagedModelMessageRole, HostManagedPromptDiagnosticCapture,
     HostManagedPromptDiagnosticMessage, HostManagedPromptDiagnosticSink,
+    HostManagedToolInputDiagnosticCapture, HostManagedToolResultDiagnosticCapture,
+    HostManagedToolResultDiagnosticStatus, HostManagedToolStartedDiagnosticCapture,
     estimate_tokens_from_chars,
 };
 use ironclaw_product_contracts::inspector::{
-    DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_LIVE_UPDATE_SCOPES, DEFAULT_MAX_MODEL_CALLS_PER_RUN,
-    DEFAULT_MAX_RETAINED_RUNS_PER_SESSION, DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
-    DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN, DEFAULT_MAX_TRACKED_SESSIONS, DiagnosticActivityEntry,
-    DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticCursor, DiagnosticMetricTotal,
-    DiagnosticModelCallId, DiagnosticModelCount, DiagnosticScope, DiagnosticSequence,
-    DiagnosticSnapshot, DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope,
-    DiagnosticUpdateKind, InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic,
-    ModelTokenUsage, PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic,
-    SessionDiagnosticStats, ToolExecutionDiagnostic, ToolExecutionStatus,
+    BoundedDiagnosticText, DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_LIVE_UPDATE_SCOPES,
+    DEFAULT_MAX_MODEL_CALLS_PER_RUN, DEFAULT_MAX_RETAINED_RUNS_PER_SESSION,
+    DEFAULT_MAX_RETAINED_UPDATES_PER_RUN, DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN,
+    DEFAULT_MAX_TRACKED_SESSIONS, DiagnosticActivityEntry, DiagnosticActivityEvent,
+    DiagnosticActivityKind, DiagnosticCursor, DiagnosticMetricTotal, DiagnosticModelCallId,
+    DiagnosticModelCount, DiagnosticScope, DiagnosticSequence, DiagnosticSnapshot,
+    DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope, DiagnosticUpdateKind,
+    InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic, ModelTokenUsage,
+    PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, SessionDiagnosticStats,
+    ToolExecutionDiagnostic, ToolExecutionStatus,
 };
 use ironclaw_safety::LeakDetector;
 use thiserror::Error;
@@ -199,6 +203,16 @@ struct DiagnosticStoreState {
     session_order: VecDeque<DiagnosticSessionKey>,
     live_updates: HashMap<DiagnosticScope, broadcast::Sender<Arc<DiagnosticUpdateEnvelope>>>,
     live_update_order: VecDeque<DiagnosticScope>,
+    pending_tool_inputs: HashMap<(DiagnosticScope, String), PendingToolInput>,
+    pending_tool_input_order: VecDeque<(DiagnosticScope, String)>,
+}
+
+const MAX_PENDING_TOOL_INPUTS: usize = 1_024;
+
+#[derive(Debug, Clone)]
+struct PendingToolInput {
+    capability_name: BoundedDiagnosticText,
+    arguments: BoundedDiagnosticText,
 }
 
 impl DiagnosticStoreState {
@@ -322,6 +336,47 @@ impl InMemoryDiagnosticStore {
             limits,
             state: Mutex::new(DiagnosticStoreState::default()),
         })
+    }
+
+    fn record_pending_tool_input(
+        &self,
+        scope: DiagnosticScope,
+        input_ref: String,
+        input: PendingToolInput,
+    ) -> Result<(), DiagnosticStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        let key = (scope, input_ref);
+        if !state.pending_tool_inputs.contains_key(&key) {
+            while state.pending_tool_inputs.len() >= MAX_PENDING_TOOL_INPUTS {
+                let evicted = state
+                    .pending_tool_input_order
+                    .pop_front()
+                    .ok_or(DiagnosticStoreError::Invariant)?;
+                state.pending_tool_inputs.remove(&evicted);
+            }
+        }
+        touch(&mut state.pending_tool_input_order, key.clone());
+        state.pending_tool_inputs.insert(key, input);
+        Ok(())
+    }
+
+    fn take_pending_tool_input(
+        &self,
+        scope: &DiagnosticScope,
+        input_ref: &str,
+    ) -> Result<Option<PendingToolInput>, DiagnosticStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        let key = (scope.clone(), input_ref.to_string());
+        state
+            .pending_tool_input_order
+            .retain(|candidate| candidate != &key);
+        Ok(state.pending_tool_inputs.remove(&key))
     }
 
     pub fn record_prompt(
@@ -674,6 +729,20 @@ fn diagnostic_prompt_text(detector: &LeakDetector, value: &str) -> String {
     detector.redact_all_secrets(&validated).0
 }
 
+fn diagnostic_scope_for_context(context: &LoopRunContext) -> Option<DiagnosticScope> {
+    let user_id = context
+        .actor
+        .as_ref()
+        .map(|actor| actor.user_id.clone())
+        .or_else(|| context.scope.explicit_owner_user_id().cloned())?;
+    Some(DiagnosticScope::new(
+        context.scope.tenant_id.clone(),
+        user_id,
+        context.thread_id.clone(),
+        context.run_id,
+    ))
+}
+
 fn prompt_component_kind(
     index: usize,
     identity_message_count: u32,
@@ -905,6 +974,165 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             ),
         ) {
             tracing::debug!(%error, "model-call activity diagnostics could not be retained");
+        }
+    }
+
+    fn record_tool_input(&self, capture: HostManagedToolInputDiagnosticCapture) {
+        let Some(scope) = diagnostic_scope_for_context(&capture.context) else {
+            tracing::debug!(
+                run_id = %capture.context.run_id,
+                "tool diagnostics skipped because the run has no user scope"
+            );
+            return;
+        };
+        let detector = LeakDetector::new();
+        let input = PendingToolInput {
+            capability_name: BoundedDiagnosticText::label(diagnostic_prompt_text(
+                &detector,
+                &capture.capability_name,
+            )),
+            arguments: BoundedDiagnosticText::tool_arguments(diagnostic_prompt_text(
+                &detector,
+                &capture.arguments,
+            )),
+        };
+        if let Err(error) = self.record_pending_tool_input(scope, capture.input_ref, input) {
+            tracing::debug!(%error, "tool input diagnostics could not be retained");
+        }
+    }
+
+    fn record_tool_started(&self, capture: HostManagedToolStartedDiagnosticCapture) {
+        let Some(scope) = diagnostic_scope_for_context(&capture.context) else {
+            return;
+        };
+        let pending = match self.take_pending_tool_input(&scope, &capture.input_ref) {
+            Ok(Some(pending)) => pending,
+            Ok(None) => {
+                tracing::debug!(
+                    activity_id = %capture.activity_id,
+                    "tool start diagnostics had no correlated bounded input"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::debug!(%error, "tool input diagnostics could not be correlated");
+                return;
+            }
+        };
+        let activity_id =
+            ironclaw_host_api::turn::CapabilityActivityId::from_uuid(capture.activity_id);
+        let tool = ToolExecutionDiagnostic {
+            activity_id,
+            model_call_id: None,
+            capability_name: pending.capability_name,
+            arguments: Some(pending.arguments),
+            result: None,
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            output_bytes: None,
+            failure_category: None,
+            failure_summary: None,
+        };
+        if let Err(error) = self.record_tool_execution(scope.clone(), tool) {
+            tracing::debug!(%error, "tool start diagnostics could not be retained");
+            return;
+        }
+        if let Err(error) = self.record_activity(
+            scope,
+            DiagnosticActivityEvent::new(
+                Utc::now(),
+                DiagnosticActivityKind::ToolStarted,
+                None,
+                Some(activity_id),
+                None,
+                Some("Tool invocation started".to_string()),
+            ),
+        ) {
+            tracing::debug!(%error, "tool start activity diagnostics could not be retained");
+        }
+    }
+
+    fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+        let Some(scope) = diagnostic_scope_for_context(&capture.context) else {
+            return;
+        };
+        let activity_id =
+            ironclaw_host_api::turn::CapabilityActivityId::from_uuid(capture.activity_id);
+        let existing = match self.tool_execution(&scope, activity_id) {
+            Ok(existing) => existing,
+            Err(error) => {
+                tracing::debug!(%error, "tool result diagnostics could not read their start");
+                return;
+            }
+        };
+        let detector = LeakDetector::new();
+        let result = match capture.result {
+            Some(result) => {
+                let safe_result = diagnostic_prompt_text(&detector, &result);
+                let retained_bytes = u64::try_from(safe_result.len()).unwrap_or(u64::MAX);
+                let original_bytes = capture
+                    .result_original_bytes
+                    .unwrap_or(retained_bytes)
+                    .max(retained_bytes);
+                match BoundedDiagnosticText::retained_tool_result(safe_result, original_bytes) {
+                    Ok(result) => Some(result),
+                    Err(error) => {
+                        tracing::debug!(%error, "tool result diagnostics had invalid bounds");
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+        let failure_category = capture.failure_category.map(|category| {
+            BoundedDiagnosticText::label(diagnostic_prompt_text(&detector, &category))
+        });
+        let failure_summary = capture.failure_summary.map(|summary| {
+            BoundedDiagnosticText::summary(diagnostic_prompt_text(&detector, &summary))
+        });
+        let status = match capture.status {
+            HostManagedToolResultDiagnosticStatus::Succeeded => ToolExecutionStatus::Succeeded,
+            HostManagedToolResultDiagnosticStatus::Failed => ToolExecutionStatus::Failed,
+        };
+        let tool = ToolExecutionDiagnostic {
+            activity_id,
+            model_call_id: existing.as_ref().and_then(|tool| tool.model_call_id),
+            capability_name: existing
+                .as_ref()
+                .map(|tool| tool.capability_name.clone())
+                .unwrap_or_else(|| {
+                    BoundedDiagnosticText::label(diagnostic_prompt_text(
+                        &detector,
+                        &capture.capability_name,
+                    ))
+                }),
+            arguments: existing.and_then(|tool| tool.arguments),
+            output_bytes: result.as_ref().map(BoundedDiagnosticText::original_bytes),
+            result,
+            status,
+            duration_ms: None,
+            failure_category,
+            failure_summary: failure_summary.clone(),
+        };
+        if let Err(error) = self.record_tool_execution(scope.clone(), tool) {
+            tracing::debug!(%error, "tool result diagnostics could not be retained");
+            return;
+        }
+        let (kind, summary) = match capture.status {
+            HostManagedToolResultDiagnosticStatus::Succeeded => (
+                DiagnosticActivityKind::ToolCompleted,
+                Some("Tool invocation completed".to_string()),
+            ),
+            HostManagedToolResultDiagnosticStatus::Failed => (
+                DiagnosticActivityKind::ToolFailed,
+                failure_summary.map(|summary| summary.content().to_string()),
+            ),
+        };
+        if let Err(error) = self.record_activity(
+            scope,
+            DiagnosticActivityEvent::new(Utc::now(), kind, None, Some(activity_id), None, summary),
+        ) {
+            tracing::debug!(%error, "tool result activity diagnostics could not be retained");
         }
     }
 }
@@ -1674,7 +1902,7 @@ mod tests {
             &store,
             HostManagedModelCallDiagnosticCapture {
                 call_id: uuid::Uuid::new_v4(),
-                context,
+                context: context.clone(),
                 iteration: 4,
                 requested_model: "interactive_model".to_string(),
                 effective_model: "provider-model".to_string(),
@@ -1689,6 +1917,59 @@ mod tests {
                     cache_creation_input_tokens: 1,
                 }),
                 failure_summary: None,
+            },
+        );
+        let first_tool_id = uuid::Uuid::new_v4();
+        let second_tool_id = uuid::Uuid::new_v4();
+        for (input_ref, activity_id) in [
+            ("input:first", first_tool_id),
+            ("input:second", second_tool_id),
+        ] {
+            HostManagedPromptDiagnosticSink::record_tool_input(
+                &store,
+                HostManagedToolInputDiagnosticCapture {
+                    context: context.clone(),
+                    input_ref: input_ref.to_string(),
+                    capability_name: "filesystem.read".to_string(),
+                    arguments: format!(r#"{{"path":"{secret}"}}"#),
+                },
+            );
+            HostManagedPromptDiagnosticSink::record_tool_started(
+                &store,
+                HostManagedToolStartedDiagnosticCapture {
+                    context: context.clone(),
+                    activity_id,
+                    input_ref: input_ref.to_string(),
+                },
+            );
+        }
+        HostManagedPromptDiagnosticSink::record_tool_result(
+            &store,
+            HostManagedToolResultDiagnosticCapture {
+                context: context.clone(),
+                activity_id: first_tool_id,
+                capability_name: "filesystem.read".to_string(),
+                result: Some(format!(
+                    "{secret} {}",
+                    "x".repeat(TOOL_RESULT_MAX_BYTES + 32)
+                )),
+                result_original_bytes: Some((TOOL_RESULT_MAX_BYTES + 96) as u64),
+                status: HostManagedToolResultDiagnosticStatus::Succeeded,
+                failure_category: None,
+                failure_summary: None,
+            },
+        );
+        HostManagedPromptDiagnosticSink::record_tool_result(
+            &store,
+            HostManagedToolResultDiagnosticCapture {
+                context,
+                activity_id: second_tool_id,
+                capability_name: "filesystem.read".to_string(),
+                result: None,
+                result_original_bytes: None,
+                status: HostManagedToolResultDiagnosticStatus::Failed,
+                failure_category: Some("invalid_input".to_string()),
+                failure_summary: Some(format!("could not read {secret}")),
             },
         );
 
@@ -1741,6 +2022,45 @@ mod tests {
         assert_eq!(snapshot.model_calls[0].iteration, 4);
         assert_eq!(snapshot.stats.total_model_calls, 1);
         assert_eq!(snapshot.stats.input_tokens.known_total, 12);
+        assert_eq!(snapshot.tool_executions.len(), 2);
+        assert_eq!(
+            snapshot.tool_executions[0].activity_id.as_uuid(),
+            first_tool_id
+        );
+        assert_eq!(
+            snapshot.tool_executions[1].activity_id.as_uuid(),
+            second_tool_id
+        );
+        assert_eq!(
+            snapshot.tool_executions[0].status,
+            ToolExecutionStatus::Succeeded
+        );
+        assert_eq!(
+            snapshot.tool_executions[1].status,
+            ToolExecutionStatus::Failed
+        );
+        let first_arguments = snapshot.tool_executions[0]
+            .arguments
+            .as_ref()
+            .expect("first arguments");
+        assert!(first_arguments.content().contains("[REDACTED]"));
+        assert!(!first_arguments.content().contains(&secret));
+        let first_result = snapshot.tool_executions[0]
+            .result
+            .as_ref()
+            .expect("first result");
+        assert!(first_result.truncated());
+        assert!(first_result.content().len() <= TOOL_RESULT_MAX_BYTES);
+        assert!(!first_result.content().contains(&secret));
+        assert!(
+            snapshot.tool_executions[1]
+                .failure_summary
+                .as_ref()
+                .is_some_and(|summary| summary.content().contains("[REDACTED]"))
+        );
+        assert_eq!(snapshot.stats.total_tool_calls, 2);
+        assert_eq!(snapshot.stats.successful_tool_calls, 1);
+        assert_eq!(snapshot.stats.failed_tool_calls, 1);
     }
 
     #[test]

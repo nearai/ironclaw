@@ -3344,6 +3344,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         durable_milestone_sink,
         live_projection_publisher,
     );
+    let diagnostic_store =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
     let (
         capability_factory,
         capability_input_resolver,
@@ -3369,6 +3371,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
+            Some(Arc::clone(&diagnostic_store)
+                as Arc<
+                    dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink,
+                >),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -3629,8 +3635,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
-    let diagnostic_store =
-        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),

@@ -1,6 +1,7 @@
 import React from "react";
 
 import { cn } from "../../../utils/cn";
+import { fetchInspectorTool } from "./inspector-api";
 import {
   INSPECTOR_HEALTH,
   INSPECTOR_TABS,
@@ -215,12 +216,14 @@ function ActivityShell({
   runHistory,
   selectedRunId,
   onSelectRun,
+  threadId,
 }: {
   snapshot: Record<string, unknown> | null;
   updates: Array<Record<string, unknown>>;
   runHistory: string[];
   selectedRunId: string | null;
   onSelectRun: (runId: string) => void;
+  threadId: string | null;
 }) {
   const activity = reduceInspectorActivity(snapshot, updates);
   const selectedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
@@ -255,7 +258,14 @@ function ActivityShell({
         onSelectRun={onSelectRun}
       />
       <ol className="space-y-2" aria-label="Run activity timeline">
-        {activity.map((entry) => <ActivityEntry key={entry.key} entry={entry} />)}
+        {activity.map((entry) => (
+          <ActivityEntry
+            key={entry.key}
+            entry={entry}
+            threadId={threadId}
+            runId={selectedRunId}
+          />
+        ))}
       </ol>
     </div>
   );
@@ -321,7 +331,104 @@ function shortId(value: string | null): string | null {
   return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
 }
 
-function ActivityEntry({ entry }: { entry: InspectorActivityRow }) {
+interface ToolDetailText {
+  content: string;
+  original_bytes: number;
+  truncated: boolean;
+}
+
+interface ToolDetail {
+  capability_name: ToolDetailText;
+  arguments: ToolDetailText | null;
+  result: ToolDetailText | null;
+  status: string;
+  output_bytes: number | null;
+  failure_category: ToolDetailText | null;
+  failure_summary: ToolDetailText | null;
+}
+
+function ToolDetailDisclosure({
+  threadId,
+  runId,
+  activityId,
+}: {
+  threadId: string;
+  runId: string;
+  activityId: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
+  const [tool, setTool] = React.useState<ToolDetail | null>(null);
+  const [unavailable, setUnavailable] = React.useState(false);
+  const load = () => {
+    const nextOpen = !open;
+    setOpen(nextOpen);
+    if (!nextOpen || tool || loading || unavailable) return;
+    const controller = new AbortController();
+    setLoading(true);
+    fetchInspectorTool({ threadId, runId, activityId, signal: controller.signal })
+      .then((response) => {
+        const detail = (response as { tool?: ToolDetail | null })?.tool || null;
+        setTool(detail);
+        setUnavailable(!detail);
+      })
+      .catch(() => setUnavailable(true))
+      .finally(() => setLoading(false));
+  };
+  return (
+    <div className="mt-3 border-t border-[var(--v2-panel-border)] pt-3">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={load}
+        className="text-xs font-medium text-[var(--v2-accent-text)]"
+      >
+        {open ? "Hide details" : "Show details"}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-3 text-xs" data-testid={`inspector-tool-detail-${activityId}`}>
+          {loading && <p role="status">Loading tool details…</p>}
+          {unavailable && <p role="status">Tool details are unavailable or no longer retained.</p>}
+          {tool && (
+            <>
+              <p><span className="font-medium">Capability:</span> {tool.capability_name.content}</p>
+              <p><span className="font-medium">Status:</span> {tool.status}</p>
+              <ToolDetailBlock label="Arguments" value={tool.arguments} />
+              <ToolDetailBlock label="Output" value={tool.result} />
+              {tool.output_bytes != null && <p>Output size: {tool.output_bytes.toLocaleString()} bytes</p>}
+              <ToolDetailBlock label="Failure category" value={tool.failure_category} />
+              <ToolDetailBlock label="Failure" value={tool.failure_summary} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolDetailBlock({ label, value }: { label: string; value: ToolDetailText | null }) {
+  if (!value) return null;
+  return (
+    <div>
+      <p className="mb-1 font-medium">
+        {label}{value.truncated ? ` · truncated from ${value.original_bytes.toLocaleString()} bytes` : ""}
+      </p>
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--v2-surface-soft)] p-3 text-[11px]">
+        {value.content}
+      </pre>
+    </div>
+  );
+}
+
+function ActivityEntry({
+  entry,
+  threadId,
+  runId,
+}: {
+  entry: InspectorActivityRow;
+  threadId: string | null;
+  runId: string | null;
+}) {
   const failed = entry.kind.endsWith("_failed") || entry.kind === "gate_blocked";
   const correlation = shortId(entry.activity_id || entry.model_call_id);
   const timestamp = new Date(entry.occurred_at);
@@ -354,6 +461,13 @@ function ActivityEntry({ entry }: { entry: InspectorActivityRow }) {
         {entry.iteration != null ? ` · iteration ${entry.iteration}` : ""}
         {correlation ? ` · ${correlation}` : ""}
       </p>
+      {entry.kind.startsWith("tool_") && entry.activity_id && threadId && runId && (
+        <ToolDetailDisclosure
+          threadId={threadId}
+          runId={runId}
+          activityId={entry.activity_id}
+        />
+      )}
     </li>
   );
 }
@@ -596,6 +710,7 @@ function InspectorPanelCore({
             runHistory={runHistory}
             selectedRunId={selectedRunId}
             onSelectRun={setSelectedRunId}
+            threadId={threadId}
           />
         )}
         {preferences.activeTab === "stats" && <StatsShell snapshot={snapshot} />}

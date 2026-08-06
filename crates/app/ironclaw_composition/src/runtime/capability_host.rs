@@ -25,8 +25,11 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ThreadScopeResolver, loop_driver_execution_extension_id,
+    HostManagedModelGateway, HostManagedPromptDiagnosticSink,
+    HostManagedToolInputDiagnosticCapture, HostManagedToolResultDiagnosticCapture,
+    HostManagedToolResultDiagnosticStatus, HostManagedToolStartedDiagnosticCapture,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ThreadScopeResolver, loop_driver_execution_extension_id,
 };
 use ironclaw_product_contracts::project_service::ProjectService;
 
@@ -113,6 +116,7 @@ pub(super) fn capability_wiring(
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
@@ -155,7 +159,8 @@ pub(super) fn capability_wiring(
             Arc::clone(&thread_service),
             fallback_user_id.clone(),
         )
-        .with_observer(capability_observer),
+        .with_observer(capability_observer)
+        .with_tool_diagnostic_sink(tool_diagnostic_sink),
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -322,6 +327,7 @@ struct StagedCapabilityIo {
     /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
     /// (the input resolver bypasses this IO for provider tool-call inputs).
     observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 }
 
 #[derive(Clone)]
@@ -348,6 +354,7 @@ impl StagedCapabilityIo {
             display_previews,
             durable_previews: None,
             observer: None,
+            tool_diagnostic_sink: None,
         }
     }
 
@@ -365,6 +372,7 @@ impl StagedCapabilityIo {
                 fallback_user_id,
             }),
             observer: None,
+            tool_diagnostic_sink: None,
         }
     }
 
@@ -372,6 +380,36 @@ impl StagedCapabilityIo {
     fn with_observer(mut self, observer: Option<Arc<dyn CapabilityTrajectoryObserver>>) -> Self {
         self.observer = observer;
         self
+    }
+
+    fn with_tool_diagnostic_sink(
+        mut self,
+        sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    ) -> Self {
+        self.tool_diagnostic_sink = sink;
+        self
+    }
+
+    fn record_tool_input_diagnostic(
+        &self,
+        run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        capability_name: &str,
+        arguments: &serde_json::Value,
+    ) {
+        let Some(sink) = self.tool_diagnostic_sink.as_ref() else {
+            return;
+        };
+        let Ok(arguments) = serde_json::to_string(arguments) else {
+            tracing::debug!("tool arguments could not be serialized for diagnostics");
+            return;
+        };
+        sink.record_tool_input(HostManagedToolInputDiagnosticCapture {
+            context: run_context.clone(),
+            input_ref: input_ref.as_str().to_string(),
+            capability_name: capability_name.to_string(),
+            arguments,
+        });
     }
 
     #[cfg(test)]
@@ -762,6 +800,12 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
             tool_call.name.as_str(),
             &tool_call.arguments,
         );
+        self.record_tool_input_diagnostic(
+            run_context,
+            &input_ref,
+            tool_call.name.as_str(),
+            &tool_call.arguments,
+        );
         Ok(input_ref)
     }
 
@@ -779,6 +823,12 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
         // provider tool name, so the title and per-tool summary are correct.
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
+            input_ref,
+            capability_id.as_str(),
+            &tool_call.arguments,
+        );
+        self.record_tool_input_diagnostic(
+            run_context,
             input_ref,
             capability_id.as_str(),
             &tool_call.arguments,
@@ -817,6 +867,11 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
         let preview = first_look_result_preview(&output_content);
+        let diagnostic_result = self
+            .tool_diagnostic_sink
+            .as_ref()
+            .and_then(|_| String::from_utf8(output_content.clone()).ok());
+        let diagnostic_result_original_bytes = u64::try_from(output_content.len()).ok();
         // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
@@ -861,6 +916,18 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
+        if let Some(sink) = self.tool_diagnostic_sink.as_ref() {
+            sink.record_tool_result(HostManagedToolResultDiagnosticCapture {
+                context: run_context.clone(),
+                activity_id: invocation_id.as_uuid(),
+                capability_name: capability_id.as_str().to_string(),
+                result: diagnostic_result,
+                result_original_bytes: diagnostic_result_original_bytes,
+                status: HostManagedToolResultDiagnosticStatus::Succeeded,
+                failure_category: None,
+                failure_summary: None,
+            });
+        }
         let mut write_result =
             CapabilityWriteResult::from_output(result_ref, output_bytes, &output);
         write_result.model_observation = Some(result_reference_observation(
@@ -874,12 +941,19 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
 
     fn record_running_invocation(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+        if let Some(sink) = self.tool_diagnostic_sink.as_ref() {
+            sink.record_tool_started(HostManagedToolStartedDiagnosticCapture {
+                context: run_context.clone(),
+                activity_id: invocation_id.as_uuid(),
+                input_ref: input_ref.as_str().to_string(),
+            });
+        }
     }
 
     async fn stage_capability_failure_preview(
@@ -895,6 +969,18 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             capability_id,
             summary,
         );
+        if let Some(sink) = self.tool_diagnostic_sink.as_ref() {
+            sink.record_tool_result(HostManagedToolResultDiagnosticCapture {
+                context: run_context.clone(),
+                activity_id: invocation_id.as_uuid(),
+                capability_name: capability_id.as_str().to_string(),
+                result: None,
+                result_original_bytes: None,
+                status: HostManagedToolResultDiagnosticStatus::Failed,
+                failure_category: Some("capability_failed".to_string()),
+                failure_summary: Some(summary.to_string()),
+            });
+        }
         // Persist the failure preview to the durable timeline (status Failed)
         // so the detail survives refresh/replay, mirroring the success path in
         // `write_capability_result`.
