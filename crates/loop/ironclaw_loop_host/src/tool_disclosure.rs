@@ -1887,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_rank_scores_deterministically() {
+    fn tool_search_index_scores_deterministically() {
         let definitions = [
             fixture_tool(
                 "http_fetch",

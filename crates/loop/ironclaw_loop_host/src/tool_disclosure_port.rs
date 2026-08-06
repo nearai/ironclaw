@@ -446,12 +446,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
             .collect();
-        let mut state = self.turn_state()?;
+        let mut state = self.refresh_turn_state(surface.version.clone())?;
         let Some(state) = state.as_mut() else {
             surface.callable_capability_ids = Some(callable_capability_ids);
             return Ok(surface);
         };
-        state.surface_version = Some(surface.version.clone());
         let active_or_disclosed_descriptors = state
             .catalog
             .active_or_disclosed_descriptors(&state.active, &state.disclosed_names);
@@ -565,21 +564,52 @@ impl ToolDisclosureCapabilityPort {
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
-        let mut guard = self.turn_state.lock().map_err(|e| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                format!("tool disclosure turn state lock is poisoned: {e}"),
-            )
-        })?;
+        let guard = self.lock_turn_state()?;
+        let current_turn = guard
+            .as_ref()
+            .is_some_and(|state| state.turn_id == self.run_context.turn_id);
+        if current_turn {
+            return Ok(guard);
+        }
+        drop(guard);
+        self.rebuild_turn_state(None)
+    }
+
+    fn refresh_turn_state(
+        &self,
+        surface_version: CapabilitySurfaceVersion,
+    ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
+        let guard = self.lock_turn_state()?;
+        let current_surface = guard.as_ref().is_some_and(|state| {
+            state.turn_id == self.run_context.turn_id
+                && state.surface_version.as_ref() == Some(&surface_version)
+        });
+        if current_surface {
+            return Ok(guard);
+        }
+        drop(guard);
+        self.rebuild_turn_state(Some(surface_version))
+    }
+
+    fn rebuild_turn_state(
+        &self,
+        surface_version: Option<CapabilitySurfaceVersion>,
+    ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
+        // The visible-surface version commits to full descriptor metadata,
+        // including schemas. Bridge calls reuse the state until the owning
+        // visible-capability refresh reports a new version. Definition retrieval
+        // and canonical schema hashing therefore happen only on a real refresh,
+        // and remain outside the state critical section.
         let definitions = self.inner.tool_definitions()?;
-        // Fit and cache retrieval only over the effective authorized corpus.
-        // Denied schemas therefore cannot affect IDF, ordering, counts, cache
-        // invalidation, or search-index construction work.
         let authorized_definitions: Vec<_> = definitions
             .into_iter()
             .filter(|definition| self.allow_set.permits(&definition.capability_id))
             .collect();
         let fingerprint = definitions_fingerprint(&authorized_definitions);
+        let mut guard = self.lock_turn_state()?;
+        // Fit and cache retrieval only over the effective authorized corpus.
+        // Denied schemas therefore cannot affect IDF, ordering, counts, cache
+        // invalidation, or search-index construction work.
         let same_turn = guard
             .as_ref()
             .map(|state| state.turn_id == self.run_context.turn_id)
@@ -588,6 +618,7 @@ impl ToolDisclosureCapabilityPort {
             .as_ref()
             .map(|state| {
                 state.turn_id != self.run_context.turn_id
+                    || state.surface_version != surface_version
                     || state.definitions_fingerprint != fingerprint
             })
             .unwrap_or(true);
@@ -607,7 +638,7 @@ impl ToolDisclosureCapabilityPort {
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
-            let (surface_version, disclosed_names, search_ranks) = guard
+            let (previous_surface_version, disclosed_names, search_ranks) = guard
                 .take()
                 .filter(|_| same_turn)
                 .map(|state| {
@@ -621,7 +652,7 @@ impl ToolDisclosureCapabilityPort {
             *guard = Some(ToolDisclosureTurnState {
                 turn_id: self.run_context.turn_id,
                 definitions_fingerprint: fingerprint,
-                surface_version,
+                surface_version: surface_version.or(previous_surface_version),
                 catalog,
                 search_index,
                 active,
@@ -630,6 +661,17 @@ impl ToolDisclosureCapabilityPort {
             });
         }
         Ok(guard)
+    }
+
+    fn lock_turn_state(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
+        self.turn_state.lock().map_err(|e| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("tool disclosure turn state lock is poisoned: {e}"),
+            )
+        })
     }
 
     fn promoted_for_scope(&self) -> Result<PromotedSet, AgentLoopHostError> {
@@ -1443,6 +1485,71 @@ mod tests {
         invocations: Mutex<Vec<LoopRequest>>,
     }
 
+    struct MutableDefinitionsPort {
+        definitions: Mutex<Vec<ProviderToolDefinition>>,
+        surface_version: Mutex<CapabilitySurfaceVersion>,
+        tool_definition_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for MutableDefinitionsPort {
+        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+            self.tool_definition_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self
+                .definitions
+                .lock()
+                .expect("mutable definitions lock")
+                .clone())
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            let definitions = self
+                .definitions
+                .lock()
+                .expect("mutable definitions lock")
+                .clone();
+            Ok(VisibleCapabilitySurface {
+                version: self
+                    .surface_version
+                    .lock()
+                    .expect("mutable surface-version lock")
+                    .clone(),
+                descriptors: definitions
+                    .into_iter()
+                    .map(|definition| CapabilityDescriptorView {
+                        capability_id: definition.capability_id,
+                        provider: None,
+                        runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
+                        safe_name: definition.name.to_string(),
+                        safe_description: definition.description,
+                        description_trust: definition.description_trust,
+                        concurrency_hint: ConcurrencyHint::SafeForParallel,
+                        parameters_schema: definition.parameters,
+                    })
+                    .collect(),
+                callable_capability_ids: None,
+            })
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
+            unreachable!("turn-state rebuild test does not dispatch")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
+            unreachable!("turn-state rebuild test does not dispatch")
+        }
+    }
+
     #[async_trait]
     impl LoopCapabilityPort for SpyPort {
         fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -1589,6 +1696,75 @@ mod tests {
                 stopped_on_suspension: false,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn same_turn_schema_refresh_rebuilds_index_and_preserves_progress() {
+        let inner = Arc::new(MutableDefinitionsPort {
+            definitions: Mutex::new(vec![provider_definition(
+                "fixture.lookup",
+                "fixture__lookup",
+                "Lookup records",
+            )]),
+            surface_version: Mutex::new(
+                CapabilitySurfaceVersion::new("surface:initial")
+                    .expect("valid initial surface version"),
+            ),
+            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("initial surface refresh");
+        let original_fingerprint = {
+            let mut guard = port.lock_turn_state().expect("initial turn state");
+            let state = guard.as_mut().expect("initial state exists");
+            state.disclosed_names.insert("fixture__lookup".to_string());
+            state.search_ranks.insert("fixture__lookup".to_string(), 2);
+            state.definitions_fingerprint
+        };
+        let reads_after_initial_refresh = inner
+            .tool_definition_reads
+            .load(std::sync::atomic::Ordering::Relaxed);
+        drop(port.turn_state().expect("cached turn state"));
+        drop(port.turn_state().expect("cached turn state again"));
+        assert_eq!(
+            inner
+                .tool_definition_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            reads_after_initial_refresh,
+            "unchanged same-turn bridge calls must not refetch or rehash definitions"
+        );
+        inner.definitions.lock().expect("mutable definitions lock")[0].parameters = json!({
+            "type": "object",
+            "properties": {"timezone": {"type": "string"}},
+            "required": ["timezone"],
+            "additionalProperties": false
+        });
+        *inner
+            .surface_version
+            .lock()
+            .expect("mutable surface-version lock") =
+            CapabilitySurfaceVersion::new("surface:refreshed")
+                .expect("valid refreshed surface version");
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("same-turn surface refresh");
+        let guard = port.lock_turn_state().expect("refreshed turn state");
+        let state = guard.as_ref().expect("refreshed state exists");
+        assert_ne!(state.definitions_fingerprint, original_fingerprint);
+        assert_eq!(
+            state.search_index.search("timezone", 1).names,
+            vec!["fixture__lookup"]
+        );
+        assert!(state.disclosed_names.contains("fixture__lookup"));
+        assert_eq!(state.search_ranks["fixture__lookup"], 2);
     }
 
     struct TestWriter;

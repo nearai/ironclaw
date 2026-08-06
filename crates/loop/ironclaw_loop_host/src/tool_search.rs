@@ -177,11 +177,20 @@ impl IndexedDocument {
     fn new(definition: &ProviderToolDefinition) -> Self {
         let mut builder = SearchDocumentBuilder::default();
         let capability_id = definition.capability_id.as_str();
-        builder.add_field(capability_id, NAME_WEIGHT);
-        builder.add_field(definition.name.as_str(), NAME_WEIGHT);
-        if let Some(provider) = capability_id.split('.').next() {
+        let provider = capability_id.split('.').next();
+        if let Some(provider) = provider {
             builder.add_field(provider, PROVIDER_WEIGHT);
         }
+        let capability_local_name = capability_id
+            .split_once('.')
+            .map_or(capability_id, |(_, local_name)| local_name);
+        builder.add_field(capability_local_name, NAME_WEIGHT);
+        let provider_name = definition.name.as_str();
+        let provider_local_name = provider
+            .and_then(|provider| provider_name.strip_prefix(provider))
+            .and_then(|name| name.strip_prefix("__"))
+            .unwrap_or(provider_name);
+        builder.add_field(provider_local_name, NAME_WEIGHT);
         builder.add_field(&definition.description, DESCRIPTION_WEIGHT);
         builder.collect_schema(
             &definition.parameters,
@@ -266,70 +275,83 @@ impl SearchDocumentBuilder {
                 {
                     self.add_field(description, DESCRIPTION_WEIGHT);
                 }
-                self.collect_schema(schema, depth.saturating_add(1), trusted_descriptions);
+                self.collect_schema_children(std::iter::once(schema), depth, trusted_descriptions);
             }
         }
         if let Some(items) = object.get("items") {
             match items {
                 Value::Array(items) => {
-                    for item in items.iter().take(MAX_SCHEMA_NODES) {
-                        if self.schema_nodes >= MAX_SCHEMA_NODES {
-                            break;
-                        }
-                        self.collect_schema(item, depth.saturating_add(1), trusted_descriptions);
-                    }
+                    self.collect_schema_children(items, depth, trusted_descriptions)
                 }
-                _ => self.collect_schema(items, depth.saturating_add(1), trusted_descriptions),
+                _ => self.collect_schema_children(
+                    std::iter::once(items),
+                    depth,
+                    trusted_descriptions,
+                ),
             }
         }
         for keyword in ["anyOf", "oneOf", "allOf"] {
             if let Some(variants) = object.get(keyword).and_then(Value::as_array) {
-                for variant in variants.iter().take(MAX_SCHEMA_NODES) {
-                    if self.schema_nodes >= MAX_SCHEMA_NODES {
-                        break;
-                    }
-                    self.collect_schema(variant, depth.saturating_add(1), trusted_descriptions);
-                }
+                self.collect_schema_children(variants, depth, trusted_descriptions);
             }
         }
         if let Some(additional) = object.get("additionalProperties")
             && additional.is_object()
         {
-            self.collect_schema(additional, depth.saturating_add(1), trusted_descriptions);
+            self.collect_schema_children(std::iter::once(additional), depth, trusted_descriptions);
         }
         for keyword in ["$defs", "definitions"] {
             if let Some(definitions) = object.get(keyword).and_then(Value::as_object) {
-                for definition in definitions.values().take(MAX_SCHEMA_NODES) {
-                    if self.schema_nodes >= MAX_SCHEMA_NODES {
-                        break;
-                    }
-                    self.collect_schema(definition, depth.saturating_add(1), trusted_descriptions);
-                }
+                self.collect_schema_children(definitions.values(), depth, trusted_descriptions);
             }
+        }
+    }
+
+    fn collect_schema_children<'a>(
+        &mut self,
+        children: impl IntoIterator<Item = &'a Value>,
+        parent_depth: usize,
+        trusted_descriptions: bool,
+    ) {
+        for child in children.into_iter().take(MAX_SCHEMA_NODES) {
+            if self.schema_nodes >= MAX_SCHEMA_NODES {
+                break;
+            }
+            self.collect_schema(child, parent_depth.saturating_add(1), trusted_descriptions);
         }
     }
 }
 
-fn tokenize(value: &str) -> BTreeSet<String> {
+fn tokenize(value: &str) -> Vec<String> {
     let mut normalized = String::with_capacity(value.len());
     let mut previous_lowercase_or_digit = false;
-    for character in value.chars() {
+    let mut previous_uppercase = false;
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
         if character.is_alphanumeric() {
-            if character.is_uppercase() && previous_lowercase_or_digit {
+            let starts_word = character.is_uppercase()
+                && (previous_lowercase_or_digit
+                    || (previous_uppercase
+                        && characters.peek().is_some_and(|next| next.is_lowercase())));
+            if starts_word {
                 normalized.push(' ');
             }
             for lowercase in character.to_lowercase() {
                 normalized.push(lowercase);
             }
             previous_lowercase_or_digit = character.is_lowercase() || character.is_numeric();
+            previous_uppercase = character.is_uppercase();
         } else {
             normalized.push(' ');
             previous_lowercase_or_digit = false;
+            previous_uppercase = false;
         }
     }
+    let mut seen = BTreeSet::new();
     normalized
         .split_whitespace()
         .filter(|term| !term.is_empty())
+        .filter(|term| seen.insert((*term).to_string()))
         .map(str::to_string)
         .collect()
 }
@@ -502,6 +524,42 @@ mod tests {
     }
 
     #[test]
+    fn field_and_document_term_budgets_are_enforced() {
+        let mut builder = SearchDocumentBuilder::default();
+        let long_field = format!("{} tail_canary", "prefix ".repeat(64));
+        builder.add_field(&long_field, DESCRIPTION_WEIGHT);
+        assert!(builder.term_weights.contains_key("prefix"));
+        assert!(
+            !builder.term_weights.contains_key("tail"),
+            "terms beyond the per-field byte cap must not be admitted"
+        );
+
+        for field in 0..(MAX_DOCUMENT_BYTES / MAX_FIELD_BYTES + 4) {
+            builder.add_field(
+                &format!("budget{field} {}", "padding ".repeat(64)),
+                DESCRIPTION_WEIGHT,
+            );
+        }
+        assert_eq!(builder.admitted_bytes, MAX_DOCUMENT_BYTES);
+        assert!(builder.term_weights.len() <= MAX_UNIQUE_TERMS);
+        let terms_at_cap = builder.term_weights.len();
+        builder.add_field("document_tail_canary", DESCRIPTION_WEIGHT);
+        assert_eq!(builder.term_weights.len(), terms_at_cap);
+        assert!(!builder.term_weights.contains_key("document"));
+
+        let mut unique_term_builder = SearchDocumentBuilder::default();
+        for term in 0..(MAX_UNIQUE_TERMS + 32) {
+            unique_term_builder.add_field(&format!("term{term}"), DESCRIPTION_WEIGHT);
+        }
+        assert_eq!(unique_term_builder.term_weights.len(), MAX_UNIQUE_TERMS);
+        assert!(
+            !unique_term_builder
+                .term_weights
+                .contains_key(&format!("term{}", MAX_UNIQUE_TERMS))
+        );
+    }
+
+    #[test]
     fn unauthorized_documents_cannot_change_authorized_order_or_counts() {
         let first = definition(
             "allowed.first",
@@ -569,6 +627,94 @@ mod tests {
     }
 
     #[test]
+    fn equal_scores_tie_break_by_capability_id_not_provider_name() {
+        let later_id_earlier_name = definition(
+            "zeta.same",
+            "aaa__tool",
+            "shared vocabulary",
+            json!({"type":"object","properties":{}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let earlier_id_later_name = definition(
+            "alpha.same",
+            "zzz__tool",
+            "shared vocabulary",
+            json!({"type":"object","properties":{}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let index =
+            AuthorizedToolSearchIndex::new([&later_id_earlier_name, &earlier_id_later_name]);
+
+        assert_eq!(
+            index.search("shared vocabulary", 2).names,
+            vec!["zzz__tool", "aaa__tool"]
+        );
+    }
+
+    #[test]
+    fn provider_terms_keep_provider_weight() {
+        let tool = definition(
+            "github.list_issues",
+            "github__list_issues",
+            "List issues.",
+            json!({"type":"object","properties":{}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let document = IndexedDocument::new(&tool);
+
+        assert_eq!(document.term_weights["github"], PROVIDER_WEIGHT);
+        assert_eq!(document.term_weights["list"], NAME_WEIGHT);
+        assert_eq!(document.term_weights["issues"], NAME_WEIGHT);
+    }
+
+    #[test]
+    fn query_term_budget_uses_only_the_first_unique_terms() {
+        let tool = definition(
+            "fixture.tail",
+            "fixture__tail",
+            "tail_canary",
+            json!({"type":"object","properties":{}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let index = AuthorizedToolSearchIndex::new([&tool]);
+        let first_terms = (0..MAX_QUERY_TERMS)
+            .map(|term| format!("noise{term}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            index
+                .search(&format!("{first_terms} tail_canary"), 1)
+                .names
+                .is_empty(),
+            "the 33rd unique term must not affect retrieval"
+        );
+        assert_eq!(
+            index.search(&format!("tail_canary {first_terms}"), 1).names,
+            vec!["fixture__tail"]
+        );
+    }
+
+    #[test]
+    fn empty_index_returns_no_match() {
+        let index = AuthorizedToolSearchIndex::new(std::iter::empty());
+
+        assert_eq!(
+            index.search("anything", 5),
+            SearchOutcome {
+                names: Vec::new(),
+                query_class: SearchQueryClass::NoMatch,
+            }
+        );
+    }
+
+    #[test]
+    fn tokenize_splits_camel_case_and_acronym_boundaries() {
+        assert_eq!(tokenize("createEvent"), vec!["create", "event"]);
+        assert_eq!(tokenize("HTTPUrl"), vec!["http", "url"]);
+    }
+
+    #[test]
     fn fingerprint_covers_search_metadata_but_ignores_json_object_order() {
         let first = definition(
             "fixture.lookup",
@@ -602,6 +748,29 @@ mod tests {
         assert_ne!(
             definitions_fingerprint(&[first]),
             definitions_fingerprint(&[changed])
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_definition_order() {
+        let first = definition(
+            "fixture.first",
+            "fixture__first",
+            "First.",
+            json!({"type":"object","properties":{"alpha":{"type":"string"}}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let second = definition(
+            "fixture.second",
+            "fixture__second",
+            "Second.",
+            json!({"type":"object","properties":{"beta":{"type":"string"}}}),
+            CapabilityDescriptionTrust::VerifiedCatalog,
+        );
+
+        assert_eq!(
+            definitions_fingerprint(&[first.clone(), second.clone()]),
+            definitions_fingerprint(&[second, first])
         );
     }
 
