@@ -226,19 +226,18 @@ def _bound_pr_buckets(
     return bounded
 
 
+DOCKERFILE_ROOT_TEST = "tests/dockerfile_runtime_home.rs"
+
+
 def _root_test_partitions() -> dict[str, int]:
-    support_tests = (
-        ["support_unit_tests"]
-        if (ROOT / "tests/support_unit_tests.rs").is_file()
-        else []
-    )
+    # Every root test target, not just the `reborn_*` ones. Cargo
+    # auto-discovers `tests/*.rs` for the root package, so a narrower glob
+    # left the remainder (`dockerfile_runtime_home`, `trace_format`,
+    # `trace_llm_tests`, the `e2e_trace_runtime_policy_*` pair) outside the
+    # inventory — and the planner fails closed, so touching one of them in a
+    # PR aborted planning with `unmapped test or CI path`.
     names = sorted(
-        [
-            path.stem
-            for path in (ROOT / "tests").glob("reborn_*.rs")
-            if path.is_file()
-        ]
-        + support_tests
+        {path.stem for path in (ROOT / "tests").glob("*.rs") if path.is_file()}
     )
     return {f"tests/{name}.rs": index % 4 for index, name in enumerate(names)}
 
@@ -431,6 +430,19 @@ def build_plan(
         }:
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
+            continue
+        if (
+            path == "Dockerfile"
+            or path.startswith("Dockerfile.")
+            or path == ".dockerignore"
+            or path.startswith("docker/")
+        ):
+            # The shipped container image is asserted by
+            # `tests/dockerfile_runtime_home.rs` (runtime packages, entrypoint
+            # behavior, seed configs), so schedule that test's partition
+            # instead of failing closed on an unclassified path.
+            root_partitions.add(root_inventory.get(DOCKERFILE_ROOT_TEST, 0))
+            reasons.append(f"container image definition changed: {path}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")

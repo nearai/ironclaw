@@ -453,8 +453,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             self.plan("pull_request", ["crates/deleted/src/lib.rs"])
 
     def test_unclassified_build_input_fails_fast(self) -> None:
+        # `Dockerfile` used to be the example here; it now has a decision (see
+        # `test_container_image_paths_select_the_dockerfile_root_test`). The
+        # fail-closed arm still has to reject build inputs nobody has ruled on.
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
-            self.plan("pull_request", ["Dockerfile"])
+            self.plan("pull_request", ["Makefile"])
 
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
@@ -552,6 +555,42 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
+
+    def test_non_reborn_root_tests_are_classified(self) -> None:
+        # The root inventory used to glob only `tests/reborn_*.rs`, so every
+        # other root test (`dockerfile_runtime_home.rs`, `trace_format.rs`,
+        # the `e2e_trace_runtime_policy_*` pair, ...) fell through to the
+        # fail-closed `unmapped test or CI path` error. Touching one of them
+        # in a PR failed the planner outright.
+        inventory = planner._root_test_partitions()
+        for name in (
+            "tests/dockerfile_runtime_home.rs",
+            "tests/trace_format.rs",
+            "tests/trace_llm_tests.rs",
+        ):
+            with self.subTest(path=name):
+                self.assertIn(name, inventory)
+                plan = self.plan("pull_request", [name])
+                self.assertEqual(plan["root_partitions"], [inventory[name]])
+
+    def test_container_image_paths_select_the_dockerfile_root_test(self) -> None:
+        # `Dockerfile` and friends are covered by
+        # `tests/dockerfile_runtime_home.rs`, so a change to the image
+        # definition must schedule that test's partition rather than being
+        # rejected as an unclassified path.
+        expected = planner._root_test_partitions()["tests/dockerfile_runtime_home.rs"]
+        for path in (
+            "Dockerfile",
+            "Dockerfile.process-sandbox",
+            ".dockerignore",
+            # Seed configs are asserted by the same root test. Note
+            # `docker/reborn/entrypoint.sh` is deliberately excluded — it has a
+            # pre-existing explicit decision in PR_STATIC_CONTROL_PATHS.
+            "docker/reborn/config.hosted-single-tenant.toml",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["root_partitions"], [expected])
 
     def test_hosted_mcp_support_selects_its_owning_integration_lane(self) -> None:
         owner = planner.INTEGRATION_SUPPORT_OWNERS[
