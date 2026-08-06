@@ -388,12 +388,13 @@ Expected fields include:
 - `driver_registry: initialized`
 
 When one or more of `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `http_proxy`,
-`https_proxy`, or `all_proxy` are present, `doctor` also reports a
-`host_mediated_ambient_proxy` check. Presence is enough to trigger the check,
-including when the variable's value is empty. The check reports only that
-ambient proxy configuration is present; it never emits proxy URLs, credentials,
-or other environment-variable values. When none of those variables are present,
-the check is omitted. `NO_PROXY` and `no_proxy` specify proxy bypass rules, not
+`https_proxy`, or `all_proxy` are set to a non-empty value, `doctor` also reports a
+`host_mediated_ambient_proxy` check. A variable that is set but empty does not
+trigger the check, matching how the host-mediated transport parses these
+variables. The check reports only that ambient proxy configuration is present; it
+never emits proxy URLs, credentials, or other environment-variable values. When
+none of those variables are set to a non-empty value, the check is omitted.
+`NO_PROXY` and `no_proxy` specify proxy bypass rules, not
 proxy endpoints, so they are deliberately excluded; they are irrelevant to the
 host-mediated transport because it disables ambient proxy discovery.
 
