@@ -2196,7 +2196,7 @@ pub struct RebornServices<
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
-    diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStoreReadPort>,
+    diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -2287,7 +2287,7 @@ where
     /// inspector. Capture adapters and this read surface must share one store.
     pub fn with_diagnostic_store(
         mut self,
-        diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStoreReadPort>,
+        diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
     ) -> Self {
         self.diagnostic_store = diagnostic_store;
         self

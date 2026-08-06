@@ -88,9 +88,19 @@ pub(crate) fn push_canonical_representation(
         .collect::<String>();
     representations.push(CanonicalTraceRepresentation {
         kind,
+        // `kind.vector_key_segment()`, never `{:?}`. This key is durable and
+        // cross-service — it addresses rows in a vector store — and deriving its
+        // discriminator from `Debug` meant renaming a variant silently re-keyed
+        // every future embedding and orphaned the indexed ones (#7144). The
+        // segments are frozen at the values `Debug` produced, so no existing key
+        // moves; `durable_identifier_segments_are_frozen_against_variant_renames`
+        // pins them.
         vector_key: format!(
-            "trace:{}:{:?}:{}:{}",
-            envelope.trace_id, kind, index, hash_fragment
+            "trace:{}:{}:{}:{}",
+            envelope.trace_id,
+            kind.vector_key_segment(),
+            index,
+            hash_fragment
         )
         .to_ascii_lowercase(),
         canonical_hash,
@@ -304,12 +314,28 @@ pub(crate) fn canonical_hash(content: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// Integrity/dedupe digest over the redacted events and their counts.
+///
+/// Fallible on purpose. `serde_json::to_vec(...).unwrap_or_default()` hashed
+/// *zero bytes* on a serialization failure, so every failing trace produced the
+/// same well-formed `sha256:…` — a silent collision in the value used for
+/// dedupe and integrity, and one that still satisfies the `starts_with("sha256:")`
+/// dependability check downstream (#7144). Failing is the only honest answer;
+/// both callers can carry it.
 pub(crate) fn redaction_hash(
     events: &[TraceContributionEvent],
     counts: &BTreeMap<String, u32>,
-) -> String {
+) -> Result<String, TraceContributionError> {
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(events).unwrap_or_default());
-    hasher.update(serde_json::to_vec(counts).unwrap_or_default());
-    format!("sha256:{}", hex::encode(hasher.finalize()))
+    hasher.update(serde_json::to_vec(events).map_err(|error| {
+        TraceContributionError::RedactionFailed {
+            reason: format!("redacted trace events could not be serialized for hashing: {error}"),
+        }
+    })?);
+    hasher.update(serde_json::to_vec(counts).map_err(|error| {
+        TraceContributionError::RedactionFailed {
+            reason: format!("redaction counts could not be serialized for hashing: {error}"),
+        }
+    })?);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }

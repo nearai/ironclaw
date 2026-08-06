@@ -2269,6 +2269,16 @@ mod postgres_tests {
     /// mid-write, far from the cause — and races its own assertions against
     /// their declarations. Path prefixes isolate rows; they cannot isolate
     /// schema, so a schema-level test gets a schema-level scope.
+    ///
+    /// This is the ancestor of the crate's shared `test-support` provisioner
+    /// (`src/postgres_isolation.rs`), which the event-store and
+    /// product-workflow-ledger suites use. This suite deliberately keeps its
+    /// own older variant: its URL resolution goes through `postgres_url()`
+    /// (container startup + the `IRONCLAW_SKIP_POSTGRES_TESTS` opt-out), its
+    /// names are uuid-based rather than epoch-based, and its sweep runs per
+    /// provisioning call without the shared seam's age gate — migrating it is
+    /// a behavior change to this suite's scaffolding, not a de-duplication,
+    /// and is left as a candidate follow-up.
     struct IsolatedDatabase {
         filesystem: PostgresRootFilesystem,
         prefix: String,

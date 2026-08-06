@@ -383,11 +383,85 @@ async fn privacy_filter_sidecar_failure_falls_back_without_raw_error_text() {
             .contains_key("privacy_filter:sidecar_failure")
     );
 }
+/// The three sidecar tests below are the coverage for stderr suppression,
+/// environment scrubbing and oversized-stdout rejection. They used to open
+/// with `if !Path::new("/bin/sh").exists() { return; }` — so on a runner
+/// without a POSIX shell they reported success while asserting nothing, the
+/// "green gate enforcing nothing" shape this program has repeatedly paid for
+/// (#7144).
+///
+/// Fail-closed two ways now. `#[cfg(unix)]` means the tests do not exist on
+/// Windows rather than silently passing there — and Windows never runs this
+/// suite anyway (`windows-build` is `cargo check`, not `cargo test`). On
+/// unix, where POSIX guarantees `/bin/sh`, a missing shell is a hard
+/// failure.
+///
+/// Deliberately not the `IRONCLAW_REQUIRE_DOCKER_TESTS` shape: that flag is
+/// set nowhere in the repo, so the gate it guards is itself inert. A
+/// precondition that CI must remember to opt into is a precondition that
+/// will be forgotten.
+#[cfg(unix)]
+fn require_posix_shell() {
+    assert!(
+        Path::new("/bin/sh").exists(),
+        "/bin/sh is missing on a unix host — these sidecar security tests \
+         must fail rather than skip, or they prove nothing"
+    );
+}
+
+/// #7144: the parent wrote the whole request into the sidecar's stdin
+/// before anything drained stdout, and the timeout covered only
+/// `wait_with_output` — so a sidecar that emits more than one pipe buffer
+/// before reading its input deadlocked both ends with no timeout over the
+/// parked write. In the runtime path that wedges a spawned task and leaks a
+/// live child process per turn, unbounded.
+///
+/// Every pre-existing sidecar test opens with `cat >/dev/null`, i.e. drains
+/// stdin first — structurally the one ordering that cannot deadlock — and
+/// passes 5 bytes of input. This one inverts both: the sidecar writes
+/// ~256 KiB of stdout *before* reading, against ~256 KiB of input. The
+/// padding is spaces, which `serde_json` skips as leading whitespace, so the
+/// exchange must also *succeed* — a test that only outlived the timeout would
+/// pass on any immediate adapter failure. (`printf '%262144s'` rather than
+/// `seq`, which POSIX does not guarantee `/bin/sh` can reach.)
+///
+/// Wrapped in an outer timeout so a regression fails the suite in seconds
+/// instead of hanging CI until the job limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn command_privacy_filter_does_not_deadlock_on_a_sidecar_that_writes_before_reading() {
+    require_posix_shell();
+    let adapter = CommandPrivacyFilterAdapter::new("/bin/sh")
+        .with_args([
+            "-c",
+            // Fill the stdout pipe well past its buffer, then read stdin.
+            "printf '%262144s' ''; cat >/dev/null; \
+             printf '{\"redacted_text\":\"ok\"}'",
+        ])
+        .with_output_limits(2 * 1024 * 1024, 64 * 1024);
+
+    let big_input = "y".repeat(256 * 1024);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        adapter.redact_text(&big_input),
+    )
+    .await;
+
+    let redaction = result
+        .expect(
+            "the sidecar exchange deadlocked: stdin must be written concurrently \
+             with draining stdout, and the whole exchange must sit under the \
+             adapter timeout",
+        )
+        .expect("the sidecar exchange must succeed")
+        .expect("the sidecar must return a redaction");
+    assert_eq!(redaction.redacted_text, "ok");
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn command_privacy_filter_error_does_not_echo_stderr() {
-    if !Path::new("/bin/sh").exists() {
-        return;
-    }
+    require_posix_shell();
     let adapter = CommandPrivacyFilterAdapter::new("/bin/sh").with_args([
         "-c",
         "cat >/dev/null; printf '%s' 'raw-secret-from-stderr' >&2; exit 7",
@@ -403,11 +477,10 @@ async fn command_privacy_filter_error_does_not_echo_stderr() {
     assert!(error.contains("stderr_hash="));
     assert!(!error.contains("raw-secret-from-stderr"));
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn command_privacy_filter_adapter_does_not_inherit_trace_commons_tokens() {
-    if !Path::new("/bin/sh").exists() {
-        return;
-    }
+    require_posix_shell();
     let _env_guard =
         EnvVarRestore::set("TRACE_COMMONS_TENANT_TOKENS", "tenant-a:super-secret-token");
 
@@ -423,11 +496,10 @@ async fn command_privacy_filter_adapter_does_not_inherit_trace_commons_tokens() 
 
     assert_eq!(redaction.redacted_text, "unset");
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn command_privacy_filter_rejects_oversized_stdout() {
-    if !Path::new("/bin/sh").exists() {
-        return;
-    }
+    require_posix_shell();
     let adapter = CommandPrivacyFilterAdapter::new("/bin/sh")
         .with_args([
             "-c",
