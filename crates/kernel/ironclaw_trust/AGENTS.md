@@ -2,7 +2,8 @@
 
 ## Start Here
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
+- Read `README.md` for orientation (charter, measured deps/consumers, gates).
+  This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `CONTRACT.md` — the co-located cross-crate contract (evaluation matrix, requested-vs-effective split, mutation/invalidation orchestration).
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
@@ -19,6 +20,43 @@
 - Synchronous fail-closed invalidation: `InvalidationBus`, `TrustChange`, `TrustChangeListener` (`invalidation`).
 - The `Clock` abstraction (`clock`), `TrustError` (`error`), and test fixtures (`fixtures`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+
+## Guardrails
+
+- Own host-controlled trust evaluation only: `EffectiveTrustClass`,
+  `TrustPolicy`, layered `PolicySource`s, and the trust-change invalidation
+  contract.
+- Privileged variants of `EffectiveTrustClass` (FirstParty, System) MUST only
+  be constructible from inside this crate. Public constructors expose Sandbox
+  and UserTrusted only.
+- Do not import any other `ironclaw_*` crate besides `ironclaw_host_api`. No
+  dispatcher, capability host, runtimes, host runtime, approvals, run-state,
+  processes, events, resources, or product workflow.
+- Manifest input always flows through `TrustPolicyInput`,
+  `RequestedTrustClass` and `PackageIdentity` — all three from `host_api`,
+  which owns the requested-trust half of this boundary in full. Manifest
+  deserialization paths must never construct an `EffectiveTrustClass`
+  directly.
+- Trust downgrade or revocation must publish on `InvalidationBus`
+  synchronously, before any subsequent `evaluate()` returns the new lower
+  decision — fail-closed. Runtime mutation must go through
+  `HostTrustPolicy::mutate_with`; the per-source `upsert` / `remove` methods
+  are `pub(crate)` precisely so this contract cannot be bypassed.
+- `TrustClass` ceiling alone grants no capability authority. Authorization
+  must consume both an `EffectiveTrustClass` *and* an explicit
+  `CapabilityGrant`.
+- Identity drift (`package_id`, `source`, `digest`, `signer`) or
+  requested-authority growth invalidates retained grants; downstream
+  revocation flows use the helpers exposed here.
+- The cross-crate contract — evaluation matrix, requested-vs-effective split,
+  `PackageIdentity` scope, mutation/invalidation orchestration, and built-in
+  tool migration intent — lives in `crates/kernel/ironclaw_trust/CONTRACT.md`
+  (co-located with the crate so doc + code review stays unified). Update it
+  whenever `TrustPolicy::evaluate`, `default_decision`, source match keys,
+  `mutate_with`, or `EffectiveTrustClass` semantics change. The Reborn-track
+  docs at `docs/reborn/contracts/host-api.md` / `extensions.md` describe the
+  broader vocabulary; reference them from CONTRACT.md, do not duplicate them
+  here.
 
 ## Do Not Move In Here
 

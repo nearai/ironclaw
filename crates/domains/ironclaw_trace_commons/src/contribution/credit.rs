@@ -118,12 +118,26 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         .embedding_analysis
         .as_ref()
         .and_then(|analysis| analysis.novelty_score)
+        // `.filter(is_finite)`: `clamp` bounds both ends but preserves NaN
+        // (`f32::NAN.clamp(0.0, 0.85)` is NaN), which would poison `raw`,
+        // `online_score`, and the persisted `credit_points_estimate`. A
+        // non-finite score from the embedding job means "no valid signal",
+        // which is exactly what the absent-value fallback below is for.
+        .filter(|score| score.is_finite())
         .unwrap_or_else(|| (event_count / 12.0).clamp(0.15, 0.6))
-        .min(0.85);
+        // `.clamp`, not `.min`: `novelty_score` is an unvalidated
+        // `Option<f32>` off `embedding_analysis`, which is re-scored from the
+        // on-disk queue, so a negative value from a downstream embedding job
+        // used to pass straight through while its sibling `duplicate_score` was
+        // clamped both ways (#7144).
+        .clamp(0.0, 0.85);
     let duplicate_penalty = envelope
         .embedding_analysis
         .as_ref()
         .and_then(|analysis| analysis.duplicate_score)
+        // Same NaN trap as `novelty` above: treat a non-finite duplicate
+        // score as absent rather than letting it poison the weighted sum.
+        .filter(|score| score.is_finite())
         .unwrap_or(0.0)
         .clamp(0.0, 1.0);
     let coverage_bonus = (envelope.replay.required_tools.len() as f32 / 5.0).clamp(0.0, 1.0);

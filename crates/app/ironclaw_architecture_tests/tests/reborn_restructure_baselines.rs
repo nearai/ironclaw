@@ -115,10 +115,11 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// force.
 /// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
 /// repoint added one line in composition; recorded at the measured figure.
-/// ✎ Re-measured 40_419 → 40_620 after merging sandbox PR1 with main; the
-/// sandbox profile and binding assembly remain included in this merged-tree
-/// value. Measured with `bash scripts/ci/check-composition-budget.sh --print`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_620;
+/// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
+/// messaging framework, plus the sandbox profile and binding assembly from
+/// PR1. Re-measured on the merged tree with
+/// `bash scripts/ci/check-composition-budget.sh --print`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_622;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

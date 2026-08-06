@@ -1,6 +1,7 @@
-# ironclaw_architecture_tests guardrails
+# ironclaw_architecture_tests
 
-- This crate is test-only architecture enforcement; do not add production dependencies or runtime behavior.
-- Use `cargo metadata` or equivalent workspace graph checks to enforce Reborn dependency direction.
-- Boundary tests should fail loudly with the exact forbidden edge and crate name.
-- Keep rules conservative and explicit; update docs when intentional architecture edges change.
+Consolidated per `docs/reborn/guidance-conventions.md` (one canonical home per
+fact): the working rules live in [`AGENTS.md`](./AGENTS.md); orientation in
+[`README.md`](./README.md); the family boundary in
+[`crates/app/AGENTS.md`](../AGENTS.md). This crate has no module spec — it is
+not in the root `CLAUDE.md` Module Specs table.

@@ -1,4 +1,6 @@
 // arch-exempt: large_file, backend parity contracts stay in one shared behavioral suite, plan #5274
+use std::time::Duration;
+
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{
@@ -778,6 +780,37 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
         .unwrap();
     assert_eq!(results.len(), 2);
 }
+
+#[tokio::test]
+async fn libsql_repeated_fts_declaration_does_not_wait_for_the_writer() {
+    // Regression for #7283: memory search re-declares its FTS index on the
+    // query hot path. Once the cataloged declaration has committed, checking
+    // it must remain available while an unrelated durable write owns libSQL's
+    // single writer lease.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/repeated-fts").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_repeated").unwrap(),
+        vec![content],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let writer = filesystem.begin(&prefix).await.unwrap();
+    let redeclaration = tokio::time::timeout(
+        Duration::from_secs(1),
+        filesystem.ensure_index(&prefix, &spec),
+    )
+    .await;
+    writer.rollback().await;
+
+    assert!(
+        matches!(redeclaration, Ok(Ok(()))),
+        "an existing FTS declaration must not require the writer: {redeclaration:?}"
+    );
+}
+
 #[tokio::test]
 async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
     // After ensure_index, inserting a new row through put() updates the
@@ -2269,6 +2302,16 @@ mod postgres_tests {
     /// mid-write, far from the cause — and races its own assertions against
     /// their declarations. Path prefixes isolate rows; they cannot isolate
     /// schema, so a schema-level test gets a schema-level scope.
+    ///
+    /// This is the ancestor of the crate's shared `test-support` provisioner
+    /// (`src/postgres_isolation.rs`), which the event-store and
+    /// product-workflow-ledger suites use. This suite deliberately keeps its
+    /// own older variant: its URL resolution goes through `postgres_url()`
+    /// (container startup + the `IRONCLAW_SKIP_POSTGRES_TESTS` opt-out), its
+    /// names are uuid-based rather than epoch-based, and its sweep runs per
+    /// provisioning call without the shared seam's age gate — migrating it is
+    /// a behavior change to this suite's scaffolding, not a de-duplication,
+    /// and is left as a candidate follow-up.
     struct IsolatedDatabase {
         filesystem: PostgresRootFilesystem,
         prefix: String,

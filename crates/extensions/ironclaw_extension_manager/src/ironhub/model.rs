@@ -19,6 +19,7 @@ pub(crate) const MANIFEST_CACHE_TTL: Duration = Duration::from_secs(60);
 pub(crate) const MANIFEST_CACHE_MAX_ENTRIES: usize = 64;
 pub(crate) const MAX_SEARCH_RESPONSE_BYTES: usize = 20 * 1024;
 pub(crate) const MAX_TOOL_SCHEMA_ARTIFACTS: usize = 32;
+pub(crate) const MAX_TOOL_PROMPT_ARTIFACTS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,6 +113,12 @@ pub(crate) struct IronHubToolEntry {
     /// references a schema that is absent here.
     #[serde(default)]
     pub(crate) schemas: BTreeMap<String, IronHubArtifact>,
+    /// Manifest prompt-document path to its digest-pinned artifact.
+    ///
+    /// Kept separate from schemas so both artifact classes can be bounded and
+    /// matched exactly against the manifest references they satisfy.
+    #[serde(default)]
+    pub(crate) prompts: BTreeMap<String, IronHubArtifact>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -713,3 +713,223 @@ fn normalized_archive_path_to_string(
     }
     Ok(segments.join("/"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_blob_ref_extracts_segments() {
+        let parsed = url::Url::parse(
+            "https://github.com/Pika-Labs/Pika-Skills/blob/main/fetched-helper/SKILL.md",
+        )
+        .unwrap();
+        let blob = parse_github_blob_ref(&parsed).unwrap();
+        assert_eq!(blob.owner, "Pika-Labs");
+        assert_eq!(blob.repo, "Pika-Skills");
+        assert_eq!(
+            blob.blob_segments,
+            vec!["main", "fetched-helper", "SKILL.md"]
+        );
+    }
+
+    #[test]
+    fn parse_blob_ref_trims_git_suffix() {
+        let parsed =
+            url::Url::parse("https://github.com/Pika-Labs/Pika-Skills.git/blob/main/SKILL.md")
+                .unwrap();
+        let blob = parse_github_blob_ref(&parsed).unwrap();
+        assert_eq!(blob.repo, "Pika-Skills");
+    }
+
+    #[test]
+    fn parse_blob_ref_rejects_non_github_hosts() {
+        let parsed =
+            url::Url::parse("https://example.com/Pika-Labs/Pika-Skills/blob/main/SKILL.md")
+                .unwrap();
+        assert_eq!(parse_github_blob_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_blob_ref_rejects_short_paths() {
+        let parsed = url::Url::parse("https://github.com/Pika-Labs/Pika-Skills/blob").unwrap();
+        assert_eq!(parse_github_blob_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_blob_ref_rejects_non_blob_verbs() {
+        let parsed =
+            url::Url::parse("https://github.com/Pika-Labs/Pika-Skills/raw/main/SKILL.md").unwrap();
+        assert_eq!(parse_github_blob_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_blob_ref_rejects_empty_repo_after_trim() {
+        let parsed =
+            url::Url::parse("https://github.com/Pika-Labs/.git/blob/main/SKILL.md").unwrap();
+        assert_eq!(parse_github_blob_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_repo_ref_plain_repo() {
+        let parsed = url::Url::parse("https://github.com/Pika-Labs/Pika-Skills").unwrap();
+        let repo = parse_github_repo_ref(&parsed).unwrap();
+        assert_eq!(repo.owner, "Pika-Labs");
+        assert_eq!(repo.repo, "Pika-Skills");
+        assert_eq!(repo.tree_segments, None);
+    }
+
+    #[test]
+    fn parse_repo_ref_trims_git_suffix() {
+        let parsed = url::Url::parse("https://github.com/Pika-Labs/Pika-Skills.git").unwrap();
+        let repo = parse_github_repo_ref(&parsed).unwrap();
+        assert_eq!(repo.repo, "Pika-Skills");
+    }
+
+    #[test]
+    fn parse_repo_ref_tree_segments() {
+        let parsed =
+            url::Url::parse("https://github.com/Pika-Labs/Pika-Skills/tree/main/sub/dir").unwrap();
+        let repo = parse_github_repo_ref(&parsed).unwrap();
+        assert_eq!(
+            repo.tree_segments,
+            Some(vec![
+                "main".to_string(),
+                "sub".to_string(),
+                "dir".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_repo_ref_rejects_single_segment() {
+        let parsed = url::Url::parse("https://github.com/Pika-Labs").unwrap();
+        assert_eq!(parse_github_repo_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_repo_ref_rejects_tree_without_segments() {
+        let parsed = url::Url::parse("https://github.com/Pika-Labs/Pika-Skills/tree").unwrap();
+        assert_eq!(parse_github_repo_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_repo_ref_rejects_blob_paths() {
+        let parsed =
+            url::Url::parse("https://github.com/Pika-Labs/Pika-Skills/blob/main/SKILL.md").unwrap();
+        assert_eq!(parse_github_repo_ref(&parsed), None);
+    }
+
+    #[test]
+    fn parse_repo_ref_rejects_empty_repo() {
+        let parsed = url::Url::parse("https://github.com/Pika-Labs/.git").unwrap();
+        assert_eq!(parse_github_repo_ref(&parsed), None);
+    }
+
+    #[test]
+    fn safe_component_accepts_plain_names() {
+        assert!(is_safe_github_component("main"));
+        assert!(is_safe_github_component("Pika-Skills_v1.2"));
+    }
+
+    #[test]
+    fn safe_component_rejects_unsafe_names() {
+        assert!(!is_safe_github_component(""));
+        assert!(!is_safe_github_component("a/b"));
+        assert!(!is_safe_github_component("a b"));
+        assert!(!is_safe_github_component("a;b"));
+        assert!(!is_safe_github_component("ünïcode"));
+    }
+
+    #[test]
+    fn validate_repo_components_accepts_safe_pairs() {
+        validate_github_repo_components("Pika-Labs", "Pika-Skills").unwrap();
+    }
+
+    #[test]
+    fn validate_repo_components_rejects_unsafe_pairs() {
+        let err = validate_github_repo_components("bad/owner", "repo").unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        let err = validate_github_repo_components("owner", "").unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[test]
+    fn build_api_base_url_produces_repos_endpoint() {
+        let url = build_github_api_base_url("Pika-Labs", "Pika-Skills").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills"
+        );
+    }
+
+    #[test]
+    fn build_api_base_url_rejects_unsafe_components() {
+        let err = build_github_api_base_url("bad/owner", "repo").unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[test]
+    fn build_contents_url_appends_path_and_ref() {
+        let url = build_github_contents_url("o", "r", Some("src/lib"), "main").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/o/r/contents/src/lib?ref=main"
+        );
+    }
+
+    #[test]
+    fn build_raw_url_appends_owner_repo_ref_path() {
+        let url = build_github_raw_url("o", "r", "main", Path::new("a/b/c.rs")).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://raw.githubusercontent.com/o/r/main/a/b/c.rs"
+        );
+    }
+
+    #[test]
+    fn build_matching_refs_url_accepts_heads_and_tags() {
+        let heads = build_github_matching_refs_url("o", "r", "heads", "main").unwrap();
+        assert_eq!(
+            heads.as_str(),
+            "https://api.github.com/repos/o/r/git/matching-refs/heads/main"
+        );
+        let tags = build_github_matching_refs_url("o", "r", "tags", "v1.2").unwrap();
+        assert_eq!(
+            tags.as_str(),
+            "https://api.github.com/repos/o/r/git/matching-refs/tags/v1.2"
+        );
+    }
+
+    #[test]
+    fn build_matching_refs_url_rejects_other_namespaces_and_prefixes() {
+        let err = build_github_matching_refs_url("o", "r", "release", "main").unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        let err = build_github_matching_refs_url("o", "r", "heads", "bad/prefix").unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[test]
+    fn normalized_path_to_string_joins_segments() {
+        assert_eq!(
+            normalized_archive_path_to_string(Path::new("a/b/c.txt")).unwrap(),
+            "a/b/c.txt"
+        );
+    }
+
+    #[test]
+    fn normalized_path_to_string_rejects_empty_path() {
+        let err = normalized_archive_path_to_string(Path::new("")).unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[test]
+    fn api_budget_exhausts_after_cap() {
+        let mut budget = GitHubApiBudget::default();
+        for _ in 0..MAX_GITHUB_API_REQUESTS {
+            budget.consume().unwrap();
+        }
+        let err = budget.consume().unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OutputTooLarge);
+    }
+}

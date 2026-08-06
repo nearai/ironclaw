@@ -407,12 +407,14 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
-// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
-// below, so the imports carry the same gate. Without it, any build that
-// compiles this crate as a *dependency* without `test-support` — e.g. the
-// PR clippy lane when the changed-package set is `{ironclaw,
-// ironclaw_config}` — sees three unused imports and fails `-D
-// warnings`. See #7119.
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors below,
+// so the imports carry the same gate. Without it, any build that compiles this
+// crate as a *dependency* with `test-support` off — e.g. `cargo clippy -p
+// ironclaw --lib --bins`, where the dev-dependency that would have unified the
+// feature on is not in the selected set — sees three unused imports and fails
+// `-D warnings`. See #7119; the "Check production-target lints (workspace, no
+// dev-dependency features)" step in code_style.yml keeps that shape linted so
+// the class cannot come back invisibly.
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 #[cfg(any(test, feature = "test-support"))]

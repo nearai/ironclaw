@@ -2,7 +2,8 @@
 
 ## Start Here
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
+- Read `README.md` for orientation (charter, measured deps/consumers, gates).
+  This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
 - `docs/reborn/contracts/capability-access.md`
@@ -15,8 +16,7 @@
 - The single caller-facing `CapabilityHost` authority path, currently:
 - `CapabilityHost` (`host`) and the invoke/resume/spawn flows/results: direct invoke/resume parameters, `CapabilityInvocationResult`, `CapabilitySpawnRequest`/`CapabilitySpawnResult` (`requests`); `CapabilityInvocationError`/`ResumeContextMismatchKind` (`error`).
 - The obligation seam (`obligations`): `CapabilityObligationHandler`, `CapabilityObligationRequest`/`CapabilityObligationOutcome`, abort/completion requests, `CapabilityObligationPhase`/`CapabilityObligationFailureKind`/`CapabilityObligationError`.
-- Capability-profile conformance evaluation (`conformance`): `CapabilityProfileClaim`/`CapabilityProfileClaimedOperation`, the conformance report/findings, and `evaluate_profile_conformance`.
-- The host-private replay-payload store (`replay_payload`): `ReplayPayload`, the `ReplayPayloadStore` port, `ReplayPayloadStore`, and `ReplayPayloadStoreError`. Persists the raw replay payload a gate/auth resume re-dispatches from, keyed by `InvocationId`, behind a `ScopedFilesystem` CAS lane. Never model-visible (no `SafeSummary`) — see `CLAUDE.md`.
+- The host-private replay-payload store (`replay_payload`): `ReplayPayload`, the `ReplayPayloadStore` port, `ReplayPayloadStore`, and `ReplayPayloadStoreError`. Persists the raw replay payload a gate/auth resume re-dispatches from, keyed by `InvocationId`, behind a `ScopedFilesystem` CAS lane. Never model-visible (no `SafeSummary`) — see Guardrails below.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Where Code Goes Inside `host`
@@ -39,6 +39,43 @@ branch of its own — that authority belongs to `authorize`.
 Each file must stay under the 1,500-line ARCH-SPRAWL threshold; the whole point
 of the split was retiring the `arch-exempt: large_file` waiver the fused file
 carried, so re-fusing them now trips `scripts/pre-commit-safety.sh`.
+
+## Guardrails
+
+- `CapabilityHost` is the single caller-facing authority path for
+  invoke/resume/spawn: host-runtime adapters, built-ins, custom packages, and
+  external runtimes must enter through this workflow rather than adding
+  parallel authorization/approval dispatch paths. `authorize` decides; a
+  workflow module only maps the verdict.
+- Use the neutral `CapabilityDispatcher` port; do not add a normal dependency
+  on concrete runtime crates.
+- Host authorization must use the trust-aware contract
+  (`TrustAwareCapabilityDispatchAuthorizer`) with a policy-derived
+  `TrustDecision`; do not wire production `CapabilityHost` with grant-only
+  authorization that bypasses trust ceilings.
+- Do not absorb process lifecycle/result APIs; those belong in
+  `ironclaw_processes::ProcessHost`.
+- Approval resume must validate and claim the matching fingerprinted lease
+  before dispatch.
+- Authorization denial or unsupported/failed obligations must fail before
+  runtime dispatch, process start, or approval lease claim.
+- Keep obligation handling behind the seam; the built-in obligation
+  implementations live in
+  `crates/kernel/ironclaw_host_runtime/src/obligations/`, never here.
+- The `ReplayPayloadStore` (`replay_payload`) persists the **host-private**
+  raw replay payload (tool `input`, `estimate`, prior-approval identity,
+  input ref, correlation id) a gate/auth resume re-dispatches from, keyed by
+  `InvocationId`. It is the opposite of a model-visible `GateRecord`: it
+  carries no `SafeSummary` and must never reach the model, an event, an
+  error, a snapshot, or a log — the record exists only for host-side
+  re-dispatch. It lives here because capabilities owns the invoke/resume
+  workflow this payload serves; approval and turn contracts forbid raw replay
+  input. The `ironclaw_filesystem` / `ironclaw_turns` dependencies exist for
+  this store: it persists behind a `ScopedFilesystem` over the shared
+  `cas_update` lane (fail-closed on non-CAS backends) and embeds the
+  resume-payload field types owned by `ironclaw_turns` (`CapabilityInputRef`,
+  `AuthResumeApprovalIdentity`) rather than re-typing them. Write-once; no
+  removal method until an explicit retention contract adds one.
 
 ## Do Not Move In Here
 

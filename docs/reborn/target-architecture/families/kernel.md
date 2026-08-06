@@ -155,8 +155,21 @@ depends back.
 - **Never depends on:** `ironclaw_approvals`, `ironclaw_capabilities`, `ironclaw_processes`,
   `ironclaw_resources`, or anything above the kernel — approval resolution depends on this
   crate, never the reverse.
-- **Security & authority role:** the default-deny gate; the sole owner of the lease state every Approvals' resolver is the sanctioned lease minter — a charter held by the stage's forbidden-edge rules, since the issuing port itself is public; this crate stores, matches, and expires leases.
-  fingerprinted approval rides on.
+- **Security & authority role:** the default-deny gate, and the sole owner of the lease state
+  every fingerprinted approval rides on — this crate stores, matches, and expires leases
+  (`CapabilityLease`, its status machine, `CapabilityLeaseStorePort`, the concrete store, and
+  the expiry checks all live here); the approvals crate mints into that store through the
+  issuing port and holds no lease persistence of its own. ✎ **Repaired 2026-08-05 (guidance
+  program): this bullet shipped textually corrupted in #6918 and stayed that way — a sentence
+  was spliced into the middle of this one, mid-clause, leaving the continuation line
+  `fingerprinted approval rides on.` orphaned below the splice. The authorization sentence
+  above is the reconstruction. The repair initially re-homed the spliced clause ("this crate
+  stores, matches, and expires leases") to the approvals entry; measured against the code
+  2026-08-06, that re-homing was wrong — `ironclaw_approvals` imports the lease vocabulary
+  from `ironclaw_authorization` and calls `issue`, storing only approval and gate records —
+  so the clause belongs here, folded into the sentence above, and the approvals entry records
+  the minter role only. Nothing was deleted — the corruption predates every fold in this
+  program.**
 - **Why a separate crate:** authorization is a distinct, independently testable decision from
   consent resolution — matching a static grant and resolving a one-off human decision are
   different questions with different failure modes, and only one of them should be able to mint
@@ -182,7 +195,13 @@ depends back.
   `ironclaw_turns` — the membrane depends on this crate, never the reverse.
 - **Security & authority role:** the human/policy consent authority — the only place a pending
   decision becomes either a scoped lease or a terminal denial. A denial is durable and final for
-  that request; a caller must raise a new request rather than retry a denied one.
+  that request; a caller must raise a new request rather than retry a denied one. This crate's
+  resolver is the sanctioned lease minter — a charter held by the stage's forbidden-edge rules
+  rather than by the type system, since the issuing port itself is public — constructing each
+  fingerprinted lease and issuing it through the authorization crate's lease-store port; lease
+  storage, matching, and expiry stay with `ironclaw_authorization`. *(The sentence briefly
+  restored here 2026-08-05 claimed this crate stores, matches, and expires leases; corrected
+  against the code 2026-08-06 — see the repair note on the authorization entry above.)*
 - **Why a separate crate:** consent resolution is a distinct authority from grant matching, with
   its own durability and ordering guarantees; folding it into authorization would blur "does
   this grant apply" with "did a human agree to this."

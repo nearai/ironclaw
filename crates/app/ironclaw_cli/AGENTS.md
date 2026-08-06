@@ -1,6 +1,6 @@
 # Reborn CLI Agent Contract
 
-This crate owns the standalone `ironclaw` command surface. Keep it small, explicit, and safe for agents to extend.
+This crate owns the standalone `ironclaw` command surface. Keep it small, explicit, and safe for agents to extend. Orientation (what the crate is, measured deps/consumers) lives in `README.md`; family rules in `crates/app/AGENTS.md`. This file is gate-pinned: `reborn_dependency_boundaries.rs` asserts it exists and keeps its command-layout phrases.
 
 ## Command layout
 

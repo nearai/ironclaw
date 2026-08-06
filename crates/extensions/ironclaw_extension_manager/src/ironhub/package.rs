@@ -21,7 +21,7 @@ use crate::ironhub::model::{IronHubCommandError, IronHubToolEntry};
 /// authenticate.
 ///
 /// The manifest also chooses where its own assets live: the wasm and
-/// digest-verified tool schemas are placed at the paths it declares, so
+/// digest-verified tool assets are placed at the paths it declares, so
 /// publisher and host never have to agree a filename convention across two
 /// repositories.
 pub(crate) fn ironhub_tool_package(
@@ -30,6 +30,7 @@ pub(crate) fn ironhub_tool_package(
     wasm: Vec<u8>,
     capabilities: Vec<u8>,
     schemas: Vec<(String, Vec<u8>)>,
+    prompts: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
 ) -> Result<AvailableExtensionPackage, IronHubCommandError> {
     validate_hub_name(&entry.name)?;
@@ -91,6 +92,49 @@ pub(crate) fn ironhub_tool_package(
         });
     }
     files.extend(schema_assets);
+
+    let mut prompt_assets = BTreeMap::new();
+    for (path, content) in prompts {
+        validate_manifest_asset_path(&path)?;
+        if prompt_assets.insert(path.clone(), content).is_some() {
+            return Err(IronHubCommandError::Catalog {
+                reason: format!("published prompt path '{path}' appears more than once"),
+            });
+        }
+    }
+    let referenced_prompts: BTreeSet<_> = record
+        .manifest()
+        .capabilities
+        .iter()
+        .filter_map(|capability| capability.prompt_doc_ref.as_ref())
+        .map(|path| path.as_str().to_string())
+        .collect();
+    let published_prompts: BTreeSet<_> = prompt_assets.keys().cloned().collect();
+    if referenced_prompts != published_prompts {
+        let missing: Vec<_> = referenced_prompts
+            .difference(&published_prompts)
+            .cloned()
+            .collect();
+        let unreferenced: Vec<_> = published_prompts
+            .difference(&referenced_prompts)
+            .cloned()
+            .collect();
+        return Err(IronHubCommandError::Catalog {
+            reason: format!(
+                "published prompts do not match manifest references (missing: {missing:?}, unreferenced: {unreferenced:?})"
+            ),
+        });
+    }
+    let occupied_paths: BTreeSet<_> = files.iter().map(|(path, _)| path.as_str()).collect();
+    if let Some(path) = prompt_assets
+        .keys()
+        .find(|path| occupied_paths.contains(path.as_str()))
+    {
+        return Err(IronHubCommandError::Catalog {
+            reason: format!("published prompt path '{path}' collides with another package asset"),
+        });
+    }
+    files.extend(prompt_assets);
 
     let package = registry_extension_package(files, reserved_bundled_ids)
         .map_err(IronHubCommandError::Product)?;
@@ -157,6 +201,7 @@ mod tests {
             capabilities: artifact(),
             manifest: Some(artifact()),
             schemas,
+            prompts: BTreeMap::new(),
         }
     }
 
@@ -244,6 +289,7 @@ access_token = "/access_token""#
             component(),
             b"{}".to_vec(),
             published_schemas(&entry.name),
+            Vec::new(),
             &[],
         )
         .expect("package builds")
@@ -321,6 +367,7 @@ access_token = "/access_token""#
             component(),
             b"{}".to_vec(),
             schemas,
+            Vec::new(),
             &[],
         )
         .expect_err("every manifest schema must be present in the signed catalog");
@@ -328,6 +375,68 @@ access_token = "/access_token""#
         assert!(
             error.to_string().contains("missing")
                 && error.to_string().contains("raw_output.v1.json"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn package_rejects_a_manifest_with_an_unpublished_prompt() {
+        let manifest = String::from_utf8(published_manifest(
+            "attio",
+            &api_key_auth("attio", ""),
+        ))
+        .expect("manifest UTF-8")
+        .replace(
+            "output_schema_ref = \"schemas/attio/raw_output.v1.json\"",
+            "output_schema_ref = \"schemas/attio/raw_output.v1.json\"\nprompt_doc_ref = \"prompts/attio/invoke.md\"",
+        )
+        .into_bytes();
+        let error = ironhub_tool_package(
+            &entry_named("attio"),
+            manifest,
+            component(),
+            b"{}".to_vec(),
+            published_schemas("attio"),
+            Vec::new(),
+            &[],
+        )
+        .expect_err("every manifest prompt must be present in the signed catalog");
+
+        assert!(
+            error.to_string().contains("missing")
+                && error.to_string().contains("prompts/attio/invoke.md"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn package_rejects_a_prompt_that_collides_with_the_wasm_module() {
+        let module_path = "wasm/attio-tool.wasm";
+        let manifest = String::from_utf8(published_manifest(
+            "attio",
+            &api_key_auth("attio", ""),
+        ))
+        .expect("manifest UTF-8")
+        .replace(
+            "output_schema_ref = \"schemas/attio/raw_output.v1.json\"",
+            &format!(
+                "output_schema_ref = \"schemas/attio/raw_output.v1.json\"\nprompt_doc_ref = \"{module_path}\""
+            ),
+        )
+        .into_bytes();
+        let error = ironhub_tool_package(
+            &entry_named("attio"),
+            manifest,
+            component(),
+            b"{}".to_vec(),
+            published_schemas("attio"),
+            vec![(module_path.to_string(), b"# Prompt".to_vec())],
+            &[],
+        )
+        .expect_err("a prompt must not overwrite the validated wasm module");
+
+        assert!(
+            error.to_string().contains("collides") && error.to_string().contains(module_path),
             "got {error}"
         );
     }
@@ -341,6 +450,7 @@ access_token = "/access_token""#
             component(),
             b"{}".to_vec(),
             published_schemas("attio"),
+            Vec::new(),
             &[],
         )
         .expect_err("manifest must be UTF-8");
@@ -354,6 +464,7 @@ access_token = "/access_token""#
             component(),
             b"{}".to_vec(),
             duplicate,
+            Vec::new(),
             &[],
         )
         .expect_err("duplicate schema paths must be rejected");
@@ -367,6 +478,7 @@ access_token = "/access_token""#
             component(),
             b"{}".to_vec(),
             unreferenced,
+            Vec::new(),
             &[],
         )
         .expect_err("unreferenced schema paths must be rejected");
@@ -381,6 +493,25 @@ access_token = "/access_token""#
             .schemas
             .get_mut("schemas/attio/invoke.input.v1.json")
             .expect("input schema metadata")
+            .sha256 = "b".repeat(64);
+
+        assert_ne!(
+            super::super::catalog::tool_artifact_digest(&original),
+            super::super::catalog::tool_artifact_digest(&changed),
+        );
+    }
+
+    #[test]
+    fn prompt_digest_changes_the_pinned_tool_artifact_digest() {
+        let mut original = entry_named("attio");
+        original
+            .prompts
+            .insert("prompts/attio/invoke.md".to_string(), artifact());
+        let mut changed = original.clone();
+        changed
+            .prompts
+            .get_mut("prompts/attio/invoke.md")
+            .expect("prompt metadata")
             .sha256 = "b".repeat(64);
 
         assert_ne!(
@@ -422,6 +553,7 @@ access_token = "/access_token""#
                 component(),
                 b"{}".to_vec(),
                 published_schemas("attio"),
+                Vec::new(),
                 &[],
             )
             .expect_err(label);
@@ -520,6 +652,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             component(),
             b"{}".to_vec(),
             published_schemas("other-tool"),
+            Vec::new(),
             &[],
         )
         .expect_err("mismatched id must not install");
@@ -541,6 +674,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             component(),
             b"{}".to_vec(),
             published_schemas("attio"),
+            Vec::new(),
             &[],
         )
         .expect_err("malformed manifest must not install");

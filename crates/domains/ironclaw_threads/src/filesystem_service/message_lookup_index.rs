@@ -66,6 +66,25 @@ where
                 message.message_id,
             )
             .await?;
+            if let Some(provider_call_id) = message
+                .tool_result_provider_call
+                .as_ref()
+                .map(|provider_call| provider_call.provider_call_id.as_str())
+            {
+                self.write(
+                    scope,
+                    &tool_result_provider_call_index_path(
+                        scope,
+                        thread_id,
+                        turn_run_id,
+                        result_ref,
+                        provider_call_id,
+                    )?,
+                    thread_id,
+                    message.message_id,
+                )
+                .await?;
+            }
         }
         if message.kind == MessageKind::User {
             self.write_if_absent(
@@ -133,6 +152,22 @@ where
                 tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
                 CasExpectation::Any,
             )?;
+            if let Some(provider_call_id) = message
+                .tool_result_provider_call
+                .as_ref()
+                .map(|provider_call| provider_call.provider_call_id.as_str())
+            {
+                push(
+                    tool_result_provider_call_index_path(
+                        scope,
+                        thread_id,
+                        turn_run_id,
+                        result_ref,
+                        provider_call_id,
+                    )?,
+                    CasExpectation::Any,
+                )?;
+            }
         }
         if message.kind == MessageKind::User {
             push(
@@ -199,6 +234,24 @@ where
         result_ref: &str,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
         let path = tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?;
+        self.read(scope, thread_id, &path).await
+    }
+
+    pub(super) async fn read_tool_result_provider_call(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        result_ref: &str,
+        provider_call_id: &str,
+    ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
+        let path = tool_result_provider_call_index_path(
+            scope,
+            thread_id,
+            turn_run_id,
+            result_ref,
+            provider_call_id,
+        )?;
         self.read(scope, thread_id, &path).await
     }
 
@@ -346,6 +399,33 @@ fn tool_result_index_path(
         &ToolResultIndexKey {
             turn_run_id,
             result_ref,
+        },
+    )?;
+    scoped_path(&format!(
+        "{}/indexes/tool-results/{key}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn tool_result_provider_call_index_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+    result_ref: &str,
+    provider_call_id: &str,
+) -> Result<ScopedPath, SessionThreadError> {
+    #[derive(Serialize)]
+    struct ToolResultProviderCallIndexKey<'a> {
+        turn_run_id: &'a str,
+        result_ref: &'a str,
+        provider_call_id: &'a str,
+    }
+    let key = lookup_index_key(
+        "tool-result-provider-call",
+        &ToolResultProviderCallIndexKey {
+            turn_run_id,
+            result_ref,
+            provider_call_id,
         },
     )?;
     scoped_path(&format!(

@@ -15,7 +15,7 @@ pub(super) async fn validate_trigger_delivery_target_against_registry(
     let target_id =
         crate::outbound::OutboundDeliveryTargetId::new(target.as_str()).map_err(|error| {
             tracing::debug!(
-                target = "ironclaw::reborn::trigger_create",
+                target: "ironclaw::reborn::trigger_create",
                 %error,
                 "per-trigger delivery target id failed outbound target id validation"
             );
@@ -36,7 +36,7 @@ pub(super) async fn validate_trigger_delivery_target_against_registry(
         )),
         Err(error) => {
             tracing::warn!(
-                target = "ironclaw::reborn::trigger_create",
+                target: "ironclaw::reborn::trigger_create",
                 %error,
                 "outbound delivery target lookup failed during trigger create validation"
             );
@@ -154,7 +154,7 @@ async fn resolve_current_run_delivery_target(
         .map(|source| Arc::clone(&*source))
         .map_err(|error| {
             tracing::warn!(
-                target = "ironclaw::reborn::trigger_create",
+                target: "ironclaw::reborn::trigger_create",
                 error = ?error,
                 "source reply-target resolver lock is unavailable"
             );
@@ -170,7 +170,7 @@ async fn resolve_current_run_delivery_target(
         .await
         .map_err(|error| {
             tracing::warn!(
-                target = "ironclaw::reborn::trigger_create",
+                target: "ironclaw::reborn::trigger_create",
                 %error,
                 %run_id,
                 "source run lookup failed during implicit trigger delivery-target resolution"
@@ -189,7 +189,7 @@ async fn resolve_current_run_delivery_target(
         .await
         .map_err(|error| {
             tracing::warn!(
-                target = "ironclaw::reborn::trigger_create",
+                target: "ironclaw::reborn::trigger_create",
                 %error,
                 %run_id,
                 "outbound target lookup failed during implicit trigger delivery-target resolution"

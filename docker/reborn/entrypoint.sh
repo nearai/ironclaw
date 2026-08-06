@@ -145,8 +145,23 @@ if [ -f "$config_path" ]; then
   fi
 fi
 
-if ! is_truthy "${IRONCLAW_REBORN_SLACK_ENABLED:-}" \
-  && awk '
+# Strip the retired `[slack]` setup fields that make `serve` fail closed.
+#
+# This used to also require `IRONCLAW_REBORN_SLACK_ENABLED` to be non-truthy.
+# That variable lost its last Rust reader in #6116, which deleted the
+# enablement-gate path outright — this line was the only thing in the repo
+# still reading it. Worse, the operator docs instructed setting it to `true`,
+# so following the documented setup **disabled the migration** and produced a
+# container that would not boot: the mechanism built to prevent exactly that
+# failure was switched off by the same instruction (#7115). The awk condition
+# below is the whole signal.
+#
+# Chosen, not incidental: the migration fires only for `enabled = false`. A
+# config with `enabled = true` plus legacy fields is left alone and fails
+# `serve` closed with a migration pointer, because silently rewriting an
+# apparently-live channel config is worse than refusing to start. This matches
+# the narrowly-gated `[llm.default]` migration above.
+if awk '
     /^[[:space:]]*\[/ {
       in_slack = ($0 ~ /^[[:space:]]*\[slack\][[:space:]]*$/)
     }
