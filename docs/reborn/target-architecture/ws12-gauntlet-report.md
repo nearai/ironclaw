@@ -263,8 +263,9 @@ EXIT=0 — **49 passed (47 + 2), 0 failed, 0 skip lines**; the postgres leg
 legs both ran. The journal contract proper runs over the fabric
 (backend-neutral); its Postgres correctness is held by P1.
 
-**P6 — event store (`ironclaw_event_store`) — THE ONE REAL FAILURE OF THIS
-GAUNTLET (pre-existing, test-design, not a store defect).**
+**P6 — event store (`ironclaw_event_store`) — THE FIRST OF THIS GAUNTLET'S
+TWO REAL FAILURES, ONE DEFECT CLASS (pre-existing, test-design, not a store
+defect; the second instance is P8).**
 `--test durable_event_store_contract --test profile_contract` under the parity
 env: `profile_contract` 8/8 ok; `durable_event_store_contract` **11 passed,
 2 FAILED** — `postgres_replay_advances_next_cursor_past_trailing_filtered_records`
