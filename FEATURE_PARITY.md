@@ -632,7 +632,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Exec approval dialogs | ✅ | ✅ | - | TUI overlay |
 | iMessage integration | ✅ | 🚫 | - | |
 | Instances tab | ✅ | 🚫 | - | Presence beacons across instances |
-| Agent events debug window | ✅ | 🚫 | - | Real-time event inspector |
+| Agent events debug window | ✅ | ✅ | - | Operator-only prompt, activity, statistics, and bounded tool-detail inspector (`?debug=true`) |
 | Sparkle auto-updates | ✅ | 🚫 | - | Appcast distribution |
 
 ### Owner: _Unassigned_ (if ever prioritized)

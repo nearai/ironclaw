@@ -1539,6 +1539,40 @@ mod tests {
     }
 
     #[test]
+    fn streamed_tool_updates_never_serialize_arguments_or_results() {
+        let marker = "must-only-exist-in-the-dedicated-detail-response";
+        let detail = ToolExecutionDiagnostic::new(
+            CapabilityActivityId::new(),
+            None,
+            "builtin.echo",
+            Some(format!(r#"{{"secret":"{marker}"}}"#)),
+            Some(marker.to_string()),
+            ToolExecutionStatus::Succeeded,
+            Some(7),
+            None,
+            None,
+            None,
+        );
+        let result_truncated = detail.result_truncated();
+        let update = DiagnosticUpdateKind::ToolExecutionUpdated {
+            activity_id: detail.activity_id,
+            model_call_id: detail.model_call_id,
+            capability_name: detail.capability_name,
+            status: detail.status,
+            duration_ms: detail.duration_ms,
+            output_bytes: detail.output_bytes,
+            result_truncated,
+        };
+
+        let serialized = serde_json::to_string(&update).expect("serialize tool update");
+        assert!(!serialized.contains(marker));
+        assert!(!serialized.contains("arguments"));
+        assert!(!serialized.contains("result\""));
+        assert!(serialized.contains("output_bytes"));
+        assert!(serialized.contains("result_truncated"));
+    }
+
+    #[test]
     fn stats_bound_the_per_model_breakdown_and_mark_truncation() {
         let stats = SessionDiagnosticStats {
             calls_per_model: (0..=MAX_MODELS_IN_STATS)

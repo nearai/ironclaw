@@ -105,19 +105,28 @@ pub(super) fn updates(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_product_contracts::inspector::{
+        DiagnosticActivityEvent, DiagnosticActivityKind, ToolExecutionDiagnostic,
+        ToolExecutionStatus,
+    };
 
     use super::*;
+
+    fn caller(tenant: &str, user: &str) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::new(tenant).expect("tenant"),
+            UserId::new(user).expect("user"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+        )
+    }
 
     #[test]
     fn scope_uses_authenticated_tenant_and_user() {
         let run_id = TurnRunId::new();
-        let caller = ProductSurfaceCaller::new(
-            TenantId::new("tenant-a").expect("tenant"),
-            UserId::new("user-a").expect("user"),
-            Some(AgentId::new("agent-a").expect("agent")),
-            Some(ProjectId::new("project-a").expect("project")),
-        );
+        let caller = caller("tenant-a", "user-a");
         let scope = diagnostic_scope(
             caller,
             DiagnosticRunRequest {
@@ -130,5 +139,108 @@ mod tests {
         assert_eq!(scope.user_id.as_str(), "user-a");
         assert_eq!(scope.thread_id.as_str(), "thread-a");
         assert_eq!(scope.run_id, run_id);
+    }
+
+    #[test]
+    fn reads_are_isolated_by_authenticated_scope_and_exact_resource_ids() {
+        let store = InMemoryDiagnosticStore::default();
+        let run_id = TurnRunId::new();
+        let other_run_id = TurnRunId::new();
+        let activity_id = CapabilityActivityId::new();
+        let owner = caller("tenant-a", "user-a");
+        let owner_scope = DiagnosticScope::new(
+            owner.tenant_id.clone(),
+            owner.user_id.clone(),
+            ThreadId::new("thread-a").expect("thread"),
+            run_id,
+        );
+        store
+            .record_activity(
+                owner_scope.clone(),
+                DiagnosticActivityEvent::new(
+                    Utc::now(),
+                    DiagnosticActivityKind::Progress,
+                    None,
+                    None,
+                    None,
+                    Some("owner-only activity".to_string()),
+                ),
+            )
+            .expect("record activity");
+        store
+            .record_tool_execution(
+                owner_scope,
+                ToolExecutionDiagnostic::new(
+                    activity_id,
+                    None,
+                    "builtin.echo",
+                    Some(r#"{"value":"owner-only arguments"}"#.to_string()),
+                    Some("owner-only output".to_string()),
+                    ToolExecutionStatus::Succeeded,
+                    Some(1),
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .expect("record tool");
+
+        let exact = snapshot(
+            &store,
+            owner.clone(),
+            DiagnosticRunRequest {
+                thread_id: "thread-a".to_string(),
+                run_id: run_id.to_string(),
+            },
+        )
+        .expect("owner snapshot");
+        assert!(exact.payload["snapshot"].is_object());
+
+        for (read_caller, thread_id, requested_run) in [
+            (caller("tenant-b", "user-a"), "thread-a", run_id),
+            (caller("tenant-a", "user-b"), "thread-a", run_id),
+            (owner.clone(), "thread-b", run_id),
+            (owner.clone(), "thread-a", other_run_id),
+        ] {
+            let page = snapshot(
+                &store,
+                read_caller,
+                DiagnosticRunRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: requested_run.to_string(),
+                },
+            )
+            .expect("isolated snapshot");
+            assert!(page.payload["snapshot"].is_null());
+            let serialized = page.payload.to_string();
+            assert!(!serialized.contains("owner-only"));
+        }
+
+        let wrong_activity = tool(
+            &store,
+            owner.clone(),
+            DiagnosticToolRequest {
+                thread_id: "thread-a".to_string(),
+                run_id: run_id.to_string(),
+                activity_id: CapabilityActivityId::new().to_string(),
+            },
+        )
+        .expect("wrong activity lookup");
+        assert!(wrong_activity.payload["tool"].is_null());
+
+        let exact_tool = tool(
+            &store,
+            owner,
+            DiagnosticToolRequest {
+                thread_id: "thread-a".to_string(),
+                run_id: run_id.to_string(),
+                activity_id: activity_id.to_string(),
+            },
+        )
+        .expect("owner tool lookup");
+        assert_eq!(
+            exact_tool.payload["tool"]["activity_id"],
+            serde_json::json!(activity_id),
+        );
     }
 }
