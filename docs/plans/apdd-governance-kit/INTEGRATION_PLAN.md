@@ -193,48 +193,44 @@ not disturb the job's existing `pnpm test` / `pnpm build` steps or the shared
 those rules auto-loading, which is the intended effect. Each phase is
 independently revertible in this way.
 
-**After any rollback, verify nothing stale survives** — two checks:
+**After any rollback, verify nothing stale survives** — two scoped checks, run
+after the deletes + targeted reverts.
 
-1. **No reference to a *deleted* file remains** — search for each removed path.
-2. **No reference to a *reverted config/dep* remains** — after reverting the
-   hunks in the edited files (`vite.config.ts`, `package.json`, `code_style.yml`,
-   `CLAUDE.md`), confirm no Storybook / Vitest-browser leftovers linger (a
-   half-reverted `vite.config.ts` still naming the browser project is the
-   likeliest miss).
-
-Use a **hidden-file-aware** search that still honors `.gitignore` — so it scans
-`.claude/` and `.github/` but skips `node_modules/` and build output, which
-retain the Storybook/Playwright packages on disk until a fresh install and would
-only add noise:
+**Check 1 — no reference to a *deleted file/dir* remains.** Tree-wide over
+source with `--hidden` (honors `.gitignore`, so it scans `.claude/`/`.github/`
+but skips `node_modules/` and build output), excluding the proposal docs (they
+list every path by design). File/dir references only — **no dependency names
+here** (those are Check 2):
 
 ```bash
 rg --hidden --glob '!.git' --glob '!**/node_modules/**' --glob '!docs/plans/apdd-governance-kit/**' -n \
-  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md|@vitest/browser'
+  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md'
 ```
 
-(`--hidden` scans dotfiles/dirs but honors `.gitignore`; the explicit
-`!**/node_modules/**` is belt-and-suspenders.) The pattern **deliberately drops
-bare `playwright`/`storybook`** — IronClaw's existing e2e suite already uses
-Playwright, so `playwright` would match legitimate coverage and drown the
-signal; `@vitest/browser` and the `.storybook` dir are the specific identifiers
-a half-reverted Storybook browser project would actually leave behind.
-**Exclude the proposal docs themselves** (`docs/plans/apdd-governance-kit/**`) —
-they enumerate every removed path and dependency by design, so they would swamp
-the output with expected self-matches. **Keep the edited production files in scope**
-(`CLAUDE.md`, `package.json`, `vite.config.ts`, `code_style.yml`): after a
-correct revert they name none of these, so a match *there* is a real leftover
-(an incomplete revert) — precisely what this check should surface. As a
-belt-and-suspenders complement, also confirm each edited file's reverted diff is
-clean (per the manifest above).
+If Phase 0 (§0.1/§0.2) resolved non-default `DESIGN.md`/feature-docs locations,
+add those exact paths to the alternation first (recorded in the decisions note;
+not hard-coded here — this is the proposal, written before Phase 0 runs). Strip
+any pointer this surfaces so a deleted file is never still cited as authoritative.
 
-The alternation lists the **default** `DESIGN.md` and `docs/features/` paths;
-if Phase 0 (§0.1 / §0.2) resolved different locations, **add those exact paths
-to the pattern** before running the check — the resolved paths are recorded in
-the Phase 0 decisions note. (They can't be hard-coded here: this is the
-proposal, written before Phase 0 runs.)
+**Check 2 — no *removed dependency* survives.** Dependency names are checked
+**only in the frontend manifest + lockfile**, never tree-wide: there they are
+unambiguous (the frontend declares none of them today), whereas tree-wide they
+would false-positive on IronClaw's existing Playwright e2e and on `node_modules`:
 
-Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
-workflows, or docs, so a deleted file is never still referenced as authoritative.
+```bash
+rg -n 'storybook|@storybook/|@vitest/browser|playwright' \
+  crates/product/ironclaw_webui/frontend/{package.json,pnpm-lock.yaml}
+```
+
+Any hit in Check 2 after a rollback is a dependency the revert missed — this
+covers `storybook`, `@storybook/react-vite`, the addons, `@vitest/browser`, and
+`playwright` (the `@chromatic-com/storybook` visual-regression dep too, if
+Phase 4 added it).
+
+**Primary guarantee is the targeted revert itself:** confirm each edited file's
+reverted diff is clean (`CLAUDE.md`, `package.json`, `pnpm-lock.yaml`,
+`vite.config.ts`, `code_style.yml`, `review-discipline.md`); the two greps are
+the backstop.
 
 ## Open questions for reviewers
 
