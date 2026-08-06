@@ -64,7 +64,8 @@ function summarizeTools(tools, t) {
    More than that → a collapsed summary line that expands to the full rows. */
 export function ToolRun({ tools }) {
   const t = useT();
-  const hasError = tools.some((tool) => tool.toolStatus === "error");
+  const failedCount = tools.filter((tool) => tool.toolStatus === "error").length;
+  const hasError = failedCount > 0;
   const hasTerminalNotice = tools.some(
     (tool) => tool.toolStatus === "error" || tool.toolStatus === "declined",
   );
@@ -94,13 +95,22 @@ export function ToolRun({ tools }) {
         type="button"
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded ? "true" : "false"}
-        className={[
-          "v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
-          hasError ? "text-[var(--v2-danger-text)]" : "text-iron-400 hover:text-iron-200",
-        ].join(" ")}
+        className="v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm text-iron-400 hover:text-iron-200"
       >
         <Icon name="layers" className="h-4 w-4 shrink-0" />
         <span className="min-w-0 truncate">{summary}</span>
+        {hasError &&
+        (<>
+          <span className="sr-only">
+            {t(failedCount === 1 ? "activity.failed" : "activity.failedPlural", {
+              count: failedCount,
+            })}
+          </span>
+          <Icon
+            name="alert"
+            className="h-3.5 w-3.5 shrink-0 text-[var(--v2-warning-text)]"
+          />
+        </>)}
         <Icon
           name="chevron"
           className={["ml-auto h-3.5 w-3.5 shrink-0", expanded ? "rotate-180" : ""].join(" ")}

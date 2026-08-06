@@ -14,6 +14,10 @@ const typingIndicatorSource = readFileSync(
   new URL("./typing-indicator.tsx", import.meta.url),
   "utf8",
 );
+const iconsSource = readFileSync(
+  new URL("../../../design-system/icons.tsx", import.meta.url),
+  "utf8",
+);
 
 test("tool activity cards keep long tool output inside the mobile viewport", () => {
   assert.match(
@@ -64,6 +68,52 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
     toolActivitySource,
     /className="v2-wrap-anywhere border-b border-iron-700\/(?:60|40)/,
     "tool result table cells should keep natural column widths instead of aggressively wrapping",
+  );
+});
+
+test("a failed tool call is flagged with a subtle badge, not a red banner (#7302)", () => {
+  // The whole-summary danger recolor is gone from the activity-run row: a
+  // recovered run should read as informational, never alarming.
+  assert.doesNotMatch(
+    activityRunSource,
+    /--v2-danger-text/,
+    "activity run summary should not paint the entire row with the danger color",
+  );
+  // The tool-run collapse row keeps its neutral text and drops the ternary that
+  // swapped in the danger color on failure.
+  assert.doesNotMatch(
+    toolActivitySource,
+    /hasError \? "text-\[var\(--v2-danger-text\)\]"/,
+    "tool run summary should not swap the whole row to the danger color",
+  );
+
+  // A subtle warning-tinted badge stands in for the red, gated on the failure
+  // flag in each summary row.
+  assert.match(
+    activityRunSource,
+    /summary\.hasError &&[\s\S]{0,200}name="alert"[\s\S]{0,120}text-\[var\(--v2-warning-text\)\]/,
+    "activity run summary should show a subtle warning badge when a tool failed",
+  );
+  assert.match(
+    toolActivitySource,
+    /hasError &&[\s\S]{0,320}name="alert"[\s\S]{0,120}text-\[var\(--v2-warning-text\)\]/,
+    "tool run summary should show a subtle warning badge when a tool failed",
+  );
+
+  // The collapsed tool-run summary text omits the failure count, so the badge
+  // carries an accessible note for assistive tech.
+  assert.match(
+    toolActivitySource,
+    /className="sr-only"[\s\S]{0,160}activity\.failed/,
+    "collapsed tool-run badge should expose the failure to assistive technology",
+  );
+
+  // The badge glyph must exist, or the Icon component silently falls back to
+  // the default `spark` icon.
+  assert.match(
+    iconsSource,
+    /\balert:\s*\(/,
+    "an `alert` glyph should exist for the failure badge",
   );
 });
 
