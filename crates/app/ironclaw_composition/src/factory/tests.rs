@@ -15,8 +15,8 @@ use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{
-        CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, RunId, SecretHandle, TenantId,
-        UserId,
+        CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, ProjectId, RunId, SecretHandle,
+        TenantId, ThreadId, UserId,
     },
     mount::{MountGrant, MountPermissions},
     path::{MountAlias, ScopedPath, VirtualPath},
@@ -24,6 +24,7 @@ use ironclaw_host_api::{
     result_meta::FailureKind,
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
+    turn::{TurnActor, TurnScope},
 };
 use ironclaw_host_api::{
     capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
@@ -36,6 +37,13 @@ use ironclaw_host_runtime::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
+use ironclaw_loop_contracts::{
+    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
+};
+use ironclaw_memory::{
+    MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
+    MemoryServiceError, MemoryServiceErrorKind,
+};
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
@@ -858,6 +866,539 @@ async fn standalone_memory_documents_persist_across_rebuilds() {
         search["results"][0]["path"],
         serde_json::json!("projects/durable/notes.md")
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Issue #7275 — verify explicit persistent memory recall across conversations
+// on the PRODUCTION composition path (standalone build over the embedded
+// libSQL root filesystem — the active shipping backend of the local-dev
+// deployment), not an in-memory harness. Each assertion maps to one
+// acceptance criterion of the issue; see the PR body for the criterion table.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Build an execution context for the memory tools scoped to `user`, the
+/// conversation `thread`, and (optionally) an isolated `project` axis. The
+/// flattened `ExecutionContext` fields and `resource_scope` must agree
+/// (`ExecutionContext::validate()` enforces it), so both are set together.
+fn memory_context_for(
+    capability_id: &str,
+    user: &str,
+    thread: &str,
+    project: Option<&str>,
+) -> ExecutionContext {
+    let mut context = memory_context(capability_id);
+    let user_id = UserId::new(user).expect("valid user id");
+    let thread_id = ThreadId::new(thread).expect("valid thread id");
+    context.user_id = user_id.clone();
+    context.resource_scope.user_id = user_id;
+    context.thread_id = Some(thread_id.clone());
+    context.resource_scope.thread_id = Some(thread_id);
+    if let Some(project) = project {
+        let project_id = ProjectId::new(project).expect("valid project id");
+        context.project_id = Some(project_id.clone());
+        context.resource_scope.project_id = Some(project_id);
+    }
+    context
+}
+
+/// The loop-facing scope of a conversation, matching what
+/// `ThreadBackedLoopContextPort::build_memory_prompt_context_request` derives
+/// from the run context (tenant/user/agent/project + the active thread).
+fn prompt_lane_turn_scope(user: &str, thread: &str, project: Option<&str>) -> TurnScope {
+    let mut scope = ResourceScope::local_default(
+        UserId::new(user).expect("valid user id"),
+        InvocationId::new(),
+    )
+    .expect("valid resource scope");
+    scope.thread_id = Some(ThreadId::new(thread).expect("valid thread id"));
+    if let Some(project) = project {
+        scope.project_id = Some(ProjectId::new(project).expect("valid project id"));
+    }
+    TurnScope::new(
+        scope.tenant_id,
+        scope.agent_id,
+        scope.project_id,
+        scope.thread_id.expect("thread id set above"),
+    )
+}
+
+/// The prompt-lane request the loop would build for a user turn: the query is
+/// the user's latest message, the scope is the conversation's run scope, and
+/// the actor is the human user.
+fn prompt_lane_request(scope: &TurnScope, user: &str, query: &str) -> MemoryPromptContextRequest {
+    MemoryPromptContextRequest {
+        scope: scope.clone(),
+        actor: TurnActor::new(UserId::new(user).expect("valid user id")),
+        query: query.to_string(),
+        max_snippets: 8,
+        context_profile_id: ContextProfileId::new("default").expect("valid profile id"),
+    }
+}
+
+/// Derive the production prompt-context service EXACTLY as
+/// `build_reborn_runtime` does (runtime.rs): resolve the bound provider
+/// through the resolver, then derive the memory consumers through the shared
+/// lifecycle-gating helper. Using the same derivation means the test cannot
+/// fork from production wiring.
+fn prompt_lane_service(
+    services: &RebornRuntimeStores,
+) -> Option<Arc<dyn MemoryPromptContextService>> {
+    let provider = services.memory_service_resolver.resolve_provider(
+        Arc::clone(&services.extension_filesystem) as Arc<dyn RootFilesystem>,
+        None,
+    );
+    crate::memory_provider_factory::memory_lifecycle_consumers(provider, &services.memory_lifecycle)
+        .memory_context_service
+}
+
+/// Issue #7275 acceptance criteria 1, 2, 3, and 6: an explicit persistent-memory
+/// write in conversation A (with provider-issued write evidence) must be
+/// searchable and proactively retrievable in conversation B — a DIFFERENT
+/// thread under the same tenant/user/agent/project scope — after a full
+/// runtime teardown and rebuild over the same on-disk libSQL root.
+#[tokio::test]
+async fn memory_recall_across_conversations_on_production_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let standalone_root = dir.path().join("standalone");
+    let owner = "issue-7275-recall-owner";
+    let user = "issue-7275-user";
+    const MARKER: &str = "launch-code-plum-42";
+    const TARGET: &str = "projects/recall/notes.md";
+
+    // ── Conversation A: explicit persistent-memory write ──────────────────
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+        owner,
+        standalone_root.clone(),
+    ))
+    .await
+    .expect("standalone services build");
+    let written = invoke_json(
+        &services,
+        MEMORY_WRITE_CAPABILITY_ID,
+        memory_context_for(MEMORY_WRITE_CAPABILITY_ID, user, "conv-a", None),
+        serde_json::json!({
+            "target": TARGET,
+            "content": format!("remember that {MARKER} unlocks staging"),
+            "append": false
+        }),
+    )
+    .await
+    .expect("memory_write succeeds in conversation A");
+    // Criterion 1 — provider-issued/durable write evidence: the tool response
+    // carries the durable write status, the document path, and the byte
+    // length, not merely a completion acknowledgement.
+    assert_eq!(written["status"], serde_json::json!("written"));
+    assert_eq!(written["path"], serde_json::json!(TARGET));
+    assert_eq!(written["append"], serde_json::json!(false));
+    assert!(
+        written["content_length"].as_u64().expect("content length") > 0,
+        "write evidence must carry the content length: {written}"
+    );
+
+    // Caller-level read-back on the same store before teardown.
+    let tree = invoke_json(
+        &services,
+        MEMORY_TREE_CAPABILITY_ID,
+        memory_context_for(MEMORY_TREE_CAPABILITY_ID, user, "conv-a", None),
+        serde_json::json!({"path": "", "depth": 3}),
+    )
+    .await
+    .expect("memory_tree read-back in conversation A");
+    assert!(
+        tree.to_string().contains("recall/"),
+        "memory_tree must list the written document: {tree}"
+    );
+
+    // ── Durable reopen (criterion 6): the write survives a full runtime
+    // teardown and rebuild over the SAME on-disk libSQL root — the shipping
+    // backend, not an in-memory harness. ───────────────────────────────────
+    drop(services);
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+        owner,
+        standalone_root.clone(),
+    ))
+    .await
+    .expect("rebuilt standalone services");
+
+    // ── Conversation B: DIFFERENT thread id, SAME tenant/user/agent/project
+    // scope (criterion 2): the marker is found through `memory_search`. ────
+    let search = invoke_json(
+        &services,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-b", None),
+        serde_json::json!({"query": "launch code unlocks staging", "limit": 5}),
+    )
+    .await
+    .expect("memory_search succeeds in conversation B");
+    assert_eq!(search["result_count"], serde_json::json!(1));
+    assert_eq!(search["results"][0]["path"], serde_json::json!(TARGET));
+    assert!(
+        search["results"][0]["content"]
+            .as_str()
+            .expect("search result content")
+            .contains(MARKER),
+        "conversation B must find the marker: {search}"
+    );
+    assert_eq!(
+        search["search_scope"],
+        serde_json::json!("reborn_internal_persistent_memory")
+    );
+
+    // ── Proactive prompt-memory lane (criterion 3): the SAME production
+    // service the loop wires returns the saved marker WITHOUT any memory tool
+    // call — the request mirrors the loop's own request builder (query = the
+    // user's latest message, scope = conversation B's run scope). The query
+    // is deliberately a natural-language message with punctuation — the
+    // #7275/#7185 production shape that previously FAILED the FTS backend
+    // (raw `?`/`!`/`(` in a MATCH expression is a syntax error, surfacing as
+    // `OperationFailed` on the tool and silently degrading the prompt lane
+    // to empty) instead of returning a no-match.
+    let lane = prompt_lane_service(&services).expect("native binding wires the prompt lane");
+    let scope = prompt_lane_turn_scope(user, "conv-b", None);
+    let snippets = lane
+        .load_memory_snippets(prompt_lane_request(&scope, user, "unlocks staging?"))
+        .await
+        .expect("prompt lane retrieval succeeds");
+    assert!(
+        snippets
+            .iter()
+            .any(|snippet| snippet.safe_summary.contains(MARKER)),
+        "conversation B must receive the marker through the proactive prompt lane: {snippets:?}"
+    );
+    assert!(
+        snippets
+            .iter()
+            .all(|snippet| snippet.snippet_ref.starts_with("memory-snippet:")),
+        "prompt-lane snippets must carry the host-built memory-snippet reference"
+    );
+
+    // The explicit tool surface must also survive natural-language queries
+    // (the sanitizer regression): punctuation-laden queries succeed and find
+    // the marker instead of failing the invocation. (The FTS backends match
+    // AND-of-terms, so each probe overlaps the seeded document's tokens.)
+    for probe in [
+        "unlocks staging!",
+        "staging (unlocks)",
+        "launch-code-plum-42?",
+    ] {
+        let found = invoke_json(
+            &services,
+            MEMORY_SEARCH_CAPABILITY_ID,
+            memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-b", None),
+            serde_json::json!({"query": probe, "limit": 5}),
+        )
+        .await
+        .unwrap_or_else(|failure| {
+            panic!("natural-language search probe {probe:?} must succeed: {failure:?}")
+        });
+        assert_eq!(
+            found["result_count"],
+            serde_json::json!(1),
+            "probe {probe:?} must find the marker: {found}"
+        );
+        assert!(
+            found["results"][0]["content"]
+                .as_str()
+                .expect("search result content")
+                .contains(MARKER)
+        );
+    }
+}
+
+/// Issue #7275 acceptance criterion 4: the SAME scenario must fail closed for
+/// a different user AND for any intentionally isolated scope axis (here: a
+/// different project under the same user). The negative assertions are
+/// non-vacuous — a same-scope control in the same test finds the marker.
+#[tokio::test]
+async fn memory_recall_fails_closed_for_other_users_and_isolated_scope_axes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let standalone_root = dir.path().join("standalone");
+    let owner = "issue-7275-isolation-owner";
+    let user = "issue-7275-isolation-user";
+    const MARKER: &str = "isolation-marker-nova-77";
+    const TARGET: &str = "projects/recall/notes.md";
+
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+        owner,
+        standalone_root.clone(),
+    ))
+    .await
+    .expect("standalone services build");
+    invoke_json(
+        &services,
+        MEMORY_WRITE_CAPABILITY_ID,
+        memory_context_for(MEMORY_WRITE_CAPABILITY_ID, user, "conv-a", None),
+        serde_json::json!({
+            "target": TARGET,
+            "content": format!("remember that {MARKER} is the isolation marker"),
+            "append": false
+        }),
+    )
+    .await
+    .expect("seed write succeeds");
+
+    // Non-vacuity control: same user + same project, different thread → found.
+    let control = invoke_json(
+        &services,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-b", None),
+        serde_json::json!({"query": "isolation marker", "limit": 5}),
+    )
+    .await
+    .expect("control search succeeds");
+    assert_eq!(control["result_count"], serde_json::json!(1));
+
+    let lane = prompt_lane_service(&services).expect("native binding wires the prompt lane");
+
+    // Different USER: search succeeds with zero results (no leak), and the
+    // prompt lane returns no snippet — both are SUCCESSFUL empty outcomes,
+    // the fail-closed shape, not errors.
+    let other_user_search = invoke_json(
+        &services,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        memory_context_for(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            "issue-7275-other-user",
+            "conv-c",
+            None,
+        ),
+        serde_json::json!({"query": "isolation marker", "limit": 5}),
+    )
+    .await
+    .expect("cross-user search succeeds (fail-closed, not an error)");
+    assert_eq!(other_user_search["result_count"], serde_json::json!(0));
+    assert_eq!(
+        other_user_search["search_scope"],
+        serde_json::json!("reborn_internal_persistent_memory")
+    );
+    let other_scope = prompt_lane_turn_scope("issue-7275-other-user", "conv-c", None);
+    let other_snippets = lane
+        .load_memory_snippets(prompt_lane_request(
+            &other_scope,
+            "issue-7275-other-user",
+            "isolation marker?",
+        ))
+        .await
+        .expect("cross-user prompt lane retrieval succeeds");
+    assert!(
+        other_snippets.is_empty(),
+        "different user must not receive the marker through the prompt lane"
+    );
+
+    // Isolated scope axis: same user, DIFFERENT project → same fail-closed
+    // shape on both surfaces (the memory document scope is
+    // tenant/user/agent/project, so a different project is a different
+    // memory partition).
+    let isolated_search = invoke_json(
+        &services,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        memory_context_for(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            user,
+            "conv-d",
+            Some("isolated-project"),
+        ),
+        serde_json::json!({"query": "isolation marker", "limit": 5}),
+    )
+    .await
+    .expect("isolated-project search succeeds (fail-closed, not an error)");
+    assert_eq!(isolated_search["result_count"], serde_json::json!(0));
+    let isolated_scope = prompt_lane_turn_scope(user, "conv-d", Some("isolated-project"));
+    let isolated_snippets = lane
+        .load_memory_snippets(prompt_lane_request(
+            &isolated_scope,
+            user,
+            "isolation marker?",
+        ))
+        .await
+        .expect("isolated-project prompt lane retrieval succeeds");
+    assert!(
+        isolated_snippets.is_empty(),
+        "an isolated scope axis must not receive the marker through the prompt lane"
+    );
+}
+
+/// Issue #7275 acceptance criterion 5: retrieval/backend failure is
+/// distinguishable from "no matching memory" in test evidence AND operator
+/// diagnostics.
+///
+/// - No match: the real tool surface returns a SUCCESSFUL invocation with
+///   `result_count: 0`.
+/// - Input failure: the same tool surface FAILS the invocation (empty query
+///   is rejected before any retrieval) instead of returning an empty result
+///   set — distinguishable outcome shapes on the same caller surface.
+/// - Backend failure: the error contract carries `Err(Unavailable)`, never a
+///   fabricated empty `Ok` (the diagnostic capture for the lane lives in
+///   [`memory_prompt_lane_failure_emits_operator_diagnostic`], which needs a
+///   current-thread runtime so the tracing subscriber sees the events).
+#[tokio::test]
+async fn memory_retrieval_failure_is_distinct_from_no_matching_memory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let standalone_root = dir.path().join("standalone");
+    let owner = "issue-7275-failure-owner";
+    let user = "issue-7275-failure-user";
+    const MARKER: &str = "failure-marker-cobalt-9";
+
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+        owner,
+        standalone_root.clone(),
+    ))
+    .await
+    .expect("standalone services build");
+    invoke_json(
+        &services,
+        MEMORY_WRITE_CAPABILITY_ID,
+        memory_context_for(MEMORY_WRITE_CAPABILITY_ID, user, "conv-a", None),
+        serde_json::json!({
+            "target": "projects/failure/notes.md",
+            "content": format!("remember that {MARKER} is the failure marker"),
+            "append": false
+        }),
+    )
+    .await
+    .expect("seed write succeeds");
+
+    // No matching memory → SUCCESS with zero results (the search_scope marker
+    // proves the surface answered, scoped to internal persistent memory). The
+    // query avoids every token present in the seeded document AND any
+    // hyphenation (FTS5 would parse `-` as a negation operator and error).
+    let no_match = invoke_json(
+        &services,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-b", None),
+        serde_json::json!({"query": "totally absent unicorn planet", "limit": 5}),
+    )
+    .await
+    .expect("no-match search is a successful invocation");
+    assert_eq!(no_match["result_count"], serde_json::json!(0));
+    assert_eq!(
+        no_match["search_scope"],
+        serde_json::json!("reborn_internal_persistent_memory")
+    );
+
+    // Retrieval failure (invalid input on the same surface) → the invocation
+    // FAILS with a distinct failure kind instead of fabricating an empty
+    // result set: failure is observable at the caller.
+    let input_failure = invoke_json(
+        &services,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-c", None),
+        serde_json::json!({}),
+    )
+    .await
+    .expect_err("an empty query must fail the search invocation, not return empty results");
+    assert_eq!(
+        input_failure,
+        FailureKind::InputEncode,
+        "invalid search input must surface as a distinct failure kind"
+    );
+
+    // The error contract itself: a backend failure is a typed
+    // `Err(Unavailable)`, never an empty `Ok` — the same distinction the
+    // caller-level surfaces above make observable.
+    let failing_error = MemoryServiceError::unavailable();
+    assert_eq!(
+        failing_error.kind(),
+        MemoryServiceErrorKind::Unavailable,
+        "backend failure is a typed Err(Unavailable), not an empty Ok"
+    );
+}
+
+/// The operator-diagnostics half of criterion 5: a failing backend degrades
+/// the PRODUCTION prompt adapter (the exact type production wires) to empty
+/// WITHOUT failing the turn, while emitting the structured
+/// `memory context lane retrieval failed` diagnostic carrying the error kind
+/// — so an operator can tell a broken backend from a silent no-match.
+///
+/// Uses a hand-rolled subscriber (not `tracing_test`): the tracing-test
+/// EnvFilter enables ONLY the current crate's target, which would filter out
+/// the cross-crate diagnostic emitted by `ironclaw_host_runtime`. Runs on a
+/// current-thread runtime so the thread-local default subscriber sees every
+/// event.
+#[tokio::test(flavor = "current_thread")]
+async fn memory_prompt_lane_failure_emits_operator_diagnostic() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(CaptureWriter(Arc::clone(&captured)))
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::dispatcher::set_default(&tracing::Dispatch::new(subscriber));
+
+    let failing: Arc<dyn MemoryService> = Arc::new(UnavailableMemoryService);
+    let adapter = crate::memory_provider_factory::memory_lifecycle_consumers(
+        Some(Arc::clone(&failing)),
+        &ironclaw_extension_contracts::memory::MemoryDescriptor {
+            lifecycle: ironclaw_extension_contracts::memory::MemoryLifecycleHook::ALL.to_vec(),
+        },
+    )
+    .memory_context_service
+    .expect("a bound provider wires the prompt lane");
+    let scope = prompt_lane_turn_scope("issue-7275-failure-user", "conv-d", None);
+    let degraded = adapter
+        .load_memory_snippets(prompt_lane_request(
+            &scope,
+            "issue-7275-failure-user",
+            "failure marker?",
+        ))
+        .await
+        .expect("a failing backend must degrade to empty, never fail the turn");
+    assert!(
+        degraded.is_empty(),
+        "backend failure must degrade the prompt lane to empty"
+    );
+    let logs =
+        String::from_utf8(captured.lock().expect("capture lock").clone()).expect("captured utf8");
+    assert!(
+        logs.contains("memory context lane retrieval failed"),
+        "operator diagnostics must record the lane retrieval failure (distinct from a silent no-match): {logs}"
+    );
+}
+
+/// `MakeWriter` for the diagnostic-capture subscriber.
+#[derive(Clone)]
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A provider whose retrieval lanes fail with `Unavailable` — the backend
+/// failure shape, as opposed to a successful empty result.
+struct UnavailableMemoryService;
+
+#[async_trait::async_trait]
+impl MemoryService for UnavailableMemoryService {
+    async fn read_long_term(
+        &self,
+        _invocation: MemoryInvocation,
+        _request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        Err(MemoryServiceError::unavailable())
+    }
+
+    async fn read_short_term(
+        &self,
+        _invocation: MemoryInvocation,
+        _request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        Err(MemoryServiceError::unavailable())
+    }
 }
 
 #[tokio::test]

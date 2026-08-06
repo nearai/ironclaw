@@ -8,6 +8,28 @@ use ironclaw_memory::MemoryDocumentPath;
 /// from translating `usize::MAX` into an unbounded SQL `LIMIT`.
 const MAX_LIMIT: usize = 1_000;
 
+/// Reduce a raw user query to the whitespace-joined alphanumeric tokens the
+/// FTS backends can match on. Every character that is not an alphanumeric is
+/// a token separator — the same treatment the unicode61 tokenizer applies to
+/// indexed content — so punctuation, quotes, parens, and the FTS5
+/// operators (`+ - " * ( ) : ^`) cannot leak into a backend MATCH
+/// expression and turn a natural-language query into a syntax error.
+fn sanitize_fts_query(raw: impl Into<String>) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in raw.into().chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens.join(" ")
+}
+
 /// Upper bound on the per-branch candidate budget before fusion. 5x the
 /// final-limit ceiling leaves enough headroom for hybrid fusion to do
 /// useful re-ranking without letting an attacker request millions of rows.
@@ -41,7 +63,20 @@ pub struct MemorySearchRequest {
 
 impl MemorySearchRequest {
     pub fn new(query: impl Into<String>) -> Result<Self, HostApiError> {
-        let query = query.into();
+        // Sanitize BEFORE validation so a query that is only punctuation is
+        // rejected as empty, and a natural-language query cannot carry FTS
+        // syntax into a backend MATCH expression. The libSQL backend passes
+        // the query verbatim to FTS5, which treats `+ - " * ( ) : ^` as
+        // operators: a raw user query containing them makes the MATCH
+        // expression invalid and the whole search FAILS (the tool surface
+        // reports `OperationFailed` and the prompt lane degrades to empty)
+        // — the #7275 production recall failure. The in-memory reference
+        // matcher requires every whitespace token as a substring, so raw
+        // punctuation breaks it the same way; Postgres already parses via
+        // `plainto_tsquery`. Content is tokenized by unicode61 the same
+        // way, so sanitizing the query to whitespace-joined alphanumeric
+        // tokens is faithful, not lossy.
+        let query = sanitize_fts_query(query);
         if query.trim().is_empty() {
             return Err(HostApiError::InvalidId {
                 kind: "memory search query",
@@ -322,6 +357,44 @@ pub(crate) fn fuse_memory_search_results(
 mod tests {
     use super::*;
     use ironclaw_memory::MemoryDocumentPath;
+
+    // ── FTS query sanitization (#7275 production recall fix) ──────────────
+
+    #[test]
+    fn sanitize_fts_query_strips_fts5_operator_punctuation() {
+        // Natural-language user messages carry `?`, `!`, parens, quotes, and
+        // the FTS5 operator characters — every one must become a token
+        // separator, never FTS syntax.
+        assert_eq!(sanitize_fts_query("unlocks staging?"), "unlocks staging");
+        assert_eq!(
+            sanitize_fts_query("what unlocks staging?!"),
+            "what unlocks staging"
+        );
+        assert_eq!(sanitize_fts_query("staging (unlocks)"), "staging unlocks");
+        assert_eq!(sanitize_fts_query("a-b+c:d\"e*f^g"), "a b c d e f g");
+        // Hyphenated identifiers are tokenized like the unicode61 content
+        // tokenizer tokenizes them.
+        assert_eq!(
+            sanitize_fts_query("launch-code-plum-42"),
+            "launch code plum 42"
+        );
+        // Unicode letters survive (unicode61 keeps them too).
+        assert_eq!(sanitize_fts_query("héllo, wörld?"), "héllo wörld");
+        // Punctuation-only input has no tokens left.
+        assert_eq!(sanitize_fts_query("!!!???"), "");
+    }
+
+    #[test]
+    fn new_sanitizes_natural_language_query_for_fts_backends() {
+        let request = MemorySearchRequest::new("unlocks staging?").expect("query sanitized");
+        assert_eq!(request.query(), "unlocks staging");
+    }
+
+    #[test]
+    fn new_rejects_query_that_is_only_punctuation() {
+        assert!(MemorySearchRequest::new("!!!???").is_err());
+        assert!(MemorySearchRequest::new("   ").is_err());
+    }
 
     fn ranked(_chunk_key: &str, relative_path: &str, rank: u32) -> RankedMemorySearchResult {
         RankedMemorySearchResult {
