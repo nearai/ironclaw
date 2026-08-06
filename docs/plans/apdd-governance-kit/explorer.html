@@ -397,6 +397,28 @@
         </div>
       </div>
     </div>
+
+    <div class="schema">
+      <div class="cap">FIG.1b &nbsp;·&nbsp; <b>Review gate &amp; role routing</b> — inside layer ①, a change's blast radius is declared, a hard team-review gate resolves, and (proposed for IronClaw) the change is routed to the reviewer role that owns the ground it touches.</div>
+      <div class="spine">
+        <div class="rulecard">
+          <span class="lbl">Declare — spec §5 / plan §4</span>
+          <h3>Impact &amp; dependency, up front</h3>
+          <p><b>Architecture Impact</b> (which boundaries a change crosses) and <b>Dependencies &amp; Sequencing</b> are written into the spec/plan before code — blast radius is explicit, not discovered mid-review.</p>
+        </div>
+        <div class="rulecard">
+          <span class="lbl">Gate — spec §8 (hard)</span>
+          <h3>Team review resolves first</h3>
+          <p>The implementation plan may not begin until the spec's <b>Feedback &amp; Decisions</b> gate is resolved. Kit-native; IronClaw strengthens the generic gate with the role routing below.</p>
+        </div>
+      </div>
+      <div class="cap" style="margin:20px 0 12px">▸ <b>Cross-functional trigger</b> — a boundary-crossing diff names the owning reviewer <b>role</b> (checks come from <code>review-discipline.md</code> + the trust-boundary checklist, which name <em>what</em> to inspect, not who); role&nbsp;→&nbsp;person mapping stays in CODEOWNERS.</div>
+      <div class="layers">
+        <div class="node"><span class="num">ENGINEERING</span><h3>Runtime &amp; data</h3><div class="mech">trust · persistence · capability · runtime boundaries</div></div>
+        <div class="node"><span class="num">PRODUCT</span><h3>Behavior &amp; surface</h3><div class="mech">user-facing behavior · product-surface contract</div></div>
+        <div class="node"><span class="num">DESIGN</span><h3>UI &amp; system</h3><div class="mech">UI · design system (DESIGN.md · tokens · a11y · taxonomy)</div></div>
+      </div>
+    </div>
   </div>
 </section>
 
