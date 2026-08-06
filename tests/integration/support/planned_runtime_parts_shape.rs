@@ -11,11 +11,11 @@
 //!
 //! Zero production-crate changes: `DefaultPlannedRuntimeParts` is already
 //! `pub` with `pub` fields and no `#[non_exhaustive]`
-//! (`crates/ironclaw_runner/src/runtime.rs:260-326`), so this file only reads
+//! (`crates/ironclaw_turn_runner/src/runtime.rs:260-326`), so this file only reads
 //! it from test-tree code.
 
 use ironclaw_loop_host::HostManagedModelGateway;
-use ironclaw_runner::runtime::DefaultPlannedRuntimeParts;
+use ironclaw_turn_runner::runtime::DefaultPlannedRuntimeParts;
 
 /// Some/None shape of `DefaultPlannedRuntimeParts`'s 18 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see

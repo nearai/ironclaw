@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02
 **Status:** Hosted HTTP/SSE discovery slice
-**Crate:** `crates/ironclaw_mcp`
+**Crate:** `crates/lanes/ironclaw_mcp`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---

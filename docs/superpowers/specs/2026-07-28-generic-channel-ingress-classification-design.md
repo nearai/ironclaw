@@ -253,7 +253,7 @@ Targeted verification follows the owning-crate guidance:
 - `cargo test -p ironclaw_telegram_v2_adapter`
 - `cargo test -p ironclaw_telegram_extension`
 - targeted CLI and composition tests
-- `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
 - targeted clippy for changed crates with warnings denied
 
 ## Compatibility, Rollback, and Risk
