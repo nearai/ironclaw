@@ -106,7 +106,10 @@ documented exclusion(s), 0 owned exception(s))`.
 Under `crates/extensions/packages/`, 14 package directories: 4 are workspace
 crates (`slack`, `telegram`, `memory-native`, `mem0`) and 10 are data-only
 (manifest + prompts/schemas, some with prebuilt WASM): github, gmail, the
-five google-*, nearai-mcp, notion-mcp, web-access.
+five google-*, nearai-mcp, notion-mcp, web-access. Every package directory —
+data-only ones included — carries its own `README.md`, so the read order
+above applies at package level too: `crates/extensions/AGENTS.md` →
+`crates/extensions/packages/<pkg>/README.md`.
 
 Enumerate crate directories with `python3 scripts/ci/lib/crate_tree.py .` — a
 flat `crates/ironclaw_*/` glob matches nothing.

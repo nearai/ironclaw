@@ -74,7 +74,8 @@ workspace crates: `slack` and `telegram` (channel adapters),
 `memory-native` and `mem0` (memory providers). Ten are data-only packages
 (manifest + prompts/schemas, some with prebuilt WASM): `github`, `gmail`,
 `google-calendar`, `google-docs`, `google-drive`, `google-sheets`,
-`google-slides`, `nearai-mcp`, `notion-mcp`, `web-access`.
+`google-slides`, `nearai-mcp`, `notion-mcp`, `web-access`. Each package
+directory has its own `README.md`, crate or not.
 
 ### The workspace beyond `crates/`
 
