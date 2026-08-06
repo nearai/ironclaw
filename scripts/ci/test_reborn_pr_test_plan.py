@@ -818,6 +818,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
         finally:
             planner._wasm_wit_prefix.cache_clear()
 
+    def test_unrelated_path_never_triggers_wasm_crate_resolution(self) -> None:
+        """A docs-only PR must not resolve the ironclaw_wasm crate at all.
+
+        The WIT-routing check (`path.startswith("wit/") or
+        path.startswith(_wasm_wit_prefix())`) sits after the ignore-prefix
+        filter, so an ignored path like `docs/readme-typo-fix.md` is
+        `continue`d out by that filter before the WIT check's `or` clause
+        ever calls `_wasm_wit_prefix()`. Before that reordering, `or` still
+        evaluated `_wasm_wit_prefix()` for every path not literally starting
+        with `wit/`, so an unrelated docs change could trip
+        `crate_directory`'s `CrateTreeError` and fail the whole planner
+        closed with a `RuntimeError` — mirroring
+        `test_frontend_prefix_resolution_failure_fails_closed`, but proving
+        the mock is never even called for a path this unrelated."""
+        planner._wasm_wit_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                side_effect=planner.CrateTreeError("boom"),
+            ) as resolver:
+                plan = self.plan("pull_request", ["docs/readme-typo-fix.md"])
+            resolver.assert_not_called()
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["reasons"], ["no Reborn test surface changed"])
+        finally:
+            planner._wasm_wit_prefix.cache_clear()
+
     def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
         # The crate-owned WIT path is derived from `_wasm_wit_prefix` at
         # test-input time (not a hardcoded literal), same as

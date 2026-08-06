@@ -642,6 +642,13 @@ def build_plan(
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
+        if (
+            path in IGNORED_GUIDANCE_PATHS
+            or path.startswith(IGNORED_PREFIXES)
+            or path in IGNORED_ROOT_FILES
+            or (path.endswith(".md") and "/" not in path)
+        ):
+            continue
         # The WIT directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so a
         # bare `wit/` path no longer occurs on disk; both prefixes are kept so
         # neither the historical root location nor the current crate-owned
@@ -654,13 +661,6 @@ def build_plan(
         # matching and WIT diffs silently stop routing here.
         if path.startswith("wit/") or path.startswith(_wasm_wit_prefix()):
             reasons.append(f"Platform & Compat owns WIT compatibility: {path}")
-            continue
-        if (
-            path in IGNORED_GUIDANCE_PATHS
-            or path.startswith(IGNORED_PREFIXES)
-            or path in IGNORED_ROOT_FILES
-            or (path.endswith(".md") and "/" not in path)
-        ):
             continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
