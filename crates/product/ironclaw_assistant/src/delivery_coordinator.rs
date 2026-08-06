@@ -321,11 +321,17 @@ impl DeliveryCoordinator {
         }
     }
 
-    /// Crash recovery (OUT-6): every attempt still `Sending` in this scope
-    /// crashed between vendor egress and the result write. Mark each
-    /// `Unknown`; never blindly resend. A per-attempt failure does not abandon
-    /// the captured snapshot: recovery continues, then returns the first
-    /// typed store error after all remaining attempts have been guarded.
+    /// Crash recovery (OUT-6): attempts still `Sending` in this scope are
+    /// assumed to have crashed between vendor egress and the result write,
+    /// and are marked `Unknown`; never blindly resend. This is not a
+    /// guarantee that every such attempt actually crashed: a genuinely
+    /// concurrent `deliver()` call for this scope can still be `Sending`
+    /// when the scan runs and gets marked `Unknown` transiently — that
+    /// delivery's own eventual `mark_terminal` call overwrites it with the
+    /// real terminal status, so the row self-heals. A per-attempt failure
+    /// does not abandon the captured snapshot: recovery continues, then
+    /// returns the first typed store error after all remaining attempts
+    /// have been guarded.
     pub async fn recover_interrupted_deliveries(
         &self,
         scope: ironclaw_turns::TurnScope,
