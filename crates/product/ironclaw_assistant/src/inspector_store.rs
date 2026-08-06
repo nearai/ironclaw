@@ -21,12 +21,12 @@ use ironclaw_product_contracts::inspector::{
     DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_LIVE_UPDATE_SCOPES, DEFAULT_MAX_MODEL_CALLS_PER_RUN,
     DEFAULT_MAX_RETAINED_RUNS_PER_SESSION, DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
     DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN, DEFAULT_MAX_TRACKED_SESSIONS, DiagnosticActivityEntry,
-    DiagnosticActivityEvent, DiagnosticCursor, DiagnosticMetricTotal, DiagnosticModelCount,
-    DiagnosticScope, DiagnosticSequence, DiagnosticSnapshot, DiagnosticStreamId,
-    DiagnosticUpdateBatch, DiagnosticUpdateEnvelope, DiagnosticUpdateKind,
-    InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic, ModelTokenUsage,
-    PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, SessionDiagnosticStats,
-    ToolExecutionDiagnostic, ToolExecutionStatus,
+    DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticCursor, DiagnosticMetricTotal,
+    DiagnosticModelCallId, DiagnosticModelCount, DiagnosticScope, DiagnosticSequence,
+    DiagnosticSnapshot, DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope,
+    DiagnosticUpdateKind, InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic,
+    ModelTokenUsage, PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic,
+    SessionDiagnosticStats, ToolExecutionDiagnostic, ToolExecutionStatus,
 };
 use ironclaw_safety::LeakDetector;
 use thiserror::Error;
@@ -791,8 +791,38 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             Some(effective_model),
             Some(capture.context_limit),
         );
-        if let Err(error) = InMemoryDiagnosticStore::record_prompt(self, scope, prompt) {
+        let is_first_observation = matches!(self.snapshot(&scope), Ok(None));
+        if is_first_observation
+            && let Err(error) = self.record_activity(
+                scope.clone(),
+                DiagnosticActivityEvent::new(
+                    Utc::now(),
+                    DiagnosticActivityKind::TurnStarted,
+                    None,
+                    None,
+                    None,
+                    Some("Turn started".to_string()),
+                ),
+            )
+        {
+            tracing::debug!(%error, "turn-start diagnostics could not be retained");
+        }
+        if let Err(error) = InMemoryDiagnosticStore::record_prompt(self, scope.clone(), prompt) {
             tracing::debug!(%error, "prompt diagnostics could not be retained");
+            return;
+        }
+        if let Err(error) = self.record_activity(
+            scope,
+            DiagnosticActivityEvent::new(
+                Utc::now(),
+                DiagnosticActivityKind::PromptPrepared,
+                None,
+                None,
+                None,
+                Some("Prompt prepared".to_string()),
+            ),
+        ) {
+            tracing::debug!(%error, "prompt activity diagnostics could not be retained");
         }
     }
 
@@ -823,26 +853,58 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             cache_creation_input_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
         });
         let status = match capture.status {
+            HostManagedModelCallDiagnosticStatus::Started => InspectorModelCallStatus::Started,
             HostManagedModelCallDiagnosticStatus::Succeeded => InspectorModelCallStatus::Succeeded,
             HostManagedModelCallDiagnosticStatus::Failed => InspectorModelCallStatus::Failed,
         };
         let detector = LeakDetector::new();
+        let failure_summary = capture
+            .failure_summary
+            .map(|summary| diagnostic_prompt_text(&detector, &summary));
+        let call_id = DiagnosticModelCallId::from_uuid(capture.call_id);
         let model_call = ModelCallDiagnostic::new(
-            ironclaw_product_contracts::inspector::DiagnosticModelCallId::new(),
+            call_id,
             capture.iteration,
             diagnostic_prompt_text(&detector, &capture.requested_model),
             Some(diagnostic_prompt_text(&detector, &capture.effective_model)),
             capture.started_at,
-            Some(capture.completed_at),
-            Some(capture.duration_ms),
+            capture.completed_at,
+            capture.duration_ms,
             status,
             usage,
-            capture
-                .failure_summary
-                .map(|summary| diagnostic_prompt_text(&detector, &summary)),
+            failure_summary.clone(),
         );
-        if let Err(error) = InMemoryDiagnosticStore::record_model_call(self, scope, model_call) {
+        if let Err(error) =
+            InMemoryDiagnosticStore::record_model_call(self, scope.clone(), model_call)
+        {
             tracing::debug!(%error, "model-call diagnostics could not be retained");
+            return;
+        }
+        let (kind, summary) = match capture.status {
+            HostManagedModelCallDiagnosticStatus::Started => (
+                DiagnosticActivityKind::ModelCallStarted,
+                Some("Model call started".to_string()),
+            ),
+            HostManagedModelCallDiagnosticStatus::Succeeded => (
+                DiagnosticActivityKind::ModelCallCompleted,
+                Some("Model call completed".to_string()),
+            ),
+            HostManagedModelCallDiagnosticStatus::Failed => {
+                (DiagnosticActivityKind::ModelCallFailed, failure_summary)
+            }
+        };
+        if let Err(error) = self.record_activity(
+            scope,
+            DiagnosticActivityEvent::new(
+                Utc::now(),
+                kind,
+                Some(capture.iteration),
+                None,
+                Some(call_id),
+                summary,
+            ),
+        ) {
+            tracing::debug!(%error, "model-call activity diagnostics could not be retained");
         }
     }
 }
@@ -1611,13 +1673,14 @@ mod tests {
         HostManagedPromptDiagnosticSink::record_model_call(
             &store,
             HostManagedModelCallDiagnosticCapture {
+                call_id: uuid::Uuid::new_v4(),
                 context,
                 iteration: 4,
                 requested_model: "interactive_model".to_string(),
                 effective_model: "provider-model".to_string(),
                 started_at: Utc::now(),
-                completed_at: Utc::now(),
-                duration_ms: 42,
+                completed_at: Some(Utc::now()),
+                duration_ms: Some(42),
                 status: HostManagedModelCallDiagnosticStatus::Succeeded,
                 usage: Some(LoopModelUsage {
                     input_tokens: 12,

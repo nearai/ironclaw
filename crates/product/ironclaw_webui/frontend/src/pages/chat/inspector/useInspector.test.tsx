@@ -104,6 +104,10 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
 
   await act(async () => stream.hooks.onRequestError?.({}));
   assert.equal(latestState?.health, INSPECTOR_HEALTH.RECONNECTING);
+  assert.equal((latestState?.updates[0].update as any)?.data?.kind, "stream_disconnected");
+
+  await act(async () => stream.respond());
+  assert.equal((latestState?.updates[1].update as any)?.data?.kind, "stream_resumed");
 });
 
 test("deduplicates cursors, rebases snapshots, and stops on forbidden", async () => {

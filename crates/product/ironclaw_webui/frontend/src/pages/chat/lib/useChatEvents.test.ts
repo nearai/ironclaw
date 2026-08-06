@@ -93,6 +93,7 @@ function createUseChatEventsHarness({
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
   onStreamError = () => {},
+  publishProductInspectorActivity = () => {},
   t: selectedTranslator = t,
 } = {}) {
   let threadId = "thread-1";
@@ -163,6 +164,7 @@ function createUseChatEventsHarness({
     isRunFailureMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
+    publishProductInspectorActivity,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
     STREAM_FAILURE_ID_PREFIX,

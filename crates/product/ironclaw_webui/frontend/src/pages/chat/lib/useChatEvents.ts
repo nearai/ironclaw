@@ -26,11 +26,129 @@ import {
   STREAM_FAILURE_ID_PREFIX,
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
+import { publishProductInspectorActivity } from "../inspector/product-activity";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
 const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
 const AMBIGUOUS_RUN_ID = Symbol("ambiguous-run-id");
+
+function publishCapabilityActivity(threadId, fallbackRunId, activity) {
+  const runId = activity?.turn_run_id || fallbackRunId;
+  const activityId = activity?.invocation_id || activity?.activity_id;
+  if (!runId || !activityId) return;
+  const status = String(activity.status || "started").toLowerCase();
+  const kind = status === "completed" || status === "succeeded"
+    ? "tool_completed"
+    : status === "failed" || status === "killed"
+      ? "tool_failed"
+      : "tool_started";
+  publishProductInspectorActivity({
+    threadId,
+    runId,
+    kind,
+    activityId,
+    summary: kind === "tool_started"
+      ? "Tool invocation started"
+      : kind === "tool_completed"
+        ? "Tool invocation completed"
+        : "Tool invocation failed",
+    dedupeKey: `tool:${activityId}:${status}`,
+  });
+}
+
+function publishRunStatusActivity(threadId, runStatus) {
+  const runId = runStatus?.run_id;
+  const status = String(runStatus?.status || "").toLowerCase();
+  if (!runId || !status) return;
+  if (["queued", "running"].includes(status)) {
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: status === "queued" ? "turn_started" : "progress",
+      summary: status === "queued" ? "Turn queued" : "Turn running",
+      dedupeKey: `run:${status}`,
+    });
+  } else if (["completed", "succeeded"].includes(status)) {
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: "final_response_completed",
+      summary: "Final response completed",
+      dedupeKey: "run:completed",
+    });
+  } else if (status.startsWith("blocked_") || status === "awaiting_gate") {
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: "gate_blocked",
+      summary: "Run blocked by a gate",
+      dedupeKey: `run:${status}`,
+    });
+  }
+}
+
+function publishInspectorEnvelope(envelope, threadId, fallbackRunId) {
+  if (!threadId || !envelope?.type || !envelope?.frame) return;
+  const { type, frame } = envelope;
+  if (type === "accepted") {
+    const runId = frame.ack?.run_id;
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: "turn_started",
+      summary: "Turn accepted",
+      dedupeKey: "turn:accepted",
+    });
+    return;
+  }
+  if (type === "running" || type === "capability_progress") {
+    const runId = frame.progress?.turn_run_id || fallbackRunId;
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: "progress",
+      summary: "Safe run progress received",
+      dedupeKey: `progress:${type}`,
+    });
+    return;
+  }
+  if (type === "capability_activity") {
+    publishCapabilityActivity(threadId, fallbackRunId, frame.activity);
+    return;
+  }
+  if (type === "gate" || type === "auth_required") {
+    const runId = frame.prompt?.turn_run_id || frame.prompt?.run_id || fallbackRunId;
+    const gateRef = frame.prompt?.gate_ref || frame.prompt?.request_id || type;
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: "gate_blocked",
+      summary: type === "auth_required" ? "Run blocked for authorization" : "Run blocked by a gate",
+      dedupeKey: `gate:${gateRef}`,
+    });
+    return;
+  }
+  if (type === "final_reply") {
+    const runId = frame.reply?.turn_run_id || fallbackRunId;
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: "final_response_completed",
+      summary: "Final response completed",
+      dedupeKey: "final:reply",
+    });
+    return;
+  }
+  if (type === "projection_snapshot" || type === "projection_update") {
+    for (const item of frame.state?.items || []) {
+      if (item.run_status) publishRunStatusActivity(threadId, item.run_status);
+      if (item.capability_activity) {
+        publishCapabilityActivity(threadId, item.run_status?.run_id || fallbackRunId, item.capability_activity);
+      }
+    }
+  }
+}
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -86,6 +204,11 @@ export function useChatEvents({
     (envelope) => {
       const { type, frame } = envelope || {};
       if (!type || !frame) return;
+      publishInspectorEnvelope(
+        envelope,
+        threadId,
+        activeRunRef?.current?.runId || latestRunIdRef.current,
+      );
 
       // Per-thread run bookkeeping, owned and reset by `useChat` (see
       // `lib/run-tracking-state.ts`). Read from the ref on every event rather

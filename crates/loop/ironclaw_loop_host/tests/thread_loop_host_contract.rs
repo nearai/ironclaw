@@ -296,15 +296,20 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
     assert_eq!(captures[0].context_limit, 64_000);
     drop(captures);
     let model_calls = sink.model_calls.lock().expect("model calls");
-    assert_eq!(model_calls.len(), 1);
-    assert_eq!(model_calls[0].iteration, 7);
-    assert_eq!(model_calls[0].requested_model, "interactive_model");
+    assert_eq!(model_calls.len(), 2);
+    assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
     assert_eq!(
-        model_calls[0].effective_model,
+        model_calls[0].status,
+        ironclaw_loop_host::HostManagedModelCallDiagnosticStatus::Started
+    );
+    assert_eq!(model_calls[1].iteration, 7);
+    assert_eq!(model_calls[1].requested_model, "interactive_model");
+    assert_eq!(
+        model_calls[1].effective_model,
         "provider-model-from-response"
     );
     assert_eq!(
-        model_calls[0].usage.map(|usage| usage.input_tokens),
+        model_calls[1].usage.map(|usage| usage.input_tokens),
         Some(21)
     );
 }
@@ -349,15 +354,16 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
     assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
 
     let model_calls = sink.model_calls.lock().expect("model calls");
-    assert_eq!(model_calls.len(), 1);
+    assert_eq!(model_calls.len(), 2);
+    assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
     assert_eq!(
-        model_calls[0].status,
+        model_calls[1].status,
         ironclaw_loop_host::HostManagedModelCallDiagnosticStatus::Failed
     );
-    assert_eq!(model_calls[0].usage, Some(usage));
-    assert_eq!(model_calls[0].effective_model, "provider-model-from-error");
+    assert_eq!(model_calls[1].usage, Some(usage));
+    assert_eq!(model_calls[1].effective_model, "provider-model-from-error");
     assert_eq!(
-        model_calls[0].failure_summary.as_deref(),
+        model_calls[1].failure_summary.as_deref(),
         Some("model provider unavailable")
     );
 }
@@ -391,8 +397,9 @@ async fn model_port_keeps_omitted_usage_unavailable() {
     .expect("model call succeeds");
 
     let model_calls = sink.model_calls.lock().expect("model calls");
-    assert_eq!(model_calls.len(), 1);
-    assert_eq!(model_calls[0].usage, None);
+    assert_eq!(model_calls.len(), 2);
+    assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
+    assert_eq!(model_calls[1].usage, None);
 }
 
 #[tokio::test]

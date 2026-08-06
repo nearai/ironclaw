@@ -5,8 +5,11 @@ import {
   INSPECTOR_HEALTH,
   INSPECTOR_TABS,
   inspectorViewportMode,
+  reduceInspectorActivity,
   readInspectorPreferences,
+  rememberInspectorRun,
   writeInspectorPreferences,
+  type InspectorActivityRow,
   type InspectorPreferences,
   type InspectorTab,
 } from "./inspector-state";
@@ -208,29 +211,150 @@ function PromptShell({
 
 function ActivityShell({
   snapshot,
-  updateCount,
+  updates,
+  runHistory,
+  selectedRunId,
+  onSelectRun,
 }: {
   snapshot: Record<string, unknown> | null;
-  updateCount: number;
+  updates: Array<Record<string, unknown>>;
+  runHistory: string[];
+  selectedRunId: string | null;
+  onSelectRun: (runId: string) => void;
 }) {
-  const retained = Array.isArray(snapshot?.activity) ? snapshot.activity.length : 0;
-  if (retained === 0 && updateCount === 0) {
+  const activity = reduceInspectorActivity(snapshot, updates);
+  const selectedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
+  const previousRun = selectedIndex > 0 ? runHistory[selectedIndex - 1] : null;
+  const nextRun = selectedIndex >= 0 && selectedIndex < runHistory.length - 1
+    ? runHistory[selectedIndex + 1]
+    : null;
+  if (activity.length === 0) {
     return (
-      <EmptyTab
-        title="No activity yet"
-        description="Ordered model and tool activity will appear here as the run progresses."
-      />
+      <div>
+        <TurnNavigation
+          runHistory={runHistory}
+          selectedIndex={selectedIndex}
+          previousRun={previousRun}
+          nextRun={nextRun}
+          onSelectRun={onSelectRun}
+        />
+        <EmptyTab
+          title="No activity yet"
+          description="Ordered model and tool activity will appear here as the run progresses."
+        />
+      </div>
     );
   }
   return (
-    <div className="space-y-3 p-4">
-      <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
-        <p className="text-xs uppercase tracking-wide text-[var(--v2-text-faint)]">Activity</p>
-        <p className="mt-1 text-sm text-[var(--v2-text-strong)]">
-          {retained} retained · {updateCount} live updates
-        </p>
-      </div>
+    <div className="space-y-3 p-4" data-testid="inspector-activity-content">
+      <TurnNavigation
+        runHistory={runHistory}
+        selectedIndex={selectedIndex}
+        previousRun={previousRun}
+        nextRun={nextRun}
+        onSelectRun={onSelectRun}
+      />
+      <ol className="space-y-2" aria-label="Run activity timeline">
+        {activity.map((entry) => <ActivityEntry key={entry.key} entry={entry} />)}
+      </ol>
     </div>
+  );
+}
+
+function TurnNavigation({
+  runHistory,
+  selectedIndex,
+  previousRun,
+  nextRun,
+  onSelectRun,
+}: {
+  runHistory: string[];
+  selectedIndex: number;
+  previousRun: string | null;
+  nextRun: string | null;
+  onSelectRun: (runId: string) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
+      <button
+        type="button"
+        aria-label="Previous turn"
+        disabled={!previousRun}
+        onClick={() => previousRun && onSelectRun(previousRun)}
+        className="rounded px-2 py-1 text-xs disabled:opacity-40"
+      >
+        ← Previous
+      </button>
+      <p className="text-center text-xs text-[var(--v2-text-muted)]">
+        Turn {selectedIndex >= 0 ? selectedIndex + 1 : 0} of {runHistory.length}
+      </p>
+      <button
+        type="button"
+        aria-label="Next turn"
+        disabled={!nextRun}
+        onClick={() => nextRun && onSelectRun(nextRun)}
+        className="rounded px-2 py-1 text-xs disabled:opacity-40"
+      >
+        Next →
+      </button>
+    </div>
+  );
+}
+
+const ACTIVITY_LABELS: Record<string, string> = {
+  turn_started: "Turn started",
+  prompt_prepared: "Prompt prepared",
+  model_call_started: "Model call started",
+  model_call_completed: "Model call completed",
+  model_call_failed: "Model call failed",
+  progress: "Progress",
+  tool_started: "Tool started",
+  tool_completed: "Tool completed",
+  tool_failed: "Tool failed",
+  gate_blocked: "Gate blocked",
+  final_response_completed: "Final response completed",
+  stream_disconnected: "Stream disconnected",
+  stream_resumed: "Stream resumed",
+};
+
+function shortId(value: string | null): string | null {
+  return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
+}
+
+function ActivityEntry({ entry }: { entry: InspectorActivityRow }) {
+  const failed = entry.kind.endsWith("_failed") || entry.kind === "gate_blocked";
+  const correlation = shortId(entry.activity_id || entry.model_call_id);
+  const timestamp = new Date(entry.occurred_at);
+  return (
+    <li className="rounded-xl border border-[var(--v2-panel-border)] p-3" data-activity-kind={entry.kind}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-[var(--v2-text-strong)]">
+            {ACTIVITY_LABELS[entry.kind] || entry.kind.replaceAll("_", " ")}
+          </p>
+          {entry.summary?.content && (
+            <p className="mt-1 break-words text-xs text-[var(--v2-text-muted)]">
+              {entry.summary.content}{entry.summary.truncated ? "…" : ""}
+            </p>
+          )}
+        </div>
+        <span className={cn(
+          "shrink-0 rounded-full px-2 py-0.5 text-[10px]",
+          failed
+            ? "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
+            : entry.pending
+              ? "bg-[var(--v2-surface-soft)] text-[var(--v2-warning-text)]"
+              : "bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]",
+        )}>
+          {failed ? "Failed" : entry.pending ? "Pending" : "Recorded"}
+        </span>
+      </div>
+      <p className="mt-2 font-mono text-[10px] text-[var(--v2-text-faint)]">
+        {Number.isNaN(timestamp.getTime()) ? entry.occurred_at : timestamp.toLocaleTimeString()}
+        {entry.iteration != null ? ` · iteration ${entry.iteration}` : ""}
+        {correlation ? ` · ${correlation}` : ""}
+      </p>
+    </li>
   );
 }
 
@@ -352,10 +476,19 @@ function InspectorPanelCore({
   const [preferences, setPreferences] = React.useState<InspectorPreferences>(() =>
     readInspectorPreferences(),
   );
+  const [runHistory, setRunHistory] = React.useState<string[]>(() =>
+    rememberInspectorRun(threadId, runId),
+  );
+  const [selectedRunId, setSelectedRunId] = React.useState<string | null>(runId);
+  React.useEffect(() => {
+    const history = rememberInspectorRun(threadId, runId);
+    setRunHistory(history);
+    setSelectedRunId(runId || history.at(-1) || null);
+  }, [threadId, runId]);
   const inspector = useInspector({
     enabled: preferences.open && viewportMode !== "mobile",
     threadId,
-    runId,
+    runId: selectedRunId,
   });
 
   const updatePreferences = React.useCallback((next: InspectorPreferences) => {
@@ -424,7 +557,9 @@ function InspectorPanelCore({
           </button>
         </div>
         <p className="mt-2 truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
-          {threadId && runId ? `${threadId} · ${runId}` : "Waiting for an active run"}
+          {threadId && selectedRunId
+            ? `${threadId} · ${selectedRunId}`
+            : "Waiting for an active run"}
         </p>
       </header>
 
@@ -455,7 +590,13 @@ function InspectorPanelCore({
           <PromptShell snapshot={snapshot} health={inspector.health} />
         )}
         {preferences.activeTab === "activity" && (
-          <ActivityShell snapshot={snapshot} updateCount={inspector.updates.length} />
+          <ActivityShell
+            snapshot={snapshot}
+            updates={inspector.updates}
+            runHistory={runHistory}
+            selectedRunId={selectedRunId}
+            onSelectRun={setSelectedRunId}
+          />
         )}
         {preferences.activeTab === "stats" && <StatsShell snapshot={snapshot} />}
       </section>

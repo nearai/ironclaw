@@ -4,11 +4,15 @@ import { test } from "vitest";
 import {
   INSPECTOR_HEALTH,
   INSPECTOR_PREFERENCES_KEY,
+  INSPECTOR_RUN_HISTORY_KEY,
+  MAX_INSPECTOR_ACTIVITY_ENTRIES,
   healthForInspectorStatus,
   inspectorDebugEnabled,
   inspectorViewportMode,
   latestInspectorRunId,
+  reduceInspectorActivity,
   readInspectorPreferences,
+  rememberInspectorRun,
   shouldAcceptInspectorCursor,
   writeInspectorPreferences,
 } from "./inspector-state";
@@ -93,4 +97,96 @@ test("HTTP status classification distinguishes auth, absence, and retry", () => 
   assert.equal(healthForInspectorStatus(404), INSPECTOR_HEALTH.UNAVAILABLE);
   assert.equal(healthForInspectorStatus(503), INSPECTOR_HEALTH.RECONNECTING);
   assert.equal(healthForInspectorStatus(400), INSPECTOR_HEALTH.DISCONNECTED);
+});
+
+function activity(kind: string, options: Record<string, unknown> = {}) {
+  return {
+    occurred_at: options.occurred_at || "2026-08-06T10:00:00Z",
+    kind,
+    iteration: options.iteration ?? null,
+    activity_id: options.activity_id ?? null,
+    model_call_id: options.model_call_id ?? null,
+    summary: options.summary ?? null,
+  };
+}
+
+test("activity reducer orders, deduplicates, and settles correlated model calls", () => {
+  const snapshot = {
+    stream_id: "stream-a",
+    activity: [
+      { sequence: 3, event: activity("model_call_completed", { model_call_id: "call-a" }) },
+      { sequence: 1, event: activity("turn_started") },
+      { sequence: 2, event: activity("model_call_started", { model_call_id: "call-a" }) },
+    ],
+  };
+  const rows = reduceInspectorActivity(snapshot, [
+    {
+      stream_id: "stream-a",
+      sequence: 3,
+      update: { type: "activity", data: activity("model_call_completed", { model_call_id: "call-a" }) },
+    },
+    {
+      stream_id: "stream-a",
+      sequence: 4,
+      update: { type: "activity", data: activity("model_call_started", { model_call_id: "call-b" }) },
+    },
+  ]);
+  assert.deepEqual(rows.map((row) => row.sequence), [1, 2, 3, 4]);
+  assert.equal(rows[1].pending, false);
+  assert.equal(rows[3].pending, true);
+});
+
+test("activity reducer bounds retention and keeps transport events", () => {
+  const activityEntries = Array.from(
+    { length: MAX_INSPECTOR_ACTIVITY_ENTRIES + 5 },
+    (_, index) => ({ sequence: index + 1, event: activity("progress") }),
+  );
+  const rows = reduceInspectorActivity(
+    { stream_id: "stream-a", activity: activityEntries },
+    [{
+      local_id: "transport-1",
+      update: { type: "activity", data: activity("stream_resumed", { occurred_at: "2026-08-06T11:00:00Z" }) },
+    }],
+  );
+  assert.equal(rows.length, MAX_INSPECTOR_ACTIVITY_ENTRIES);
+  assert.equal(rows.at(-1)?.kind, "stream_resumed");
+  assert.equal(rows[0].sequence, 7);
+});
+
+test("activity reducer replaces local lifecycle hints with authoritative diagnostics", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-authoritative",
+      activity: [{ sequence: 1, event: activity("turn_started") }],
+    },
+    [
+      {
+        local_id: "product-turn",
+        update: { type: "activity", data: activity("turn_started") },
+      },
+      {
+        local_id: "disconnect-1",
+        update: { type: "activity", data: activity("stream_disconnected") },
+      },
+      {
+        local_id: "disconnect-2",
+        update: { type: "activity", data: activity("stream_disconnected") },
+      },
+    ],
+  );
+
+  assert.equal(rows.filter((row) => row.kind === "turn_started").length, 1);
+  assert.equal(rows.filter((row) => row.kind === "stream_disconnected").length, 2);
+  assert.equal(rows.find((row) => row.kind === "turn_started")?.sequence, 1);
+});
+
+test("run navigation history is thread-scoped, deduplicated, and bounded", () => {
+  const memory = storage();
+  assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-1"]);
+  assert.deepEqual(rememberInspectorRun("thread-a", "run-2", memory), ["run-1", "run-2"]);
+  assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-2", "run-1"]);
+  assert.deepEqual(rememberInspectorRun("thread-b", "run-b", memory), ["run-b"]);
+  const saved = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY]);
+  assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
+  assert.deepEqual(saved["thread-b"], ["run-b"]);
 });

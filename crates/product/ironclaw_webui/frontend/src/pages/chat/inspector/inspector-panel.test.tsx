@@ -125,6 +125,42 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
   assert.match(stats.textContent || "", /metric samples were unavailable/);
 });
 
+test("activity tab renders ordered correlations and navigates retained turns", async () => {
+  inspectorState.snapshot = {
+    stream_id: "stream-a",
+    activity: [
+      {
+        sequence: 1,
+        event: {
+          occurred_at: "2026-08-06T10:00:00Z",
+          kind: "model_call_started",
+          iteration: 2,
+          activity_id: null,
+          model_call_id: "call-1234567890",
+          summary: { content: "Model call started", original_bytes: 18, truncated: false },
+        },
+      },
+    ],
+  };
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />));
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-b" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+
+  const activity = document.querySelector("[data-testid='inspector-activity-content']");
+  assert.ok(activity);
+  assert.match(activity.textContent || "", /Model call started/);
+  assert.match(activity.textContent || "", /Pending/);
+  assert.match(activity.textContent || "", /Turn 2 of 2/);
+
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.click(),
+  );
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-a");
+});
+
 afterEach(async () => {
   await act(async () => root?.unmount());
   document.body.replaceChildren();
