@@ -475,43 +475,24 @@ pub struct PutToolResultRecordRequest {
 /// tool outputs recoverable in 1-2 calls instead of ~49.
 /// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
 /// this value; raising it here raises that ceiling too.
-/// Compile-time ceiling on a single `result_read` request: 24 KiB, unchanged.
+/// Compile-time ceiling on a single `result_read` request: 24 KiB.
 ///
 /// Do NOT raise this to widen the env override. `tool_result_reference.rs` derives
-/// `MAX_MODEL_OBSERVATION_BYTES` from it (`* 2`), so raising it silently doubles the
-/// model-observation envelope and changes preview truncation for every caller -- which is a
-/// behavior change, not a knob. Raising it to 64 KiB broke three preview/result_read tests
-/// whose fixtures are sized against the envelope
-/// (`write_capability_result_truncated_array_preview_reports_item_count` and two
-/// `local_dev_result_read_*`), with "fixture must exceed the preview cap".
-///
-/// The env override is bounded by [`TOOL_RESULT_READ_ENV_CEILING_BYTES`] instead, which
-/// nothing else is derived from.
+/// `MAX_MODEL_OBSERVATION_BYTES` from it (`* 2`), so raising it changes preview truncation for
+/// every caller. The override is bounded by [`TOOL_RESULT_READ_ENV_CEILING_BYTES`] instead, which
+/// nothing derives from.
 pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
 
-/// Highest value `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` may request: 64 KiB.
-///
-/// Separate from [`TOOL_RESULT_RECORD_READ_MAX_BYTES`] on purpose -- this bounds only the
-/// opt-in override, so the observation envelope and every default stay exactly where they
-/// were. A deployment that raises the cap accepts larger single reads; it does not change
-/// anything for a deployment that does not.
+/// Highest value `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` may request: 64 KiB. Separate from
+/// [`TOOL_RESULT_RECORD_READ_MAX_BYTES`] so the observation envelope stays put.
 pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
 
-/// Effective per-request cap: 24 KiB — unchanged from the historical default.
+/// Effective per-request cap: 24 KiB by default.
 ///
-/// A larger cap was briefly tried on the theory that a small one turns a big file into
-/// a paging loop (on `manufacturing_equipment_maintenance`, nearai/benchmarks#287,
-/// reborn made 8 `read_file` calls and zero shell calls, then spent the turn on
-/// `result_read` at offset 24576). That is a real trace, but the change was NEVER
-/// ISOLATED — it shipped in an arm alongside two other switches, so there is no
-/// evidence it helped. Defaulting back to 24 KiB keeps this crate's behavior
-/// byte-identical to before and leaves the knob for anyone who wants to measure it
-/// properly.
-///
-/// Raise with `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
-/// `[4, TOOL_RESULT_RECORD_READ_MAX_BYTES]` — an override can never exceed the
-/// compile-time ceiling, so the observation envelope is always large enough for
-/// whatever a read returns.
+/// A larger default was tried and reverted -- the trace motivating it was real but the change
+/// shipped alongside two others, so nothing isolates its effect. Raise with
+/// `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
+/// `[4, TOOL_RESULT_READ_ENV_CEILING_BYTES]`.
 pub(crate) const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
 
 /// Env var controlling [`effective_tool_result_read_max_bytes`].

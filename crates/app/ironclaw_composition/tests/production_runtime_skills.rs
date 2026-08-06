@@ -282,19 +282,12 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     second.shutdown().await.expect("second shutdown");
 }
 
-/// The reader and the writer must resolve `/skills` to the SAME tree.
+/// The reader and the writer must resolve `/skills` to the SAME tree — the guard for
+/// nearai/ironclaw#7168, where the writer resolved to the database and the reader to the host disk,
+/// so an installed skill reported success and was invisible forever.
 ///
-/// This is the guard for nearai/ironclaw#7168, and it is deliberately a pure mount-view comparison
-/// rather than a full install-then-list round trip: the two mount views are the entire bug surface,
-/// and comparing them fails in milliseconds with a message that names the divergence, where a round
-/// trip would need a capability port stood up and would report "skill not found" without saying why.
-///
-/// What went wrong: `production_skill_management_mount_view` resolves `/skills` to
-/// `/tenants/{t}/users/{u}/skills`, which the composite routes to the DATABASE, while the read side
-/// used `scoped_skill_context_mount_view` -> `/projects/tenants/{t}/users/{u}/skills`, which routes
-/// to the HOST DISK. `skill_install` wrote to one tree and discovery listed the other, so an
-/// agent-installed skill reported `installed: true`, appeared in `skill_list` for the rest of that
-/// session, and was then invisible forever.
+/// A pure mount-view comparison rather than an install-then-list round trip: the two views are the
+/// whole bug surface, and this names the divergence where a round trip would just say "not found".
 #[tokio::test]
 async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
     use ironclaw_host_api::{
@@ -391,23 +384,17 @@ async fn tenant_shared_skills_resolve_under_the_canonical_shared_subtree() {
     );
 }
 
-/// The same parity requirement for the OTHER read branch: local-dev, local-storage production, and
-/// hosted single-tenant.
+/// The same parity requirement for the OTHER read branch: local-dev, local-storage production and
+/// hosted single-tenant, which build their reader in `HostAccessAssembly::build_workspace_filesystems`
+/// rather than from `production_skill_context_mount_view`.
 ///
-/// Those shapes supply their own `workspace_filesystems`, so they never construct
-/// `production_skill_context_mount_view` — they build the skill reader in
-/// `HostAccessAssembly::build_workspace_filesystems`. The writer is the same
-/// `production_skill_management_mount_view` in every production-shaped build.
+/// This is why #7168 survived its first fix: that fix corrected only the multi-tenant Postgres
+/// branch, so the E2E passed while local-dev stayed broken in exactly the reported way. One root
+/// cause, two readers, one green test covering one of them.
 ///
-/// This is why #7168 survived its first fix. That fix corrected the branch only hosted multi-tenant
-/// Postgres takes, and the multi-tenant E2E test then passed while local-dev stayed broken in
-/// exactly the reported way: the WebUI reported the skill installed, `skill_list` showed it for the
-/// rest of the session, Settings → Skills never listed it, and a second conversation could not
-/// activate it. One root cause, two readers, and a green test that only covered one of them.
-///
-/// `/system/skills` is asserted separately: it must stay on the host disk, because that is where
-/// `ensure_bundled_reborn_skills_installed` writes. Sending it to the database would resolve bundled
-/// skills to an empty tree and silently drop all 32.
+/// `/system/skills` is asserted separately — it must stay on the host disk, where
+/// `ensure_bundled_reborn_skills_installed` writes, or all 32 bundled skills resolve to an empty
+/// tree.
 #[tokio::test]
 async fn local_dev_skill_read_and_write_mounts_resolve_to_the_same_tree() {
     use ironclaw_host_api::{

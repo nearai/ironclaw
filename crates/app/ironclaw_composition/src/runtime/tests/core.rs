@@ -366,14 +366,8 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     );
 }
 
-/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the
-/// unset one.
-///
-/// The unset branch is the product default and was previously unreachable from a
-/// test: it sits behind `std::env::var`, and unsetting the key in-process would
-/// race the other tests in this binary. `skill_injection_mode_from_env_value`
-/// takes the lookup's `Result` so the decision can be exercised without touching
-/// process state.
+/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the unset one --
+/// previously unreachable, since unsetting the key in-process races the other tests here.
 #[test]
 fn skill_injection_mode_resolves_every_env_branch() {
     use ironclaw_loop_host::SkillInjectionMode;
@@ -1897,15 +1891,9 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 
 /// Seed a skill where the runtime actually reads one: the DB-backed virtual filesystem.
 ///
-/// These tests used to write user skills to `storage_root/tenants/.../skills` on the HOST DISK,
-/// because that is where the runtime's skill reader used to look. It was also where an agent's own
-/// `skill_install` wrote, while Settings → Skills listed the database — three mount views over two
-/// trees, which is nearai/ironclaw#7168. Now every skill mount is built from
-/// `db_backed_skill_grants`, so a disk-seeded skill is correctly invisible and a test that seeds to
-/// disk is testing nothing.
-///
-/// Migrations are idempotent, so this can run before the runtime is built and each test keeps its
-/// original seed-then-build shape.
+/// Seeding the host disk instead is now testing nothing — every skill mount derives from
+/// `db_backed_skill_grants`, so a disk-seeded skill is correctly invisible (nearai/ironclaw#7168).
+/// Migrations are idempotent, so this runs before the runtime is built.
 async fn seed_db_skill(
     storage_root: &std::path::Path,
     virtual_dir: &str,
@@ -7260,25 +7248,13 @@ async fn scheduler_stopped_rejects_send_user_message() {
 }
 // arch-exempt: large_file, runtime composition contract coverage remains centralized, plan #6175
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────────
-// Two-thread skill fixtures: thread 1 authors a skill carrying a script, thread 2 runs that script.
+// Two-thread skill fixtures: thread 1 authors a skill carrying a script, thread 2 runs it.
 //
-// Distilled from ten live demo runs against real models, every one of which failed somewhere in this
-// sequence, and none of which any existing hermetic test caught:
-//
-//   1. `skill_install` reported success and the skill never appeared again -- writer and reader
-//      resolved `/skills` to different trees (nearai/ironclaw#7168).
-//   2. A manifest with no `description:` installed fine and was skipped by discovery forever.
-//   3. Thread 2 activated the skill, read `scripts/egfr.py`, and could not execute it: the bundle
-//      lives in the database, so no host process can open it.
-//   4. Deprived of execution, one agent POSTed the patient's creatinine to `api.mathjs.org`.
-//   5. After staging landed, the path the model was TOLD still missed, because `/workspace` means
-//      `<root>/tenants/<t>/users/<u>` to the file tools and `<root>` to the shell.
-//
-// So these assert the whole chain, not a layer: installed, survives into a second conversation, the
-// path handed to the model is a real host path, and the script there runs and prints its own output.
-// A layer-at-a-time test passed through all ten failures.
-// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Distilled from ten live demo runs, each of which failed somewhere in this chain and none of which
+// a hermetic test caught: the install vanished (#7168); a missing `description:` made the skill
+// invisible to discovery forever; the staged script could not be executed because the bundle lives
+// in the database; and once staging landed, the path the model was TOLD still missed. So these
+// assert the whole chain rather than a layer -- a layer-at-a-time test passed through all ten.
 /// The skill an agent writes when asked for eGFR — the exact shape every demo produced.
 const SKILL_MD: &str = "---\nname: egfr-calc\ndescription: Compute eGFR from serum creatinine with the 2021 race-free CKD-EPI equation and assign a KDIGO stage.\n---\n\n# eGFR\n\nRun the bundled script:\n\n```bash\npython3 scripts/egfr.py --scr 1.3 --age 62 --female\n```\n";
 
@@ -7312,16 +7288,13 @@ const TENANT: &str = "two-thread-tenant";
 const OWNER: &str = "two-thread-owner";
 const AGENT: &str = "two-thread-agent";
 
-/// A mocked model that does what the demo's second thread does: read the activated skill body, take
-/// the working directory the body ADVERTISES, and run the skill's own command there through the real
-/// `builtin.shell` tool.
+/// A mocked model doing what the demo's second thread does: read the activated body, take the
+/// workdir it ADVERTISES, and run the skill's command there through the real `builtin.shell`.
 ///
-/// The point is the path provenance. The sibling fixture locates the staged script by walking the
-/// workspace and then runs it with `std::process::Command`, which proves the bytes landed but says
-/// nothing about the string handed to the model -- and a wrong string is exactly what shipped once
-/// (`/workspace/tenants/<t>/users/<u>/.skills/<name>`, resolved a second time beneath the per-caller
-/// root, so every command died with `Failed to spawn command`). Here the workdir is parsed out of the
-/// injected body, so if the advertised path is wrong the shell fails and this fails with it.
+/// The point is path provenance. The sibling fixture walks the workspace and runs the script with
+/// `std::process::Command`, which proves the bytes landed but says nothing about the string handed
+/// to the model — and a wrong string is what shipped once. Parsed from the body, so a wrong
+/// advertised path fails this test.
 #[derive(Debug, Default)]
 struct SkillShellGateway {
     calls: StdMutex<usize>,
@@ -7579,18 +7552,12 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
     runtime.shutdown().await.expect("thread two shutdown");
 }
 
-/// The demo, end to end, with the model mocked and everything around it real.
+/// The demo end to end, with the model mocked and everything around it real.
 ///
-/// Thread 1 installs a skill carrying a script. Thread 2 is a NEW runtime over the same store: it
-/// activates the skill, and a mocked model reads the working directory the injected body ADVERTISES
-/// and runs the skill's own command there through the real `builtin.shell` capability.
-///
-/// The sibling fixture proves the bytes land somewhere runnable; it says so itself, and it executes
-/// them with `std::process::Command`. This one closes the other half -- the path the model is TOLD --
-/// by parsing the workdir out of the body and letting the host's own process port resolve it. When
-/// that string was wrong (`/workspace/tenants/<t>/users/<u>/.skills/<name>`, resolved a second time
-/// beneath the per-caller root) every command failed with `Failed to spawn command: No such file or
-/// directory`, and nothing in the previous fixture noticed.
+/// Thread 1 installs a skill carrying a script; thread 2 is a NEW runtime over the same store whose
+/// mocked model reads the advertised workdir and runs the command through the real `builtin.shell`.
+/// Closes the half the sibling fixture cannot see: the path the model is TOLD. When that string was
+/// wrong, every command failed with `Failed to spawn command` and nothing noticed.
 #[tokio::test]
 async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
     let root = tempfile::tempdir().expect("tempdir");

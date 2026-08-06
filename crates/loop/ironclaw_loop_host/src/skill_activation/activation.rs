@@ -52,10 +52,9 @@ const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
 const SKILL_LISTING_HEADER: &str = include_str!("../../prompts/skill_listing_header.md");
 /// Total character budget for the rendered listing, excluding its header.
 ///
-/// Replaces a flat 100-skill cap, which dropped whole alphabetical tails (the listing is
-/// source-then-name ordered), and sized so a real catalog lists at full description length.
-/// Shrinking descriptions to fit more names in was measured worse: 52% activation with 88
-/// full-length entries against 0% with 227 shrunken ones.
+/// Replaces a flat 100-skill cap, which dropped whole alphabetical tails, and sized so a real
+/// catalog lists at full description length. Shrinking descriptions to fit more names in was
+/// measured worse: 52% activation with 88 full-length entries against 0% with 227 shrunken ones.
 ///
 /// BOUNDED BY THE SNIPPET CAP, which is not a nicety. The listing ships as ONE model-visible
 /// snippet, and `skill_context.rs` rejects a snippet over

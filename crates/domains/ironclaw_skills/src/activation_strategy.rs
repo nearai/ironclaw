@@ -1,12 +1,10 @@
 //! Hot-swappable skill-activation strategies, following the memory-provider pattern: a named set,
 //! a fail-closed binding, and a default that preserves existing behavior.
 //!
-//! Scoring reads only `activation.keywords`/`tags`/`patterns`, so `name` and `description`
-//! contribute nothing. That is fine for curated skills and fatal for self-authored ones: on the
-//! 31-task subset in nearai/benchmarks#287, **0 of 30** agent-authored skills carried an
-//! `activation` block, so each scored 0 and could never be selected again.
-//! [`ActivationStrategy::NameAndDescription`] ports Claude Code's contract, where name and
-//! description alone make a skill selectable.
+//! Scoring reads only `activation.keywords`/`tags`/`patterns`, so `name` and `description` count
+//! for nothing. Fatal for self-authored skills: on the 31-task subset in nearai/benchmarks#287,
+//! 0 of 30 carried an `activation` block, so each scored 0 and could never be selected again.
+//! [`ActivationStrategy::NameAndDescription`] ports Claude Code's contract.
 
 use crate::types::SkillManifest;
 
@@ -122,12 +120,9 @@ pub enum ActivationBindingError {
     NotPermittedInProduction(String),
 }
 
-/// Fallback score from a skill's `name`/`description`, used only when the bound
-/// strategy allows it and the criteria pass produced nothing.
-///
-/// Whole-word matching only: a substring rule would make short names like `pdf`
-/// match `pdfs`, `pdf-forms` and any prose mentioning them, which is exactly the
-/// over-selection that makes injecting an unrelated skill bank harmful.
+/// Fallback score from `name`/`description`, only when the strategy allows it and criteria matched
+/// nothing. Whole-word only: a substring rule makes `pdf` match `pdfs`, `pdf-forms` and any prose
+/// mentioning them.
 pub fn fallback_score(manifest: &SkillManifest, message_lower: &str) -> u32 {
     let words: Vec<&str> = message_lower
         .split(|c: char| !c.is_alphanumeric())

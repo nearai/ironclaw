@@ -4517,9 +4517,9 @@ fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> 
     skill_injection_mode_from_env_value(std::env::var(SKILL_INJECTION_MODE_ENV_KEY))
 }
 
-/// The decision itself, separated from the lookup so every branch is testable. `remove_var` is not
-/// an option: these tests run in-process and in parallel, so unsetting the key races every other
-/// test reading it.
+/// The decision itself, split from the lookup so every branch is testable. `remove_var` is not an
+/// option: these tests run in-process and in parallel, so unsetting the key races every other test
+/// reading it.
 fn skill_injection_mode_from_env_value(
     value: Result<String, std::env::VarError>,
 ) -> Result<SkillInjectionMode, RebornRuntimeError> {
@@ -4539,18 +4539,13 @@ const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
 
 /// Default stays `CriteriaOnly` — behavior-preserving.
 ///
-/// `name_and_description` is the opt-in
-/// (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`): it lets a skill match on its
-/// name and description, not only on `activation.keywords`/`tags`/`patterns`. Measured on
-/// nearai/benchmarks#287, **0 of 30 agent-authored skills carried an `activation` block**, so
-/// under criteria scoring they never auto-activate.
+/// `name_and_description` is the opt-in (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`):
+/// a skill matches on name and description, not only `activation.keywords`/`tags`/`patterns`. On
+/// nearai/benchmarks#287, 0 of 30 agent-authored skills carried an `activation` block, so under
+/// criteria scoring they never auto-activate.
 ///
-/// A floor-score strategy (`always_available`, "every skill is a candidate") was tried and
-/// REMOVED. It bought nothing: listing membership is decided by VISIBILITY, not selection
-/// (`extension_ports/activation.rs`), so the model was already shown every visible skill; the
-/// floor only reordered that listing, and it demoted chain-loaded companions. The real gap is
-/// not that the model cannot see a skill -- it is that it rarely acts on the listing
-/// (`builtin.skill_activate` called in 3 of 30 measured runs, body read in 0 of 30).
+/// A floor-score strategy (`always_available`) was tried and REMOVED: listing membership is decided
+/// by visibility, not selection, so the floor only reordered a listing the model already saw.
 const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
     ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
 
@@ -4569,16 +4564,16 @@ fn skill_activation_env()
     }
 }
 
-/// Default skill-injection mode for Reborn. `Listing` shows a one-line menu and loads a body only
-/// on `$name` or `builtin.skill_activate`; `Full` injects scored bodies.
+/// Default skill-injection mode. `Listing` shows a one-line menu and loads a body only on `$name`
+/// or `builtin.skill_activate`; `Full` injects scored bodies.
 ///
-/// Measured on the 31-task subset in nearai/benchmarks#287 (`deepseek-v4-flash`), `Listing` leaves
-/// skills nearly inert -- `skill_list` called in 30/30 runs, `skill_activate` in 3/30, a body read
-/// in 0/30 -- and scores 79.8% against 78.5% for no skills at all, where `Full` scores 85.6%.
+/// On the 31-task subset in nearai/benchmarks#287 (`deepseek-v4-flash`), `Listing` leaves skills
+/// nearly inert -- `skill_list` called in 30/30 runs, `skill_activate` in 3/30, a body read in
+/// 0/30 -- and scores 79.8% against 78.5% for no skills at all, where `Full` scores 85.6%.
 ///
-/// **Left at `Listing` anyway**: three local-dev tests drive a mock expecting the listing candidate
-/// and HANG under `Full`, so flipping the product default is a maintainer call that needs those
-/// expectations updated first. Opt in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
+/// **Left at `Listing` anyway**: three `local_dev_*` tests drive a mock expecting the listing
+/// candidate and HANG under `Full`, so flipping the product default needs those updated first. Opt
+/// in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
 const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Listing;
 
 fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {

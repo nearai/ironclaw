@@ -102,13 +102,9 @@ struct ParsedInstallFile {
 
 /// Normalize a `builtin.skill_install` input before [`dispatch`] sees it.
 ///
-/// Inline installs — `content`, optionally with the rest of the bundle in
-/// `files` — pass through untouched. A `url` install is resolved here: the
-/// HTTPS/GitHub source is fetched through the mediated egress port on `fetch`,
-/// and the fetched SKILL.md plus any bundle files are rewritten into that same
-/// `content`/`files` shape, with `source`/`source_url` recording the provenance.
-/// Anything else (both, or neither, or either arm carrying forged provenance) is
-/// an input error.
+/// Inline installs (`content`, optionally with `files`) pass through untouched. A `url` install is
+/// fetched through the mediated egress port and rewritten into that same shape, with
+/// `source`/`source_url` recording provenance. Anything else is an input error.
 ///
 /// `usage` accumulates the fetch's network egress so the host runtime can
 /// account for a failed install exactly as it accounts for a successful one.

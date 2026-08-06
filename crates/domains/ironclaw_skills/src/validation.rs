@@ -338,17 +338,11 @@ pub fn lint_skill_routing_metadata_blocking(manifest: &SkillManifest) -> Vec<Str
     problems
 }
 
-/// The subset that must only WARN, because it describes the skill's own quality.
+/// The subset that must only WARN, because it describes the skill's OWN quality.
 ///
-/// An empty or over-long description hurts that skill's discoverability and nothing else.
-/// Refusing the write hurts it strictly more: the agent authored a working skill and ends up with
-/// no skill at all, which is the failure this epic exists to remove.
-///
-/// This is not hypothetical. **19 of 26 skills agents actually wrote fail these rules — 15 have no
-/// description whatsoever.** Gating the write path on them would have silently returned
-/// self-creation to a ~0pp effect, and the self-creation measurement could not have caught it,
-/// because it re-runs the *use* phase against previously-authored skills and never exercises the
-/// write path.
+/// Not hypothetical: 19 of 26 agent-authored skills fail these rules and 15 carry no description at
+/// all, so gating the write on them returns self-creation to a ~0pp effect. The self-creation
+/// measurement could not catch that -- it re-runs the use phase and never exercises the write.
 pub fn lint_skill_routing_metadata_advisory(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = Vec::new();
     if manifest.description.trim().is_empty() {
