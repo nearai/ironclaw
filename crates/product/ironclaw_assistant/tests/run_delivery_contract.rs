@@ -1385,9 +1385,10 @@ async fn observer_records_gate_route_after_approval_prompt() {
 /// reference. The gate reference is hashed with a domain-separated,
 /// length-framed SHA-256 input so the persisted metadata neither leaks the ref
 /// nor admits ambiguous concatenations. Replaying the *same* gate must still
-/// address the original delivery and remain duplicate-suppressed.
+/// resolve to the identity its first appearance reserved, so it addresses the
+/// original durable row instead of opening a second one.
 #[tokio::test]
-async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_replays() {
+async fn observer_delivers_distinct_same_kind_gates_and_replays_reuse_their_identity() {
     const APPROVAL_A: &str = "gate:approval-00000000000000000000000000000001";
     const APPROVAL_B: &str = "gate:approval-00000000000000000000000000000002";
     const AUTH_A: &str = "gate:auth-vector";
@@ -1402,7 +1403,8 @@ async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_rep
             scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
             scripted_state(TurnStatus::BlockedAuth, Some(AUTH_B)),
             // Replays must resolve to the same identity as their first
-            // appearance and therefore produce no second vendor egress.
+            // appearance and therefore address the row that appearance
+            // already reserved rather than opening a second one.
             scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
             scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
             scripted_state(TurnStatus::Completed, None),
@@ -1422,18 +1424,31 @@ async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_rep
         )
         .await;
 
+    // Egress-level duplicate suppression is the durable delivery claim's job,
+    // not this identity's. Without that claim a replayed gate is re-sent, so
+    // the observable egress here is the two distinct approvals plus their one
+    // approval replay, the two distinct auth gates plus their one auth replay,
+    // and the final reply. These egress counts hold with or WITHOUT the
+    // gate-bound identity: a collision shares the durable row, it does not
+    // suppress rendering on `main`. They are here to pin the egress shape the
+    // durable assertions are read against, not to detect the collision. The
+    // assertions that actually catch it are `attempts.len()` and the
+    // `expected_run_notification_refs` comparison below — under a colliding
+    // identity the two same-kind gates share one row, so the row count and the
+    // pinned digest set both come up short.
     let texts = harness.adapter.texts();
     assert_eq!(
         texts.len(),
-        5,
-        "two distinct approvals, two distinct auth gates, and one final reply must reach egress"
+        7,
+        "two distinct approvals, two distinct auth gates, one replay of each kind, and one final \
+         reply must reach egress"
     );
     assert_eq!(
         texts
             .iter()
             .filter(|text| text.contains("Approval needed"))
             .count(),
-        2,
+        3,
         "same-kind approval gates with distinct refs must not collide"
     );
     assert_eq!(
@@ -1441,9 +1456,20 @@ async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_rep
             .iter()
             .filter(|text| text.contains("Authentication required"))
             .count(),
-        2,
+        3,
         "same-kind auth gates with distinct refs must not collide"
     );
+    // Rendering sanity check for the counts above: each count is made of four
+    // distinct gates rather than repeats of one, and every prompt carries its
+    // own gate ref. This is not a collision detector — under a collision all
+    // four refs still render distinctly, because the collision lands on the
+    // durable row rather than the rendered text.
+    for gate_ref in [APPROVAL_A, APPROVAL_B, AUTH_A, AUTH_B] {
+        assert!(
+            texts.iter().any(|text| text.contains(gate_ref)),
+            "every distinct gate must render its own prompt: {gate_ref} missing from {texts:#?}"
+        );
+    }
 
     let attempts = harness
         .store
@@ -1452,8 +1478,8 @@ async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_rep
         .expect("attempts");
     assert_eq!(
         attempts.len(),
-        7,
-        "five run notifications plus cleanup of the two delivered auth prompts"
+        8,
+        "five run-notification identities plus cleanup of the three delivered auth prompts"
     );
     let mut run_notification_refs: Vec<String> = attempts
         .iter()
@@ -1496,13 +1522,13 @@ async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_rep
                 .as_str()
                 .starts_with("system-notice:cleanup:retract-"))
             .count(),
-        2,
+        3,
         "each delivered auth prompt owns one durable cleanup/retraction row"
     );
     assert_eq!(
         harness.adapter.retracted_refs().len(),
-        2,
-        "both stale auth prompts are retracted after the final reply"
+        3,
+        "every stale auth prompt is retracted after the final reply"
     );
 }
 
@@ -2254,7 +2280,8 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
 /// The triggered driver is a separate production caller of the projection-id
 /// helper. Keep its gate reference wired into identity derivation too: a
 /// trigger can park repeatedly on distinct approval/auth gates before its final
-/// reply, while a replay of an already-delivered gate remains a no-op.
+/// reply, and a replay of an already-delivered gate must land back on the
+/// identity that gate already reserved.
 #[tokio::test]
 async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
     const APPROVAL_A: &str = "gate:approval-00000000000000000000000000000001";
@@ -2276,11 +2303,12 @@ async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
         true,
     );
     seed_preference(&harness.store).await;
-    // Keep this contract focused on the five run notifications. A successful
-    // channel delivery may omit a vendor message ref; doing so prevents the
-    // driver's terminal auth-prompt cleanup from adding unrelated Cleanup
-    // rows to this projection-identity assertion.
-    for _ in 0..5 {
+    // Keep this contract focused on the five run-notification identities. A
+    // successful channel delivery may omit a vendor message ref; doing so
+    // prevents the driver's terminal auth-prompt cleanup from adding unrelated
+    // Cleanup rows to this projection-identity assertion. One report per
+    // egress, replays included.
+    for _ in 0..7 {
         harness
             .adapter
             .reports
@@ -2304,19 +2332,23 @@ async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
         TriggeredRunDeliveryOutcomeKind::Delivered
     );
 
+    // As on the observer path, suppressing a replay's *egress* belongs to the
+    // durable delivery claim. This contract owns the identity: distinct
+    // same-kind gates each render, and replays fold back onto the rows their
+    // first appearance reserved (asserted over `attempts` below).
     let texts = harness.adapter.texts();
     assert_eq!(
         texts.len(),
-        5,
-        "two distinct approvals, two distinct auth gates, and one final reply must reach the \
-         triggered target"
+        7,
+        "two distinct approvals, two distinct auth gates, one replay of each kind, and one final \
+         reply must reach the triggered target"
     );
     assert_eq!(
         texts
             .iter()
             .filter(|text| text.contains("Approval needed"))
             .count(),
-        2,
+        3,
         "distinct triggered approval gates must not collide"
     );
     assert_eq!(
@@ -2324,9 +2356,16 @@ async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
             .iter()
             .filter(|text| text.contains("Authentication required"))
             .count(),
-        2,
+        3,
         "distinct triggered auth gates must not collide"
     );
+    for gate_ref in [APPROVAL_A, APPROVAL_B, AUTH_A, AUTH_B] {
+        assert!(
+            texts.iter().any(|text| text.contains(gate_ref)),
+            "every distinct triggered gate must render its own prompt: {gate_ref} missing from \
+             {texts:#?}"
+        );
+    }
     assert!(
         harness.adapter.envelopes().iter().all(|envelope| envelope
             .target
