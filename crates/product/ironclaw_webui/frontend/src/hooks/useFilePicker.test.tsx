@@ -91,7 +91,7 @@ test("useFilePicker resets after selection, supports reselection, and ignores ca
   }
 });
 
-test("useFilePicker prevents disabled activation", () => {
+test("useFilePicker prevents disabled activation and selection", () => {
   const click = vi.spyOn(HTMLInputElement.prototype, "click");
   const onSelect = vi.fn();
   const picker = renderPicker({ disabled: true, onSelect });
@@ -100,9 +100,12 @@ test("useFilePicker prevents disabled activation", () => {
     assert.ok(picker.button);
     assert.ok(picker.input);
     act(() => picker.button.click());
+    selectFiles(picker.input, [new File(["{}"], "settings.json")]);
+
     assert.equal(click.mock.calls.length, 0);
     assert.equal(onSelect.mock.calls.length, 0);
     assert.equal(picker.input.disabled, true);
+    assert.equal(picker.input.value, "");
   } finally {
     picker.cleanup();
     click.mockRestore();

@@ -615,7 +615,7 @@ test("ChatInput keeps Enter blocked when submit becomes disabled during send", a
 
   // Re-render in production would update submitDisabledRef before the original
   // async send closure reaches finally.
-  const submitDisabledRef = refs[5];
+  const submitDisabledRef = refs[4];
   submitDisabledRef.current = true;
   resolveSend();
   await flushAsyncHandlers();

@@ -19,10 +19,14 @@ function catalogItem(entry) {
 function ImportButton({ onImport, isImporting, isBusy }) {
   const t = useT();
   const disabled = isBusy || isImporting;
+  const handleImportSelection = React.useCallback(
+    ([file]) => onImport?.(file),
+    [onImport]
+  );
   const [openFilePicker, importInputProps] = useFilePicker({
     accept: ".zip,application/zip",
     disabled,
-    onSelect: ([file]) => onImport?.(file),
+    onSelect: handleImportSelection,
   });
 
   return (

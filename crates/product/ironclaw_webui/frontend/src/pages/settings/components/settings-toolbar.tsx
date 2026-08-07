@@ -95,10 +95,14 @@ export function SettingsToolbar({
     },
     [onImport, showMessage, t]
   );
+  const handleImportSelection = React.useCallback(
+    ([file]) => handleImportFile(file),
+    [handleImportFile]
+  );
   const [openFilePicker, importInputProps] = useFilePicker({
     accept: ".json,application/json",
     disabled: isImporting,
-    onSelect: ([file]) => handleImportFile(file),
+    onSelect: handleImportSelection,
   });
 
   return (

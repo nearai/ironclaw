@@ -1,4 +1,4 @@
-import { useRef, type ChangeEventHandler } from "react";
+import { useCallback, useRef, type ChangeEventHandler } from "react";
 
 export interface UseFilePickerOptions {
   accept?: string;
@@ -15,24 +15,27 @@ export function useFilePicker({
 }: UseFilePickerOptions) {
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const openFilePicker = () => {
+  const openFilePicker = useCallback(() => {
     if (!disabled) {
       inputRef.current?.click();
     }
-  };
+  }, [disabled]);
 
-  const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
-    const input = event.currentTarget;
-    const files = Array.from(input.files ?? []);
+  const handleChange = useCallback<ChangeEventHandler<HTMLInputElement>>(
+    (event) => {
+      const input = event.currentTarget;
+      const files = Array.from(input.files ?? []);
 
-    // Browsers do not emit another change event for an unchanged file input.
-    // Clear it before handing control back so the same file can be selected again.
-    input.value = "";
+      // Browsers do not emit another change event for an unchanged file input.
+      // Clear it before handing control back so the same file can be selected again.
+      input.value = "";
 
-    if (files.length > 0) {
-      onSelect(files);
-    }
-  };
+      if (!disabled && files.length > 0) {
+        onSelect(files);
+      }
+    },
+    [disabled, onSelect],
+  );
 
   return [
     openFilePicker,

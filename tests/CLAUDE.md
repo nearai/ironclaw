@@ -64,7 +64,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 
 Totals: **51** group scenarios · **54** flat integration bins (48 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**868** test functions).
+**102** Python scenario files (**869** test functions).
 
 ---
 
@@ -291,7 +291,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 868 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 869 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the

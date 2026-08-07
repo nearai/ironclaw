@@ -59,12 +59,6 @@ export function ChatInput({
   const currentDraftContextRef = React.useRef({ draftKey, resetKey });
   currentDraftContextRef.current.draftKey = draftKey;
   const textareaRef = React.useRef(null);
-  const [openFilePicker, fileInputProps] = useFilePicker({
-    accept: acceptAttr,
-    multiple: true,
-    disabled,
-    onSelect: (files) => addFiles(files),
-  });
   const sendBlockedRef = React.useRef(false);
   const sendBlocked = disabled || sendDisabled || isSending;
   const submitDisabledRef = React.useRef(disabled || sendDisabled);
@@ -78,6 +72,58 @@ export function ChatInput({
   const stagingQueueRef = React.useRef(Promise.resolve());
   const activeDraftContextRef = React.useRef({ draftKey, storageScope });
   activeDraftContextRef.current = { draftKey, storageScope };
+
+  // Stage dropped/picked/pasted files: validate against the server contract,
+  // append the accepted ones, and surface any rejection reasons as a single
+  // combined notice. `stageFiles` reads bytes to base64 off the main file
+  // list, so this is async.
+  const addFiles = React.useCallback(
+    (files) => {
+      // Paste/drop can call this while the composer is disabled; don't stage then.
+      if (disabled || !files || files.length === 0) return;
+      const expectedDraftKey = draftKey;
+      const expectedStorageScope = storageScope;
+      // Chain on the staging queue so calls run one-at-a-time and each sees the
+      // attachments admitted by the previous one (via attachmentsRef). The
+      // `.catch` guarantees the shared queue promise always resolves — an
+      // unexpected staging failure must not permanently reject it and skip every
+      // later add.
+      stagingQueueRef.current = stagingQueueRef.current
+        .then(async () => {
+          const { staged, errors } = await stageFiles(files, {
+            limits,
+            existing: attachmentsRef.current,
+            t,
+          });
+          const current = activeDraftContextRef.current;
+          if (
+            current.draftKey !== expectedDraftKey ||
+            current.storageScope !== expectedStorageScope ||
+            authScope() !== expectedStorageScope
+          ) {
+            return;
+          }
+          if (staged.length > 0) {
+            const next = [...attachmentsRef.current, ...staged];
+            attachmentsRef.current = next;
+            setStagedAttachments(expectedDraftKey, next);
+            setAttachments(next);
+          }
+          setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
+        })
+        .catch(() => {
+          setAttachmentError(t("chat.attachmentStagingFailed"));
+        });
+    },
+    [disabled, draftKey, limits, storageScope, t]
+  );
+  const [openFilePicker, fileInputProps] = useFilePicker({
+    accept: acceptAttr,
+    multiple: true,
+    disabled,
+    onSelect: addFiles,
+  });
+
   React.useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
@@ -245,53 +291,6 @@ export function ChatInput({
       node.setSelectionRange(end, end);
     });
   }, [draftKey, resetKey, initialText, disabled]);
-
-  // Stage dropped/picked/pasted files: validate against the server contract,
-  // append the accepted ones, and surface any rejection reasons as a single
-  // combined notice. `stageFiles` reads bytes to base64 off the main file
-  // list, so this is async.
-  const addFiles = React.useCallback(
-    (files) => {
-      // Paste/drop can call this while the composer is disabled; don't stage then.
-      if (disabled || !files || files.length === 0) return;
-      const expectedDraftKey = draftKey;
-      const expectedStorageScope = storageScope;
-      // Chain on the staging queue so calls run one-at-a-time and each sees the
-      // attachments admitted by the previous one (via attachmentsRef). The
-      // `.catch` guarantees the shared queue promise always resolves — an
-      // unexpected staging failure must not permanently reject it and skip every
-      // later add.
-      stagingQueueRef.current = stagingQueueRef.current
-        .then(async () => {
-          const expectedDraftKey = draftKey;
-          const expectedStorageScope = storageScope;
-          const { staged, errors } = await stageFiles(files, {
-            limits,
-            existing: attachmentsRef.current,
-            t,
-          });
-          const current = activeDraftContextRef.current;
-          if (
-            current.draftKey !== expectedDraftKey ||
-            current.storageScope !== expectedStorageScope ||
-            authScope() !== expectedStorageScope
-          ) {
-            return;
-          }
-          if (staged.length > 0) {
-            const next = [...attachmentsRef.current, ...staged];
-            attachmentsRef.current = next;
-            setStagedAttachments(expectedDraftKey, next);
-            setAttachments(next);
-          }
-          setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
-        })
-        .catch(() => {
-          setAttachmentError(t("chat.attachmentStagingFailed"));
-        });
-    },
-    [disabled, draftKey, limits, storageScope, t]
-  );
 
   const removeAttachment = React.useCallback((id) => {
     const next = attachmentsRef.current.filter((att) => att.id !== id);
