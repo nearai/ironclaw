@@ -13,6 +13,7 @@ use ironclaw_composition::{
     RebornHostBindings, RebornRuntime, RebornRuntimeInput, build_reborn_runtime,
     capability_allowlist, visible_capability_request_for_run,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -27,9 +28,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
@@ -482,7 +482,7 @@ async fn standalone_adapter_gates_builtin_echo_when_global_auto_approve_is_off()
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io.clone(),
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -611,7 +611,7 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io.clone(),
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -711,7 +711,7 @@ async fn standalone_adapter_invokes_extension_scoped_grants_with_loop_driver_pri
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io.clone(),
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -805,7 +805,7 @@ async fn standalone_adapter_registers_provider_tool_calls_as_run_scoped_inputs()
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io.clone(),
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -960,7 +960,7 @@ async fn standalone_adapter_exposes_skill_install_provider_tool_schema_requires_
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io,
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -1053,7 +1053,7 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io,
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -1132,7 +1132,7 @@ async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
             ),
             capability_input_resolver: io.clone(),
             capability_result_writer: io.clone(),
-            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            capability_surface_policy: capability_allowlist([capability_id.clone()]),
             ..adapter_config()
         },
     )
@@ -1244,13 +1244,13 @@ async fn adapter_bundle_wires_required_product_live_components() {
     assert_eq!(route.policy_mode(), ModelSelectionMode::ManagedOnly);
 
     let context = loop_run_context("adapter-config").await;
-    let allow_set = adapters
+    let policy = adapters
         .capability_surface_resolver
         .resolve(&context)
         .await
         .unwrap();
-    assert!(allow_set.permits(&capability_id("demo.allowed")));
-    assert!(!allow_set.permits(&capability_id("demo.denied")));
+    assert!(policy.permits_capability_id(&capability_id("demo.allowed")));
+    assert!(!policy.permits_capability_id(&capability_id("demo.denied")));
 
     let readiness = verify_product_live_cancellation_probe(adapters.cancellation_factory.as_ref())
         .expect("turn-state cancellation factory should expose a live probe");
@@ -1321,7 +1321,7 @@ async fn adapter_bundle_resolves_authority_for_each_run_context() {
             capability_authority_resolver: Arc::new(RecordingAuthorityResolver {
                 calls: Arc::clone(&calls),
             }),
-            capability_allow_set: capability_allowlist([capability_id(ECHO_CAPABILITY_ID)]),
+            capability_surface_policy: capability_allowlist([capability_id(ECHO_CAPABILITY_ID)]),
             ..adapter_config()
         },
     )
@@ -1541,7 +1541,7 @@ fn adapter_config() -> ProductLivePlannedRuntimeAdapterConfig {
         )),
         capability_input_resolver: Arc::new(UnusedCapabilityIo),
         capability_result_writer: Arc::new(UnusedCapabilityIo),
-        capability_allow_set: capability_allowlist([capability_id("demo.allowed")]),
+        capability_surface_policy: capability_allowlist([capability_id("demo.allowed")]),
         model_routes: ProductLiveModelRouteSettings::new("nearai", "qwen3-coder").unwrap(),
         cancellation_factory: Arc::new(ReadyRunCancellationFactory::default()),
         input_queue: Arc::new(EmptyInputQueue),

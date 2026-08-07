@@ -50,6 +50,7 @@ use ironclaw_host_api::turn::{
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
@@ -62,11 +63,11 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
-    CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
-    HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
+    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_loop_host::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -4742,8 +4743,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 

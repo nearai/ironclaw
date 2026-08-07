@@ -9,6 +9,7 @@ use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStoreError, ReplayPayloa
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     capability::{CapabilitySet, EffectKind},
+    capability_surface::CapabilitySurfacePolicy,
     dispatch::{
         CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchInputIssue,
         DispatchInputIssueCode, RuntimeDispatchErrorKind,
@@ -555,6 +556,20 @@ pub trait LoopCapabilityPortFactory: Send + Sync {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
+
+    /// Build a port from an already-resolved host-owned model-surface policy.
+    ///
+    /// The default preserves compatibility for factories whose inner surface
+    /// has no host-runtime visibility request. Production host-backed
+    /// factories override this method so disclosure, outer filtering, and the
+    /// host's visible snapshot all consume the same resolved value.
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        _surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        self.create_capability_port(run_context).await
+    }
 }
 
 pub trait LoopCapabilityPortDecorator: Send + Sync {
@@ -591,6 +606,21 @@ impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let mut port = self.inner.create_capability_port(run_context).await?;
+        for decorator in &self.decorators {
+            port = decorator.decorate(run_context, port);
+        }
+        Ok(port)
+    }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = self
+            .inner
+            .create_capability_port_with_surface_policy(run_context, surface_policy)
+            .await?;
         for decorator in &self.decorators {
             port = decorator.decorate(run_context, port);
         }
@@ -715,6 +745,16 @@ impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         Ok(self.for_run_context(run_context.clone()))
     }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut factory = self.clone();
+        factory.visible_request.policy = surface_policy.as_ref().clone();
+        factory.create_capability_port(run_context).await
+    }
 }
 
 struct PreparedProviderToolCall {
@@ -723,7 +763,6 @@ struct PreparedProviderToolCall {
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
     effective_capability_ids: Vec<CapabilityId>,
-    capability_info_target_missing: bool,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -1679,7 +1718,6 @@ impl HostRuntimeLoopCapabilityPort {
             provider_turn_id,
             normalized_arguments: prepared.normalized_arguments,
             effective_capability_ids: prepared.effective_capability_ids,
-            capability_info_target_missing: prepared.capability_info_target_missing,
         })
     }
 
@@ -1757,14 +1795,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(tool_call)?;
-        if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID
-            && prepared.capability_info_target_missing
-        {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "capability_info target is not on the visible surface",
-            ));
-        }
         Ok(ProviderToolCallCapabilityIds {
             provider_capability_id: prepared.capability_id,
             effective_capability_ids: prepared.effective_capability_ids,
@@ -7209,20 +7239,24 @@ mod tests {
         let mut call = provider_tool_call();
         call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({ "name": "demo.missing" });
-        let error = port
-            .provider_tool_call_capability_ids(&call)
-            .expect_err("approval-time capability id lookup should reject unknown targets");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            port.provider_tool_call_capability_ids(&call)
+                .expect("unknown targets must remain stageable for a model-visible failure")
+                .effective_capability_ids,
+            vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+        );
 
         let mut malformed_call = provider_tool_call();
         malformed_call.id = "call_malformed_unknown_target".to_string();
         malformed_call.name = capability_info::provider_tool_name().expect("provider tool name");
         malformed_call.arguments =
             serde_json::json!({ "name": "demo.missing", "detail": "everything" });
-        let error = port
-            .provider_tool_call_capability_ids(&malformed_call)
-            .expect_err("approval-time target lookup should still reject unknown targets");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            port.provider_tool_call_capability_ids(&malformed_call)
+                .expect("unknown targets must not pre-empt argument error reporting")
+                .effective_capability_ids,
+            vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+        );
 
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))

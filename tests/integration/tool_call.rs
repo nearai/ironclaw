@@ -348,13 +348,7 @@ async fn runs_http_save_tool_call_through_real_egress_and_persists_body() {
         .expect("final reply finalized");
 }
 
-/// Regression derived from the sanitized IPO thread export: a realistic-size
-/// response saved under `/workspace` must be queryable without shell or inline
-/// copying. The same caller-level turn pins the original `$` query and invalid
-/// expression failures, adjacent indices, root arrays, actionable diagnostics,
-/// and the operation-specific schema disclosed to the model.
-#[tokio::test]
-async fn json_queries_scoped_file_and_adjacent_array_indices() {
+fn transcript_json_fixture() -> Vec<u8> {
     let source = serde_json::json!({
         "schema": "ironclaw.thread.export.v1",
         "messages": [
@@ -403,9 +397,13 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
         (470_000..480_000).contains(&source_bytes.len()),
         "sanitized fixture should preserve the supplied export's size class"
     );
+    source_bytes
+}
+
+async fn run_scoped_file_json_queries() -> RebornIntegrationHarness {
     let h = RebornIntegrationHarness::test_default()
         .with_real_egress_pipeline()
-        .with_real_egress_response_bodies([source_bytes])
+        .with_real_egress_response_bodies([transcript_json_fixture()])
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.http.save",
@@ -434,6 +432,21 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
                     "path": "$.nodes[2].data[15][0]"
                 }),
             ),
+            RebornScriptedReply::text("queried"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("save the response and query its JSON paths")
+        .await
+        .expect("turn completes");
+    h
+}
+
+async fn run_inline_jsonpath_queries() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .script([
             RebornScriptedReply::tool_call(
                 "builtin.json",
                 json!({
@@ -458,6 +471,21 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
                     "path": "$.items[0].name"
                 }),
             ),
+            RebornScriptedReply::text("queried"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("query inline JSON with JSONPath-style roots")
+        .await
+        .expect("turn completes");
+    h
+}
+
+async fn run_invalid_json_query() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .script([
             RebornScriptedReply::tool_call(
                 "builtin.json",
                 json!({
@@ -470,38 +498,26 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
         .build()
         .await
         .expect("harness builds");
-
-    h.submit_turn("save the response and query both JSON paths")
+    h.submit_turn("stringify invalid JSON")
         .await
         .expect("turn completes");
-    h.assert_tool_invoked("builtin.http.save")
-        .await
-        .expect("http.save tool ran");
-    h.assert_tool_invoked("builtin.json")
-        .await
-        .expect("JSON query tool ran");
-    h.assert_workspace_file_contains("source.json", "value-15")
-        .await
-        .expect("http.save persisted the JSON source");
-    h.assert_tool_result_contains("\"$\"")
-        .await
-        .expect("the transcript-derived file query returns its nested root marker");
-    h.assert_tool_result_contains("value-15")
-        .await
-        .expect("file-backed query traversed repeated adjacent indices");
-    h.assert_tool_result_contains("1.7404796872364274")
-        .await
-        .expect("the transcript-derived inline root query returns the full object");
-    h.assert_tool_result_contains("root-array-value")
-        .await
-        .expect("inline compatibility includes JSONPath-style root-array queries");
-    h.assert_tool_result_contains("jsonpath-root-value")
-        .await
-        .expect("JSONPath-style object roots resolve through the real capability path");
-    h.assert_tool_error_summary_contains("JSON input is not valid JSON")
-        .await
-        .expect("invalid JSON is explained to the model with an actionable safe summary");
+    h
+}
 
+async fn run_json_schema_disclosure() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .script([RebornScriptedReply::text("described")])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("describe the JSON capability")
+        .await
+        .expect("turn completes");
+    h
+}
+
+fn assert_json_schema_disclosure(h: &RebornIntegrationHarness) {
     let definitions = h.scripted_llm.captured_tool_definitions();
     let definition = definitions
         .iter()
@@ -532,6 +548,56 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
             })),
         "model-visible schema must disclose the file-backed query alternative unambiguously"
     );
+}
+
+/// A realistic-size response saved under `/workspace` remains queryable without
+/// shell or inline copying, including repeated adjacent array indices.
+#[tokio::test]
+async fn json_queries_scoped_file_and_adjacent_array_indices() {
+    let h = run_scoped_file_json_queries().await;
+    h.assert_tool_invoked("builtin.http.save")
+        .await
+        .expect("http.save tool ran");
+    h.assert_workspace_file_contains("source.json", "value-15")
+        .await
+        .expect("http.save persisted the JSON source");
+    h.assert_tool_result_contains("\"$\"")
+        .await
+        .expect("the transcript-derived file query returns its nested root marker");
+    h.assert_tool_result_contains("value-15")
+        .await
+        .expect("file-backed query traversed repeated adjacent indices");
+}
+
+/// `$`-rooted inline queries support object roots, array roots, and traversal.
+#[tokio::test]
+async fn json_queries_inline_jsonpath_roots() {
+    let h = run_inline_jsonpath_queries().await;
+    h.assert_tool_result_contains("1.7404796872364274")
+        .await
+        .expect("the transcript-derived inline root query returns the full object");
+    h.assert_tool_result_contains("root-array-value")
+        .await
+        .expect("inline compatibility includes JSONPath-style root-array queries");
+    h.assert_tool_result_contains("jsonpath-root-value")
+        .await
+        .expect("JSONPath-style object roots resolve through the real capability path");
+}
+
+/// Invalid JSON produces actionable, model-visible correction guidance.
+#[tokio::test]
+async fn invalid_json_is_recoverable() {
+    let h = run_invalid_json_query().await;
+    h.assert_tool_error_summary_contains("JSON input is not valid JSON")
+        .await
+        .expect("invalid JSON is explained to the model with an actionable safe summary");
+}
+
+/// The model-visible schema advertises operations and file-backed JSONPath queries.
+#[tokio::test]
+async fn json_schema_discloses_file_queries() {
+    let h = run_json_schema_disclosure().await;
+    assert_json_schema_disclosure(&h);
 }
 
 /// Regression for #5817: a decimal lifted from prose (`0.95`) tokenizes as
@@ -596,7 +662,7 @@ async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
 
 /// The globally-disabled `builtin.spawn_subagent` capability (configured
 /// through `DefaultPlannedRuntimeConfig::disabled_capability_ids`, applied as
-/// the OUTERMOST `PerSurfaceCapabilityDenyDecorator` in
+/// the OUTERMOST `CapabilitySurfacePolicyFilter` in
 /// `build_default_planned_runtime_inner` — see that function's doc comments)
 /// must never reach the model-facing tool list, whichever port would
 /// otherwise have surfaced it: the flavor-aware `SubagentSpawnCapabilityDecorator`
@@ -647,7 +713,7 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 }
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
-/// at the gateway (`CapabilitySurfaceDenyFilter`, before
+/// at the gateway (`CapabilitySurfacePolicyFilter`, before
 /// `register_provider_tool_call` ever stages an invocation). The loop must
 /// surface the precise `outside_capability_surface` observation to the model,
 /// let it repair the response on the next call, and complete without ever
@@ -685,6 +751,40 @@ async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     h.assert_capability_result_count("builtin.spawn_subagent", 0)
         .await
         .expect("the rejected call must not produce a successful capability result");
+}
+
+/// Regression for the host-policy propagation seam: capability metadata
+/// lookup must resolve against the same already-narrowed host-visible surface
+/// that disclosure and the outer gate use. A denied target is therefore
+/// indistinguishable from an unknown target and returns a normal tool failure;
+/// it must not escape registration as terminal invalid model output.
+#[tokio::test]
+async fn capability_info_for_disabled_spawn_is_opaque_and_model_recoverable() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "capability_info",
+                json!({"name": "builtin__spawn_subagent", "detail": "schema"}),
+            ),
+            RebornScriptedReply::text("continued without the disabled capability"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("inspect the disabled spawn capability")
+        .await
+        .expect("run recovers from opaque capability_info failure");
+    h.assert_tool_error_summary_contains("capability_info target is not on the visible surface")
+        .await
+        .expect("denied target is reported through the model-visible tool-result path");
+    h.assert_reply_contains("continued without the disabled capability")
+        .await
+        .expect("the model can continue after the tool failure");
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("metadata lookup never dispatches the denied target");
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`

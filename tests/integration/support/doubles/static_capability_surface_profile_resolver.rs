@@ -1,11 +1,10 @@
 use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_loop_contracts::LoopRunContext;
-use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-};
+use ironclaw_loop_host::{CapabilityResolveError, CapabilitySurfaceProfileResolver};
 
 pub(crate) struct StaticCapabilitySurfaceProfileResolver {
-    pub(crate) allow_set: CapabilityAllowSet,
+    pub(crate) policy: CapabilitySurfacePolicy,
 }
 
 #[async_trait]
@@ -13,7 +12,7 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(self.allow_set.clone())
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(self.policy.clone())
     }
 }
