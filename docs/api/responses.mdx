@@ -163,16 +163,13 @@ print(resp.output_text)
 | `instructions` | no | System/developer instructions. Injected ahead of `input` as an `<instructions>` block and stored as part of the persisted user message. See [Per-request instructions](#per-request-instructions) for the IronClaw-specific replay caveat. |
 | `previous_response_id` | no | The `id` from a prior response. Resumes the same thread; see [Session continuity](#session-continuity). |
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
-| `temperature` | no | Sampling temperature, `0.0`–`2.0` inclusive. Forwarded to the underlying provider request; values outside the range are rejected with `400`. |
-| `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). Rejected with `400` when the deployment has no external-tools support; an empty `tools: []` is treated as omitted. |
+| `temperature` | no | Sampling temperature, `0.0`–`2.0` inclusive; values outside the range are rejected with `400`. Validated and carried in the submitted turn payload; it is not currently applied as a provider sampling parameter. |
+| `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). An empty `tools: []` is treated as omitted. |
+| `tool_choice` | no | Accepted and ignored — there is no per-request tool-choice surface. |
 | `x_context` | no | IronClaw extension. Structured JSON context (≤ 10 KB) prepended as `<user-context>`. The alias `context` is also accepted but may collide with future OpenAI fields. Prefer `x_context`. |
 
 These are rejected with `400` so callers know they were not honoured:
 
-- `tool_choice` on a deployment without external-tools support (with external
-  tools enabled it is accepted but currently ignored — there is no per-request
-  tool-choice surface)
-- Non-empty `tools` on a deployment without external-tools support
 - `temperature` outside `0.0`–`2.0`
 - A malformed `model` (empty, surrounding whitespace, over 256 bytes, or control characters)
 - `x_context` larger than 10 KB
@@ -180,6 +177,14 @@ These are rejected with `400` so callers know they were not honoured:
 Other OpenAI request fields not listed above (for example `max_output_tokens`)
 are **accepted and ignored**: the endpoint deliberately tolerates unknown
 fields so newer SDK payloads keep working, but unlisted fields have no effect.
+
+<Note>
+External-tools support is always wired on a standard `ironclaw serve`
+deployment, which is why `tools` and `tool_choice` are accepted above. A
+custom composition that mounts the Responses routes without external-tool
+wiring instead rejects non-empty `tools` and any `tool_choice` with `400`
+naming the field.
+</Note>
 
 ---
 
@@ -206,7 +211,7 @@ curl https://your-host/api/v1/responses/$ID \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Returns the output items reconstructed from the stored conversation. Token usage is not retained per-message; the `usage` field on a retrieved response is zero.
+Returns the output items reconstructed from the stored conversation. The `usage` field is read best-effort from persisted run state (token totals plus USD cost); it can be zero when the run reported no usage.
 
 ---
 
@@ -543,12 +548,12 @@ if (call) {
 
 - **Rate limit**: 30 requests per 60 seconds per user (shared with `/api/chat/send`).
 - **Body size**: 14 MiB request limit at the gateway.
-- **Turn timeout (non-streaming)**: 120 seconds. Use `stream: true` for long-running work.
+- **Turn timeout (non-streaming)**: 30 seconds. Use `stream: true` for long-running work.
 - **Tool batching**: one external-tool call per round trip. The engine resumes the next call on the next turn.
 - **Approvals and auth gates**: not surfaced over the Responses API. Resolve them via the web UI before retrying.
-- **`tool_choice`**: rejected with `400` on deployments without external-tools support; with external tools enabled it is accepted but ignored. `max_output_tokens` and other unlisted OpenAI fields are accepted and ignored.
+- **`tool_choice`**: accepted and ignored — there is no per-request tool-choice surface. `max_output_tokens` and other unlisted OpenAI fields are likewise accepted and ignored.
 - **`model`**: required, any well-formed name (≤ 256 bytes). It is a routing hint echoed back in the response; provider and model selection is server-side via settings.
-- **Token usage on retrieval**: `GET /api/v1/responses/{id}` returns reconstructed output items but `usage` is zero because per-message token counts are not persisted.
+- **Token usage on retrieval**: `GET /api/v1/responses/{id}` reads `usage` best-effort from persisted run state (token totals plus USD cost); it can be zero when the run reported no usage.
 
 ---
 
