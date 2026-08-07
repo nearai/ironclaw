@@ -22,8 +22,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
-    SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadScope,
-    ToolResultReferenceEnvelope,
+    SessionThreadService, ThreadHistoryRequest, ThreadScope, ToolResultReferenceEnvelope,
+    effective_tool_result_read_max_bytes,
 };
 
 /// Test-support wrap: layers the synthetic `result_read` capability onto
@@ -72,7 +72,16 @@ pub const RESULT_READ_CAPABILITY_ID_FOR_TEST: &str = RESULT_READ_CAPABILITY_ID;
 pub const RESULT_READ_CAPABILITY_ID: &str = "builtin.result_read";
 const RESULT_READ_PROVIDER_TOOL_NAME: &str = "builtin__result_read";
 const RESULT_READ_MIN_BYTES: u64 = 4;
-const RESULT_READ_MAX_BYTES: u64 = TOOL_RESULT_RECORD_READ_MAX_BYTES as u64;
+/// The largest `max_bytes` a caller may request, resolved per request.
+///
+/// NOT the compile-time `TOOL_RESULT_RECORD_READ_MAX_BYTES`. This gate sits UPSTREAM of
+/// `validate_tool_result_record_read`, so pinning it to the constant made
+/// `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` inert: the downstream validator was widened while this
+/// one still rejected anything over 24 KiB and the advertised schema still said `maximum: 24576`,
+/// so no larger read was ever issued and the knob changed nothing.
+fn result_read_max_bytes() -> u64 {
+    effective_tool_result_read_max_bytes() as u64
+}
 
 fn thread_scope_for_run(
     run_context: &ironclaw_loop_contracts::LoopRunContext,
@@ -539,7 +548,7 @@ fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput,
     }
     let max_bytes = match max_bytes_value
         .as_u64()
-        .filter(|value| (RESULT_READ_MIN_BYTES..=RESULT_READ_MAX_BYTES).contains(value))
+        .filter(|value| (RESULT_READ_MIN_BYTES..=result_read_max_bytes()).contains(value))
     {
         Some(value) => value,
         None => {
@@ -548,7 +557,10 @@ fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput,
                 CapabilityInputIssue {
                     path: "max_bytes".to_string(),
                     code: DispatchInputIssueCode::InvalidValue,
-                    expected: Some(format!("{RESULT_READ_MIN_BYTES}..={RESULT_READ_MAX_BYTES}")),
+                    expected: Some(format!(
+                        "{RESULT_READ_MIN_BYTES}..={}",
+                        result_read_max_bytes()
+                    )),
                     received: Some(sanitized_issue_text(max_bytes_value.to_string())),
                     schema_path: Some("properties/max_bytes".to_string()),
                 },
@@ -570,7 +582,7 @@ fn result_read_input_schema() -> serde_json::Value {
         "properties": {
             "result_ref": {"type": "string", "description": "Opaque result reference from a prior tool result."},
             "offset": {"type": "integer", "minimum": 0},
-            "max_bytes": {"type": "integer", "minimum": RESULT_READ_MIN_BYTES, "maximum": RESULT_READ_MAX_BYTES}
+            "max_bytes": {"type": "integer", "minimum": RESULT_READ_MIN_BYTES, "maximum": result_read_max_bytes()}
         }
     })
 }
@@ -578,6 +590,37 @@ fn result_read_input_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The caller-facing gate must be the EFFECTIVE cap, not the compile-time constant.
+    ///
+    /// This is the whole of the inert-knob bug: `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` widened
+    /// `validate_tool_result_record_read`, which sits downstream, while this gate and the advertised
+    /// schema stayed pinned to `TOOL_RESULT_RECORD_READ_MAX_BYTES`. A larger read was rejected before
+    /// it could reach the widened validator, so the knob changed nothing at all.
+    ///
+    /// Asserted as a wiring identity rather than by setting the env var: these tests run in-process
+    /// and in parallel, so mutating the process environment races every other test reading it, and
+    /// the identity is what actually regressed.
+    #[test]
+    fn the_caller_gate_and_schema_track_the_effective_read_cap() {
+        assert_eq!(
+            result_read_max_bytes(),
+            effective_tool_result_read_max_bytes() as u64,
+            "the gate must resolve the same cap the record validator enforces, or the env override \
+             is inert"
+        );
+
+        let schema = result_read_input_schema();
+        let advertised = schema["properties"]["max_bytes"]["maximum"]
+            .as_u64()
+            .expect("the schema must advertise a max_bytes ceiling");
+        assert_eq!(
+            advertised,
+            result_read_max_bytes(),
+            "the model is told what it may ask for; advertising the compile-time constant while the \
+             gate allows more (or less) is how the knob went unnoticed"
+        );
+    }
 
     #[test]
     fn storage_failures_remain_terminal_and_model_safe() {

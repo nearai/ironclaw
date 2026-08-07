@@ -46,6 +46,7 @@ const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
 const GITHUB_EXTENSION_PREFERENCE: &str = "Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.";
+const WEB_SEARCH_PREFERENCE: &str = "Use this capability for structured HTTP APIs and direct file downloads when raw HTTP request control is required. For general web research or retrieving human-facing web pages, prefer an available `web_search` tool. This client does not render JavaScript and may receive bot or paywall interstitials.";
 const SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY: &str =
     "response body exceeded builtin.http.save response_body_limit; nothing was saved";
 const SAVE_BODY_STORE_UNAVAILABLE_SUMMARY: &str =
@@ -96,7 +97,8 @@ fn http_manifest(
     description: &str,
     effects: Vec<EffectKind>,
 ) -> Result<CapabilityManifest, ExtensionError> {
-    let description = format!("{description} {GITHUB_EXTENSION_PREFERENCE}");
+    let description =
+        format!("{description} {WEB_SEARCH_PREFERENCE} {GITHUB_EXTENSION_PREFERENCE}");
     first_party_capability_manifest(
         capability_id,
         &description,
