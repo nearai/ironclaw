@@ -674,7 +674,6 @@ fn binding() -> ironclaw_product_contracts::binding::ResolvedBinding {
     ironclaw_product_contracts::binding::ResolvedBinding {
         tenant_id: tenant(),
         actor_user_id: user(),
-        subject_user_id: Some(user()),
         thread_id: ThreadId::new("thread-a").expect("thread"),
         agent_id: Some(agent()),
         project_id: None,

@@ -4292,7 +4292,7 @@ mod tests {
     /// (`outbound_target.rs::notification_channels_set_approval_gate_approve_applies_channels`).
     #[tokio::test]
     async fn notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor()
-    {
+     {
         use ironclaw_approvals::ApprovalRequestStorePort as _;
         use ironclaw_authorization::CapabilityLeaseStorePort as _;
 
@@ -4471,7 +4471,10 @@ mod tests {
             .await
             .expect("approval store read succeeds")
             .expect("the raise persisted the approval request under the raise scope");
-        assert_eq!(raise_record.status, ironclaw_approvals::ApprovalStatus::Pending);
+        assert_eq!(
+            raise_record.status,
+            ironclaw_approvals::ApprovalStatus::Pending
+        );
         let fingerprint = raise_record
             .request
             .invocation_fingerprint

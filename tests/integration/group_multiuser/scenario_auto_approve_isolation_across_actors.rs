@@ -33,11 +33,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     // Grant always-allow for A's owner ONLY.
-    let a_owner = a
-        .binding
-        .subject_user_id
-        .clone()
-        .ok_or("actor A binding missing subject user id")?;
+    let a_owner = a.binding.actor_user_id.clone();
     // Force A OFF first: `AUTO_APPROVE_DEFAULT_ENABLED` is `true`, so a no-op
     // `enable_auto_approve_for_owner` could otherwise mask a broken grant.
     g.disable_auto_approve_for_owner(&a_owner)
@@ -75,16 +71,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     // Non-vacuity: distinct owners, else "B gates" would be the same scope as A.
-    if a.binding.subject_user_id == b.binding.subject_user_id {
+    if a.binding.actor_user_id == b.binding.actor_user_id {
         return Err("with_actor_id seam no-op: both actors resolved the same owner".into());
     }
     // Give B its OWN explicit always-allow=OFF so B is a genuine gating actor;
     // A's ON and B's OFF then coexist unambiguously per owner.
-    let b_owner = b
-        .binding
-        .subject_user_id
-        .clone()
-        .ok_or("actor B binding missing subject user id")?;
+    let b_owner = b.binding.actor_user_id.clone();
     g.disable_auto_approve_for_owner(&b_owner)
         .await
         .map_err(|e| format!("[B disable] {e}"))?;

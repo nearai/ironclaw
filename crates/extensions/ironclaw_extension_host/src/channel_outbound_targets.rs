@@ -42,11 +42,11 @@ use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::channel_host::GenericChannelHostAssembly;
 use ironclaw_extension_host::ChannelConfigService;
+use ironclaw_extension_host::handle_declares_field;
 use ironclaw_extension_host::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
 };
-use ironclaw_extension_host::handle_declares_field;
 use ironclaw_outbound::{
     DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
@@ -283,7 +283,6 @@ impl GenericChannelOutboundTargetProvider {
     fn caller_in_scope(&self, caller: &OutboundDeliveryTargetScope) -> bool {
         caller.tenant_id == self.deps.identity.tenant_id
     }
-
 }
 
 #[async_trait]

@@ -775,30 +775,30 @@ impl GenericChannelHostAssembly {
         // over its `[channel.config]` value, and a channel declaring no
         // admission handle gets `None`, which rejects every shared
         // conversation.
-        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> =
-            match &extras.shared_admission {
-                Some(resolver) => Some(Arc::clone(resolver)),
-                None => {
-                    let fields = admin_configuration_fields(source.resolved());
-                    let handles =
-                        ironclaw_extension_host::shared_channel_admission_handles(&fields);
-                    if handles.declared() {
-                        let extension_id = ExtensionId::new(source.extension_id())
-                            .map_err(|error| format!("invalid extension id: {error}"))?;
-                        Some(Arc::new(
-                            ironclaw_extension_host::ChannelConfigSharedAdmission::new(
-                                adapter_id.clone(),
-                                installation_id.clone(),
-                                extension_id,
-                                handles,
-                                Arc::clone(&self.deps.channel_config),
-                            ),
-                        ))
-                    } else {
-                        None
-                    }
+        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> = match &extras
+            .shared_admission
+        {
+            Some(resolver) => Some(Arc::clone(resolver)),
+            None => {
+                let fields = admin_configuration_fields(source.resolved());
+                let handles = ironclaw_extension_host::shared_channel_admission_handles(&fields);
+                if handles.declared() {
+                    let extension_id = ExtensionId::new(source.extension_id())
+                        .map_err(|error| format!("invalid extension id: {error}"))?;
+                    Some(Arc::new(
+                        ironclaw_extension_host::ChannelConfigSharedAdmission::new(
+                            adapter_id.clone(),
+                            installation_id.clone(),
+                            extension_id,
+                            handles,
+                            Arc::clone(&self.deps.channel_config),
+                        ),
+                    ))
+                } else {
+                    None
                 }
-            };
+            }
+        };
         let channel = source.resolved().channel.as_ref();
         Ok(ChannelWorkflowRequest {
             adapter_id,

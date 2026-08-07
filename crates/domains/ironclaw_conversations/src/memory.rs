@@ -961,7 +961,12 @@ impl InMemoryConversationServices {
                     request.adapter_installation_id.clone(),
                     request.external_conversation_ref,
                     ReplyRouteAccess::new(route_actor_key, request.route_kind),
-                    BindingTarget::new(thread_id, trusted_agent_id, trusted_project_id, owner_user_id),
+                    BindingTarget::new(
+                        thread_id,
+                        trusted_agent_id,
+                        trusted_project_id,
+                        owner_user_id,
+                    ),
                 )?;
                 let resolution = binding.resolution(
                     actor_user_id.clone(),
@@ -1558,10 +1563,7 @@ pub(crate) struct BindingKey {
 }
 
 impl BindingKey {
-    pub(crate) fn for_route(
-        request: &ResolveConversationRequest,
-        actor_user_id: &UserId,
-    ) -> Self {
+    pub(crate) fn for_route(request: &ResolveConversationRequest, actor_user_id: &UserId) -> Self {
         Self {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),

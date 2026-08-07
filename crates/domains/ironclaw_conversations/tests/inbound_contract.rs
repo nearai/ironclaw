@@ -1339,12 +1339,7 @@ async fn shared_route_owner_is_the_actor_even_when_a_trusted_owner_is_passed() {
     );
     shared.route_kind = ConversationRouteKind::Shared;
     let resolution = services
-        .resolve_or_create_binding_with_trusted_scope(
-            shared,
-            None,
-            None,
-            Some(user("operator")),
-        )
+        .resolve_or_create_binding_with_trusted_scope(shared, None, None, Some(user("operator")))
         .await
         .expect("shared bind succeeds");
 

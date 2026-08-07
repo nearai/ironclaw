@@ -518,8 +518,7 @@ fn binding_with_user(
     let user_id = UserId::new(user).expect("valid user");
     ironclaw_product_contracts::binding::ResolvedBinding {
         tenant_id: TenantId::new("tenant:install_alpha").expect("valid tenant"),
-        actor_user_id: user_id.clone(),
-        subject_user_id: Some(user_id),
+        actor_user_id: user_id,
         thread_id: ThreadId::new(thread).expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
@@ -529,12 +528,13 @@ fn binding_with_user(
 fn turn_scope_for_binding(
     binding: &ironclaw_product_contracts::binding::ResolvedBinding,
 ) -> TurnScope {
+    // A run acts as the user who invoked it: the actor owns the thread scope.
     TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),
         binding.project_id.clone(),
         binding.thread_id.clone(),
-        binding.subject_user_id.clone(),
+        Some(binding.actor_user_id.clone()),
     )
 }
 
@@ -621,7 +621,7 @@ async fn user_message_resolves_binding_persists_message_and_submits_turn() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
+                owner_user_id: Some(binding.actor_user_id.clone()),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -634,8 +634,10 @@ async fn user_message_resolves_binding_persists_message_and_submits_turn() {
     assert!(history.messages[0].turn_run_id.is_some());
 }
 
+// Pin changed with the run-acts-as-invoker ruling: a shared route's turn
+// scope is owned by the ACTOR who invoked it, not a resolved subject.
 #[tokio::test]
-async fn shared_user_message_submits_subject_owned_turn_scope() {
+async fn shared_user_message_submits_actor_owned_turn_scope() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = CapturingTurnCoordinator::default();
@@ -669,7 +671,7 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
         .expect("turn should be submitted");
     assert_eq!(
         submitted.scope.explicit_owner_user_id(),
-        binding.subject_user_id.as_ref()
+        Some(&binding.actor_user_id)
     );
     assert_eq!(submitted.actor.user_id, binding.actor_user_id);
 
@@ -679,13 +681,13 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
+                owner_user_id: Some(binding.actor_user_id.clone()),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
         })
         .await
-        .expect("shared route history should use the resolved subject");
+        .expect("shared route history should use the actor-owned scope");
     assert_eq!(history.messages.len(), 1);
     assert_eq!(
         history.messages[0].content.as_deref(),
@@ -753,7 +755,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let model_route_resolver = Arc::new(
@@ -927,7 +929,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let model_route_resolver = Arc::new(
@@ -1117,7 +1119,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let model_route_resolver = Arc::new(
@@ -1228,7 +1230,7 @@ async fn busy_thread_persists_second_message_as_rejected_busy() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
+                owner_user_id: Some(binding.actor_user_id.clone()),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -1277,7 +1279,7 @@ async fn busy_thread_with_input_queue_defers_second_message_until_queue_ack() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let history = thread_service
@@ -1385,7 +1387,7 @@ async fn busy_thread_queue_submit_tolerates_input_ack_before_queued_mark() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let history = thread_service
@@ -1664,7 +1666,7 @@ async fn busy_submit_rejects_when_active_run_profile_disallows_steering() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let history = thread_service
@@ -1741,7 +1743,7 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
+                owner_user_id: Some(binding.actor_user_id.clone()),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -1807,7 +1809,7 @@ async fn replay_lookup_is_namespaced_by_installation() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
+                owner_user_id: Some(binding.actor_user_id.clone()),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -1851,7 +1853,7 @@ async fn legacy_deferred_busy_retry_resubmits_existing_message() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     assert_eq!(
@@ -2089,7 +2091,7 @@ async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
+                owner_user_id: Some(binding.actor_user_id.clone()),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -2237,7 +2239,7 @@ async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
         binding.agent_id.clone(),
         binding.project_id.clone(),
         binding.thread_id.clone(),
-        binding.subject_user_id.clone(),
+        Some(binding.actor_user_id.clone()),
     );
     coordinator
         .cancel_run(ironclaw_turns::CancelRunRequest {
@@ -2270,7 +2272,7 @@ async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     };
     let history = thread_service

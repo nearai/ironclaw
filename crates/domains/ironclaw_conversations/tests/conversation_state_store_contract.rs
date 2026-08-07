@@ -653,7 +653,11 @@ async fn legacy_subject_owned_shared_binding_is_retained_but_unreachable_after_r
         .iter()
         .filter(|entry| entry[0].get("shared_actor_user_id").is_none())
         .collect();
-    assert_eq!(legacy_rows.len(), 1, "exactly one legacy-keyed row survives");
+    assert_eq!(
+        legacy_rows.len(),
+        1,
+        "exactly one legacy-keyed row survives"
+    );
     assert_eq!(
         legacy_rows[0][1]["owner_user_id"],
         serde_json::Value::String("operator".to_string()),

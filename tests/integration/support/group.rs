@@ -798,18 +798,15 @@ struct GroupBaseData {
 }
 
 impl GroupBaseData {
-    /// The canonical binding's resolved subject user id — the hashed `UserId`
-    /// the actor `host-user` resolves to. `live_approvals` and `profile_tools`
-    /// both pin their capability harness's executor user to this so capability
-    /// dispatch shares the run's `(tenant, user)` with the turn-store /
-    /// evidence scope resolved from the SAME `canonical_binding` (see the
-    /// `canonical_binding` field docs above).
+    /// The canonical binding's actor user id — the hashed `UserId` the actor
+    /// `host-user` resolves to (a run acts as the user who invoked it).
+    /// `live_approvals` and `profile_tools` both pin their capability
+    /// harness's executor user to this so capability dispatch shares the
+    /// run's `(tenant, user)` with the turn-store / evidence scope resolved
+    /// from the SAME `canonical_binding` (see the `canonical_binding` field
+    /// docs above).
     fn canonical_subject_user(&self) -> HarnessResult<UserId> {
-        Ok(self
-            .canonical_binding
-            .subject_user_id
-            .clone()
-            .ok_or("canonical binding missing subject user id")?)
+        Ok(self.canonical_binding.actor_user_id.clone())
     }
 }
 
@@ -917,7 +914,7 @@ impl RebornIntegrationGroupBuilder {
         // build the single shared turn store and evidence-port `ThreadScope`
         // before any per-thread binding exists. This is the SINGLE canonical
         // resolution for the group: `live_approvals` reuses
-        // `canonical_binding.subject_user_id` for its capability user rather than
+        // `canonical_binding.actor_user_id` for its capability user rather than
         // probing a second time, so turn-store scope and approval user can't
         // drift. The probe persists one deterministic, inert binding for
         // `conv-canonical-probe` (no thread submits turns against it); group
@@ -1139,7 +1136,7 @@ impl RebornIntegrationGroupBuilder {
                 base.canonical_binding.agent_id.clone(),
                 base.canonical_binding.project_id.clone(),
                 base.canonical_binding.thread_id.clone(),
-                base.canonical_binding.subject_user_id.clone(),
+                Some(base.canonical_binding.actor_user_id.clone()),
             )
             .to_resource_scope(),
             Arc::clone(&runtime_thread_service),
@@ -1568,7 +1565,7 @@ impl<'g> RebornThreadBuilder<'g> {
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
 
         // --- per-thread scripted gateway, registered before any submit ---------
