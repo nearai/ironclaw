@@ -22,6 +22,7 @@ vi.mock("../lib/admin-api", () => ({
 
 vi.mock("../../../lib/download", () => ({ saveBlob: vi.fn() }));
 
+import { saveBlob } from "../../../lib/download";
 import { ThreadScrapingPanel } from "./thread-scraping-panel";
 
 function LanguageSwitchingPanel() {
@@ -192,6 +193,88 @@ test("switching target users discards the previous user's pending artifact", asy
     requests.fetchThreads.mockReset();
     requests.fetchArtifact.mockReset();
     requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("switching target users discards a pending run download", async () => {
+  const pendingRun = deferred<Record<string, unknown>>();
+  requests.fetchThreads.mockImplementation((userId) =>
+    Promise.resolve({
+      threads: [
+        {
+          thread_id: userId === "user-one" ? "thread-one" : "thread-two",
+          title: userId === "user-one" ? "One" : "Two",
+        },
+      ],
+      next_cursor: null,
+    }),
+  );
+  requests.fetchArtifact.mockImplementation((_userId, threadId) =>
+    Promise.resolve({
+      thread_id: threadId,
+      messages: [
+        {
+          message_id: `message-${threadId}`,
+          kind: "assistant",
+          run_id: threadId === "thread-one" ? "run-one" : "run-two",
+          content: threadId,
+        },
+      ],
+    }),
+  );
+  requests.fetchRunArtifact.mockReturnValue(pendingRun.promise);
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-one" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    const firstRunButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("run-one"),
+    );
+    assert.ok(firstRunButton);
+    await act(async () => firstRunButton.click());
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-two" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    const secondRunButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("run-two"),
+    );
+    assert.ok(secondRunButton);
+    assert.equal(secondRunButton.disabled, false);
+
+    await act(async () => {
+      pendingRun.resolve({ schema: "stale-run-artifact" });
+    });
+    assert.equal(vi.mocked(saveBlob).mock.calls.length, 0);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+    vi.mocked(saveBlob).mockReset();
   }
 });
 

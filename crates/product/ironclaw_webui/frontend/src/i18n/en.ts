@@ -1214,6 +1214,8 @@ registerPack("en", {
   "admin.users.admin": "Admin",
   "admin.users.suspend": "Suspend",
   "admin.users.actionFailed": "Action failed: {message}",
+  // The lazy admin page registers the full copy for these route-only keys.
+  // These stubs preserve locale key/placeholder parity without charging /chat.
   "admin.users.lastAdminRequired": "",
   "admin.users.activate": "Activate",
   "admin.users.promote": "Promote",

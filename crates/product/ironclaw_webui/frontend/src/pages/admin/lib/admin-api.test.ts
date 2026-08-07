@@ -210,11 +210,17 @@ test("thread scraping clients preserve target, thread, run, and pagination scope
   stubFetch((path) => path.endsWith("/threads?limit=25&cursor=next")
     ? { threads: [], next_cursor: null }
     : { schema: "artifact" });
+  const controller = new AbortController();
 
-  await fetchThreadScrapeThreads("user a/b", { limit: 25, cursor: "next" });
+  await fetchThreadScrapeThreads("user a/b", {
+    limit: 25,
+    cursor: "next",
+    signal: controller.signal,
+  });
   await fetchThreadScrapeArtifact("user a/b", "thread a/b");
   await fetchThreadScrapeRunArtifact("user a/b", "thread a/b", "run a/b");
 
+  assert.equal(calls[0].init.signal, controller.signal);
   assert.deepEqual(calls.map((call) => call.path), [
     "/api/webchat/v2/admin/users/user%20a%2Fb/thread-scrape/threads?limit=25&cursor=next",
     "/api/webchat/v2/admin/users/user%20a%2Fb/thread-scrape/threads/thread%20a%2Fb/artifact",

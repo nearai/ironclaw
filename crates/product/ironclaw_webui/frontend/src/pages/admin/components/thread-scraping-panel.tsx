@@ -64,6 +64,7 @@ export function ThreadScrapingPanel({ userId }) {
     setIsLoading(true);
     setIsLoadingMore(false);
     setIsLoadingArtifact(false);
+    setDownloadingRunId("");
     setErrorKey("");
     fetchThreadScrapeThreads(userId, { limit: 100, signal: controller.signal })
       .then((response) => {
@@ -96,6 +97,7 @@ export function ThreadScrapingPanel({ userId }) {
     setArtifact(null);
     setErrorKey("");
     setIsLoadingArtifact(true);
+    setDownloadingRunId("");
     try {
       const response = await fetchThreadScrapeArtifact(userId, threadId);
       if (artifactRequestRef.current === requestId) setArtifact(response);
@@ -142,15 +144,19 @@ export function ThreadScrapingPanel({ userId }) {
 
   const downloadRun = async (runId) => {
     if (!selectedThreadId || !runId || downloadingRunId) return;
+    const requestId = artifactRequestRef.current;
     setDownloadingRunId(runId);
     setErrorKey("");
     try {
       const runArtifact = await fetchThreadScrapeRunArtifact(userId, selectedThreadId, runId);
+      if (artifactRequestRef.current !== requestId) return;
       saveArtifact(runArtifact, artifactFilename("run", runId));
     } catch {
-      setErrorKey("admin.threadScraping.downloadFailed");
+      if (artifactRequestRef.current === requestId) {
+        setErrorKey("admin.threadScraping.downloadFailed");
+      }
     } finally {
-      setDownloadingRunId("");
+      if (artifactRequestRef.current === requestId) setDownloadingRunId("");
     }
   };
 
@@ -193,6 +199,7 @@ export function ThreadScrapingPanel({ userId }) {
               <button
                 key={thread.thread_id}
                 type="button"
+                aria-pressed={selectedThreadId === thread.thread_id}
                 data-testid="admin-thread-scraping-thread"
                 onClick={() => selectThread(thread.thread_id)}
                 className={`w-full rounded-lg border px-3 py-2 text-left ${

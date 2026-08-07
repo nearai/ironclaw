@@ -218,6 +218,12 @@ test("user detail view is keyed by user id so local state resets between users",
 
   assert.equal(rendered.type.name, "UserDetailView");
   assert.equal(rendered.props.key, "user-2");
+  assert.equal(rendered.props.threadScrapingEnabled, false);
+  assert.equal(
+    UserDetail({ userId: "user-2", onBack: () => {}, threadScrapingEnabled: true })
+      .props.threadScrapingEnabled,
+    true,
+  );
 });
 
 test("user detail exposes thread scraping only when the deployment gate is enabled", () => {
