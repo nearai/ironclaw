@@ -742,12 +742,12 @@ fn build_recipe_authorization_url(
             .append_pair("response_type", "code");
         // An empty ceiling omits the parameter instead of sending it empty.
         // RFC 6749 §3.3 makes `scope` optional but requires at least one token
-        // when present, and servers enforce that: Attio rejects `scope=` with
-        // `400 invalid_scope` yet accepts the same request without it (#7308).
-        // A recipe legitimately carries no scopes when the vendor registers
-        // dynamically and declares none (`notion-mcp`, and every hosted-MCP
-        // registration) — `OAuth2CodeRecipe::validate` rejects only an empty
-        // scope *string*, not an empty list.
+        // when present, and servers may reject `scope=` while accepting the
+        // same request without it (#7308). A recipe legitimately carries no
+        // scopes when dynamic registration discovers no declared scopes or a
+        // static recipe deliberately defines an empty ceiling —
+        // `OAuth2CodeRecipe::validate` rejects only an empty scope *string*,
+        // not an empty list.
         if !scopes.is_empty() {
             pairs.append_pair(recipe.scope_param(), &scope_text);
         }
