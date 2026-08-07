@@ -560,7 +560,7 @@ if (call) {
 - **Turn timeout (non-streaming)**: 120 seconds. Use `stream: true` for long-running work.
 - **Tool batching**: one external-tool call per round trip. The engine resumes the next call on the next turn.
 - **Approvals and auth gates**: not surfaced over the Responses API. Resolve them via the web UI before retrying.
-- **`tool_choice`**: not supported. Requests carrying it are rejected with `400`; `max_output_tokens` and other unlisted OpenAI fields are accepted and ignored.
+- **`tool_choice`**: rejected with `400` on deployments without external-tools support; with external tools enabled it is accepted but ignored. `max_output_tokens` and other unlisted OpenAI fields are accepted and ignored.
 - **`model`**: required, any well-formed name (≤ 256 bytes). It is a routing hint echoed back in the response; provider and model selection is server-side via settings.
 - **Token usage on retrieval**: `GET /api/v1/responses/{id}` returns reconstructed output items but `usage` is zero because per-message token counts are not persisted.
 
