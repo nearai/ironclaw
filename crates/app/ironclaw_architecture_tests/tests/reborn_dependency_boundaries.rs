@@ -617,7 +617,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     /// failure message. Never counted by eye.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
-        ("ironclaw_extension_contracts", 7_727),
+        // Raised 7_727 -> 7_740 by #7185 (always-on memory recall): the growth
+        // is one `MemoryLifecycleHook` variant (`read_curated`) plus its wire
+        // token, `ALL` entry, and doc comment — declaration vocabulary only.
+        // The lane's behavior (reading the standing document, chunking,
+        // budgets, sanitization) lives in the native provider and
+        // ironclaw_host_runtime.
+        ("ironclaw_extension_contracts", 7_740),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

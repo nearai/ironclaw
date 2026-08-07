@@ -18,10 +18,11 @@ service = "native_memory_provider"
 # adapter. The [[tools]] array below is the provider's model tool surface;
 # `lifecycle` declares the host-initiated hooks this provider participates in
 # (an undeclared hook is never called). The native provider implements the
-# full set: both retrieve-before-run lanes, after-turn interaction recording,
-# and loop-start profile reads.
+# full set: both retrieve-before-run search lanes, the always-on curated
+# MEMORY.md lane, after-turn interaction recording, and loop-start profile
+# reads.
 [memory]
-lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]
+lifecycle = ["read_long_term", "read_short_term", "read_curated", "record_interaction", "profile_read"]
 
 # read/write model tools + native-only search/tree conveniences. All four are
 # routed to the bound MemoryService by the host; their input/output schemas are
@@ -47,7 +48,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
+description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. Use this to save a durable user preference, fact, decision, or correction so it stays available in future conversations (target \"memory\", append mode). For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"

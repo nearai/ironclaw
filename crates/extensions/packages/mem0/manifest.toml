@@ -13,9 +13,10 @@ service = "mem0_memory_provider"
 # adapter; the compose-time [memory] binding selects exactly one provider
 # (native by default, mem0 when explicitly bound + configured). The lifecycle
 # set is honest: mem0 implements the long-term retrieval lane and profile
-# reads. It has no thread partitioning (no short-term lane) and does not
-# record interactions, so those hooks are not declared and the host never
-# calls them.
+# reads. It has no thread partitioning (no short-term lane), no curated
+# standing document (no `read_curated` lane), and does not record
+# interactions, so those hooks are not declared and the host never calls
+# them.
 [memory]
 lifecycle = ["read_long_term", "profile_read"]
 
@@ -40,7 +41,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
+description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. Use this to save a durable user preference, fact, decision, or correction so it stays available in future conversations (target \"memory\", append mode). For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"

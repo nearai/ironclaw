@@ -1,6 +1,6 @@
 //! System-prompt content owned by the loop tier.
 //!
-//! These four assets are the *content* half of the default system prompt. They
+//! These five assets are the *content* half of the default system prompt. They
 //! live here — beside the other `prompts/*.md` assets this crate ships and
 //! beside [`identity_context`](crate::identity_context), whose
 //! `HostIdentityContextSource` is what puts them in front of a model — rather
@@ -44,6 +44,17 @@ pub const TOOL_DISCLOSURE_PROTOCOL_PROMPT: &str =
 /// uses.
 pub const SELF_KNOWLEDGE_PROTOCOL_PROMPT: &str = include_str!("../prompts/self_knowledge.md");
 
+/// Persistent-memory protocol, appended to the system prompt unconditionally.
+///
+/// Like the self-knowledge section, this is ground knowledge about the running
+/// system rather than a user preference: the memory tools and the host's
+/// automatic memory-context lane exist on every deployment, but nothing tells
+/// the model *when* a durable user fact is worth saving or that surfaced
+/// memories came from earlier conversations (#7185). Seeding it into the
+/// user-editable file would only reach fresh installs, so it is appended in
+/// memory on every resolve.
+pub const MEMORY_PROTOCOL_PROMPT: &str = include_str!("../prompts/memory_protocol.md");
+
 /// Appended only when benchmarking mode is active.
 ///
 /// Tells the model there is no human to ask, overriding the "ask the user...a
@@ -69,13 +80,14 @@ mod tests {
                 TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             ),
             ("self_knowledge.md", SELF_KNOWLEDGE_PROTOCOL_PROMPT),
+            ("memory_protocol.md", MEMORY_PROTOCOL_PROMPT),
             ("benchmarking_mode.md", BENCHMARKING_MODE_PROTOCOL_PROMPT),
         ] {
             assert!(!content.trim().is_empty(), "{name} must not be empty");
         }
     }
 
-    /// The three *appended* protocols are concatenated after the user's file,
+    /// The four *appended* protocols are concatenated after the user's file,
     /// separated by a blank line; each must open with a markdown heading so it
     /// reads as its own section rather than running into the previous
     /// paragraph. The base prompt is a whole document and is exempt.
@@ -87,6 +99,7 @@ mod tests {
                 TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             ),
             ("self_knowledge.md", SELF_KNOWLEDGE_PROTOCOL_PROMPT),
+            ("memory_protocol.md", MEMORY_PROTOCOL_PROMPT),
             ("benchmarking_mode.md", BENCHMARKING_MODE_PROTOCOL_PROMPT),
         ] {
             assert!(
@@ -98,13 +111,37 @@ mod tests {
         }
     }
 
-    /// The three appended protocols are distinct sections — a copy/paste that
+    /// The memory protocol is the only thing that tells the model *when* to
+    /// save a durable user fact and *what* the automatically surfaced memory
+    /// block is (#7185). Pin the load-bearing parts: the exact tool ids it
+    /// names (a renamed tool would leave the instruction pointing at nothing),
+    /// the curated `memory` target plus append mode the always-on prompt lane
+    /// reads back, and the never-save carve-out for secrets.
+    #[test]
+    fn memory_protocol_names_the_save_path_and_its_limits() {
+        for expected in [
+            "ironclaw.memory.write",
+            "ironclaw.memory.search",
+            "`memory`",
+            "append: true",
+            "across conversations",
+            "Never save secrets",
+        ] {
+            assert!(
+                MEMORY_PROTOCOL_PROMPT.contains(expected),
+                "memory protocol must mention {expected:?}"
+            );
+        }
+    }
+
+    /// The four appended protocols are distinct sections — a copy/paste that
     /// duplicated one would silently double a section in the resolved prompt.
     #[test]
     fn appended_protocol_assets_are_distinct() {
         let appended = [
             TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             SELF_KNOWLEDGE_PROTOCOL_PROMPT,
+            MEMORY_PROTOCOL_PROMPT,
             BENCHMARKING_MODE_PROTOCOL_PROMPT,
         ];
         for (i, left) in appended.iter().enumerate() {
