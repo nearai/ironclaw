@@ -1023,6 +1023,72 @@ mod tests {
         assert_eq!(bundle.materialized_messages[0].model_content, inline_body);
     }
 
+    fn auth_vocabulary_surface(trust: CapabilityDescriptionTrust) -> VisibleCapabilitySurface {
+        VisibleCapabilitySurface {
+            version: crate::CapabilitySurfaceVersion::new("surface:auth-vocab").unwrap(),
+            descriptors: vec![CapabilityDescriptorView {
+                capability_id: ironclaw_host_api::ids::CapabilityId::new(
+                    "builtin.extension_register_hosted_mcp",
+                )
+                .unwrap(),
+                provider: None,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
+                safe_name: "extension_register_hosted_mcp".to_string(),
+                safe_description: "Choose oauth for a browser authorization-code flow.".to_string(),
+                description_trust: trust,
+                concurrency_hint: crate::ConcurrencyHint::Exclusive,
+                parameters_schema: serde_json::json!({"type": "object"}),
+            }],
+            callable_capability_ids: None,
+        }
+    }
+
+    fn surface_summary_for(trust: CapabilityDescriptionTrust) -> String {
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle::default(),
+                visible_surface: Some(auth_vocabulary_surface(trust)),
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: Vec::new(),
+            })
+            .expect("instruction bundle builds");
+        bundle
+            .materialized_messages
+            .iter()
+            .find(|message| message.model_content.starts_with("surface "))
+            .expect("surface summary message")
+            .model_content
+            .clone()
+    }
+
+    /// Host-verified descriptions legitimately mention auth flows
+    /// ("browser authorization-code flow"); the credential denylist must not
+    /// silently drop them from the prompt's capability surface.
+    #[test]
+    fn verified_catalog_descriptions_with_auth_vocabulary_stay_on_the_surface() {
+        let summary = surface_summary_for(CapabilityDescriptionTrust::VerifiedCatalog);
+        assert!(
+            summary.contains("builtin.extension_register_hosted_mcp"),
+            "verified-catalog description must stay on the prompt surface: {summary}"
+        );
+    }
+
+    /// The strict scan still governs untrusted provenance: the same
+    /// description from an unverified source stays off the surface.
+    #[test]
+    fn untrusted_descriptions_with_auth_vocabulary_are_omitted_from_the_surface() {
+        let summary = surface_summary_for(CapabilityDescriptionTrust::Untrusted);
+        assert!(
+            !summary.contains("builtin.extension_register_hosted_mcp"),
+            "untrusted description must be omitted from the prompt surface: {summary}"
+        );
+        assert!(
+            summary.contains("(none)"),
+            "an all-omitted surface must render the empty marker: {summary}"
+        );
+    }
+
     fn test_context() -> LoopRunContext {
         let scope = TurnScope::new(
             TenantId::new("tenant-instruction-bundle").unwrap(),
