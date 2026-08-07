@@ -3511,11 +3511,11 @@ async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() 
     let body = served_bundled_javascript().await;
 
     assert!(
-        body.contains("e.saveError&&!a"),
+        body.contains("data-delivery-save-error"),
         "the delivery panel must render the save error instead of swallowing it"
     );
     assert!(
-        body.contains("finalReplyTargets.length>0"),
+        body.contains("data-delivery-external-target-hint"),
         "the Slack approval footnote must be gated on an external target existing"
     );
 }

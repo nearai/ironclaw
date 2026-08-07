@@ -506,15 +506,23 @@ mod tests {
             source_text("pages/automations/components/automation-delivery-defaults-panel.tsx");
         assert!(defaults_panel.contains("finalReplyTargets"));
         assert!(defaults_panel.contains("saveFinalReplyTarget"));
-        // Badge label must branch on optStatus — unavailable targets must not
-        // display the "ready" label.
+        // The real unavailable response has no target summary or list option,
+        // so recovery must be driven by the preference status itself.
         assert!(
-            defaults_panel.contains("automations.delivery.pill.unavailable"),
-            "unavailable badge label key must be used in the target option rows"
+            defaults_panel.contains("hasUnavailablePreference && draftTargetId === \"\""),
+            "an unavailable preference must make the Web App fallback saveable"
         );
         assert!(
-            !defaults_panel.contains(r#"label={t("automations.delivery.pill.ready")}"#),
-            "target option badge label must not be unconditionally hardcoded to .pill.ready"
+            defaults_panel.contains("Boolean(currentTargetId) || hasUnavailablePreference"),
+            "an unresolved saved binding must retain an explicit clear path"
+        );
+        assert!(
+            defaults_panel.contains("data-delivery-target-status=\"unavailable\""),
+            "an unresolved saved binding must render unavailable status information"
+        );
+        assert!(
+            app_bundle.contains("data-delivery-target-status"),
+            "served WebUI bundle must include unavailable delivery target rows; run the frontend build after editing frontend/src/**"
         );
 
         let defaults_hook = source_text("pages/automations/hooks/useOutboundDeliveryDefaults.ts");

@@ -525,6 +525,7 @@ struct StubServices {
     trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<ProductSurfaceError>>,
     get_outbound_preferences_calls: Mutex<usize>,
+    next_outbound_preferences: Mutex<Option<RebornOutboundPreferencesResponse>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
     list_operator_config_calls: Mutex<usize>,
     operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
@@ -557,6 +558,10 @@ struct StubServices {
 impl StubServices {
     fn fail_create_thread(&self, error: ProductSurfaceError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
+    }
+
+    fn set_outbound_preferences_response(&self, response: RebornOutboundPreferencesResponse) {
+        *self.next_outbound_preferences.lock().expect("lock") = Some(response);
     }
 
     /// Stage the bytes `read_attachment` should return. When unset, the stub
@@ -1004,8 +1009,14 @@ impl StubServices {
             }
             id if id == OUTBOUND_PREFERENCES_VIEW.id => {
                 *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
+                let preferences = self
+                    .next_outbound_preferences
+                    .lock()
+                    .expect("lock")
+                    .take()
+                    .unwrap_or_else(|| outbound_preferences_response("slack-dm-alpha"));
                 Ok(RebornViewPage {
-                    payload: serde_json::to_value(outbound_preferences_response("slack-dm-alpha"))
+                    payload: serde_json::to_value(preferences)
                         .expect("outbound preferences payload"),
                     next_cursor: None,
                 })
@@ -3597,6 +3608,36 @@ async fn get_outbound_preferences_dispatches_through_service() {
         .map(|query| query.view_id.clone())
         .collect();
     assert!(view_ids.contains(&OUTBOUND_PREFERENCES_VIEW.id.to_string()));
+}
+
+#[tokio::test]
+async fn get_outbound_preferences_preserves_unavailable_status_without_target_summary() {
+    let services = Arc::new(StubServices::default());
+    services.set_outbound_preferences_response(RebornOutboundPreferencesResponse {
+        final_reply_target: None,
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
+        default_modality: Default::default(),
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["final_reply_target_status"], "unavailable");
+    assert!(
+        body.get("final_reply_target").is_none(),
+        "an unresolved binding must not manufacture a target summary"
+    );
 }
 
 #[tokio::test]
