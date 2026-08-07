@@ -2358,8 +2358,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         })
         .to_string()
     };
-    let targeted_start_body = |update_id: u64, chat_id: u64, code: &str| {
-        let command = "/start@itest_pairing_bot";
+    let targeted_command_body = |update_id: u64, chat_id: u64, command: &str, code: &str| {
         json!({
             "update_id": update_id,
             "message": {
@@ -2456,7 +2455,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &targeted_start_body(604, 515151, &code),
+            &targeted_command_body(604, 515151, "/start@itest_pairing_bot", &code),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -2680,6 +2679,45 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             .await,
         Some(true),
         "verified webhook re-pair must restore the durable connection"
+    );
+
+    // 6b. The bot-targeted alias shape: an already-bound sender re-sending a
+    // fresh code as `/pair@bot CODE` is serviced as the idempotent repair
+    // path — the targeted-command normalization (`@bot` strip) composes with
+    // the alias prefix, and the sender gets the already-paired notice.
+    let repair_code = services
+        .pairing_mint_for_test("telegram", &paired_user)
+        .await
+        .expect("a connected caller can still mint a repair code");
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &targeted_command_body(610, 515151, "/pair@itest_pairing_bot", &repair_code),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ingress.drain().await;
+    assert!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body)
+                        .contains(telegram_notices.already_paired_same_user.as_str())
+            }),
+        "a targeted /pair repair re-send must post the already-paired notice"
+    );
+    assert_eq!(
+        services
+            .pairing_connected_for_test("telegram", &paired_user)
+            .await,
+        Some(true),
+        "the idempotent repair re-send must leave the pairing connected"
     );
 
     // 7. Resolving the same external actor/conversation now must allocate a
