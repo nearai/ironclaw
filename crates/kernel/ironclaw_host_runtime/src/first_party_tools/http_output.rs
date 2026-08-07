@@ -80,8 +80,10 @@ pub(super) fn shape_response(
 
 /// HTTP statuses that classify as capability failures. Drawn deliberately at
 /// 400 so rate-limit and overload responses (429/503) are never reported as
-/// success; 1xx/2xx/3xx stay inspectable successful results. Single source of
-/// truth shared by the dispatch shape-limit selection and the classifier.
+/// success; all statuses outside 400..=599 (informational, successful,
+/// redirects, and out-of-spec 600+) stay inspectable successful results.
+/// Single source of truth shared by the dispatch shape-limit selection and
+/// the classifier.
 pub(super) fn is_error_status(status: u16) -> bool {
     (400..=599).contains(&status)
 }
@@ -138,11 +140,20 @@ fn bounded_failure_diagnostic(output: Value, status: u16) -> String {
     if serialized_output_len(&output) > final_budget {
         return fallback_diagnostic(status);
     }
-    insert_truncation_envelope(
-        &mut output,
-        trim.headers_truncated,
-        trim.body_bytes_returned,
-    );
+    // The envelope must reflect truncation state from BOTH stages: the shape
+    // stage may have already marked headers/body as truncated (e.g. more than
+    // 32 headers, or a body trimmed at shape time), and the diagnostic-budget
+    // stage may have trimmed only one of them. OR the surviving keys in so the
+    // model never sees headers_truncated:true alongside an envelope that
+    // claims headers:false.
+    let headers_truncated = trim.headers_truncated || output.contains_key("headers_truncated");
+    let body_bytes_returned = trim.body_bytes_returned.or_else(|| {
+        output
+            .get("body_bytes_returned")
+            .and_then(Value::as_u64)
+            .map(|bytes| bytes as usize)
+    });
+    insert_truncation_envelope(&mut output, headers_truncated, body_bytes_returned);
     scrub_model_diagnostic_controls(serialize_diagnostic(&output, status))
 }
 
@@ -716,6 +727,35 @@ mod tests {
             classify_status(shaped, 200, 1_234).is_ok(),
             "2xx must remain a successful result"
         );
+    }
+
+    #[test]
+    fn failure_diagnostic_envelope_keeps_shape_stage_truncation_flags() {
+        // 33 headers trip the shape-stage header cap (MAX_MODEL_VISIBLE_RESPONSE_HEADERS)
+        // while the body alone absorbs the diagnostic-budget trim, so the
+        // re-inserted envelope must OR the shape-stage truncation state in.
+        let shaped = shape_response(
+            RuntimeHttpEgressResponse {
+                status: 403,
+                headers: (0..33)
+                    .map(|i| (format!("x-header-{i}"), "value".to_string()))
+                    .collect(),
+                body: vec![b'x'; 8 * 1024],
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 8 * 1024,
+                redaction_applied: false,
+            },
+            48 * 1024,
+        );
+        assert_eq!(shaped.output["headers_truncated"], json!(true));
+
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
+        let parsed: Value =
+            serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
+        assert_eq!(parsed["truncation"]["headers"], json!(true));
+        assert_eq!(parsed["headers_truncated"], json!(true));
+        assert!(diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
     }
 
     #[test]
