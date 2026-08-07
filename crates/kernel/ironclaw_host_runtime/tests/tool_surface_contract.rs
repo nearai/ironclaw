@@ -848,56 +848,81 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         trigger_create
             .descriptor
             .description
-            .contains("pass delivery_target_id"),
-        "trigger_create description should teach per-trigger delivery routing"
+            .contains("builtin__outbound_deliver"),
+        "trigger_create description should name the tool the routine's prompt must call to deliver"
     );
     assert!(
-        trigger_create.descriptor.description.contains(
-            "If delivery_target_id is set, never put a send, post, or deliver-results step"
-        ),
-        "trigger_create description should front-load the no-duplicate-delivery rule"
+        trigger_create
+            .descriptor
+            .description
+            .contains("a fire that makes no delivery call delivers nothing externally"),
+        "trigger_create description should state the no-call/no-delivery rule"
     );
-    let trigger_prompt_description = trigger_create
+    let trigger_properties = trigger_create
         .descriptor
         .parameters_schema
         .get("properties")
-        .and_then(|properties| properties.get("prompt"))
+        .and_then(serde_json::Value::as_object)
+        .expect("trigger_create schema should declare properties");
+    // The retired stored delivery route: routines carry delivery in the prompt
+    // now, so the input surface must not offer the field at all (a create call
+    // carrying it is rejected as an unexpected field).
+    assert!(
+        !trigger_properties.contains_key("delivery_target_id"),
+        "trigger_create schema must not declare the retired delivery_target_id input: {:?}",
+        trigger_properties.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !trigger_create
+            .descriptor
+            .description
+            .contains("delivery_target_id"),
+        "trigger_create description must not advertise the retired delivery_target_id input"
+    );
+    let trigger_prompt_description = trigger_properties
+        .get("prompt")
         .and_then(|property| property.get("description"))
         .and_then(serde_json::Value::as_str)
         .expect("trigger prompt description should be present");
     assert!(
-        trigger_prompt_description
-            .contains("Never tell the prompt to send results back to the requesting user"),
-        "trigger_create prompt schema should forbid result self-delivery phrasing"
+        trigger_prompt_description.contains("builtin__outbound_deliver"),
+        "trigger_create prompt schema should teach delivery as an explicit prompt step"
     );
     assert!(
-        trigger_prompt_description.contains("receiving results is routing"),
-        "trigger_create prompt schema should frame send-me asks as routing, not a prompt step"
-    );
-    let trigger_delivery_target_description = trigger_create
-        .descriptor
-        .parameters_schema
-        .get("properties")
-        .and_then(|properties| properties.get("delivery_target_id"))
-        .and_then(|property| property.get("description"))
-        .and_then(serde_json::Value::as_str)
-        .expect("trigger delivery_target_id description should be present");
-    assert!(
-        trigger_delivery_target_description.contains("builtin__outbound_delivery_targets_list"),
-        "delivery_target_id schema should point at the target list capability"
+        trigger_prompt_description.contains("builtin__outbound_delivery_targets_list")
+            && trigger_prompt_description.contains("while the user is present"),
+        "trigger_create prompt schema should require the destination be picked at creation time"
     );
     assert!(
-        trigger_delivery_target_description.contains(
-            "Do not also put a send, post, or deliver-results step for that result in prompt"
-        ),
-        "delivery_target_id schema should forbid duplicate prompt delivery"
+        !trigger_prompt_description.contains("delivery_target_id"),
+        "trigger_create prompt schema must not reference the retired stored delivery target"
+    );
+
+    let outbound_deliver = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.outbound_deliver"))
+        .expect("builtin.outbound_deliver should be visible");
+    assert!(
+        outbound_deliver
+            .descriptor
+            .description
+            .contains("builtin__outbound_delivery_targets_list"),
+        "outbound_deliver description should point the model at delivery target selection"
     );
     assert!(
-        trigger_delivery_target_description
-            .contains("inherits the current source run's authorized delivery route")
-            && trigger_delivery_target_description.contains("trusted run state")
-            && trigger_delivery_target_description.contains("never prompt parsing"),
-        "delivery_target_id schema should explain trusted source-route inheritance"
+        outbound_deliver
+            .descriptor
+            .description
+            .contains("provider message references"),
+        "outbound_deliver description should name its delivery evidence"
+    );
+    assert!(
+        outbound_deliver
+            .descriptor
+            .description
+            .contains("never deliver to the conversation you are replying in"),
+        "outbound_deliver description should forbid self-conversation delivery"
     );
 
     let http_schema = &surface

@@ -100,7 +100,6 @@ pub enum TriggerRecordValidationKind {
     NameTooLong,
     PromptEmpty,
     PromptTooLong,
-    DeliveryTargetInvalid,
     Other,
 }
 
@@ -287,16 +286,17 @@ impl<'de> Deserialize<'de> for TriggerInboundContentRef {
     }
 }
 
-/// Validate an opaque outbound target at the trigger record boundary.
+/// Decode the retired `delivery_target` column of a pre-removal trigger row.
 ///
-/// The identifier itself is the neutral host-API type used by outbound
-/// inventory and mediated routing. This helper is the only trigger-owned
-/// adaptation: it preserves the trigger repository's stable error taxonomy.
-pub fn parse_trigger_delivery_target_id(
+/// Nothing writes a non-null value into that column any more — a routine
+/// delivers by calling `builtin.outbound_deliver` from its own prompt — but
+/// rows written before the removal are still read until composition's boot
+/// migration rewrites them, so the durable backends keep decoding it.
+pub(crate) fn decode_legacy_delivery_target(
     value: impl Into<String>,
 ) -> Result<TriggerDeliveryTargetId, TriggerError> {
     TriggerDeliveryTargetId::new(value).map_err(|reason| TriggerError::InvalidRecord {
-        kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+        kind: TriggerRecordValidationKind::Other,
         reason,
     })
 }
@@ -352,10 +352,14 @@ pub struct TriggerRecord {
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
     pub prompt: String,
-    /// Optional per-trigger outbound delivery target. When set, fires deliver
-    /// their results to this target instead of the creator's user-global
-    /// outbound delivery preference, so one automation's routing cannot be
-    /// clobbered by another automation (or a later preference change).
+    /// Retired per-trigger delivery route, read-tolerated only.
+    ///
+    /// Fires used to push their final reply here; they no longer do — a
+    /// routine delivers externally only by calling `builtin.outbound_deliver`
+    /// from its own prompt. No create path populates this any more, and
+    /// composition's boot migration rewrites each surviving value into its
+    /// routine's prompt and then clears it. The field (and the column behind
+    /// it) stay so pre-removal rows keep deserializing until that pass runs.
     #[serde(default)]
     pub delivery_target: Option<TriggerDeliveryTargetId>,
     pub state: TriggerState,
@@ -682,6 +686,33 @@ fn validate_user_settable_trigger_state(state: TriggerState) -> Result<(), Trigg
     }
 }
 
+/// Computes the schedule position for a caller-scoped lifecycle transition.
+///
+/// Pausing a recurring trigger means its elapsed wall-clock slots are skipped,
+/// not queued for catch-up delivery. Resuming therefore rebases a paused cron
+/// trigger to the first slot strictly after the transition. Fire-once triggers
+/// retain their original slot so a paused reminder can still run once when the
+/// user resumes it.
+fn next_run_at_for_state_transition(
+    record: &TriggerRecord,
+    new_state: TriggerState,
+    transitioned_at: Timestamp,
+) -> Result<Timestamp, TriggerError> {
+    if record.state == TriggerState::Paused
+        && new_state == TriggerState::Scheduled
+        && record.schedule.is_recurring()
+    {
+        return record
+            .schedule
+            .next_slot_after(transitioned_at)?
+            .ok_or_else(|| TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::Other,
+                reason: "cannot resume recurring trigger: schedule has no future slot".to_string(),
+            });
+    }
+    Ok(record.next_run_at)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerRunStatus {
@@ -873,10 +904,6 @@ pub struct TriggerFire {
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub prompt: String,
-    /// Per-trigger outbound delivery target carried from the record so the
-    /// delivery layer can honor it without re-reading the trigger row.
-    #[serde(default)]
-    pub delivery_target: Option<TriggerDeliveryTargetId>,
 }
 
 #[async_trait]
@@ -1038,7 +1065,6 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
-            delivery_target: record.delivery_target.clone(),
         }))
     }
 }
@@ -1046,6 +1072,24 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
 #[async_trait]
 pub trait TriggerRepository: Send + Sync {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError>;
+
+    /// Atomically replace a legacy routed trigger's prompt and clear its
+    /// retired delivery target, but only while both values still match the
+    /// record observed by the migration.
+    ///
+    /// The migration deliberately updates only these two columns. Scheduler,
+    /// run, and lifecycle fields may change concurrently and must never be
+    /// overwritten by a boot-time read-modify-write.
+    async fn migrate_legacy_delivery_target(
+        &self,
+        _expected: &TriggerRecord,
+        _migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "legacy delivery-target migration is not implemented by this repository"
+                .to_string(),
+        })
+    }
 
     async fn get_trigger(
         &self,
@@ -1097,7 +1141,10 @@ pub trait TriggerRepository: Send + Sync {
     /// (`Scheduled` or `Paused`). A stored `Completed` trigger is terminal and
     /// must not be moved back into the scheduler by this method; implementations
     /// return `Ok(None)` for that case so callers do not leak trigger existence
-    /// across invalid lifecycle transitions.
+    /// across invalid lifecycle transitions. Resuming a paused recurring
+    /// trigger atomically advances `next_run_at` to the first future schedule
+    /// slot so occurrences missed while paused are not replayed. Fire-once
+    /// triggers preserve their original slot and remain eligible to fire once.
     async fn set_scoped_trigger_state(
         &self,
         tenant_id: TenantId,
@@ -1294,11 +1341,12 @@ pub use worker::{
     ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
     ActiveHoldReason, BlockedActiveRunKind, MissingTriggerActiveRunLookup,
     NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
-    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
-    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
-    TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
-    TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFailedFireSettlement,
+    TriggerFireSettlementObserver, TriggerPollerFailureReason, TriggerPollerFireOutcome,
+    TriggerPollerFireReport, TriggerPollerTickReport, TriggerPollerWorker,
+    TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest, active_hold_projection,
+    active_holds_for_records,
 };
 
 #[derive(Clone, Default)]
