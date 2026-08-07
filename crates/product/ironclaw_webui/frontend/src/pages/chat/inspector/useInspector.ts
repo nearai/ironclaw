@@ -14,6 +14,7 @@ const MAX_RETAINED_UPDATES = 1_024;
 const MAX_SNAPSHOT_ATTEMPTS = 3;
 const SNAPSHOT_RETRY_BASE_DELAY_MS = 500;
 const SNAPSHOT_REFRESH_DEBOUNCE_MS = 50;
+const SNAPSHOT_REFRESH_MAX_WAIT_MS = 250;
 
 interface DiagnosticUpdate {
   stream_id?: string;
@@ -125,6 +126,7 @@ export function useInspector({
     let connectedOnce = false;
     let terminalState = false;
     let snapshotRefreshTimer: number | null = null;
+    let snapshotRefreshMaxWaitTimer: number | null = null;
     let controller: ReturnType<EventSourcePlus["listen"]> | null = null;
     const request = inspectorEventStreamRequest({ threadId, runId });
     const stream = new EventSourcePlus(request.url, {
@@ -139,21 +141,35 @@ export function useInspector({
 
     function terminal(healthState: InspectorHealth, message: string): void {
       terminalState = true;
-      if (snapshotRefreshTimer !== null) {
-        window.clearTimeout(snapshotRefreshTimer);
-        snapshotRefreshTimer = null;
-      }
+      cancelSnapshotRefresh();
       setHealth(healthState);
       setError(message);
       controller?.abort("terminal inspector response");
     }
 
-    function scheduleSnapshotRefresh(): void {
+    function cancelSnapshotRefresh(): void {
       if (snapshotRefreshTimer !== null) window.clearTimeout(snapshotRefreshTimer);
-      snapshotRefreshTimer = window.setTimeout(() => {
-        snapshotRefreshTimer = null;
-        if (!disposed) setSnapshotGeneration((generation) => generation + 1);
-      }, SNAPSHOT_REFRESH_DEBOUNCE_MS);
+      if (snapshotRefreshMaxWaitTimer !== null) {
+        window.clearTimeout(snapshotRefreshMaxWaitTimer);
+      }
+      snapshotRefreshTimer = null;
+      snapshotRefreshMaxWaitTimer = null;
+    }
+
+    function refreshSnapshot(): void {
+      cancelSnapshotRefresh();
+      if (!disposed) setSnapshotGeneration((generation) => generation + 1);
+    }
+
+    function scheduleSnapshotRefresh(): void {
+      if (snapshotRefreshMaxWaitTimer === null) {
+        snapshotRefreshMaxWaitTimer = window.setTimeout(
+          refreshSnapshot,
+          SNAPSHOT_REFRESH_MAX_WAIT_MS,
+        );
+      }
+      if (snapshotRefreshTimer !== null) window.clearTimeout(snapshotRefreshTimer);
+      snapshotRefreshTimer = window.setTimeout(refreshSnapshot, SNAPSHOT_REFRESH_DEBOUNCE_MS);
     }
 
     function connect(): void {
@@ -247,7 +263,7 @@ export function useInspector({
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       disposed = true;
-      if (snapshotRefreshTimer !== null) window.clearTimeout(snapshotRefreshTimer);
+      cancelSnapshotRefresh();
       document.removeEventListener("visibilitychange", onVisibilityChange);
       controller?.abort("inspector disposed");
     };

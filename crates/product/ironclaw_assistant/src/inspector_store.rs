@@ -1808,15 +1808,61 @@ mod tests {
 
     #[test]
     fn model_breakdown_truncation_remains_latched_after_a_bucket_is_removed() {
-        let mut stats = SessionDiagnosticStats::default();
-        for index in 0..MAX_MODELS_IN_STATS {
-            update_model_count(&mut stats, &format!("model-{index}"), true);
+        let store = InMemoryDiagnosticStore::default();
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let first_call_id = DiagnosticModelCallId::new();
+        for index in 0..=MAX_MODELS_IN_STATS {
+            let call_id = if index == 0 {
+                first_call_id
+            } else {
+                DiagnosticModelCallId::new()
+            };
+            store
+                .record_model_call(
+                    scope.clone(),
+                    ModelCallDiagnostic::new(
+                        call_id,
+                        u32::try_from(index).expect("model index"),
+                        "requested",
+                        Some(format!("model-{index}")),
+                        Utc::now(),
+                        Some(Utc::now()),
+                        Some(1),
+                        InspectorModelCallStatus::Succeeded,
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record distinct model");
         }
-        update_model_count(&mut stats, "omitted-model", true);
-        update_model_count(&mut stats, "model-0", false);
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    first_call_id,
+                    0,
+                    "requested",
+                    Some("model-1".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    Some(1),
+                    InspectorModelCallStatus::Succeeded,
+                    None,
+                    None,
+                ),
+            )
+            .expect("replace first model contribution");
 
-        assert!(stats.calls_per_model_truncated);
-        assert_eq!(stats.calls_per_model.len(), MAX_MODELS_IN_STATS - 1);
+        let snapshot = store.snapshot(&scope).expect("snapshot").expect("run");
+        assert!(snapshot.stats.calls_per_model_truncated);
+        assert_eq!(
+            snapshot.stats.total_model_calls,
+            u64::try_from(MAX_MODELS_IN_STATS + 1).expect("model count")
+        );
+        assert_eq!(
+            snapshot.stats.calls_per_model.len(),
+            MAX_MODELS_IN_STATS - 1
+        );
     }
 
     #[test]
