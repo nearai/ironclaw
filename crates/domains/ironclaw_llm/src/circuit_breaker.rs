@@ -289,6 +289,10 @@ fn is_transient(err: &LlmError) -> bool {
         | LlmError::ModelNotAvailable { .. }
         | LlmError::QuotaExceeded { .. }
         | LlmError::AuthFailed { .. }
+        // The backend is not degraded; this host simply has no way to renew a
+        // session. Tripping the breaker would blame the provider for a local
+        // configuration gap.
+        | LlmError::SessionRenewalUnavailable { .. }
         | LlmError::Json(_) => false,
     }
 }
@@ -737,6 +741,14 @@ mod tests {
         // NOT transient
         assert!(!is_transient(&LlmError::AuthFailed {
             provider: "p".into(),
+        }));
+        // A missing renewal path is a local configuration gap, not provider
+        // degradation. Counting it would trip the breaker against a backend
+        // that is answering perfectly well, and take every other caller of that
+        // provider down with it.
+        assert!(!is_transient(&LlmError::SessionRenewalUnavailable {
+            provider: "p".into(),
+            reason: "no renewer wired".into(),
         }));
         assert!(!is_transient(&LlmError::ContextLengthExceeded {
             used: 100_000,

@@ -37,9 +37,11 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// their concrete error carries transient connection/status evidence.
 ///
 /// Non-retryable: `InvalidRequest`, `AuthFailed`, `SessionExpired`,
-/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`,
-/// `InvalidResponse`, `EmptyResponse`.
+/// `SessionRenewalUnavailable`, `ContextLengthExceeded`, `ModelNotAvailable`,
+/// `QuotaExceeded`, `Json`, `InvalidResponse`, `EmptyResponse`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
+/// - `SessionRenewalUnavailable` — no renewal path exists in this build, so
+///   the next attempt reaches the same dead end as this one
 /// - `ModelNotAvailable` — the model won't appear between attempts
 /// - `QuotaExceeded` — billing or credits require user action
 /// - `Json` — a serde parse bug, not a transient failure
@@ -63,6 +65,7 @@ pub fn is_retryable(err: &LlmError) -> bool {
         | LlmError::QuotaExceeded { .. }
         | LlmError::AuthFailed { .. }
         | LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalUnavailable { .. }
         | LlmError::Json(_) => false,
     }
 }
@@ -742,6 +745,13 @@ mod tests {
             provider: "p".into(),
             reason: "timeout".into(),
         }));
+        // A renewal attempt that could not happen at all is NOT retryable:
+        // the headless `NoopSessionRenewer` reports the same dead end on every
+        // attempt, so retrying only spends the budget and delays the failure.
+        assert!(!is_retryable(&LlmError::SessionRenewalUnavailable {
+            provider: "nearai".into(),
+            reason: "interactive session renewal is unavailable in this build".into(),
+        }));
         assert!(is_retryable(&LlmError::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset"
@@ -868,6 +878,34 @@ mod tests {
         assert!(matches!(err, LlmError::ContextLengthExceeded { .. }));
         // Should only be called once — no retries for non-transient errors
         assert_eq!(stub.calls(), 1);
+    }
+
+    /// Driven through `RetryProvider`, not `is_retryable` alone: the classifier
+    /// gates the retry loop, so the regression only shows up as an attempt
+    /// count.
+    ///
+    /// Regression: the headless `NoopSessionRenewer` reported "renewal is
+    /// impossible here" as `SessionRenewalFailed`, which is retryable. Every
+    /// run on a host with no renewer wired therefore spent its whole retry
+    /// budget (three attempts and ~7s of backoff) re-asking a question whose
+    /// answer could not change, before failing anyway.
+    #[tokio::test]
+    async fn unavailable_session_renewal_is_not_retried() {
+        use crate::testing::fault_injection::{FaultAction, FaultInjector, FaultType};
+
+        let injector = Arc::new(FaultInjector::sequence_loop([FaultAction::Fail(
+            FaultType::SessionRenewalUnavailable,
+        )]));
+        let stub = Arc::new(StubLlm::new("unused").with_fault_injector(injector));
+        let retry = RetryProvider::new(stub.clone(), fast_config(3));
+
+        let err = retry.complete(make_request()).await.unwrap_err();
+        assert!(matches!(err, LlmError::SessionRenewalUnavailable { .. }));
+        assert_eq!(
+            stub.calls(),
+            1,
+            "a renewal path that does not exist cannot appear on a later attempt"
+        );
     }
 
     #[tokio::test]

@@ -709,6 +709,44 @@ mod tests {
         assert_eq!(data.auth_provider, Some("near".to_string()));
     }
 
+    /// The default renewer is the headless no-op, and its refusal must be the
+    /// *permanent* variant.
+    ///
+    /// Regression: it reported `SessionRenewalFailed`, which `is_retryable`
+    /// treats as retryable because a renewal attempt can fail transiently. But
+    /// "no renewer is wired in this build" is settled before the first attempt,
+    /// so every failing run on a headless host burned its full retry budget
+    /// (three attempts, ~7s of backoff) re-asking a question whose answer could
+    /// not change, and failed anyway.
+    ///
+    /// Driven through `ensure_authenticated`, the production entry point, so
+    /// the assertion covers the wiring and not just the no-op in isolation.
+    #[tokio::test]
+    async fn ensure_authenticated_without_a_renewer_fails_permanently() {
+        let dir = tempdir().unwrap();
+        let config = SessionConfig {
+            auth_base_url: "https://example.com".to_string(),
+            session_path: dir.path().join("nonexistent.json"),
+        };
+
+        let manager = SessionManager::new_async(config).await;
+        assert!(!manager.has_token().await, "no token should be loaded");
+
+        let error = manager
+            .ensure_authenticated()
+            .await
+            .expect_err("no token and no renewer cannot authenticate");
+
+        assert!(
+            matches!(error, LlmError::SessionRenewalUnavailable { .. }),
+            "the default renewer must report a permanent failure, got: {error:?}"
+        );
+        assert!(
+            !crate::retry::is_retryable(&error),
+            "a renewal path that does not exist cannot appear on a later attempt"
+        );
+    }
+
     #[tokio::test]
     async fn test_get_token_without_auth_fails() {
         let dir = tempdir().unwrap();

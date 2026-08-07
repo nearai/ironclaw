@@ -92,7 +92,7 @@ pub struct NoopSessionRenewer;
 #[async_trait]
 impl SessionRenewer for NoopSessionRenewer {
     async fn renew(&self, _manager: &super::session::SessionManager) -> Result<(), LlmError> {
-        Err(LlmError::SessionRenewalFailed {
+        Err(LlmError::SessionRenewalUnavailable {
             provider: "nearai".to_string(),
             reason: "interactive session renewal is unavailable in this build; \
                  set NEARAI_SESSION_TOKEN or NEARAI_API_KEY env var instead"

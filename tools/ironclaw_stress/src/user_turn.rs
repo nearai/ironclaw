@@ -2116,7 +2116,8 @@ fn provider_latency_failure(error: LlmError) -> OperationFailure {
         LlmError::RateLimited { .. } => "model_provider_rate_limited",
         LlmError::AuthFailed { .. }
         | LlmError::SessionExpired { .. }
-        | LlmError::SessionRenewalFailed { .. } => "model_provider_auth",
+        | LlmError::SessionRenewalFailed { .. }
+        | LlmError::SessionRenewalUnavailable { .. } => "model_provider_auth",
         LlmError::ContextLengthExceeded { .. } => "model_provider_context_length",
         LlmError::InvalidRequest { .. } => "model_provider_invalid_request",
         LlmError::ModelNotAvailable { .. } => "model_provider_model_unavailable",

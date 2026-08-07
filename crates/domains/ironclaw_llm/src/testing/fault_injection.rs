@@ -39,6 +39,10 @@ pub enum FaultType {
     ContextLengthExceeded,
     /// Session expired (transient for circuit breaker, not retryable).
     SessionExpired,
+    /// No session-renewal path exists in this build (not retryable, and not a
+    /// backend fault — the provider is healthy, this host just cannot
+    /// authenticate to it).
+    SessionRenewalUnavailable,
 }
 
 impl FaultType {
@@ -70,6 +74,10 @@ impl FaultType {
             },
             FaultType::SessionExpired => LlmError::SessionExpired {
                 provider: provider.to_string(),
+            },
+            FaultType::SessionRenewalUnavailable => LlmError::SessionRenewalUnavailable {
+                provider: provider.to_string(),
+                reason: "injected fault: session renewal is unavailable".to_string(),
             },
         }
     }

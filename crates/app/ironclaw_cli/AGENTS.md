@@ -8,6 +8,7 @@ This crate owns the standalone `ironclaw` command surface. Keep it small, explic
 - Register each command in `src/commands/mod.rs` and dispatch through `Command::execute`.
 - Keep `src/cli.rs` as the clap root only: parse top-level CLI and hand off to command modules.
 - Put shared process/env boot state in `RebornCliContext` from `src/context.rs`.
+- `src/main.rs` runs exactly two steps: `bootstrap_env::load()` then `cli::run()`. `src/bootstrap_env.rs` seeds the process environment from `./.env` and then `$IRONCLAW_REBORN_HOME/.env`, never overwriting an already-set variable, so precedence is real env > working directory > Reborn home. Every command therefore sees bootstrap variables before dispatch; do not re-read `.env` from a command.
 
 ## Boundaries
 

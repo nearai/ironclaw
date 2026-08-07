@@ -88,8 +88,22 @@ pub enum LlmError {
     #[error("Session expired for provider {provider}")]
     SessionExpired { provider: String },
 
+    /// A renewal *attempt* failed for a reason that may not recur — a
+    /// validation request that timed out, a transient 5xx from the auth
+    /// endpoint. Retrying can succeed, so [`crate::retry::is_retryable`] says
+    /// yes.
     #[error("Session renewal failed for provider {provider}: {reason}")]
     SessionRenewalFailed { provider: String, reason: String },
+
+    /// There is no renewal path at all in this build or deployment, so no
+    /// number of attempts can produce a session. Distinct from
+    /// [`Self::SessionRenewalFailed`] precisely so the retry layer can tell
+    /// "this might work next time" from "this can never work": the headless
+    /// `NoopSessionRenewer` used to report the second as the first, and every
+    /// failed run burned its full retry budget on a call whose outcome was
+    /// already decided.
+    #[error("Session renewal is unavailable for provider {provider}: {reason}")]
+    SessionRenewalUnavailable { provider: String, reason: String },
 
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),

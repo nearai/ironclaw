@@ -2739,12 +2739,24 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             HostManagedModelErrorKind::PolicyDenied,
             "requested model is not available through this profile",
         ),
-        LlmError::AuthFailed { .. }
-        | LlmError::SessionExpired { .. }
-        | LlmError::SessionRenewalFailed { .. } => HostManagedModelError::safe(
+        // A key the provider looked at and rejected. This is the one fault the
+        // pinned "check your API key and base URL" sentence actually describes,
+        // so it stays the unqualified member of the kind.
+        LlmError::AuthFailed { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             "model credentials are unavailable",
         ),
+        // A session fault is not a bad key: there was no session to present, so
+        // the credential was never read. These three were the "fourth producer"
+        // `credential_unavailable_faults_carry_distinct_reason_kinds` warned
+        // about — carrying no reason kind, they inherited the bad-key advice.
+        LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalFailed { .. }
+        | LlmError::SessionRenewalUnavailable { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "model provider session is unavailable",
+        )
+        .with_reason_kind(MODEL_PROVIDER_SESSION_UNAVAILABLE_REASON_KIND),
         LlmError::RateLimited { retry_after, .. } => {
             let error = HostManagedModelError::safe(
                 HostManagedModelErrorKind::RateLimited,
@@ -3127,6 +3139,47 @@ mod tests {
             Some(MODEL_PROVIDER_SESSION_UNAVAILABLE_REASON_KIND),
             "session-storage faults must name their own cause, not a bad API key"
         );
+    }
+
+    /// An expired session, and a session that could not be renewed, are the
+    /// producers the sibling test warned about: they carried no reason kind, so
+    /// they inherited the bad-key sentence.
+    ///
+    /// The credential was never presented in any of these cases — there was no
+    /// session to present. Telling the operator to "check the selected
+    /// provider's API key and base URL" sends them to inspect a value that was
+    /// never read. This is the exact failure a `serve` host hits, because
+    /// nothing calls `attach_renewer`, so `NoopSessionRenewer` answers every
+    /// renewal with `SessionRenewalUnavailable`.
+    #[test]
+    fn session_faults_are_not_reported_as_invalid_credentials() {
+        for error in [
+            LlmError::SessionExpired {
+                provider: "fixture-provider".to_string(),
+            },
+            LlmError::SessionRenewalFailed {
+                provider: "fixture-provider".to_string(),
+                reason: "validation request timed out".to_string(),
+            },
+            LlmError::SessionRenewalUnavailable {
+                provider: "fixture-provider".to_string(),
+                reason: "interactive session renewal is unavailable in this build".to_string(),
+            },
+        ] {
+            let label = error.to_string();
+            let mapped = map_provider_error(error);
+
+            assert_eq!(
+                mapped.kind,
+                HostManagedModelErrorKind::CredentialUnavailable,
+                "a session fault still fails fast rather than retrying: {label}"
+            );
+            assert_eq!(
+                mapped.reason_kind,
+                Some(MODEL_PROVIDER_SESSION_UNAVAILABLE_REASON_KIND),
+                "a session fault must name signing in again, not a bad API key: {label}"
+            );
+        }
     }
 
     /// The three faults that share `CredentialUnavailable` must stay

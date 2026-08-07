@@ -181,7 +181,7 @@ Closed (normal)
       → Open (if any probe fails)
 ```
 
-**Transient vs non-transient errors:** `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionExpired`, and `SessionRenewalFailed` count toward the threshold. `Http` and `Io` count only when their concrete status/error kind carries transient connection evidence. `InvalidResponse`, `EmptyResponse`, `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, and `Json` never trip the breaker.
+**Transient vs non-transient errors:** `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionExpired`, and `SessionRenewalFailed` count toward the threshold. `Http` and `Io` count only when their concrete status/error kind carries transient connection evidence. `InvalidResponse`, `EmptyResponse`, `AuthFailed`, `SessionRenewalUnavailable`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, and `Json` never trip the breaker. `SessionRenewalUnavailable` is deliberately on the non-transient side even though its sibling `SessionRenewalFailed` is not: it means *this host* has no renewal path, so counting it would trip the breaker against a backend that is answering perfectly well.
 
 Configure via `LlmConfig` fields: `circuit_breaker_threshold` (env: `LLM_CIRCUIT_BREAKER_THRESHOLD`, falls back to `CIRCUIT_BREAKER_THRESHOLD`; None = disabled), `circuit_breaker_recovery_secs` (env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; default: 30).
 
@@ -197,7 +197,9 @@ The circuit breaker wraps the retry/routing/failover chain (`apply_decorator_cha
 
 ## Retry
 
-`RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionRenewalFailed`, plus `Http` / `Io` only with concrete transient evidence. Does **not** retry completed `InvalidResponse` / `EmptyResponse`, `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, or `Json`.
+`RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionRenewalFailed`, plus `Http` / `Io` only with concrete transient evidence. Does **not** retry completed `InvalidResponse` / `EmptyResponse`, `AuthFailed`, `SessionExpired`, `SessionRenewalUnavailable`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, or `Json`.
+
+`SessionRenewalFailed` and `SessionRenewalUnavailable` split on exactly this question. The first is a renewal *attempt* that failed for a reason that may not recur (a validation request that timed out), so retrying can work. The second means no renewal path exists in this build at all — the answer is settled before the first attempt, and retrying only spends the budget and delays the failure.
 
 **Backoff schedule:** base 1s doubled per attempt with ±25% jitter, minimum floor 100ms. Attempt 0: ~1s, attempt 1: ~2s, attempt 2: ~4s. For `RateLimited`, uses the `retry_after` duration from the error (provider-supplied) instead of backoff.
 
@@ -258,6 +260,8 @@ with `rg -n "impl (SessionDb|SessionSecrets|SessionRenewer|SessionKeyPersistor) 
 before assuming any of these ports is wired.
 
 `NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops) and are the only implementations in the tree today. A binary that needs real behavior plugs concrete impls into `SessionManager` at startup; no Reborn binary currently does.
+
+Because no binary attaches a renewer, `SessionManager::ensure_authenticated` on a host with no token always ends at `NoopSessionRenewer`. It reports `SessionRenewalUnavailable` — the permanent variant — so the decorator chain fails the call on the first attempt instead of retrying a dead end. Session-token auth is therefore not a working auth mode for `serve` today; `nearai` needs an API key, which is why `effective_api_key_required` (`ironclaw_operator::llm_admin::provider_admin`) overrides its catalog value to `true`.
 
 ## Response Cache
 

@@ -3886,6 +3886,113 @@ fn doctor_rejects_empty_profile_override() {
     assert!(stderr.contains(INVALID_PROFILE_MESSAGE), "stderr: {stderr}");
 }
 
+/// The operator `.env` that sits in the Reborn home — beside the `config.toml`
+/// whose `api_key_env` names the very variables it holds — must reach the
+/// process environment.
+///
+/// Regression: only the working-directory `.env` was ever loaded, so a host
+/// started from anywhere but a checkout containing one booted with none of its
+/// bootstrap variables. A `[llm.default]` slot with
+/// `api_key_env = "NEARAI_API_KEY"` then resolved to *no key*, and the nearai
+/// provider silently fell through to a session-token path that no
+/// `SessionRenewer` is wired to renew — surfacing as "check the selected
+/// provider's API key and base URL" for a key that was never read.
+///
+/// The profile variable is the observable because it fails closed, loudly, and
+/// without starting a listener.
+#[test]
+fn dot_env_in_the_reborn_home_reaches_the_process_environment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create reborn home");
+    std::fs::write(
+        reborn_home.join(".env"),
+        "IRONCLAW_REBORN_PROFILE=definitely-not-a-profile\n",
+    )
+    .expect("write reborn-home .env");
+
+    let output = reborn_command()
+        .arg("doctor")
+        .current_dir(temp.path())
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "the Reborn-home .env must be loaded, so the invalid profile it sets \
+         should fail the command; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(INVALID_PROFILE_MESSAGE),
+        "failure should name the profile the Reborn-home .env set: {stderr}"
+    );
+}
+
+/// An exported variable outranks the file. `dotenvy` must be loaded in
+/// non-overriding mode, or a systemd/launchd unit's explicit environment would
+/// be silently replaced by a stale file on disk.
+#[test]
+fn exported_environment_outranks_the_reborn_home_dot_env() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create reborn home");
+    std::fs::write(
+        reborn_home.join(".env"),
+        "IRONCLAW_REBORN_PROFILE=definitely-not-a-profile\n",
+    )
+    .expect("write reborn-home .env");
+
+    let output = reborn_command()
+        .arg("doctor")
+        .current_dir(temp.path())
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(INVALID_PROFILE_MESSAGE),
+        "the exported profile must win over the Reborn-home .env: {stderr}"
+    );
+}
+
+/// A working-directory `.env` outranks the Reborn-home one, so a checkout can
+/// override an installed host's operator file without editing it.
+#[test]
+fn working_directory_dot_env_outranks_the_reborn_home_dot_env() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create reborn home");
+    std::fs::write(
+        reborn_home.join(".env"),
+        "IRONCLAW_REBORN_PROFILE=definitely-not-a-profile\n",
+    )
+    .expect("write reborn-home .env");
+    std::fs::write(
+        temp.path().join(".env"),
+        "IRONCLAW_REBORN_PROFILE=local-dev\n",
+    )
+    .expect("write working-directory .env");
+
+    let output = reborn_command()
+        .arg("doctor")
+        .current_dir(temp.path())
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(INVALID_PROFILE_MESSAGE),
+        "the working-directory .env must win over the Reborn-home one: {stderr}"
+    );
+}
+
 #[test]
 fn run_rejects_invalid_profile() {
     let temp = tempfile::tempdir().expect("tempdir");
