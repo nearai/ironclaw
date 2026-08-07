@@ -29,6 +29,8 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_RUN_ARTIFACT,
     WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT,
     WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_IMPORT_EXTENSION,
+    WEBUI_V2_PATTERN_INSPECTOR_PROMPT, WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
+    WEBUI_V2_PATTERN_INSPECTOR_TOOL, WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
     WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
     WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
     WEBUI_V2_PATTERN_LIST_COMMANDS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
@@ -486,6 +488,22 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_LOGS,
                 get(handlers::query_operator_logs),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
+                get(crate::webui_v2::inspector::get_inspector_snapshot),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_PROMPT,
+                get(crate::webui_v2::inspector::get_inspector_prompt),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_TOOL,
+                get(crate::webui_v2::inspector::get_inspector_tool),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
+                get(crate::webui_v2::inspector::stream_inspector_updates),
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,

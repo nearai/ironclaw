@@ -42,6 +42,7 @@
 mod descriptors;
 mod error;
 mod handlers;
+mod inspector;
 mod router;
 mod schema;
 mod sse_capacity;
@@ -66,7 +67,9 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_GET_PROJECT,
     WEBUI_V2_ROUTE_GET_RUN_ARTIFACT, WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL,
     WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
+    WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSPECTOR_PROMPT,
+    WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT, WEBUI_V2_ROUTE_INSPECTOR_TOOL,
+    WEBUI_V2_ROUTE_INSPECTOR_UPDATES, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
     WEBUI_V2_ROUTE_INSTALL_SKILL, WEBUI_V2_ROUTE_IRONHUB_DELIVER_INSTALL,
     WEBUI_V2_ROUTE_LIST_AUTOMATIONS, WEBUI_V2_ROUTE_LIST_COMMANDS,
     WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
@@ -120,6 +123,9 @@ pub use handlers::{
     setup_extension, start_codex_login, start_nearai_login, stat_fs_path, stream_events,
     stream_events_ws, test_llm_connection, trace_account_traces, trace_credits, update_skill,
     upsert_llm_provider,
+};
+pub use inspector::{
+    get_inspector_prompt, get_inspector_snapshot, get_inspector_tool, stream_inspector_updates,
 };
 pub use router::{
     WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State, webui_v2_router,

@@ -95,6 +95,10 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT: &str = "webui.v2.operator.inspector_snapshot";
+pub const WEBUI_V2_ROUTE_INSPECTOR_PROMPT: &str = "webui.v2.operator.inspector_prompt";
+pub const WEBUI_V2_ROUTE_INSPECTOR_TOOL: &str = "webui.v2.operator.inspector_tool";
+pub const WEBUI_V2_ROUTE_INSPECTOR_UPDATES: &str = "webui.v2.operator.inspector_updates";
 pub const WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION: &str =
     "webui.v2.operator.list_extension_configuration";
 pub const WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION: &str =
@@ -219,6 +223,14 @@ pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operato
 pub const WEBUI_V2_PATTERN_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
 pub const WEBUI_V2_PATTERN_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs";
 pub const WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE: &str = "/api/webchat/v2/operator/service";
+pub const WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}";
+pub const WEBUI_V2_PATTERN_INSPECTOR_PROMPT: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}/prompt";
+pub const WEBUI_V2_PATTERN_INSPECTOR_TOOL: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}/tools/{activity_id}";
+pub const WEBUI_V2_PATTERN_INSPECTOR_UPDATES: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}/events";
 pub const WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION: &str =
     "/api/webchat/v2/operator/extension-configuration";
 pub const WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP: &str =
@@ -327,6 +339,10 @@ pub fn webui_v2_routes_with_regression_artifact_export(
         operator_status_descriptor(),
         operator_logs_descriptor(),
         operator_service_lifecycle_descriptor(),
+        inspector_snapshot_descriptor(),
+        inspector_prompt_descriptor(),
+        inspector_tool_descriptor(),
+        inspector_updates_descriptor(),
         operator_list_extension_configuration_descriptor(),
         operator_replace_extension_configuration_descriptor(),
         list_project_files_descriptor(),
@@ -391,6 +407,10 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_OPERATOR_STATUS
             | WEBUI_V2_ROUTE_OPERATOR_LOGS
             | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
+            | WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT
+            | WEBUI_V2_ROUTE_INSPECTOR_PROMPT
+            | WEBUI_V2_ROUTE_INSPECTOR_TOOL
+            | WEBUI_V2_ROUTE_INSPECTOR_UPDATES
             | WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION
             | WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION
             // The zip-upload import route is admin-only (#5499): classifying
@@ -1698,6 +1718,58 @@ fn operator_logs_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn inspector_snapshot_descriptor() -> IngressRouteDescriptor {
+    inspector_read_descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT,
+        WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
+    )
+}
+
+fn inspector_prompt_descriptor() -> IngressRouteDescriptor {
+    inspector_read_descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_PROMPT,
+        WEBUI_V2_PATTERN_INSPECTOR_PROMPT,
+    )
+}
+
+fn inspector_tool_descriptor() -> IngressRouteDescriptor {
+    inspector_read_descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_TOOL,
+        WEBUI_V2_PATTERN_INSPECTOR_TOOL,
+    )
+}
+
+fn inspector_read_descriptor(
+    route_id: &'static str,
+    pattern: &'static str,
+) -> IngressRouteDescriptor {
+    descriptor(
+        route_id,
+        NetworkMethod::Get,
+        pattern,
+        read_policy(
+            rate_limit_per_caller(30, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn inspector_updates_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_UPDATES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
+        read_policy(
+            rate_limit_per_caller(12, 60),
+            AuditTraceClass::StreamingSubscription,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::Sse,
         ),
     )
 }

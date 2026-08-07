@@ -7046,7 +7046,7 @@ fn channel_connect_action_serializes_neutral_input_placeholder() {
 
 #[tokio::test]
 async fn get_outbound_preferences_unwired_returns_empty_projection() {
-    // arch-exempt: large_file, outbound pref tests belong at API seam, plan docs/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
+    // arch-exempt: large_file, outbound pref tests belong at API seam, plan docs/internal/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),

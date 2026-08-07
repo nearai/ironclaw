@@ -117,6 +117,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
     ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::inspector::{
+    INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
+};
 
 mod admin_configuration;
 mod admin_users;
@@ -126,6 +129,7 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod fs_browse;
+mod inspector;
 mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
@@ -1428,6 +1432,10 @@ fn product_view_requires_operator_config(view_id: &str) -> bool {
             || id == OPERATOR_SETUP_VIEW.id
             || id == OPERATOR_DIAGNOSTICS_VIEW.id
             || id == OPERATOR_STATUS_VIEW.id
+            || id == INSPECTOR_SNAPSHOT_VIEW.id
+            || id == INSPECTOR_PROMPT_VIEW.id
+            || id == INSPECTOR_TOOL_VIEW.id
+            || id == INSPECTOR_UPDATES_VIEW.id
     )
 }
 
@@ -2204,6 +2212,7 @@ pub struct RebornServices<
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
+    diagnostic_store: Arc<crate::inspector_store::InMemoryDiagnosticStore>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -2285,8 +2294,19 @@ where
             ironhub_link: None,
             active_model_reader: None,
             operator_approval_config: None,
+            diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    /// Override the process-local diagnostic store used by the operator
+    /// inspector. Capture adapters and this read surface must share one store.
+    pub fn with_diagnostic_store(
+        mut self,
+        diagnostic_store: Arc<crate::inspector_store::InMemoryDiagnosticStore>,
+    ) -> Self {
+        self.diagnostic_store = diagnostic_store;
+        self
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
@@ -3974,6 +3994,42 @@ where
                 .await;
         }
         match query.view_id.as_str() {
+            id if id == INSPECTOR_SNAPSHOT_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::snapshot(&self.diagnostic_store, caller, request)
+            }
+            id if id == INSPECTOR_PROMPT_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::prompt(&self.diagnostic_store, caller, request)
+            }
+            id if id == INSPECTOR_TOOL_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::tool(&self.diagnostic_store, caller, request)
+            }
+            id if id == INSPECTOR_UPDATES_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::updates(&self.diagnostic_store, caller, request, query.cursor)
+            }
             id if id == LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -7346,6 +7402,18 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_views_require_operator_config() {
+        for view in [
+            INSPECTOR_SNAPSHOT_VIEW.id,
+            INSPECTOR_PROMPT_VIEW.id,
+            INSPECTOR_TOOL_VIEW.id,
+            INSPECTOR_UPDATES_VIEW.id,
+        ] {
+            assert!(product_view_requires_operator_config(view));
+        }
+    }
 
     /// The WebUI settings/tools request enum must use the exact wire strings
     /// the operator-config storage parser accepts and the entry writer emits.
