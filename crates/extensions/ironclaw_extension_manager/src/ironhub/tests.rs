@@ -578,7 +578,10 @@ fn a_skill_bundle_is_bounded_by_count_and_total_declared_bytes() {
     assert!(validate_manifest(&skill_manifest_with_files(vec![oversize])).is_err());
 
     let mut total = Vec::new();
-    for index in 0..32 {
+    let total_cap_file_count = ironclaw_skills::MAX_INSTALL_BUNDLE_TOTAL_BYTES
+        / ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES
+        + 1;
+    for index in 0..total_cap_file_count {
         let mut file = skill_file(&format!("scripts/g{index}.py"), &"1".repeat(64));
         file.artifact.size_bytes = per_file;
         total.push(file);
@@ -598,7 +601,9 @@ fn a_skill_bundle_accepts_each_exact_declared_limit() {
     exact_file.artifact.size_bytes = per_file;
     assert!(validate_manifest(&skill_manifest_with_files(vec![exact_file])).is_ok());
 
-    let exact_total = (0..10)
+    let exact_total_file_count = ironclaw_skills::MAX_INSTALL_BUNDLE_TOTAL_BYTES
+        / ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES;
+    let exact_total = (0..exact_total_file_count)
         .map(|index| {
             let mut file = skill_file(&format!("scripts/total-{index}.py"), &"1".repeat(64));
             file.artifact.size_bytes = per_file;
@@ -1069,7 +1074,6 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     let prompt_bytes = published_tool_prompt();
     let skill_file_url = "https://hub.ironclaw.com/tests/native-install/scripts/run.py";
     let skill_file_bytes = b"print('installed bundled file')\n".to_vec();
-    let tool_manifest_bytes = published_basic_tool_manifest("0.1.0");
     let manifest = signed_manifest(
         mixed_manifest_json(MixedManifestFixture {
             tool_url,
@@ -1085,8 +1089,6 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             skill_file_size: skill_file_bytes.len(),
             skill_file_sha: &sha256_hex(&skill_file_bytes),
             tool_manifest_url,
-            tool_manifest_size: tool_manifest_bytes.len(),
-            tool_manifest_sha: &sha256_hex(&tool_manifest_bytes),
             input_schema_url,
             output_schema_url,
             prompt_url,
@@ -1327,7 +1329,6 @@ async fn bundled_file_checksum_mismatch_aborts_skill_install() {
             .to_vec();
     let expected_bundled_file = b"print('expected')\n".to_vec();
     let tampered_bundled_file = b"print('tampered')\n".to_vec();
-    let tool_manifest_bytes = published_tool_manifest("0.1.0");
     let manifest = signed_manifest(
         mixed_manifest_json(MixedManifestFixture {
             tool_url: "https://hub.ironclaw.com/tests/bundle-mismatch/tool.wasm",
@@ -1343,8 +1344,6 @@ async fn bundled_file_checksum_mismatch_aborts_skill_install() {
             skill_file_size: tampered_bundled_file.len(),
             skill_file_sha: &sha256_hex(&expected_bundled_file),
             tool_manifest_url: "https://hub.ironclaw.com/tests/bundle-mismatch/manifest.toml",
-            tool_manifest_size: tool_manifest_bytes.len(),
-            tool_manifest_sha: &sha256_hex(&tool_manifest_bytes),
             input_schema_url: "https://hub.ironclaw.com/tests/bundle-mismatch/input.json",
             output_schema_url: "https://hub.ironclaw.com/tests/bundle-mismatch/output.json",
             prompt_url: "https://hub.ironclaw.com/tests/bundle-mismatch/invoke.md",
@@ -2374,8 +2373,6 @@ struct MixedManifestFixture<'a> {
     skill_file_size: usize,
     skill_file_sha: &'a str,
     tool_manifest_url: &'a str,
-    tool_manifest_size: usize,
-    tool_manifest_sha: &'a str,
     input_schema_url: &'a str,
     output_schema_url: &'a str,
     prompt_url: &'a str,
@@ -2396,8 +2393,6 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
         skill_file_size,
         skill_file_sha,
         tool_manifest_url,
-        tool_manifest_size,
-        tool_manifest_sha,
         input_schema_url,
         output_schema_url,
         prompt_url,
@@ -2518,11 +2513,6 @@ output_schema_ref = "schemas/installed-tool/raw_output.v1.json"
     .into_bytes()
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn published_tool_manifest_with_prompt(version: &str) -> Vec<u8> {
-    add_prompt_doc_ref(published_tool_manifest(version))
-}
-
 fn published_basic_tool_manifest_with_prompt(version: &str) -> Vec<u8> {
     add_prompt_doc_ref(published_basic_tool_manifest(version))
 }
@@ -2546,16 +2536,10 @@ fn published_tool_manifest_artifact(url: &str, version: &str) -> serde_json::Val
     })
 }
 
-fn published_tool_manifest_with_prompt_artifact(url: &str, version: &str) -> serde_json::Value {
-    let bytes = published_tool_manifest_with_prompt(version);
-    serde_json::json!({
-        "url": url,
-        "size_bytes": bytes.len(),
-        "sha256": sha256_hex(&bytes),
-    })
-}
-
-fn published_basic_tool_manifest_with_prompt_artifact(url: &str, version: &str) -> serde_json::Value {
+fn published_basic_tool_manifest_with_prompt_artifact(
+    url: &str,
+    version: &str,
+) -> serde_json::Value {
     let bytes = published_basic_tool_manifest_with_prompt(version);
     serde_json::json!({
         "url": url,
@@ -2754,7 +2738,7 @@ impl RuntimeHttpEgress for BoundedDownloadEgress {
             if ordinal < self.first_wave_size {
                 self.first_wave.wait().await;
             }
-            tokio::time::sleep(Duration::from_millis((20 - ordinal) as u64)).await;
+            tokio::time::sleep(Duration::from_millis(20usize.saturating_sub(ordinal) as u64)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
         }
         Ok(RuntimeHttpEgressResponse {
