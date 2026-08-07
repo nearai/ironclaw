@@ -155,6 +155,7 @@ function renderChat({
     useChatCommands: () => [],
     matchCommand: () => null,
     useInterfacePreferences: () => ({ showChatLogsShortcut }),
+    useLocation: () => ({ search: "" }),
     useT: () => (key) => key,
     ...contextOverrides,
   };

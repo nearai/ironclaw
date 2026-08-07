@@ -48,8 +48,9 @@ exist because of that review.
 
 ### Legacy / out of scope
 
-`src/agent/`, `src/worker/`, `src/tools/`, and `crates/ironclaw_engine/` are
-**legacy** and are not designed against. The Reborn loop is the only target.
+`src/agent/`, `src/worker/`, `src/tools/`, and `crates/ironclaw_engine/` were
+the **legacy** v1 stack this design routed around; they have since been deleted
+from the tree entirely. The Reborn loop is the only target.
 
 ## 2. Goals & non-goals
 

@@ -158,6 +158,14 @@ product, composition, and frontend contracts when onboarding changes.
 
 ## Documentation and testing
 
+`docs/` is the public Mintlify site plus fenced internal material. All new
+internal engineering docs (design notes, research, plans, QA maps) go under
+`docs/internal/` — nowhere else under `docs/`. A page outside the
+`docs/.mintignore` fence is published even when omitted from `docs.json`
+navigation (hidden pages stay reachable by URL), and `.mintignore` is frozen:
+do not add entries. Enforced by `scripts/ci/docs_publication_boundary.py`
+(Code Style workflow); run it to check placement.
+
 Update the owning contract/docs when behavior changes. Choose tests using
 `.claude/rules/testing.md` and
 `.claude/skills/ironclaw-reborn-testing/SKILL.md`; use the smallest tier that
