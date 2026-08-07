@@ -296,6 +296,7 @@ async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
         )
         .await
         .expect("seed setup");
+    let legacy_connection_epoch = ironclaw_auth::AuthFlowId::new();
     for (path, value) in [
         (
             "/tenants/tenant-a/shared/slack-personal-binding/identities/U-PERSON.json",
@@ -343,6 +344,23 @@ async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
                 "updated_at": "2026-07-01T00:00:00Z"
             }),
         ),
+        (
+            "/tenants/tenant-a/shared/slack-personal-binding/connections/slack-rc1-install/operator-a.json",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "user_id": "operator-a",
+                "installation_id": "slack-rc1-install",
+                "epoch": legacy_connection_epoch,
+                "state": "connecting",
+                "pending_connection": {
+                    "epoch": legacy_connection_epoch,
+                    "expires_at": "2026-07-02T00:00:00Z"
+                },
+                "expires_at": "2026-07-02T00:00:00Z",
+                "created_at": "2026-07-01T00:00:00Z",
+                "updated_at": "2026-07-01T00:00:00Z"
+            }),
+        ),
     ] {
         filesystem
             .put(
@@ -380,6 +398,7 @@ async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
     assert_eq!(first.identities, 1);
     assert_eq!(first.route_values, 2);
     assert_eq!(first.dm_targets, 1);
+    assert_eq!(first.oauth_channel_stale_connections_expired, 1);
     let state = admin_configuration
         .get(
             &admin_scope,
@@ -488,6 +507,7 @@ async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
     assert_eq!(second.identities, 0);
     assert_eq!(second.route_values, 0);
     assert_eq!(second.dm_targets, 0);
+    assert_eq!(second.oauth_channel_connections_unchanged, 1);
 }
 
 #[tokio::test]

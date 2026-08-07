@@ -461,12 +461,23 @@ pub(super) enum Rc1SlackDisconnectCleanup {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Rc1SlackPendingConnection {
+    epoch: ironclaw_auth::AuthFlowId,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Rc1SlackConnection {
     pub(super) tenant_id: String,
     pub(super) user_id: String,
     pub(super) installation_id: String,
     pub(super) epoch: ironclaw_auth::AuthFlowId,
     pub(super) state: Rc1SlackConnectionState,
+    /// Parsed to validate the retired RC1 replacement slot; never restored
+    /// as live connection authority.
+    #[serde(default)]
+    pending_connection: Option<Rc1SlackPendingConnection>,
     #[serde(default)]
     pub(super) disconnect_cleanup: Option<Rc1SlackDisconnectCleanup>,
     pub(super) expires_at: DateTime<Utc>,
