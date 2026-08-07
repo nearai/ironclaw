@@ -421,6 +421,14 @@ async fn run_scoped_file_json_queries() -> RebornIntegrationHarness {
                 json!({
                     "operation": "query",
                     "file_path": "/workspace/source.json",
+                    "path": "$.messages[1].tool_call.arguments.path"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "file_path": "/workspace/source.json",
                     "path": "$.nodes[2].data[15][0]"
                 }),
             ),
