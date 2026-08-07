@@ -9,26 +9,18 @@
 //! that **"the §10 mirror-DTO ratchet's allowlist is what makes this safe: the
 //! old [shapes] are frozen entries that may only disappear."**
 //!
-//! This is that ratchet. It freezes the current set of collapse-target DTOs and
-//! fails on any change:
+//! The collapse COMPLETED (#6447 retired the last request DTOs), so this file
+//! is no longer the shrinking freeze that §9 describes — it is the permanent
+//! zero-gate that survives it: [`RETIRED_COLLAPSE_DTOS`] names the retired
+//! mirror shapes, and the test fails if any of them is ever re-declared
+//! (the exact §1.1 Mechanism 1 failure, attempted after the fact).
 //!
-//! - a **second definition** of a frozen name (a downstream crate re-declaring an
-//!   upstream request "for decoupling" — the exact §1.1 Mechanism 1 failure) —
-//!   flagged by the multiplicity check;
-//! - **deleting** one without trimming [`FROZEN_COLLAPSE_DTOS`] also fails — so
-//!   the allowlist shrinks in lock-step as the collapse lands (§10: compare set
-//!   membership, never a count), and reviewers watch it get shorter toward the
-//!   §3 end state (`Invocation` + the surviving per-lane requests + the five
-//!   result channels — zero mirrors).
-//!
-//! Definition of done for this axis: every entry below is deleted (its fields
-//! now carried by `Invocation`/`Authorized`, its result variants by
-//! `Resolution`), and this file is deleted with the last of them (enforced —
-//! the test fails on an empty allowlist).
-//!
-//! Owner: the §3 capability-path collapse slice series under the #6168
-//! umbrella (authorize → dispatch → result-channel migration) trims this list
-//! in the same PRs that delete the types; reviewers hold additions to zero.
+//! Two of the ten originally-frozen names are deliberately NOT here:
+//! `CapabilityOutcome` (deleted by #6299 before the retired-list conversion)
+//! and `CapabilityDispatchRequest` (its removal was a blessing, not a
+//! deletion — it survives as the canonical port type in
+//! `ironclaw_host_api::dispatch`). Reintroducing the former fires nothing;
+//! add it below if that ever becomes a live hazard.
 //!
 //! Scanner semantics (shared with the other §10 ratchets — see
 //! [`ratchet_support`]): comments/strings stripped before matching; covers
