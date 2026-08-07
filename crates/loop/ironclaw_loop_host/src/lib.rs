@@ -1420,11 +1420,19 @@ where
             let capability_ids = if let Some(view) = request.capability_view.as_ref() {
                 view.visible_capability_ids.clone()
             } else if let Some(capabilities) = self.capabilities.as_ref() {
-                capabilities
-                    .tool_definitions()?
-                    .into_iter()
-                    .map(|definition| definition.capability_id)
-                    .collect()
+                match capabilities.tool_definitions() {
+                    Ok(definitions) => definitions
+                        .into_iter()
+                        .map(|definition| definition.capability_id)
+                        .collect(),
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            "prompt diagnostics could not capture capability ids"
+                        );
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -2002,7 +2010,7 @@ impl BufferedPromptDiagnosticSink {
                 if let Err(error) =
                     tokio::task::spawn_blocking(move || sink.record_prompt(capture)).await
                 {
-                    tracing::warn!(%error, "prompt diagnostic worker failed");
+                    tracing::debug!(%error, "prompt diagnostic worker failed");
                 }
             }
         });

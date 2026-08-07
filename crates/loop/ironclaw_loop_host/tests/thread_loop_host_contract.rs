@@ -330,6 +330,58 @@ async fn model_port_records_full_capability_surface_when_request_has_no_view() {
     );
 }
 
+#[traced_test]
+#[tokio::test]
+async fn model_port_continues_when_diagnostic_capability_lookup_fails() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+    let capability_id = CapabilityId::new("demo.transient_surface").expect("capability");
+    let capabilities = Arc::new(StaticToolDefinitionPort::failing_first_lookup(vec![
+        provider_tool_definition(capability_id, "demo__transient_surface"),
+    ]));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+
+    let response = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_capability_port(capabilities.clone())
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        capability_view: None,
+    })
+    .await
+    .expect("diagnostic failure must not fail the model request");
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(AssistantReply { ref content })
+            if content == "model says hi"
+    ));
+    assert_eq!(capabilities.tool_definition_calls(), 2);
+    assert!(
+        sink.captures
+            .lock()
+            .expect("captures")
+            .first()
+            .is_some_and(|capture| capture.capability_ids.is_empty())
+    );
+    assert_eq!(gateway.tool_definition_calls().len(), 1);
+    assert!(logs_contain(
+        "prompt diagnostics could not capture capability ids"
+    ));
+}
+
 #[tokio::test]
 async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
     let fixture = GatedThreadFixture::new().await;
@@ -6082,17 +6134,42 @@ impl HostManagedModelGateway for RecordingGateway {
 
 struct StaticToolDefinitionPort {
     definitions: Vec<ProviderToolDefinition>,
+    tool_definition_calls: AtomicUsize,
+    fail_first_lookup: bool,
 }
 
 impl StaticToolDefinitionPort {
     fn new(definitions: Vec<ProviderToolDefinition>) -> Self {
-        Self { definitions }
+        Self {
+            definitions,
+            tool_definition_calls: AtomicUsize::new(0),
+            fail_first_lookup: false,
+        }
+    }
+
+    fn failing_first_lookup(definitions: Vec<ProviderToolDefinition>) -> Self {
+        Self {
+            definitions,
+            tool_definition_calls: AtomicUsize::new(0),
+            fail_first_lookup: true,
+        }
+    }
+
+    fn tool_definition_calls(&self) -> usize {
+        self.tool_definition_calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl LoopCapabilityPort for StaticToolDefinitionPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let call_index = self.tool_definition_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_first_lookup && call_index == 0 {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "transient capability surface failure",
+            ));
+        }
         Ok(self.definitions.clone())
     }
 
