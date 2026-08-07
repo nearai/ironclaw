@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import { ActivityKind } from "./activity-kind";
 import {
   INSPECTOR_RUN_HISTORY_KEY,
   MAX_INSPECTOR_ACTIVITY_ENTRIES,
@@ -36,6 +37,20 @@ test("debug activation accepts only the explicit true query value", () => {
   assert.equal(inspectorDebugEnabled("?debug=false"), false);
   assert.equal(inspectorDebugEnabled("?debug=1"), false);
   assert.equal(inspectorDebugEnabled(""), false);
+});
+
+test("debug activation fails closed when query parsing throws", () => {
+  const OriginalURLSearchParams = globalThis.URLSearchParams;
+  globalThis.URLSearchParams = class URLSearchParamsFailure {
+    constructor() {
+      throw new TypeError("query parsing unavailable");
+    }
+  } as typeof URLSearchParams;
+  try {
+    assert.equal(inspectorDebugEnabled("?debug=true"), false);
+  } finally {
+    globalThis.URLSearchParams = OriginalURLSearchParams;
+  }
 });
 
 test("preferences are session-scoped, validated, and round-trip", () => {
@@ -179,9 +194,9 @@ test("activity reducer replaces local lifecycle hints with authoritative diagnos
     ],
   );
 
-  assert.equal(rows.filter((row) => row.kind === "turn_started").length, 1);
-  assert.equal(rows.filter((row) => row.kind === "stream_disconnected").length, 2);
-  assert.equal(rows.find((row) => row.kind === "turn_started")?.sequence, 1);
+  assert.equal(rows.filter((row) => row.kind === ActivityKind.TurnStarted).length, 1);
+  assert.equal(rows.filter((row) => row.kind === ActivityKind.StreamDisconnected).length, 2);
+  assert.equal(rows.find((row) => row.kind === ActivityKind.TurnStarted)?.sequence, 1);
 });
 
 test("run navigation history is thread-scoped, deduplicated, and bounded", () => {

@@ -1,5 +1,9 @@
 export function inspectorDebugEnabled(search = ""): boolean {
-  return new URLSearchParams(search).get("debug") === "true";
+  try {
+    return new URLSearchParams(search).get("debug") === "true";
+  } catch (_) {
+    return false;
+  }
 }
 
 export function latestInspectorRunId(activeRun: unknown, messages: unknown[]): string | null {

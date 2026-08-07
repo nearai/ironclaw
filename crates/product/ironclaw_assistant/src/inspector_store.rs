@@ -11,8 +11,10 @@ use ironclaw_host_api::{
     ids::{TenantId, ThreadId, UserId},
     turn::TurnRunId,
 };
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedModelCallDiagnostic;
 use ironclaw_loop_host::{
-    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticStatus,
+    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticOutcome,
     HostManagedModelMessageRole, HostManagedPromptDiagnosticCapture,
     HostManagedPromptDiagnosticMessage, HostManagedPromptDiagnosticSink,
     estimate_tokens_from_chars,
@@ -170,6 +172,7 @@ struct DiagnosticRunState {
     stats: SessionDiagnosticStats,
     updates: VecDeque<DiagnosticUpdateEnvelope>,
     latest_sequence: DiagnosticSequence,
+    turn_started_recorded: bool,
 }
 
 impl Default for DiagnosticRunState {
@@ -183,6 +186,7 @@ impl Default for DiagnosticRunState {
             stats: SessionDiagnosticStats::default(),
             updates: VecDeque::new(),
             latest_sequence: DiagnosticSequence::ZERO,
+            turn_started_recorded: false,
         }
     }
 }
@@ -454,6 +458,28 @@ impl InMemoryDiagnosticStore {
         })
     }
 
+    fn record_turn_started_once(
+        &self,
+        scope: DiagnosticScope,
+        event: DiagnosticActivityEvent,
+    ) -> Result<Option<DiagnosticCursor>, DiagnosticStoreError> {
+        let event = event.into_bounded();
+        let cap = self.limits.max_activity_entries_per_run;
+        self.record_optional(scope, move |run, sequence| {
+            if run.turn_started_recorded {
+                return None;
+            }
+            run.turn_started_recorded = true;
+            let update = DiagnosticUpdateKind::Activity(event.clone());
+            push_bounded(
+                &mut run.activity,
+                DiagnosticActivityEntry { sequence, event },
+                cap,
+            );
+            Some(update)
+        })
+    }
+
     pub fn record_stats(
         &self,
         scope: DiagnosticScope,
@@ -583,6 +609,15 @@ impl InMemoryDiagnosticStore {
         scope: DiagnosticScope,
         mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence) -> DiagnosticUpdateKind,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        self.record_optional(scope, |run, sequence| Some(mutate(run, sequence)))?
+            .ok_or(DiagnosticStoreError::Invariant)
+    }
+
+    fn record_optional(
+        &self,
+        scope: DiagnosticScope,
+        mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence) -> Option<DiagnosticUpdateKind>,
+    ) -> Result<Option<DiagnosticCursor>, DiagnosticStoreError> {
         let mut state = self
             .state
             .write()
@@ -594,7 +629,9 @@ impl InMemoryDiagnosticStore {
             .checked_add(1)
             .ok_or(DiagnosticStoreError::SequenceExhausted)?;
         let sequence = DiagnosticSequence::new(next);
-        let update = mutate(run, sequence);
+        let Some(update) = mutate(run, sequence) else {
+            return Ok(None);
+        };
         let cursor = DiagnosticCursor::new(run.stream_id, sequence);
         let envelope = DiagnosticUpdateEnvelope {
             scope,
@@ -610,7 +647,7 @@ impl InMemoryDiagnosticStore {
             self.limits.max_updates_per_run,
         );
         state.send_live_update(envelope);
-        Ok(cursor)
+        Ok(Some(cursor))
     }
 }
 
@@ -879,25 +916,21 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             effective_model,
             Some(capture.context_limit),
         );
-        let is_first_observation = matches!(self.snapshot(&scope), Ok(None));
-        if is_first_observation
-            && let Err(error) = self.record_activity(
-                scope.clone(),
-                DiagnosticActivityEvent::new(
-                    Utc::now(),
-                    DiagnosticActivityKind::TurnStarted,
-                    None,
-                    None,
-                    None,
-                    Some("Turn started".to_string()),
-                ),
-            )
-        {
+        if let Err(error) = self.record_turn_started_once(
+            scope.clone(),
+            DiagnosticActivityEvent::new(
+                Utc::now(),
+                DiagnosticActivityKind::TurnStarted,
+                None,
+                None,
+                None,
+                Some("Turn started".to_string()),
+            ),
+        ) {
             tracing::debug!(%error, "turn-start diagnostics could not be retained");
         }
         if let Err(error) = InMemoryDiagnosticStore::record_prompt(self, scope.clone(), prompt) {
             tracing::debug!(%error, "prompt diagnostics could not be retained");
-            return;
         }
         if let Err(error) = self.record_activity(
             scope,
@@ -915,49 +948,97 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
     }
 
     fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
-        let user_id = capture
+        let (
+            diagnostic,
+            completed_at,
+            duration_ms,
+            status,
+            usage,
+            failure_summary,
+            kind,
+            default_summary,
+        ) = match capture {
+            HostManagedModelCallDiagnosticCapture::Started(diagnostic) => (
+                diagnostic,
+                None,
+                None,
+                InspectorModelCallStatus::Started,
+                None,
+                None,
+                DiagnosticActivityKind::ModelCallStarted,
+                Some("Model call started".to_string()),
+            ),
+            HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic,
+                completed_at,
+                duration_ms,
+                outcome,
+            } => match outcome {
+                HostManagedModelCallDiagnosticOutcome::Succeeded { usage } => (
+                    diagnostic,
+                    Some(completed_at),
+                    Some(duration_ms),
+                    InspectorModelCallStatus::Succeeded,
+                    usage,
+                    None,
+                    DiagnosticActivityKind::ModelCallCompleted,
+                    Some("Model call completed".to_string()),
+                ),
+                HostManagedModelCallDiagnosticOutcome::Failed {
+                    usage,
+                    failure_summary,
+                } => (
+                    diagnostic,
+                    Some(completed_at),
+                    Some(duration_ms),
+                    InspectorModelCallStatus::Failed,
+                    usage,
+                    Some(failure_summary),
+                    DiagnosticActivityKind::ModelCallFailed,
+                    None,
+                ),
+            },
+        };
+        let user_id = diagnostic
             .context
             .actor
             .as_ref()
             .map(|actor| actor.user_id.clone())
-            .or_else(|| capture.context.scope.explicit_owner_user_id().cloned());
+            .or_else(|| diagnostic.context.scope.explicit_owner_user_id().cloned());
         let Some(user_id) = user_id else {
             tracing::debug!(
-                run_id = %capture.context.run_id,
+                run_id = %diagnostic.context.run_id,
                 "model-call diagnostics skipped because the run has no user scope"
             );
             return;
         };
         let scope = DiagnosticScope::new(
-            capture.context.scope.tenant_id.clone(),
+            diagnostic.context.scope.tenant_id.clone(),
             user_id,
-            capture.context.thread_id.clone(),
-            capture.context.run_id,
+            diagnostic.context.thread_id.clone(),
+            diagnostic.context.run_id,
         );
-        let usage = capture.usage.map(|usage| ModelTokenUsage {
+        let usage = usage.map(|usage| ModelTokenUsage {
             input_tokens: Some(u64::from(usage.input_tokens)),
             output_tokens: Some(u64::from(usage.output_tokens)),
             cache_read_input_tokens: Some(u64::from(usage.cache_read_input_tokens)),
             cache_creation_input_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
         });
-        let status = match capture.status {
-            HostManagedModelCallDiagnosticStatus::Started => InspectorModelCallStatus::Started,
-            HostManagedModelCallDiagnosticStatus::Succeeded => InspectorModelCallStatus::Succeeded,
-            HostManagedModelCallDiagnosticStatus::Failed => InspectorModelCallStatus::Failed,
-        };
         let detector = LeakDetector::new();
-        let failure_summary = capture
-            .failure_summary
-            .map(|summary| diagnostic_prompt_text(&detector, &summary));
-        let call_id = DiagnosticModelCallId::from_uuid(capture.call_id);
+        let failure_summary =
+            failure_summary.map(|summary| diagnostic_prompt_text(&detector, &summary));
+        let call_id = DiagnosticModelCallId::from_uuid(diagnostic.call_id);
         let model_call = ModelCallDiagnostic::new(
             call_id,
-            capture.iteration,
-            diagnostic_prompt_text(&detector, &capture.requested_model),
-            Some(diagnostic_prompt_text(&detector, &capture.effective_model)),
-            capture.started_at,
-            capture.completed_at,
-            capture.duration_ms,
+            diagnostic.iteration,
+            diagnostic_prompt_text(&detector, &diagnostic.requested_model),
+            Some(diagnostic_prompt_text(
+                &detector,
+                &diagnostic.effective_model,
+            )),
+            diagnostic.started_at,
+            completed_at,
+            duration_ms,
             status,
             usage,
             failure_summary.clone(),
@@ -966,27 +1047,14 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             InMemoryDiagnosticStore::record_model_call(self, scope.clone(), model_call)
         {
             tracing::debug!(%error, "model-call diagnostics could not be retained");
-            return;
         }
-        let (kind, summary) = match capture.status {
-            HostManagedModelCallDiagnosticStatus::Started => (
-                DiagnosticActivityKind::ModelCallStarted,
-                Some("Model call started".to_string()),
-            ),
-            HostManagedModelCallDiagnosticStatus::Succeeded => (
-                DiagnosticActivityKind::ModelCallCompleted,
-                Some("Model call completed".to_string()),
-            ),
-            HostManagedModelCallDiagnosticStatus::Failed => {
-                (DiagnosticActivityKind::ModelCallFailed, failure_summary)
-            }
-        };
+        let summary = failure_summary.or(default_summary);
         if let Err(error) = self.record_activity(
             scope,
             DiagnosticActivityEvent::new(
                 Utc::now(),
                 kind,
-                Some(capture.iteration),
+                Some(diagnostic.iteration),
                 None,
                 Some(call_id),
                 summary,
@@ -1723,82 +1791,81 @@ mod tests {
         )
         .with_actor(TurnActor::new(user_id.clone()));
         let secret = format!("sk-{}", "diagnostictestvalue0123456789");
-        HostManagedPromptDiagnosticSink::record_prompt(
-            &store,
-            HostManagedPromptDiagnosticCapture {
-                context: context.clone(),
-                messages: vec![
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::System,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:identity.system",
-                        )
+        let prompt_capture = HostManagedPromptDiagnosticCapture {
+            context: context.clone(),
+            messages: vec![
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                        "msg:identity.system",
+                    )
+                    .expect("ref"),
+                    content: format!(
+                        "identity sk-diagnostic\u{1b}testvalue0123456789 {}",
+                        "x".repeat(70 * 1024)
+                    ),
+                },
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                        "msg:instruction.system.0.deadbeef",
+                    )
+                    .expect("ref"),
+                    content: "Follow the workspace instructions.".to_string(),
+                },
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                        "msg:snippet.skill.workspace-search.0.deadbeef",
+                    )
+                    .expect("ref"),
+                    content: "Use workspace search when needed.".to_string(),
+                },
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::User,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new("msg:thread.user")
                         .expect("ref"),
-                        content: format!(
-                            "identity sk-diagnostic\u{1b}testvalue0123456789 {}",
-                            "x".repeat(70 * 1024)
-                        ),
-                    },
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::System,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:instruction.system.0.deadbeef",
-                        )
-                        .expect("ref"),
-                        content: "Follow the workspace instructions.".to_string(),
-                    },
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::System,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:snippet.skill.workspace-search.0.deadbeef",
-                        )
-                        .expect("ref"),
-                        content: "Use workspace search when needed.".to_string(),
-                    },
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::User,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:thread.user",
-                        )
-                        .expect("ref"),
-                        content: "hello".to_string(),
-                    },
-                ],
-                identity_message_count: 1,
-                instruction_snippet_count: 2,
-                active_skills: vec![
-                    SkillName::new("workspace-search").expect("skill name"),
-                    SkillName::new(secret.clone()).expect("secret-like skill name"),
-                ],
-                capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
-                requested_model: Some(
-                    ModelProfileId::new("diagnostic-profile").expect("model profile"),
-                ),
-                effective_model: Some(
-                    ProviderModelId::new("provider/diagnostic-model").expect("provider model"),
-                ),
-                context_limit: 128_000,
-            },
-        );
+                    content: "hello".to_string(),
+                },
+            ],
+            identity_message_count: 1,
+            instruction_snippet_count: 2,
+            active_skills: vec![
+                SkillName::new("workspace-search").expect("skill name"),
+                SkillName::new(secret.clone()).expect("secret-like skill name"),
+            ],
+            capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
+            requested_model: Some(
+                ModelProfileId::new("diagnostic-profile").expect("model profile"),
+            ),
+            effective_model: Some(
+                ProviderModelId::new("provider/diagnostic-model").expect("provider model"),
+            ),
+            context_limit: 128_000,
+        };
+        HostManagedPromptDiagnosticSink::record_prompt(&store, prompt_capture.clone());
+        HostManagedPromptDiagnosticSink::record_prompt(&store, prompt_capture);
         HostManagedPromptDiagnosticSink::record_model_call(
             &store,
-            HostManagedModelCallDiagnosticCapture {
-                call_id: uuid::Uuid::new_v4(),
-                context,
-                iteration: 4,
-                requested_model: "interactive_model".to_string(),
-                effective_model: "provider-model".to_string(),
-                started_at: Utc::now(),
-                completed_at: Some(Utc::now()),
-                duration_ms: Some(42),
-                status: HostManagedModelCallDiagnosticStatus::Succeeded,
-                usage: Some(LoopModelUsage {
-                    input_tokens: 12,
-                    output_tokens: 4,
-                    cache_read_input_tokens: 2,
-                    cache_creation_input_tokens: 1,
-                }),
-                failure_summary: None,
+            HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic: HostManagedModelCallDiagnostic {
+                    call_id: uuid::Uuid::new_v4(),
+                    context,
+                    iteration: 4,
+                    requested_model: "interactive_model".to_string(),
+                    effective_model: "provider-model".to_string(),
+                    started_at: Utc::now(),
+                },
+                completed_at: Utc::now(),
+                duration_ms: 42,
+                outcome: HostManagedModelCallDiagnosticOutcome::Succeeded {
+                    usage: Some(LoopModelUsage {
+                        input_tokens: 12,
+                        output_tokens: 4,
+                        cache_read_input_tokens: 2,
+                        cache_creation_input_tokens: 1,
+                    }),
+                },
             },
         );
 
@@ -1847,6 +1914,14 @@ mod tests {
         assert_eq!(snapshot.model_calls[0].iteration, 4);
         assert_eq!(snapshot.stats.total_model_calls, 1);
         assert_eq!(snapshot.stats.input_tokens.known_total, 12);
+        assert_eq!(
+            snapshot
+                .activity
+                .iter()
+                .filter(|entry| entry.event.kind == DiagnosticActivityKind::TurnStarted)
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -93,7 +93,7 @@ function createUseChatEventsHarness({
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
   onStreamError = () => {},
-  publishProductInspectorActivity = () => {},
+  publishProductInspectorEnvelope = () => {},
   t: selectedTranslator = t,
 } = {}) {
   let threadId = "thread-1";
@@ -164,7 +164,7 @@ function createUseChatEventsHarness({
     isRunFailureMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
-    publishProductInspectorActivity,
+    publishProductInspectorEnvelope,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
     STREAM_FAILURE_ID_PREFIX,
@@ -3043,60 +3043,6 @@ test("useChatEvents: an untagged projection capability_activity in a newly opene
 
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].turnRunId, null);
-});
-
-test("useChatEvents: inspector activity uses the projection batch's sole run id", () => {
-  const published = [];
-  const harness = createUseChatEventsHarness({
-    publishProductInspectorActivity: (activity) => published.push(activity),
-  });
-
-  harness.handleEvent({
-    type: "projection_snapshot",
-    frame: {
-      state: {
-        thread_id: "thread-1",
-        items: [
-          { run_status: { run_id: "run-b", status: "running" } },
-          { capability_activity: untaggedActivity({ thread_id: "thread-1" }) },
-        ],
-      },
-    },
-  });
-
-  const toolActivity = published.find((activity) => activity.activityId === "invocation-b");
-  assert.equal(toolActivity?.runId, "run-b");
-});
-
-test("useChatEvents: inspector activity stays unscoped for an ambiguous projection batch", () => {
-  const published = [];
-  const harness = createUseChatEventsHarness({
-    publishProductInspectorActivity: (activity) => published.push(activity),
-  });
-  harness.handleEvent({
-    type: "accepted",
-    frame: { ack: { run_id: "run-active", thread_id: "thread-1", status: "queued" } },
-  });
-  published.length = 0;
-
-  harness.handleEvent({
-    type: "projection_snapshot",
-    frame: {
-      state: {
-        thread_id: "thread-1",
-        items: [
-          { run_status: { run_id: "run-active", status: "running" } },
-          { run_status: { run_id: "run-other", status: "running" } },
-          { capability_activity: untaggedActivity({ thread_id: "thread-1" }) },
-        ],
-      },
-    },
-  });
-
-  assert.equal(
-    published.some((activity) => activity.activityId === "invocation-b"),
-    false,
-  );
 });
 
 test("useChatEvents: a stuck run does not follow the user across two consecutive thread switches", () => {

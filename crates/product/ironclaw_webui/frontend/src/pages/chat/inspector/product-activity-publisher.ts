@@ -1,10 +1,15 @@
-import type { PublishProductInspectorActivity } from "./product-activity";
+import { inspectorDebugEnabled } from "./inspector-shell";
 
-export function publishProductInspectorActivity(
-  input: PublishProductInspectorActivity,
+export function publishProductInspectorEnvelope(
+  envelope: unknown,
+  threadId: unknown,
+  fallbackRunId: unknown,
 ): void {
-  if (new URLSearchParams(window.location.search).get("debug") !== "true") return;
-  void import("./product-activity").then(({ publishProductInspectorActivity: publish }) => {
-    publish(input);
+  if (
+    typeof window === "undefined"
+    || !inspectorDebugEnabled(window.location.search)
+  ) return;
+  void import("./product-activity-envelope").then(({ publishProductInspectorEnvelope: publish }) => {
+    publish(envelope, threadId, fallbackRunId);
   });
 }

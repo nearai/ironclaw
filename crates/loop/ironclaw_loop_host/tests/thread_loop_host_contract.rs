@@ -38,7 +38,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelCallDiagnosticCapture,
+    HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelCallDiagnostic,
+    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticOutcome,
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
     HostManagedPromptDiagnosticCapture, HostManagedPromptDiagnosticSink,
@@ -304,21 +305,22 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
     drop(captures);
     let model_calls = sink.model_calls.lock().expect("model calls");
     assert_eq!(model_calls.len(), 2);
-    assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
-    assert_eq!(
-        model_calls[0].status,
-        ironclaw_loop_host::HostManagedModelCallDiagnosticStatus::Started
-    );
-    assert_eq!(model_calls[1].iteration, 7);
-    assert_eq!(model_calls[1].requested_model, "interactive_model");
-    assert_eq!(
-        model_calls[1].effective_model,
-        "provider-model-from-response"
-    );
-    assert_eq!(
-        model_calls[1].usage.map(|usage| usage.input_tokens),
-        Some(21)
-    );
+    let started = model_call_diagnostic(&model_calls[0]);
+    let completed = model_call_diagnostic(&model_calls[1]);
+    assert!(matches!(
+        model_calls[0],
+        HostManagedModelCallDiagnosticCapture::Started(_)
+    ));
+    assert_eq!(started.call_id, completed.call_id);
+    assert_eq!(completed.iteration, 7);
+    assert_eq!(completed.requested_model, "interactive_model");
+    assert_eq!(completed.effective_model, "provider-model-from-response");
+    let Some(HostManagedModelCallDiagnosticOutcome::Succeeded { usage }) =
+        model_call_outcome(&model_calls[1])
+    else {
+        panic!("completed model call should succeed");
+    };
+    assert_eq!(usage.as_ref().map(|usage| usage.input_tokens), Some(21));
 }
 
 #[tokio::test]
@@ -362,17 +364,19 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
 
     let model_calls = sink.model_calls.lock().expect("model calls");
     assert_eq!(model_calls.len(), 2);
-    assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
-    assert_eq!(
-        model_calls[1].status,
-        ironclaw_loop_host::HostManagedModelCallDiagnosticStatus::Failed
-    );
-    assert_eq!(model_calls[1].usage, Some(usage));
-    assert_eq!(model_calls[1].effective_model, "provider-model-from-error");
-    assert_eq!(
-        model_calls[1].failure_summary.as_deref(),
-        Some("model provider unavailable")
-    );
+    let started = model_call_diagnostic(&model_calls[0]);
+    let completed = model_call_diagnostic(&model_calls[1]);
+    assert_eq!(started.call_id, completed.call_id);
+    let Some(HostManagedModelCallDiagnosticOutcome::Failed {
+        usage: completed_usage,
+        failure_summary,
+    }) = model_call_outcome(&model_calls[1])
+    else {
+        panic!("completed model call should fail");
+    };
+    assert_eq!(*completed_usage, Some(usage));
+    assert_eq!(completed.effective_model, "provider-model-from-error");
+    assert_eq!(failure_summary, "model provider unavailable");
 }
 
 #[tokio::test]
@@ -405,8 +409,16 @@ async fn model_port_keeps_omitted_usage_unavailable() {
 
     let model_calls = sink.model_calls.lock().expect("model calls");
     assert_eq!(model_calls.len(), 2);
-    assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
-    assert_eq!(model_calls[1].usage, None);
+    assert_eq!(
+        model_call_diagnostic(&model_calls[0]).call_id,
+        model_call_diagnostic(&model_calls[1]).call_id
+    );
+    let Some(HostManagedModelCallDiagnosticOutcome::Succeeded { usage }) =
+        model_call_outcome(&model_calls[1])
+    else {
+        panic!("completed model call should succeed");
+    };
+    assert_eq!(*usage, None);
 }
 
 #[tokio::test]
@@ -6102,6 +6114,24 @@ struct RecordingGateway {
 struct RecordingPromptDiagnosticSink {
     captures: Mutex<Vec<HostManagedPromptDiagnosticCapture>>,
     model_calls: Mutex<Vec<HostManagedModelCallDiagnosticCapture>>,
+}
+
+fn model_call_diagnostic(
+    capture: &HostManagedModelCallDiagnosticCapture,
+) -> &HostManagedModelCallDiagnostic {
+    match capture {
+        HostManagedModelCallDiagnosticCapture::Started(diagnostic)
+        | HostManagedModelCallDiagnosticCapture::Completed { diagnostic, .. } => diagnostic,
+    }
+}
+
+fn model_call_outcome(
+    capture: &HostManagedModelCallDiagnosticCapture,
+) -> Option<&HostManagedModelCallDiagnosticOutcome> {
+    match capture {
+        HostManagedModelCallDiagnosticCapture::Started(_) => None,
+        HostManagedModelCallDiagnosticCapture::Completed { outcome, .. } => Some(outcome),
+    }
 }
 
 impl HostManagedPromptDiagnosticSink for RecordingPromptDiagnosticSink {

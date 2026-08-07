@@ -1,5 +1,11 @@
+import {
+  ActivityKind,
+  MAX_INSPECTOR_ACTIVITY_ENTRIES,
+  activityKindFromWire,
+} from "./activity-kind";
+
 export const INSPECTOR_RUN_HISTORY_KEY = "ironclaw:inspector-run-history";
-export const MAX_INSPECTOR_ACTIVITY_ENTRIES = 1_000;
+export { MAX_INSPECTOR_ACTIVITY_ENTRIES } from "./activity-kind";
 const MAX_INSPECTOR_RUNS_PER_THREAD = 32;
 
 export interface BoundedDiagnosticText {
@@ -10,7 +16,7 @@ export interface BoundedDiagnosticText {
 
 export interface InspectorActivityEvent {
   occurred_at: string;
-  kind: string;
+  kind: ActivityKind;
   iteration: number | null;
   activity_id: string | null;
   model_call_id: string | null;
@@ -79,11 +85,12 @@ export function rememberInspectorRun(
 function asActivityEvent(value: unknown): InspectorActivityEvent | null {
   if (!value || typeof value !== "object") return null;
   const event = value as Partial<InspectorActivityEvent>;
-  if (typeof event.occurred_at !== "string" || typeof event.kind !== "string") return null;
+  const kind = activityKindFromWire(event.kind);
+  if (typeof event.occurred_at !== "string" || !kind) return null;
   const summary = event.summary;
   return {
     occurred_at: event.occurred_at,
-    kind: event.kind,
+    kind,
     iteration: typeof event.iteration === "number" ? event.iteration : null,
     activity_id: typeof event.activity_id === "string" ? event.activity_id : null,
     model_call_id: typeof event.model_call_id === "string" ? event.model_call_id : null,
@@ -94,29 +101,34 @@ function asActivityEvent(value: unknown): InspectorActivityEvent | null {
 function correlationKey(event: InspectorActivityEvent): string | null {
   if (event.model_call_id) return `model:${event.model_call_id}`;
   if (event.activity_id) return `tool:${event.activity_id}`;
-  if (event.kind === "turn_started" || event.kind === "final_response_completed") return "turn";
+  if (
+    event.kind === ActivityKind.TurnStarted
+    || event.kind === ActivityKind.FinalResponseCompleted
+  ) return "turn";
   return null;
 }
 
-function isTerminalActivity(kind: string): boolean {
-  return kind === "model_call_completed"
-    || kind === "model_call_failed"
-    || kind === "tool_completed"
-    || kind === "tool_failed"
-    || kind === "final_response_completed";
+function isTerminalActivity(kind: ActivityKind): boolean {
+  return kind === ActivityKind.ModelCallCompleted
+    || kind === ActivityKind.ModelCallFailed
+    || kind === ActivityKind.ToolCompleted
+    || kind === ActivityKind.ToolFailed
+    || kind === ActivityKind.FinalResponseCompleted;
 }
 
-function isStartedActivity(kind: string): boolean {
-  return kind === "model_call_started" || kind === "tool_started" || kind === "turn_started";
+function isStartedActivity(kind: ActivityKind): boolean {
+  return kind === ActivityKind.ModelCallStarted
+    || kind === ActivityKind.ToolStarted
+    || kind === ActivityKind.TurnStarted;
 }
 
 function stableLifecycleKey(event: InspectorActivityEvent): string | null {
   if (event.model_call_id) return `${event.kind}:model:${event.model_call_id}`;
   if (event.activity_id) return `${event.kind}:tool:${event.activity_id}`;
   if (
-    event.kind === "turn_started"
-    || event.kind === "prompt_prepared"
-    || event.kind === "final_response_completed"
+    event.kind === ActivityKind.TurnStarted
+    || event.kind === ActivityKind.PromptPrepared
+    || event.kind === ActivityKind.FinalResponseCompleted
   ) {
     return event.kind;
   }

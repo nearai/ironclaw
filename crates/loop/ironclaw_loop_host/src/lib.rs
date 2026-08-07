@@ -1480,19 +1480,16 @@ where
             diagnostic_model.as_ref(),
             diagnostic_call_id,
         ) {
-            sink.record_model_call(HostManagedModelCallDiagnosticCapture {
-                call_id,
-                context: self.run_context.clone(),
-                iteration: request.iteration,
-                requested_model: requested_model.clone(),
-                effective_model: effective_model.clone(),
-                started_at: diagnostic_started_at,
-                completed_at: None,
-                duration_ms: None,
-                status: HostManagedModelCallDiagnosticStatus::Started,
-                usage: None,
-                failure_summary: None,
-            });
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture::Started(
+                HostManagedModelCallDiagnostic {
+                    call_id,
+                    context: self.run_context.clone(),
+                    iteration: request.iteration,
+                    requested_model: requested_model.clone(),
+                    effective_model: effective_model.clone(),
+                    started_at: diagnostic_started_at,
+                },
+            ));
         }
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
@@ -1589,17 +1586,14 @@ where
             diagnostic_model.as_ref(),
             diagnostic_call_id,
         ) {
-            let (status, usage, failure_summary) = match &host_response_result {
-                Ok(response) => (
-                    HostManagedModelCallDiagnosticStatus::Succeeded,
-                    diagnostic_usage(response.usage),
-                    None,
-                ),
-                Err(error) => (
-                    HostManagedModelCallDiagnosticStatus::Failed,
-                    diagnostic_usage(error.usage),
-                    Some(error.safe_summary.as_str().to_string()),
-                ),
+            let outcome = match &host_response_result {
+                Ok(response) => HostManagedModelCallDiagnosticOutcome::Succeeded {
+                    usage: diagnostic_usage(response.usage),
+                },
+                Err(error) => HostManagedModelCallDiagnosticOutcome::Failed {
+                    usage: diagnostic_usage(error.usage),
+                    failure_summary: error.safe_summary.as_str().to_string(),
+                },
             };
             let effective_model = diagnostic_effective_model
                 .or_else(|| {
@@ -1612,20 +1606,19 @@ where
                         .map(ProviderModelId::into_inner)
                 })
                 .unwrap_or_else(|| model_profile_id.as_str().to_string());
-            sink.record_model_call(HostManagedModelCallDiagnosticCapture {
-                call_id,
-                context: self.run_context.clone(),
-                iteration: request.iteration,
-                requested_model: requested_model.clone(),
-                effective_model,
-                started_at: diagnostic_started_at,
-                completed_at: Some(Utc::now()),
-                duration_ms: Some(
-                    u64::try_from(diagnostic_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
-                ),
-                status,
-                usage,
-                failure_summary,
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic: HostManagedModelCallDiagnostic {
+                    call_id,
+                    context: self.run_context.clone(),
+                    iteration: request.iteration,
+                    requested_model: requested_model.clone(),
+                    effective_model,
+                    started_at: diagnostic_started_at,
+                },
+                completed_at: Utc::now(),
+                duration_ms: u64::try_from(diagnostic_timer.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                outcome,
             });
         }
 
@@ -2148,7 +2141,7 @@ impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
     }
 
     fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
-        let run_id = capture.context.run_id;
+        let run_id = capture.diagnostic().context.run_id;
         self.enqueue(run_id, BufferedDiagnosticCapture::ModelCall(capture));
     }
 }
@@ -2173,26 +2166,44 @@ pub struct HostManagedPromptDiagnosticMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostManagedModelCallDiagnosticStatus {
-    Started,
-    Succeeded,
-    Failed,
-}
-
 #[derive(Debug, Clone)]
-pub struct HostManagedModelCallDiagnosticCapture {
+pub struct HostManagedModelCallDiagnostic {
     pub call_id: Uuid,
     pub context: LoopRunContext,
     pub iteration: u32,
     pub requested_model: String,
     pub effective_model: String,
     pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub duration_ms: Option<u64>,
-    pub status: HostManagedModelCallDiagnosticStatus,
-    pub usage: Option<LoopModelUsage>,
-    pub failure_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HostManagedModelCallDiagnosticOutcome {
+    Succeeded {
+        usage: Option<LoopModelUsage>,
+    },
+    Failed {
+        usage: Option<LoopModelUsage>,
+        failure_summary: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum HostManagedModelCallDiagnosticCapture {
+    Started(HostManagedModelCallDiagnostic),
+    Completed {
+        diagnostic: HostManagedModelCallDiagnostic,
+        completed_at: DateTime<Utc>,
+        duration_ms: u64,
+        outcome: HostManagedModelCallDiagnosticOutcome,
+    },
+}
+
+impl HostManagedModelCallDiagnosticCapture {
+    pub fn diagnostic(&self) -> &HostManagedModelCallDiagnostic {
+        match self {
+            Self::Started(diagnostic) | Self::Completed { diagnostic, .. } => diagnostic,
+        }
+    }
 }
 
 fn diagnostic_usage(usage: Option<LoopModelUsage>) -> Option<LoopModelUsage> {
@@ -3166,18 +3177,18 @@ mod tests {
         let context = prompt_diagnostic_capture_for_test().context;
         let now = Utc::now();
 
-        buffered.record_model_call(HostManagedModelCallDiagnosticCapture {
-            call_id: Uuid::new_v4(),
-            context,
-            iteration: 1,
-            requested_model: "interactive_model".to_string(),
-            effective_model: "provider-model".to_string(),
-            started_at: now,
-            completed_at: Some(now),
-            duration_ms: Some(1),
-            status: HostManagedModelCallDiagnosticStatus::Succeeded,
-            usage: None,
-            failure_summary: None,
+        buffered.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
+            diagnostic: HostManagedModelCallDiagnostic {
+                call_id: Uuid::new_v4(),
+                context,
+                iteration: 1,
+                requested_model: "interactive_model".to_string(),
+                effective_model: "provider-model".to_string(),
+                started_at: now,
+            },
+            completed_at: now,
+            duration_ms: 1,
+            outcome: HostManagedModelCallDiagnosticOutcome::Succeeded { usage: None },
         });
 
         tokio::time::timeout(Duration::from_secs(1), async {

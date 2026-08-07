@@ -1,9 +1,12 @@
+import { ActivityKind, MAX_INSPECTOR_ACTIVITY_ENTRIES } from "./activity-kind";
+import { inspectorDebugEnabled } from "./inspector-shell";
+
 export interface ProductInspectorActivity {
   localId: string;
   threadId: string;
   runId: string;
   occurredAt: string;
-  kind: string;
+  kind: ActivityKind;
   activityId: string | null;
   summary: string;
 }
@@ -11,7 +14,7 @@ export interface ProductInspectorActivity {
 export interface PublishProductInspectorActivity {
   threadId: unknown;
   runId: unknown;
-  kind: string;
+  kind: ActivityKind;
   activityId?: unknown;
   summary: string;
   dedupeKey: string;
@@ -20,7 +23,11 @@ export interface PublishProductInspectorActivity {
 type ProductActivityListener = (activity: ProductInspectorActivity) => void;
 
 const MAX_PRODUCT_ACTIVITY_RUNS = 32;
-const MAX_PRODUCT_ACTIVITY_PER_RUN = 1_000;
+// Product events are provisional UI hints. The diagnostic stream is
+// authoritative and replaces matching hints in reduceInspectorActivity.
+// Keep the hint buffer at the final reducer's shared ceiling so the local
+// source cannot introduce a larger competing retention contract.
+const MAX_PRODUCT_ACTIVITY_PER_RUN = MAX_INSPECTOR_ACTIVITY_ENTRIES;
 const retained = new Map<string, ProductInspectorActivity[]>();
 const dedupe = new Map<string, Set<string>>();
 const listeners = new Map<string, Set<ProductActivityListener>>();
@@ -28,7 +35,7 @@ let nextLocalId = 0;
 
 function isInspectorActivityEnabled(): boolean {
   return typeof window !== "undefined"
-    && new URLSearchParams(window.location.search).get("debug") === "true";
+    && inspectorDebugEnabled(window.location.search);
 }
 
 function scopeKey(threadId: string, runId: string): string {
