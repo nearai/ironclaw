@@ -466,7 +466,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             &request.adapter_installation_id,
             &request.external_actor_ref,
         )?;
-        let binding_key = BindingKey::from_request(&request);
+        let binding_key = BindingKey::for_route(&request, &actor_user_id);
         let external_conversation_identity =
             ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
         state.ensure_external_event_route(
@@ -539,7 +539,7 @@ impl ConversationBindingService for InMemoryConversationServices {
                 return Ok(replay.clone());
             }
 
-            let binding_key = BindingKey::from_request(resolve);
+            let binding_key = BindingKey::for_route(resolve, &actor_user_id);
             let current = state.bindings.get(&binding_key).cloned().ok_or_else(|| {
                 InboundTurnError::BindingRequired {
                     adapter_kind: resolve.adapter_kind.as_str().to_string(),
@@ -654,6 +654,8 @@ impl ConversationBindingService for InMemoryConversationServices {
                 external_conversation_identity: ExternalConversationIdentity::from_ref(
                     &request.external_conversation_ref,
                 ),
+                shared_actor_user_id: (request.route_kind == ConversationRouteKind::Shared)
+                    .then(|| actor_user_id.clone()),
             };
             if state.bindings.contains_key(&binding_key) {
                 let existing = state
@@ -869,7 +871,7 @@ impl InMemoryConversationServices {
                 &request.adapter_installation_id,
                 &request.external_actor_ref,
             )?;
-            let binding_key = BindingKey::from_request(&request);
+            let binding_key = BindingKey::for_route(&request, &actor_user_id);
             let external_conversation_identity =
                 ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
             state.ensure_external_event_route(
@@ -911,11 +913,6 @@ impl InMemoryConversationServices {
                 )?;
                 if request.route_kind == ConversationRouteKind::Shared {
                     state.widen_binding_route_access(&binding_key)?;
-                    if binding.owner_user_id.is_none()
-                        && let Some(owner_user_id) = trusted_owner_user_id.clone()
-                    {
-                        state.set_binding_owner(&binding_key, owner_user_id)?;
-                    }
                 }
                 state.record_external_event_route(
                     &request.tenant_id,
@@ -947,18 +944,24 @@ impl InMemoryConversationServices {
                 state
                     .threads
                     .insert(ThreadKey::new(&request.tenant_id, &thread_id), thread);
+                // A shared-route binding is keyed by — and owned by — its
+                // actor: a run acts as the user who invoked it. The trusted
+                // owner parameter serves host-trusted lanes that bind a
+                // Direct conversation FOR a user (the trigger fire path binds
+                // the creator); on a Shared route it is deliberately ignored
+                // so no configured subject can claim another user's thread.
+                let owner_user_id = if request.route_kind == ConversationRouteKind::Shared {
+                    Some(actor_user_id.clone())
+                } else {
+                    trusted_owner_user_id
+                };
                 let binding = BindingRecord::new(
                     request.tenant_id.clone(),
                     request.adapter_kind.clone(),
                     request.adapter_installation_id.clone(),
                     request.external_conversation_ref,
                     ReplyRouteAccess::new(route_actor_key, request.route_kind),
-                    BindingTarget::new(
-                        thread_id,
-                        trusted_agent_id,
-                        trusted_project_id,
-                        trusted_owner_user_id,
-                    ),
+                    BindingTarget::new(thread_id, trusted_agent_id, trusted_project_id, owner_user_id),
                 )?;
                 let resolution = binding.resolution(
                     actor_user_id.clone(),
@@ -1333,25 +1336,6 @@ impl InMemoryState {
         Ok(())
     }
 
-    fn set_binding_owner(
-        &mut self,
-        binding_key: &BindingKey,
-        owner_user_id: UserId,
-    ) -> Result<(), InboundTurnError> {
-        let binding = self
-            .bindings
-            .get_mut(binding_key)
-            .ok_or(InboundTurnError::StatePoisoned)?;
-        binding.owner_user_id = Some(owner_user_id.clone());
-        if let Some(source_binding) = self
-            .source_bindings
-            .get_mut(binding.source_binding_ref.as_str())
-        {
-            source_binding.owner_user_id = Some(owner_user_id.clone());
-        }
-        Ok(())
-    }
-
     fn ensure_trusted_scope_not_reinterpreted(
         &self,
         binding: &BindingRecord,
@@ -1558,10 +1542,26 @@ pub(crate) struct BindingKey {
     pub(crate) adapter_kind: AdapterKind,
     pub(crate) adapter_installation_id: AdapterInstallationId,
     pub(crate) external_conversation_identity: ExternalConversationIdentity,
+    /// The canonical PAIRED actor a `Shared` route binds for — a run acts as
+    /// the user who invoked it, so a shared conversation holds one binding
+    /// (and one thread) per actor. `None` for `Direct` routes, whose stable
+    /// route identity is the conversation alone.
+    ///
+    /// Serde-defaulted so persisted state written before this field loads
+    /// unchanged: legacy `Direct` keys deserialize to the identical key
+    /// (`skip_serializing_if` keeps new `Direct` keys byte-identical too),
+    /// while legacy conversation-scoped `Shared` rows deserialize to a key no
+    /// per-actor lookup ever builds — retained on disk, deliberately
+    /// unreachable, and every participant starts a fresh per-actor thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shared_actor_user_id: Option<UserId>,
 }
 
 impl BindingKey {
-    pub(crate) fn from_request(request: &ResolveConversationRequest) -> Self {
+    pub(crate) fn for_route(
+        request: &ResolveConversationRequest,
+        actor_user_id: &UserId,
+    ) -> Self {
         Self {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
@@ -1569,6 +1569,8 @@ impl BindingKey {
             external_conversation_identity: ExternalConversationIdentity::from_ref(
                 &request.external_conversation_ref,
             ),
+            shared_actor_user_id: (request.route_kind == ConversationRouteKind::Shared)
+                .then(|| actor_user_id.clone()),
         }
     }
 }

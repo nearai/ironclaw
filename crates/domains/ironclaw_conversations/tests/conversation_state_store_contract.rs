@@ -537,6 +537,135 @@ async fn filesystem_conversation_services_reopen_snapshot_without_pairing_epochs
     assert_eq!(resolution.binding_epoch, None);
 }
 
+/// The shared-route subject-binding retirement's migration contract, restart
+/// path included: a binding persisted BEFORE per-actor shared keys (keyed by
+/// the conversation alone, owned by a configured subject) is
+/// **ignored-but-retained** after reopen. No per-actor lookup can address it,
+/// so every participant — including the old subject user themselves — starts
+/// a fresh thread they own; the legacy row and its thread stay in durable
+/// state untouched (LLM data is never deleted).
+#[tokio::test]
+async fn legacy_subject_owned_shared_binding_is_retained_but_unreachable_after_reopen() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    services
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-legacy-shared"),
+            user_id("alice"),
+        )
+        .await
+        .expect("pair actor");
+    let mut shared_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-shared"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-seed",
+    );
+    shared_request.route_kind = ConversationRouteKind::Shared;
+    let seeded = services
+        .resolve_or_create_binding(shared_request)
+        .await
+        .expect("seed a shared binding to rewrite into the legacy shape");
+    let legacy_thread_id = seeded.turn_scope.thread_id.clone();
+    drop(services);
+
+    // Rewrite the persisted row into the pre-upgrade shape: the key loses its
+    // per-actor component and the record's owner becomes the configured
+    // subject of the era (the deployment operator).
+    let state_path = VirtualPath::new("/tenants/tenant-a/users/alice/conversations/state.json")
+        .expect("state path");
+    let mut versioned = backend
+        .get(&state_path)
+        .await
+        .expect("read state")
+        .expect("stored state");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&versioned.entry.body).expect("state json");
+    let bindings = state["bindings"].as_array_mut().expect("bindings array");
+    assert_eq!(bindings.len(), 1, "exactly the seeded shared binding");
+    let entry = bindings[0].as_array_mut().expect("binding entry pair");
+    entry[0]
+        .as_object_mut()
+        .expect("binding key object")
+        .remove("shared_actor_user_id")
+        .expect("the seeded shared key carries the per-actor component");
+    entry[1]
+        .as_object_mut()
+        .expect("binding record object")
+        .insert(
+            "owner_user_id".to_string(),
+            serde_json::Value::String("operator".to_string()),
+        );
+    versioned.entry.body = serde_json::to_vec(&state).expect("legacy state json");
+    backend
+        .put(
+            &state_path,
+            versioned.entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .expect("write legacy snapshot");
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("legacy snapshots remain readable");
+    let mut per_actor_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-shared"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-post-upgrade",
+    );
+    per_actor_request.route_kind = ConversationRouteKind::Shared;
+    let per_actor = reopened
+        .resolve_or_create_binding(per_actor_request)
+        .await
+        .expect("post-upgrade shared resolve binds a fresh per-actor thread");
+    assert_ne!(
+        per_actor.turn_scope.thread_id, legacy_thread_id,
+        "the legacy subject-owned thread must not be silently reused"
+    );
+    assert_eq!(
+        per_actor
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("alice"),
+        "the fresh thread is owned by the invoking actor"
+    );
+
+    // Retention: the legacy row is still in durable state, untouched, next to
+    // the new per-actor row.
+    let after = backend
+        .get(&state_path)
+        .await
+        .expect("read state after upgrade")
+        .expect("stored state after upgrade");
+    let after: serde_json::Value = serde_json::from_slice(&after.entry.body).expect("state json");
+    let bindings = after["bindings"].as_array().expect("bindings array");
+    assert_eq!(bindings.len(), 2, "legacy row retained beside the new row");
+    let legacy_rows: Vec<&serde_json::Value> = bindings
+        .iter()
+        .filter(|entry| entry[0].get("shared_actor_user_id").is_none())
+        .collect();
+    assert_eq!(legacy_rows.len(), 1, "exactly one legacy-keyed row survives");
+    assert_eq!(
+        legacy_rows[0][1]["owner_user_id"],
+        serde_json::Value::String("operator".to_string()),
+        "the legacy row keeps its subject owner untouched"
+    );
+    assert_eq!(
+        legacy_rows[0][1]["thread_id"],
+        serde_json::Value::String(legacy_thread_id.to_string()),
+        "the legacy row still points at its original thread"
+    );
+}
+
 /// Regression for the `ScopedFilesystem` migration: two
 /// [`RebornFilesystemConversationServices`] instances share one
 /// underlying [`RootFilesystem`] but each is constructed with a
