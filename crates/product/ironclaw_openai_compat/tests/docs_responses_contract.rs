@@ -102,8 +102,10 @@ fn fact(facts: &BTreeMap<String, String>, key: &str) -> String {
 #[tokio::test]
 async fn every_documented_request_field_is_accepted() {
     let facts = doc_facts();
-    let rejected_always = fact(&facts, "rejected_always");
-    let conditional = fact(&facts, "rejected_without_external_tools");
+    let conditional: Vec<String> = fact(&facts, "rejected_without_external_tools")
+        .split(',')
+        .map(|field| field.trim().to_string())
+        .collect();
 
     let samples: BTreeMap<&str, Value> = [
         ("model", json!("default")),
@@ -132,10 +134,10 @@ async fn every_documented_request_field_is_accepted() {
             )
         });
         // Fields whose only universally-accepted sample is "absent"
-        // (rejected_always fields, and refs that must resolve) stay out of
-        // the request body; their acceptance-as-a-field is proven by the DTO
-        // parse in their dedicated tests below.
-        if sample.is_null() || field == rejected_always || field == conditional {
+        // (conditionally-rejected fields, and refs that must resolve) stay
+        // out of the request body; their acceptance-as-a-field is proven by
+        // the dedicated tests below.
+        if sample.is_null() || conditional.iter().any(|c| c == field) {
             continue;
         }
         body.insert(field.to_string(), sample.clone());
@@ -155,15 +157,26 @@ async fn every_documented_request_field_is_accepted() {
     assert_eq!(workflow.accepted_count(), 1);
 }
 
+/// `tool_choice` is conditionally rejected exactly like `tools`: 400 on the
+/// plain router, accepted (and ignored — no per-request tool-choice surface,
+/// so nothing registers) when external tools are wired. Caught by Copilot
+/// review on the docs PR: `validate_responses_supported_fields_with_external_tools`
+/// never checks `tool_choice`.
 #[tokio::test]
-async fn rejected_always_field_rejects_with_400_naming_the_param() {
+async fn tool_choice_rejects_without_external_wiring_and_is_ignored_with_it() {
     let facts = doc_facts();
-    let field = fact(&facts, "rejected_always");
+    let conditional: Vec<String> = fact(&facts, "rejected_without_external_tools")
+        .split(',')
+        .map(|field| field.trim().to_string())
+        .collect();
     assert_eq!(
-        field, "tool_choice",
-        "the doc's rejected_always claim changed; update this test's sample below"
+        conditional,
+        vec!["tools".to_string(), "tool_choice".to_string()],
+        "the doc's conditionally-rejected set changed; update the dedicated \
+         behavioral tests to cover the new set"
     );
 
+    // Without external-tool wiring: rejected, naming the param.
     let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(workflow.clone());
     let response = router
@@ -176,15 +189,40 @@ async fn rejected_always_field_rejects_with_400_naming_the_param() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await;
-    assert_eq!(body["error"]["param"], field.as_str());
+    assert_eq!(body["error"]["param"], "tool_choice");
     assert_eq!(workflow.accepted_count(), 0);
+
+    // With external-tool wiring: accepted and ignored — the request submits,
+    // and nothing registers because no tools were supplied.
+    let workflow = Arc::new(FakeProductSurface::new());
+    let store = Arc::new(RecordingExternalToolStore::default());
+    let router = test_router_with_external_tools(workflow.clone(), store.clone());
+    let response = router
+        .oneshot(response_create_request(json!({
+            "model": "default",
+            "input": "hello",
+            "tool_choice": "auto",
+        })))
+        .await
+        .expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "tool_choice must be accepted (and ignored) when external tools are wired"
+    );
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(store.registered_count(), 0);
 }
 
 #[tokio::test]
 async fn tools_reject_without_external_wiring_and_accept_with_it() {
     let facts = doc_facts();
-    let field = fact(&facts, "rejected_without_external_tools");
-    assert_eq!(field, "tools");
+    assert!(
+        fact(&facts, "rejected_without_external_tools")
+            .split(',')
+            .any(|field| field.trim() == "tools"),
+        "the doc no longer lists `tools` as conditionally rejected"
+    );
     let tools_body = json!({
         "model": "default",
         "input": "hello",
@@ -205,7 +243,7 @@ async fn tools_reject_without_external_wiring_and_accept_with_it() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await;
-    assert_eq!(body["error"]["param"], field.as_str());
+    assert_eq!(body["error"]["param"], "tools");
     assert_eq!(workflow.accepted_count(), 0);
 
     // An empty tools array is treated as omitted on the same router.

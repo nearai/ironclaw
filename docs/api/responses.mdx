@@ -187,8 +187,7 @@ fields so newer SDK payloads keep working, but unlisted fields have no effect.
     crates/product/ironclaw_openai_compat/tests/docs_responses_contract.rs.
     Edit these values only together with the prose they pin.
 request_fields = model,input,stream,temperature,instructions,previous_response_id,metadata,tools,tool_choice,x_context
-rejected_always = tool_choice
-rejected_without_external_tools = tools
+rejected_without_external_tools = tools,tool_choice
 ignored_unknown_fields = true
 temperature_min = 0.0
 temperature_max = 2.0
