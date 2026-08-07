@@ -349,11 +349,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         """
         planner._webui_frontend_prefix.cache_clear()
         try:
-            with mock.patch.object(
-                planner,
-                "crate_directory",
-                return_value="crates/substrates/ironclaw_webui",
-            ) as resolver:
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    return_value="crates/substrates/ironclaw_webui",
+                ) as resolver,
+            ):
                 plan = self.plan(
                     "pull_request",
                     ["crates/substrates/ironclaw_webui/frontend/src/app.tsx"],
@@ -372,10 +375,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         "no Reborn test surface changed" for a real WebUI diff)."""
         planner._webui_frontend_prefix.cache_clear()
         try:
-            with mock.patch.object(
-                planner,
-                "crate_directory",
-                side_effect=planner.CrateTreeError("boom"),
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    side_effect=planner.CrateTreeError("boom"),
+                ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError, "cannot resolve the ironclaw_webui crate"
@@ -527,6 +533,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 plan = self.plan("pull_request", [path])
                 self.assertNotEqual(plan["mode"], "none")
                 self.assertTrue(plan["run_sandbox_docker"])
+
+    def test_sandbox_docker_prefix_follows_crate_inventory_when_nested(self) -> None:
+        """A family-moved ironclaw_sandbox still selects the Docker lane."""
+        moved_directory = "crates/lanes-next/ironclaw_sandbox"
+        moved_metadata = metadata()
+        next(package for package in moved_metadata["packages"] if package["id"] == "alpha")[
+            "manifest_path"
+        ] = str(ROOT / moved_directory / "Cargo.toml")
+
+        with mock.patch.object(
+            planner,
+            "crate_directory",
+            return_value=moved_directory,
+        ) as resolver:
+            plan = planner.build_plan(
+                event="pull_request",
+                changed_paths=[f"{moved_directory}/src/sandbox_process/command.rs"],
+                metadata=moved_metadata,
+                canonical_packages=self.canonical,
+            )
+        resolver.assert_any_call("ironclaw_sandbox", planner.ROOT)
+        self.assertTrue(plan["run_sandbox_docker"])
 
     def test_sandbox_docker_paths_preserve_regular_test_inventory_selection(
         self,

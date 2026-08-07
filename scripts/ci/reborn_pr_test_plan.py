@@ -42,6 +42,20 @@ def _webui_frontend_prefix() -> str:
             f"the frontend path prefix used to route Code Style is unknown: {error}"
         ) from error
     return f"{directory}/frontend/"
+
+
+def _sandbox_docker_prefixes() -> tuple[str, ...]:
+    """Sandbox source prefixes whose changes require the Docker lane."""
+    try:
+        directory = crate_directory("ironclaw_sandbox", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_sandbox crate, so "
+            f"the source path prefixes used to route the Docker lane are unknown: {error}"
+        ) from error
+    return (f"{directory}/src/sandbox_process",)
+
+
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -174,7 +188,6 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "tests/integration/support/harness/options.rs",
     "tests/integration/support/harness/profiles/sandbox_shell.rs",
 }
-SANDBOX_DOCKER_PREFIXES = ("crates/lanes/ironclaw_sandbox/src/sandbox_process",)
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
@@ -653,6 +666,7 @@ def build_plan(
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
+    sandbox_docker_prefixes = _sandbox_docker_prefixes()
 
     for path in sorted(paths):
         if path == "Cargo.lock":
@@ -693,7 +707,9 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
-        if path in SANDBOX_DOCKER_EXACT_PATHS or path.startswith(SANDBOX_DOCKER_PREFIXES):
+        if path in SANDBOX_DOCKER_EXACT_PATHS or path.startswith(
+            sandbox_docker_prefixes
+        ):
             run_sandbox_docker = True
             reasons.append(f"sandbox Docker surface changed: {path}")
             if (
