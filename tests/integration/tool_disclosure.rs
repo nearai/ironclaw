@@ -39,6 +39,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::extension_surface::BUNDLED_EXTENSION_CAPABILITY_IDS;
@@ -425,6 +426,46 @@ async fn empty_policy_advertises_no_tools() {
         .expect("an empty surface performs no capability side effects");
 }
 
+/// The disclosure catalog must consume the complete policy-qualified visible
+/// surface, not rebuild a broader corpus by checking capability IDs alone.
+/// An empty runtime dimension therefore hides host-runtime tools and must not
+/// synthesize discovery bridges for their excluded metadata, even though every
+/// capability ID remains permitted. Host-synthetic core tools are outside that
+/// runtime catalog and remain governed by their owning surface.
+#[tokio::test]
+async fn runtime_excluded_policy_advertises_no_runtime_tools_or_disclosure_bridges() {
+    let mut policy = CapabilitySurfacePolicy::allow_all();
+    policy.allowed_runtimes.clear();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_capability_surface_policy_for_bridged_test(policy)
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("runtime-excluded bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("answer without tools")
+        .await
+        .expect("text-only turn completes");
+
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("a runtime-excluded policy advertises no host-runtime tools");
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_excludes(bridge)
+            .await
+            .expect("runtime-excluded metadata must not synthesize a disclosure bridge");
+    }
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("a runtime-excluded surface performs no capability side effects");
+}
+
 /// #5647 trust boundary: the bridge-id exemption must not widen access to
 /// UNDERLYING tools. Even a malformed deferred call that would otherwise take
 /// the describe-first recovery path resolves to the real capability id
@@ -553,6 +594,50 @@ async fn narrowed_policy_filters_tool_search_results() {
             "non-allowlisted capability metadata leaked into tool_search results: {result}"
         );
     }
+}
+
+/// #7177: retrieval must use admitted schema vocabulary, not only provider
+/// names and top-level descriptions. `committer` exists in the GitHub file
+/// mutation schemas but not in their catalog descriptions.
+#[tokio::test]
+async fn tool_search_discovers_authorized_tools_by_parameter_only_vocabulary() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "committer", "limit": 10}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("find a tool that accepts committer identity")
+        .await
+        .expect("turn completes");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    let ids: std::collections::BTreeSet<&str> = output["results"]
+        .as_array()
+        .expect("results is an array")
+        .iter()
+        .filter_map(|result| result["capability_id"].as_str())
+        .collect();
+    assert!(
+        ids.contains("github.delete_file") || ids.contains("github.create_or_update_file"),
+        "parameter-only query must discover a matching authorized file tool, got {ids:?}"
+    );
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "committer")
+        .await
+        .expect("richer internal search metadata must not grow the prompt-side names-only index");
 }
 
 /// #5712: tool_describe of a non-allowlisted id reads as unknown — same
