@@ -1134,6 +1134,7 @@ impl RebornRuntime {
                 as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
             identity_lookup: Arc::clone(&self.channel_identity_store)
                 as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            dm_targets: Arc::clone(&self.channel_dm_target_store),
             deployment_channels: Arc::clone(&self.deployment_channels),
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),

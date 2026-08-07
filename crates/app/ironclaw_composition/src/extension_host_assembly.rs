@@ -385,6 +385,8 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) outbound_delivery_targets:
         Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
     pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+    pub(crate) dm_targets:
+        Arc<ironclaw_extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) channel_pairing:
@@ -425,6 +427,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
             as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
         identity_lookup: Arc::clone(&services.channel_identity_store)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+        dm_targets: Arc::clone(&services.channel_dm_target_store),
         deployment_channels: Arc::clone(&services.deployment_channels),
         channel_config: Arc::clone(&services.channel_config_service),
         channel_pairing: services.channel_pairing.clone(),
@@ -494,6 +497,7 @@ pub(crate) fn start_channel_host(
         triggered_delivery_store,
         outbound_delivery_targets,
         identity_lookup,
+        dm_targets,
         deployment_channels,
         channel_config,
         channel_pairing,
@@ -542,6 +546,7 @@ pub(crate) fn start_channel_host(
             as Arc<dyn ironclaw_product_contracts::channel_workflow::ChannelWorkflowFactory>,
         identity,
         identity_lookup,
+        dm_targets: Some(Arc::clone(dm_targets)),
         channel_pairing: channel_pairing.clone(),
         admin_users,
     });

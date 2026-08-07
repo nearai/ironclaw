@@ -15,7 +15,9 @@ use crate::{
 /// Every run notification names its own target: a live run replies on its
 /// source route, and a background run's notifier resolves the creator's
 /// notification channels itself and passes each one as a
-/// [`RunNotificationOrigin::RunScopedTarget`]. The engine reads no stored
+/// [`RunNotificationOrigin::RunScopedTarget`]. A no-run lifecycle failure uses
+/// [`RunNotificationOrigin::SystemEventTarget`] after the same owner-scoped
+/// catalog resolution. The engine reads no stored
 /// preference at all — there are no per-purpose target slots any more.
 pub(crate) struct OutboundResolutionEngine;
 
@@ -63,6 +65,7 @@ impl OutboundResolutionEngine {
                 source_route.reply_target_binding_ref.clone()
             }
             RunNotificationOrigin::RunScopedTarget { target } => target.clone(),
+            RunNotificationOrigin::SystemEventTarget { target, .. } => target.clone(),
             RunNotificationOrigin::SystemEvent { reason } => {
                 return Ok(CommunicationDeliveryResolution::NoDelivery { reason: *reason });
             }
@@ -195,6 +198,23 @@ mod tests {
                 reason: SystemEventReasonCode::Operator
             }
         );
+    }
+
+    #[tokio::test]
+    async fn targeted_system_event_uses_the_sealed_binding() {
+        let engine = OutboundResolutionEngine;
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::RunBlocked,
+            RunNotificationOrigin::SystemEventTarget {
+                reason: SystemEventReasonCode::Trigger,
+                target: reply_ref("reply:trigger-failure"),
+            },
+            "reply:trigger-failure",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
     }
 
     /// The surviving per-target origin: a run-scoped binding is used verbatim,

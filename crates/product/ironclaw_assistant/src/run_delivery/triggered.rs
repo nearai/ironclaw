@@ -19,9 +19,10 @@ use ironclaw_outbound::{
     CommunicationPreferenceKey, DeliveryDefaultScope, OutboundDeliveryTargetScope, OutboundError,
     OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, TriggeredRunDelivery,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest,
-    TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
+    TriggeredFireFailureDeliveryRequest, TriggeredRunDelivery, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
@@ -308,6 +309,53 @@ impl TriggeredRunDeliveryDriver {
             );
         });
     }
+
+    /// Notify the creator when a fire permanently fails before a run can be
+    /// submitted. The stable fire ref, rather than a fabricated run id, drives
+    /// coordinator idempotency and durable delivery-attempt evidence.
+    pub async fn on_trigger_failed_before_submit(
+        &self,
+        request: TriggeredFireFailureDeliveryRequest,
+    ) {
+        if request.project_scoped {
+            tracing::debug!(
+                failure_ref = %request.failure_ref,
+                "background fire failure notification denied: project-scoped trigger is not personal scope"
+            );
+            return;
+        }
+        let Ok(pending_permit) = Arc::clone(&self.pending_permits).try_acquire_owned() else {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                failure_ref = %request.failure_ref,
+                "background fire failure notification skipped: pending delivery queue full"
+            );
+            return;
+        };
+
+        let permits = Arc::clone(&self.delivery_permits);
+        let services = self.services.clone();
+        let target_codecs = Arc::clone(&self.target_codecs);
+        let fallback_agent_id = self.fallback_agent_id.clone();
+        tokio::spawn(async move {
+            let _pending_permit = pending_permit;
+            let Ok(_permit) = permits.acquire_owned().await else {
+                tracing::warn!(
+                    target: TRACE_TARGET,
+                    failure_ref = %request.failure_ref,
+                    "background fire failure notification skipped: delivery semaphore closed"
+                );
+                return;
+            };
+            notify_pre_submit_failure(
+                &services,
+                request,
+                target_codecs.as_ref(),
+                &fallback_agent_id,
+            )
+            .await;
+        });
+    }
 }
 
 /// The port the generic post-submit hook drives this driver through.
@@ -320,6 +368,89 @@ impl TriggeredRunDelivery for TriggeredRunDeliveryDriver {
     async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest) {
         TriggeredRunDeliveryDriver::on_trigger_submitted(self, request).await;
     }
+
+    async fn on_trigger_failed_before_submit(&self, request: TriggeredFireFailureDeliveryRequest) {
+        TriggeredRunDeliveryDriver::on_trigger_failed_before_submit(self, request).await;
+    }
+}
+
+async fn notify_pre_submit_failure(
+    services: &RunDeliveryServices,
+    request: TriggeredFireFailureDeliveryRequest,
+    target_codecs: &dyn ActivePreferenceTargetCodecs,
+    fallback_agent_id: &AgentId,
+) {
+    let TriggeredFireFailureDeliveryRequest {
+        scope,
+        creator_user_id,
+        project_scoped: _,
+        prompt,
+        failure_ref,
+    } = request;
+    let actor = TurnActor::new(creator_user_id.clone());
+    let thread_scope = ThreadScope {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| fallback_agent_id.clone()),
+        project_id: scope.project_id.clone(),
+        owner_user_id: scope.explicit_owner_user_id().cloned(),
+        mission_id: None,
+    };
+    let codecs = target_codecs.active_preference_target_codecs();
+    let targets = resolve_notification_targets(
+        services,
+        &codecs,
+        &scope.tenant_id,
+        &creator_user_id,
+        failure_ref.as_str(),
+    )
+    .await;
+    if targets.is_empty() {
+        return;
+    }
+
+    let authority = TriggeredReplyTargetAuthority {
+        scope: scope.clone(),
+        actor: actor.clone(),
+        codecs: &codecs,
+    };
+    let text = format!(
+        "{}{}",
+        prompts::BACKGROUND_RUN_FAILED_MESSAGE,
+        prompts::triggered_update_footer(&prompts::triggered_label_from_prompt(&prompt))
+    );
+    let delivery_context = PreSubmitFailureDeliveryContext {
+        services,
+        scope: &scope,
+        thread_scope: &thread_scope,
+        actor: &actor,
+        authority: &authority,
+        failure_ref: &failure_ref,
+        text: &text,
+    };
+    for target in targets {
+        if let Err(error) = deliver_pre_submit_failure_to_target(&delivery_context, &target).await {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                failure_ref = %failure_ref,
+                extension_id = %target.extension_id,
+                reason = %error,
+                "background fire failure notification failed for one channel"
+            );
+        }
+    }
+}
+
+struct PreSubmitFailureDeliveryContext<'a> {
+    services: &'a RunDeliveryServices,
+    scope: &'a TurnScope,
+    thread_scope: &'a ThreadScope,
+    actor: &'a TurnActor,
+    authority: &'a TriggeredReplyTargetAuthority<'a>,
+    failure_ref: &'a ProjectionUpdateRef,
+    text: &'a str,
 }
 
 /// Inner watcher coroutine for a single background run.
@@ -369,12 +500,13 @@ async fn notify_background_run(
     let target_codecs = target_codecs.active_preference_target_codecs();
 
     // Resolve the creator's notification channels ONCE, at fire time.
+    let run_ref = run_id.to_string();
     let targets = resolve_notification_targets(
         services,
         &target_codecs,
         &scope.tenant_id,
         &creator_user_id,
-        run_id,
+        &run_ref,
     )
     .await;
 
@@ -603,7 +735,7 @@ async fn resolve_notification_targets(
     target_codecs: &[Arc<dyn PreferenceTargetCodec>],
     tenant_id: &TenantId,
     creator_user_id: &UserId,
-    run_id: TurnRunId,
+    notification_ref: &str,
 ) -> Vec<NotificationTarget> {
     let key = CommunicationPreferenceKey {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), creator_user_id.clone()),
@@ -626,7 +758,7 @@ async fn resolve_notification_targets(
                 // the web app surface still shows the hold.
                 tracing::warn!(
                     target: TRACE_TARGET,
-                    %run_id,
+                    notification_ref,
                     %error,
                     "background run notification: notification-channel read failed"
                 );
@@ -638,7 +770,7 @@ async fn resolve_notification_targets(
         // notification on every other channel.
         tracing::debug!(
             target: TRACE_TARGET,
-            %run_id,
+            notification_ref,
             target_id = %target_id,
             %error,
             "background run notification: notification channel lookup failed; skipped"
@@ -656,7 +788,7 @@ async fn resolve_notification_targets(
             } => {
                 tracing::debug!(
                     target: TRACE_TARGET,
-                    %run_id,
+                    notification_ref,
                     target_id = %target_id,
                     "background run notification: notification channel is no longer available to its owner; skipped"
                 );
@@ -669,7 +801,7 @@ async fn resolve_notification_targets(
             } => {
                 tracing::debug!(
                     target: TRACE_TARGET,
-                    %run_id,
+                    notification_ref,
                     "background run notification: legacy notification slot no longer resolves; skipped"
                 );
                 continue;
@@ -865,6 +997,64 @@ async fn notification_plan_for_state(
             keeps_run_parked: false,
         })),
         _ => Ok(None),
+    }
+}
+
+/// Deliver one system-originated fire failure to one proven notification
+/// target. There is no run id; the stable fire projection ref is the
+/// idempotency key persisted by the coordinator.
+async fn deliver_pre_submit_failure_to_target(
+    context: &PreSubmitFailureDeliveryContext<'_>,
+    target: &NotificationTarget,
+) -> Result<(), TriggeredNotificationFailure> {
+    let projection_access_policy = AllowNoProjectionAccess;
+    let outbound_policy = OutboundPolicyService::new(
+        context.services.outbound_store.as_ref(),
+        &projection_access_policy,
+        context.authority,
+    );
+    let delivery = PrepareCommunicationDeliveryRequest {
+        resolution_request: CommunicationDeliveryResolutionRequest {
+            scope: context.scope.clone(),
+            actor: context.actor.clone(),
+            modality: CommunicationModality::Text,
+            intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                event_kind: RunNotificationEventKind::RunBlocked,
+                origin: RunNotificationOrigin::SystemEventTarget {
+                    reason: SystemEventReasonCode::Trigger,
+                    target: target.target.clone(),
+                },
+            }),
+        },
+        turn_run_id: None,
+        projection_ref: context.failure_ref.clone(),
+        attempted_at: Utc::now(),
+    };
+    let outcome = context
+        .services
+        .coordinator
+        .deliver(
+            &outbound_policy,
+            context.authority,
+            context.services.project_filesystem.as_ref(),
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::BackgroundRunNotice,
+                delivery,
+                parts: vec![OutboundPart::Text(context.text.to_string())],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: &target.extension_id,
+                thread_scope: context.thread_scope,
+            },
+        )
+        .await
+        .map_err(classify_delivery_error)?;
+    match outcome {
+        CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
+            TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
+        ),
+        _ => Ok(()),
     }
 }
 

@@ -32,9 +32,10 @@ mod tests {
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-        SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+        SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_contracts::{
         CapabilityCallCandidate, CapabilityInputIssue, CapabilityInputRef,
@@ -3960,6 +3961,7 @@ mod tests {
             .iter()
             .map(|descriptor| descriptor.capability_id.as_str())
             .collect::<Vec<_>>();
+        assert!(descriptor_ids.contains(&OUTBOUND_DELIVER_CAPABILITY_ID));
         assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID));
         assert!(descriptor_ids.contains(&OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID));
         let tool_definitions = port.tool_definitions().expect("tool definitions");
@@ -3967,6 +3969,7 @@ mod tests {
             .iter()
             .map(|definition| definition.name.as_str().to_string())
             .collect::<Vec<_>>();
+        assert!(tool_definition_names.contains(&"builtin__outbound_deliver".to_string()));
         assert!(
             tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
         );

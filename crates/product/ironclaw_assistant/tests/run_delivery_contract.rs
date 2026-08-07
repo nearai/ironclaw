@@ -48,8 +48,8 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     DeliveredGateRouteStore, DeliveryDefaultScope, DeliveryTargetCapabilities, OutboundError,
-    OutboundStateStore, OutboundStateStorePort, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
+    OutboundStateStore, OutboundStateStorePort, TriggeredFireFailureDeliveryRequest,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
 };
 use ironclaw_outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
@@ -2154,6 +2154,112 @@ async fn triggered_project_scoped_fire_is_denied_without_delivery() {
     let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
     assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Denied);
     assert!(harness.adapter.texts().is_empty(), "nothing delivered");
+}
+
+#[tokio::test]
+async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_run() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let scope = binding_scope();
+
+    let request = TriggeredFireFailureDeliveryRequest {
+        scope: scope.clone(),
+        creator_user_id: user(),
+        project_scoped: false,
+        prompt: "Send the daily summary".to_string(),
+        failure_ref: ironclaw_outbound::ProjectionUpdateRef::new("trigger-failure:fire-identity-1")
+            .expect("failure ref"),
+    };
+    harness
+        .driver
+        .on_trigger_failed_before_submit(request.clone())
+        .await;
+
+    for _ in 0..100 {
+        if harness.adapter.texts().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one redacted failure notice per target");
+    assert!(texts.iter().all(|text| text.contains("routine run failed")));
+    assert!(
+        texts.iter().all(|text| !text.contains("materialization")),
+        "notification copy must not leak internal failure detail: {texts:?}"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("attempts");
+    assert_eq!(attempts.len(), 2, "durable attempt evidence per target");
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt.candidate.turn_run_id.is_none())
+    );
+
+    harness
+        .driver
+        .on_trigger_failed_before_submit(request)
+        .await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        harness.adapter.texts().len(),
+        2,
+        "replaying one settled fire must not duplicate provider sends"
+    );
+    assert_eq!(
+        harness
+            .store
+            .list_delivery_attempts(binding_scope())
+            .await
+            .expect("attempts after replay")
+            .len(),
+        2,
+        "stable fire identity must reuse the durable attempts"
+    );
+}
+
+#[tokio::test]
+async fn project_scoped_pre_submit_failure_is_not_sent_to_personal_channels() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let scope = binding_scope();
+
+    harness
+        .driver
+        .on_trigger_failed_before_submit(TriggeredFireFailureDeliveryRequest {
+            scope: scope.clone(),
+            creator_user_id: user(),
+            project_scoped: true,
+            prompt: "Prepare the project report".to_string(),
+            failure_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                "trigger-failure:project-fire",
+            )
+            .expect("failure ref"),
+        })
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(harness.adapter.texts().is_empty());
+    assert!(
+        harness
+            .store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("attempts")
+            .is_empty()
+    );
 }
 
 /// Spec §8: the result push is gone. A background run that finishes normally

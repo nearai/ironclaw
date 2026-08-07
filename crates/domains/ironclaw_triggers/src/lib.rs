@@ -1293,11 +1293,12 @@ pub use worker::{
     ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
     ActiveHoldReason, BlockedActiveRunKind, MissingTriggerActiveRunLookup,
     NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
-    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
-    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
-    TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
-    TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFailedFireSettlement,
+    TriggerFireSettlementObserver, TriggerPollerFailureReason, TriggerPollerFireOutcome,
+    TriggerPollerFireReport, TriggerPollerTickReport, TriggerPollerWorker,
+    TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest, active_hold_projection,
+    active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

@@ -10,8 +10,9 @@ export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
-  const includeCompleted = filter === "completed";
-  const automationsState = useAutomations(includeCompleted);
+  // Failure summaries and the Failures tab must include completed one-shots.
+  // The presenter keeps completed rows out of the default All view.
+  const automationsState = useAutomations(true);
   const channelsState = useNotificationChannels();
 
   // A local refetch can resolve almost instantly, leaving the spinner to flash

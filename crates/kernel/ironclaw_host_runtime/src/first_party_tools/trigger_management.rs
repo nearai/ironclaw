@@ -74,7 +74,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             TRIGGER_RESUME_CAPABILITY_ID,
-            "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
+            "Resume a caller-scoped paused trigger so it may fire on its stored schedule. Use only when the user explicitly asks to resume or enable that routine; listing to avoid duplicates or to ensure exactly one routine exists is read-only and must not resume it.",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),

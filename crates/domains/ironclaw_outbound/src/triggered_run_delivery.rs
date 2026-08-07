@@ -20,6 +20,8 @@ use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
+use crate::ProjectionUpdateRef;
+
 /// Terminal outcome of a triggered-run delivery attempt.
 ///
 /// One record is written per run, after delivery reaches a terminal state
@@ -83,6 +85,18 @@ pub struct TriggeredRunDeliveryRequest {
     pub prompt: String,
 }
 
+/// One permanently failed trigger fire that never produced a run.
+/// `failure_ref` is stable across retries so the delivery coordinator's
+/// durable claim prevents duplicate provider sends.
+#[derive(Debug, Clone)]
+pub struct TriggeredFireFailureDeliveryRequest {
+    pub scope: TurnScope,
+    pub creator_user_id: UserId,
+    pub project_scoped: bool,
+    pub prompt: String,
+    pub failure_ref: ProjectionUpdateRef,
+}
+
 /// The proactive delivery driver for one channel extension, as its caller
 /// consumes it.
 ///
@@ -99,6 +113,11 @@ pub trait TriggeredRunDelivery: Send + Sync {
     /// Watch the submitted run and deliver its outputs to the creator's
     /// resolved target, recording the terminal outcome in the store.
     async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest);
+
+    /// Notify configured channels that a fire permanently failed before run
+    /// submission. There is deliberately no synthetic run id.
+    async fn on_trigger_failed_before_submit(&self, _request: TriggeredFireFailureDeliveryRequest) {
+    }
 }
 
 #[async_trait::async_trait]
@@ -108,6 +127,10 @@ where
 {
     async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest) {
         self.as_ref().on_trigger_submitted(request).await;
+    }
+
+    async fn on_trigger_failed_before_submit(&self, request: TriggeredFireFailureDeliveryRequest) {
+        self.as_ref().on_trigger_failed_before_submit(request).await;
     }
 }
 

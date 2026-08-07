@@ -523,6 +523,14 @@ fn classify_delivery_outcome(
             provider_message_refs: vendor_message_refs,
             durably_recorded: false,
         }),
+        // The durable row confirms that this exact delivery fact completed in
+        // an earlier invocation. Provider refs are not retained in the row,
+        // so report only the evidence we actually have.
+        CoordinatedDeliveryOutcome::AlreadyDelivered { .. } => Ok(ModelChannelDeliveryEvidence {
+            target,
+            provider_message_refs: Vec::new(),
+            durably_recorded: true,
+        }),
         CoordinatedDeliveryOutcome::Rejected { .. } => Err(ModelChannelDeliveryError::Rejected),
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
             Err(ModelChannelDeliveryError::Failed { kind: failure_kind })

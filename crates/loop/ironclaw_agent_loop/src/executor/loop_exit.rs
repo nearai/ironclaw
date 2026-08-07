@@ -32,7 +32,16 @@ pub(super) const COMPLETION_NUDGE_LIMIT: u32 = 2;
 /// in-loop nudge fires on the same signal the out-of-loop bench nudge used.
 pub(super) fn reply_trailed_off(content: &str) -> bool {
     let trimmed = content.trim();
-    trimmed.is_empty() || trimmed.ends_with(':')
+    if trimmed.is_empty() {
+        return true;
+    }
+    let last_line = trimmed.lines().next_back().unwrap_or(trimmed).trim_start();
+    // A block quote at the end is displayed content, not narration of a next
+    // action. Routine confirmations commonly introduce the exact message
+    // prefix and then quote it (for example `> Daily summary:`); treating that
+    // literal colon as a trail-off caused two completion nudges and three
+    // user-visible confirmations from one run.
+    !last_line.starts_with('>') && trimmed.ends_with(':')
 }
 
 /// Inline control message carrying the completion-nudge instruction. Delivered

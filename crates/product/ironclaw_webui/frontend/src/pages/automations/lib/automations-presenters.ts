@@ -49,7 +49,11 @@ function tr(t) {
 }
 
 export const AUTOMATION_FILTERS = [
-  { value: "all", labelKey: "automations.filter.all", predicate: null },
+  {
+    value: "all",
+    labelKey: "automations.filter.all",
+    predicate: (automation) => !isBrowserCompleted(automation),
+  },
   { value: "active", labelKey: "automations.filter.active", predicate: isBrowserActive },
   {
     value: "running",
@@ -90,7 +94,9 @@ export function automationSummary(automations) {
   // same-named filter tab, which filters automations via has_running_run /
   // has_failed_runs.
   const running = visible.filter((automation) => automation.has_running_run).length;
-  const failures = visible.filter((automation) => automation.has_failed_runs).length;
+  // Completed one-shots can still need review. Keep them out of the active
+  // scheduled totals, but count them exactly as the Failures filter does.
+  const failures = automations.filter((automation) => automation.has_failed_runs).length;
   // Only automations that will actually fire contribute to "soonest next run".
   // Paused triggers keep their stored next_run_at slot, but they won't run, so
   // surfacing their time here would imply a run that never happens.

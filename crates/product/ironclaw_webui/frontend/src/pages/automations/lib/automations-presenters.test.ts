@@ -815,6 +815,47 @@ test("automationSummary excludes completed rows from scheduled count", () => {
   assert.equal(summary.scheduled, 1, "completed row must not count toward scheduled total");
 });
 
+test("completed one-shot failures remain visible in failures but not the default list", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "scheduled-active",
+        name: "Active schedule",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: true,
+        next_run_at: "2026-06-25T09:00:00Z",
+      },
+      {
+        automation_id: "completed-failure",
+        name: "Failed one-shot",
+        source: { type: "once", at: "2026-06-10T12:00:00Z", timezone: "UTC" },
+        state: "completed",
+        is_active: false,
+        recent_runs: [
+          {
+            fire_slot: "2026-06-10T12:00:00Z",
+            status: "error",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    filterAutomations(automations, "all").map((automation) => automation.automation_id),
+    ["scheduled-active"],
+    "the default view stays focused on non-completed routines",
+  );
+  assert.deepEqual(
+    filterAutomations(automations, "failures").map((automation) => automation.automation_id),
+    ["completed-failure"],
+    "completed failures remain actionable in the failures view",
+  );
+  assert.equal(automationSummary(automations).failures, 1);
+  assert.equal(automationSummary(automations).scheduled, 1);
+});
+
 test("once label reflects source timezone wall-clock, not UTC", () => {
   // at="2026-06-24T00:30:00Z" is Jun 23 (previous evening) in LA (UTC-7 in
   // summer), so the LA wall-clock label must differ from the UTC-rendered label.

@@ -158,6 +158,9 @@ pub enum RunNotificationOrigin {
     /// / `RunBlocked` / `DeliveryStatus` when no live source route exists.
     /// Revalidated at egress.
     RunScopedTarget { target: ReplyTargetBindingRef },
+    /// A host-originated event with one owner-scoped, sealed target. This is
+    /// deliverable without fabricating a run id.
+    SystemEventTarget { reason: SystemEventReasonCode, target: ReplyTargetBindingRef },
     SystemEvent { reason: SystemEventReasonCode },
 }
 ```
@@ -172,6 +175,13 @@ the caller that builds the `RunNotificationContext` (the background-run
 notifier, or the `builtin.outbound_deliver` tool handler) has already decided
 the one target this notification uses; the resolver's job is only to read it
 back out, unmodified, as the candidate.
+
+`SystemEvent` remains metadata-only and resolves to no delivery candidate.
+`SystemEventTarget` is the bounded exception for a host lifecycle fact that
+has no run, such as a trigger fire that permanently failed before submission.
+Its target is still revalidated by `OutboundPolicyService`; the stable event
+projection reference and `turn_run_id = None` make retries idempotent without
+inventing run state.
 
 `ModelDelivery` can never legitimately carry `LiveSourceRoute`: that origin
 means "reply where the inbound message came from," which is definitionally

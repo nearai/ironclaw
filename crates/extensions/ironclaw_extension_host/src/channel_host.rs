@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_extension_contracts::recipe::IngressVerificationRecipe;
@@ -49,9 +50,12 @@ use ironclaw_product_contracts::channel_workflow::{
     ChannelRunDeliveryObserver, ChannelWorkflowFactory, ChannelWorkflowRequest,
     ChannelWorkflowStorageRoots,
 };
-use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductInboundEnvelope};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+};
 use ironclaw_product_contracts::subject_route::ProductConversationSubjectRouteResolver;
 
+use crate::channel_dm_targets::{FilesystemChannelDmTargetStore, dm_target_payload};
 use crate::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -239,6 +243,11 @@ pub struct GenericChannelHostDeps {
     /// operator-actor policy.
     pub identity_lookup:
         Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
+    /// Durable owner-scoped catalog of proven personal channel destinations.
+    /// A successfully admitted direct inbound message backfills this catalog,
+    /// covering identities that were bound before DM-target provisioning was
+    /// introduced or whose original bind callback did not carry a DM route.
+    pub dm_targets: Option<Arc<FilesystemChannelDmTargetStore>>,
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
     /// for extensions that pair without an OAuth vendor.
@@ -613,12 +622,27 @@ impl GenericChannelHostAssembly {
                 command_roles,
             )?)
             .await?;
-        let observer = graph.observer.map(|observer| {
-            Arc::new(RunDeliveryPostAdmissionObserver::new(
-                observer,
+        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        let dm_target_backfill =
+            self.deps
+                .dm_targets
+                .as_ref()
+                .map(|store| DirectInboundDmTargetBackfill {
+                    extension_id: source.extension_id().to_string(),
+                    provider,
+                    provider_lookup,
+                    operator_user_id: self.deps.identity.operator_user_id.clone(),
+                    store: Arc::clone(store),
+                });
+        let observer = if graph.observer.is_some() || dm_target_backfill.is_some() {
+            Some(Arc::new(RunDeliveryPostAdmissionObserver::new(
+                graph.observer,
                 self.connection_notices(source),
-            ))
-        });
+                dm_target_backfill,
+            )))
+        } else {
+            None
+        };
 
         let pairing = self
             .deps
@@ -947,26 +971,113 @@ impl IngressConfigurationPort for ChannelConfigIngressConfiguration {
 /// Adapts the generic run-delivery observer onto the generic sink's
 /// post-admission observer seam.
 pub struct RunDeliveryPostAdmissionObserver {
-    observer: Arc<dyn ChannelRunDeliveryObserver>,
+    observer: Option<Arc<dyn ChannelRunDeliveryObserver>>,
     connection_notices: ChannelConnectionNoticePolicy,
+    dm_target_backfill: Option<DirectInboundDmTargetBackfill>,
+}
+
+struct DirectInboundDmTargetBackfill {
+    extension_id: String,
+    provider: String,
+    provider_lookup: Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
+    operator_user_id: UserId,
+    store: Arc<FilesystemChannelDmTargetStore>,
 }
 
 impl RunDeliveryPostAdmissionObserver {
     fn new(
-        observer: Arc<dyn ChannelRunDeliveryObserver>,
+        observer: Option<Arc<dyn ChannelRunDeliveryObserver>>,
         connection_notices: ChannelConnectionNoticePolicy,
+        dm_target_backfill: Option<DirectInboundDmTargetBackfill>,
     ) -> Self {
         Self {
             observer,
             connection_notices,
+            dm_target_backfill,
         }
+    }
+
+    async fn backfill_direct_dm_target(
+        backfill: &DirectInboundDmTargetBackfill,
+        envelope: &ProductInboundEnvelope,
+    ) {
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return;
+        };
+        if payload.trigger != ProductTriggerReason::DirectChat {
+            return;
+        }
+
+        let user_id = match &backfill.provider_lookup {
+            Some(lookup) => {
+                let provider_user_id =
+                    ironclaw_host_api::user_identity::installation_scoped_provider_user_id(
+                        envelope.installation_id(),
+                        envelope.external_actor_ref().id(),
+                    );
+                match lookup
+                    .resolve_user_identity(&backfill.provider, &provider_user_id)
+                    .await
+                {
+                    Ok(Some(user_id)) => user_id,
+                    Ok(None) => return,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "ironclaw::reborn::channel_host",
+                            extension_id = %backfill.extension_id,
+                            %error,
+                            "direct channel target backfill identity lookup failed"
+                        );
+                        return;
+                    }
+                }
+            }
+            None => backfill.operator_user_id.clone(),
+        };
+        let conversation = envelope.external_conversation_ref();
+        if let Err(error) = backfill
+            .store
+            .upsert(
+                &backfill.extension_id,
+                &user_id,
+                envelope.external_actor_ref().id().to_string(),
+                dm_target_payload(conversation.space_id(), conversation.conversation_id()),
+            )
+            .await
+        {
+            tracing::warn!(
+                target: "ironclaw::reborn::channel_host",
+                extension_id = %backfill.extension_id,
+                %error,
+                "direct channel target backfill failed"
+            );
+        }
+    }
+}
+
+fn ack_confirms_direct_admission(ack: &ProductInboundAck) -> bool {
+    match ack {
+        ProductInboundAck::Accepted { .. }
+        | ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::RejectedBusy { .. } => true,
+        ProductInboundAck::Duplicate { prior } => ack_confirms_direct_admission(prior),
+        ProductInboundAck::Rejected(_)
+        | ProductInboundAck::CommandResult { .. }
+        | ProductInboundAck::NoOp => false,
     }
 }
 
 #[async_trait]
 impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.observer.observe_ack(envelope, ack).await;
+        if ack_confirms_direct_admission(&ack)
+            && let Some(backfill) = &self.dm_target_backfill
+        {
+            Self::backfill_direct_dm_target(backfill, &envelope).await;
+        }
+        if let Some(observer) = &self.observer {
+            observer.observe_ack(envelope, ack).await;
+        }
     }
 
     async fn observe_error(
@@ -974,7 +1085,9 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
         envelope: ProductInboundEnvelope,
         error: ironclaw_host_api::product_adapter_error::ProductAdapterError,
     ) {
-        self.observer.observe_error(envelope, error).await;
+        if let Some(observer) = &self.observer {
+            observer.observe_error(envelope, error).await;
+        }
     }
 }
 
@@ -998,9 +1111,11 @@ impl ChannelPairingOutcomeObserver for RunDeliveryPostAdmissionObserver {
                 &self.connection_notices.expired_or_unknown
             }
         };
-        self.observer
-            .post_connection_status_notice(&conversation, &event_id, text)
-            .await;
+        if let Some(observer) = &self.observer {
+            observer
+                .post_connection_status_notice(&conversation, &event_id, text)
+                .await;
+        }
     }
 }
 

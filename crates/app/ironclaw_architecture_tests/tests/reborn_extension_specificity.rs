@@ -1406,10 +1406,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // awaiting the owner's reword-or-leave call, not a new debt.
     ("crates/domains/ironclaw_identity/src/projects.rs", "github"),
     (
-        "crates/ironclaw_composition/src/automation/trigger_poller.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_assistant/src/blocked_auth_resume.rs",
         "google",
     ),
@@ -1675,7 +1671,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// list is where the trace-redaction classifier already records the identical
 /// disposition. Net vendor-name surface is unchanged: three rows moved list,
 /// zero terms appeared or vanished.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 119;
+///
+/// **119 → 118, 2026-08-06 (channel-generic trigger settlement delivery).**
+/// The trigger-poller bridge now describes its owner as the channel delivery
+/// hook instead of naming one concrete extension. The stale `slack` exception
+/// was removed after the specificity scan proved the production file no
+/// longer contains that vendor term.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 118;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

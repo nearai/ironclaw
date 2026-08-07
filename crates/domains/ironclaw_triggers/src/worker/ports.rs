@@ -7,6 +7,7 @@ use ironclaw_host_api::{
     ids::{TenantId, ThreadId},
 };
 
+use super::report::TriggerPollerFailureReason;
 use crate::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerRecord,
     TriggerRunHistoryStatus,
@@ -127,9 +128,19 @@ pub struct TriggerAcceptedFireSettlement {
     pub turn_scope: TurnScope,
 }
 
+/// A claimed fire that permanently failed before any run was submitted.
+/// Emitted only after the repository has durably settled the fire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFailedFireSettlement {
+    pub fire: TriggerFire,
+    pub reason: TriggerPollerFailureReason,
+}
+
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
+
+    async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
 }
 
 #[derive(Debug, Default)]

@@ -57,6 +57,22 @@ fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_targe
 }
 
 #[test]
+fn trigger_resume_description_requires_explicit_lifecycle_intent() {
+    let manifest = manifests()
+        .expect("trigger manifests")
+        .into_iter()
+        .find(|manifest| manifest.id.as_str() == TRIGGER_RESUME_CAPABILITY_ID)
+        .expect("trigger resume manifest");
+    assert!(
+        manifest
+            .description
+            .contains("explicitly asks to resume or enable"),
+        "checking for duplicates or ensuring exactly one routine must stay read-only: {}",
+        manifest.description
+    );
+}
+
+#[test]
 fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
     let future_year = Utc::now().year() + 1;
     let schedule = TriggerSchedule::cron(format!("0 0 8 * * * {future_year}"))

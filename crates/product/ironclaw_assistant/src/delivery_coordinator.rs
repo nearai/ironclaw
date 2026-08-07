@@ -34,10 +34,10 @@ use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{
-    DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
-    OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
-    PrepareCommunicationDeliveryRequest, ReplyAttachmentIntent, UpdateDeliveryStatusRequest,
-    ValidatedReplyTargetBinding,
+    ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind, OutboundDeliveryAttempt,
+    OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
+    OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
+    ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -228,6 +228,11 @@ pub enum CoordinatedDeliveryOutcome {
         conversation: ExternalConversationRef,
         vendor_message_refs: Vec<String>,
     },
+    /// The same durable delivery fact was already confirmed delivered. The
+    /// coordinator suppressed replay before provider egress. Provider refs
+    /// are intentionally absent because attempt persistence does not retain
+    /// them; callers may claim durable prior delivery, but not invent refs.
+    AlreadyDelivered { attempt: OutboundDeliveryAttempt },
     /// Terminal failure (permanent, retries exhausted, or partial-multipart).
     Failed {
         attempt: OutboundDeliveryAttempt,
@@ -411,6 +416,14 @@ impl DeliveryCoordinator {
             }
         };
 
+        // Reserve provider egress before target resolution, channel lookup,
+        // or workspace materialization. A replay of a terminal delivery must
+        // not depend on the target still being configured, and it must never
+        // let a later resolution failure overwrite the terminal row.
+        if !self.claim_delivery_attempt(&attempt).await? {
+            return self.outcome_for_claimed_delivery(&attempt).await;
+        }
+
         // Single-flight per delivery id.
         let delivery_id = attempt.delivery_id;
         {
@@ -496,6 +509,10 @@ impl DeliveryCoordinator {
             failure_kind: None,
         };
         self.store.record_delivery_attempt(attempt.clone()).await?;
+
+        if !self.claim_delivery_attempt(&attempt).await? {
+            return self.outcome_for_claimed_delivery(&attempt).await;
+        }
 
         // Single-flight per delivery id (uniform with the policy path).
         let delivery_id = attempt.delivery_id;
@@ -657,19 +674,7 @@ impl DeliveryCoordinator {
             reply_context,
         };
 
-        // 5. Persist Sending BEFORE any vendor egress (OUT-3).
-        self.store
-            .update_delivery_status(UpdateDeliveryStatusRequest {
-                delivery_id: attempt.delivery_id,
-                scope: attempt.scope.clone(),
-                status: OutboundDeliveryStatus::Sending,
-                updated_at: chrono::Utc::now(),
-                failure_kind: None,
-            })
-            .await
-            .map_err(CoordinatedDeliveryError::Outbound)?;
-
-        // 6. Drive the adapter with bounded retries. Once any part has been
+        // Drive the adapter with bounded retries. Once any part has been
         //    sent, a later retryable failure is terminal (OUT-7).
         let mut attempts_used = 0u32;
         loop {
@@ -771,6 +776,66 @@ impl DeliveryCoordinator {
                     }
                     tokio::time::sleep(self.retry.backoff).await;
                 }
+            }
+        }
+    }
+
+    /// Atomically reserve the sole provider-egress drive for this durable
+    /// identity. Policy preparation is idempotent and may return a fresh
+    /// `Prepared` value for an already-terminal row; only the store's guarded
+    /// transition decides whether this invocation owns the send.
+    async fn claim_delivery_attempt(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+    ) -> Result<bool, CoordinatedDeliveryError> {
+        self.store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: attempt.delivery_id,
+                scope: attempt.scope.clone(),
+            })
+            .await
+            .map_err(CoordinatedDeliveryError::Outbound)
+    }
+
+    /// Classify an atomic-claim miss from the authoritative persisted row.
+    /// This preserves terminal failure semantics and distinguishes confirmed
+    /// prior delivery from an in-flight or ambiguous attempt without ever
+    /// reopening provider egress.
+    async fn outcome_for_claimed_delivery(
+        &self,
+        requested: &OutboundDeliveryAttempt,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
+        let existing = self
+            .store
+            .list_delivery_attempts(requested.scope.clone())
+            .await
+            .map_err(CoordinatedDeliveryError::Outbound)?
+            .into_iter()
+            .find(|attempt| attempt.delivery_id == requested.delivery_id)
+            .ok_or(CoordinatedDeliveryError::Outbound(
+                ironclaw_outbound::OutboundError::DeliveryNotFound,
+            ))?;
+        match existing.status {
+            OutboundDeliveryStatus::Delivered => {
+                Ok(CoordinatedDeliveryOutcome::AlreadyDelivered { attempt: existing })
+            }
+            OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered => {
+                let failure_kind = existing
+                    .failure_kind
+                    .unwrap_or(DeliveryFailureKind::Unknown);
+                Ok(CoordinatedDeliveryOutcome::Failed {
+                    attempt: existing,
+                    failure_kind,
+                })
+            }
+            OutboundDeliveryStatus::Unknown | OutboundDeliveryStatus::Pending => {
+                Ok(CoordinatedDeliveryOutcome::Failed {
+                    attempt: existing,
+                    failure_kind: DeliveryFailureKind::Unknown,
+                })
+            }
+            OutboundDeliveryStatus::Prepared | OutboundDeliveryStatus::Sending => {
+                Err(CoordinatedDeliveryError::AlreadyInFlight)
             }
         }
     }

@@ -150,6 +150,13 @@ pub enum RunNotificationOrigin {
     RunScopedTarget {
         target: ReplyTargetBindingRef,
     },
+    /// A host-originated event with an explicitly owner-scoped destination.
+    /// Unlike `SystemEvent`, this is deliverable after the caller proves the
+    /// target through the ordinary reply-target authority chain.
+    SystemEventTarget {
+        reason: SystemEventReasonCode,
+        target: ReplyTargetBindingRef,
+    },
     SystemEvent {
         reason: SystemEventReasonCode,
     },
@@ -278,6 +285,14 @@ mod tests {
     fn run_notification_origin_round_trips_run_scoped_target() {
         assert_json_round_trip(RunNotificationOrigin::RunScopedTarget {
             target: reply_ref("reply:run-scoped"),
+        });
+    }
+
+    #[test]
+    fn run_notification_origin_round_trips_targeted_system_event() {
+        assert_json_round_trip(RunNotificationOrigin::SystemEventTarget {
+            reason: SystemEventReasonCode::Trigger,
+            target: reply_ref("reply:trigger-failure"),
         });
     }
 

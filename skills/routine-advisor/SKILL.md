@@ -1,6 +1,6 @@
 ---
 name: routine-advisor
-version: 0.1.0
+version: 0.1.1
 description: Suggests relevant cron routines based on user context, goals, and observed patterns
 activation:
   keywords:
@@ -74,7 +74,7 @@ Wait for the user to confirm before creating.
 
 ## Creating Routines
 
-Use the `builtin__trigger_create` capability. Before creating, check `builtin__trigger_list` to avoid duplicates.
+Use the `builtin__trigger_create` capability. Before creating, check `builtin__trigger_list` to avoid duplicates. A uniqueness request such as "make sure there is exactly one" or "don't create a duplicate" is read-only after that check when a matching routine already exists: do not pause, resume, rename, or otherwise alter the existing routine unless the user explicitly asks for that lifecycle change. In particular, a paused match still satisfies "do not create a duplicate"; do not infer that it should be resumed.
 
 Parameters:
 - `name`: Short human-readable routine name

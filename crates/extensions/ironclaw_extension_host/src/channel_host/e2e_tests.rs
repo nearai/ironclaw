@@ -234,6 +234,10 @@ struct Harness {
     auths: Arc<RecordingAuthInteractionService>,
     route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     identity_lookup: Arc<RecordingUserIdentityLookup>,
+    /// Generic per-user DM catalog records populated from proven direct
+    /// ingress, including identities that were connected before this process
+    /// started.
+    dm_targets: Arc<FilesystemChannelDmTargetStore>,
     /// The production configure service backing the assembly — admission
     /// scenarios save routing values through it mid-test.
     channel_config: Arc<ChannelConfigService>,
@@ -562,6 +566,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         format!("{INSTALLATION}:{SLACK_USER}"),
         UserId::new(USER).expect("user"), // safety: static test user id is valid.
     )]));
+    let dm_targets = generic_dm_target_store();
 
     let channel_config = configured_channel_config().await;
     let identity = ChannelHostIdentity {
@@ -630,6 +635,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         identity,
         identity_lookup: Some(Arc::clone(&identity_lookup)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>),
+        dm_targets: Some(Arc::clone(&dm_targets)),
         channel_pairing: None,
         admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
     };
@@ -664,6 +670,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         auths,
         route_store,
         identity_lookup,
+        dm_targets,
         channel_config,
         outbound,
         _host: host,
@@ -3886,6 +3893,60 @@ const DM_FINAL: &str = r#"{
   "event_id":"Ev-final",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000001"}
 	}"#;
+
+#[tokio::test]
+async fn existing_identity_direct_inbound_backfills_personal_dm_target() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "done".into(),
+    })
+    .await;
+    let user_id = UserId::new(USER).expect("user");
+    assert!(
+        harness
+            .dm_targets
+            .load("slack", &user_id)
+            .await
+            .expect("load before ingress")
+            .is_none(),
+        "the regression requires an existing identity with no post-bind DM record"
+    );
+
+    let response = harness.post_event(DM_FINAL).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.ingress.registry.drain().await;
+
+    let record = harness
+        .dm_targets
+        .load("slack", &user_id)
+        .await
+        .expect("load after ingress")
+        .expect("direct ingress should backfill the DM target");
+    assert_eq!(record.external_actor_id, SLACK_USER);
+    assert_eq!(record.target, dm_target_payload(Some(TEAM), CHANNEL));
+}
+
+#[tokio::test]
+async fn shared_channel_inbound_does_not_backfill_a_personal_dm_target() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "done".into(),
+    })
+    .await;
+    let user_id = UserId::new(USER).expect("user");
+
+    let response = harness.post_event(APP_MENTION_AUTH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.ingress.registry.drain().await;
+
+    assert!(
+        harness
+            .dm_targets
+            .load("slack", &user_id)
+            .await
+            .expect("load after shared ingress")
+            .is_none(),
+        "a shared conversation must never become the user's personal target"
+    );
+}
 
 const DM_COMMAND: &str = r#"{
   "type":"event_callback",

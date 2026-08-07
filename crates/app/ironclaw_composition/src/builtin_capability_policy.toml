@@ -335,6 +335,12 @@ mounts = "ambient"
 network = "default"
 
 [[grants]]
+capability = "builtin.outbound_deliver"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
 capability = "builtin.attach_workspace_file_to_reply"
 effects = ["read_filesystem", "external_write"]
 mounts = "workspace"
@@ -375,4 +381,3 @@ capability = "builtin.notification_channels_set"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"
-
