@@ -3947,7 +3947,14 @@ mod tests {
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
         let expected_provider_caller =
-            expected_outbound_delivery_caller(&run_context, owner_user_id.clone());
+            // The outbound capabilities resolve as the ACTING user, not the
+            // thread owner: on a shared-route conversation the owner is the
+            // route's configured subject (the operator by default) while the
+            // actor is whoever posted, and owner-resolution let a participant
+            // reach the subject's own destinations. This assertion previously
+            // pinned the owner; that pin predates operator-defaulted subjects
+            // and is reversed deliberately here.
+            expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         let port = factory
             .create_capability_port(&run_context)
@@ -4047,7 +4054,7 @@ mod tests {
             observed_provider_callers
                 .iter()
                 .all(|caller| caller == &expected_provider_caller),
-            "outbound target provider should be scoped to owner caller: {observed_provider_callers:?}"
+            "outbound target provider should be scoped to the acting caller: {observed_provider_callers:?}"
         );
         assert!(
             !observed_provider_callers.is_empty(),
@@ -4122,7 +4129,14 @@ mod tests {
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
         let expected_provider_caller =
-            expected_outbound_delivery_caller(&run_context, owner_user_id.clone());
+            // The outbound capabilities resolve as the ACTING user, not the
+            // thread owner: on a shared-route conversation the owner is the
+            // route's configured subject (the operator by default) while the
+            // actor is whoever posted, and owner-resolution let a participant
+            // reach the subject's own destinations. This assertion previously
+            // pinned the owner; that pin predates operator-defaulted subjects
+            // and is reversed deliberately here.
+            expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         let fallback_user_id = UserId::new("local-yolo-outbound-fallback").expect("user id");
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -4189,9 +4203,9 @@ mod tests {
         assert!(
             runtime_surfaces
                 .outbound_preferences_for_test()
-                .load_communication_preference(owner_preference_key.clone())
+                .load_communication_preference(actor_preference_key.clone())
                 .await
-                .expect("owner preference read after missing-target set")
+                .expect("acting-user preference read after missing-target set")
                 .is_none()
         );
 
@@ -4223,16 +4237,16 @@ mod tests {
                 .all(|caller| caller == &expected_provider_caller),
             "outbound target provider should be scoped to owner caller: {observed_provider_callers:?}"
         );
-        let owner_preference = runtime_surfaces
+        let acting_preference = runtime_surfaces
             .outbound_preferences_for_test()
-            .load_communication_preference(owner_preference_key)
+            .load_communication_preference(actor_preference_key)
             .await
-            .expect("owner preference read after direct set")
-            .expect("owner preference persisted");
+            .expect("acting-user preference read after direct set")
+            .expect("acting-user preference persisted");
         // The bypassed-gate dispatch writes the notification-channel set, not a
         // final-reply route: `notification_channels_set` replaces the whole set.
         assert_eq!(
-            owner_preference
+            acting_preference
                 .record
                 .notification_targets
                 .iter()
@@ -4243,9 +4257,9 @@ mod tests {
         assert!(
             runtime_surfaces
                 .outbound_preferences_for_test()
-                .load_communication_preference(actor_preference_key)
+                .load_communication_preference(owner_preference_key)
                 .await
-                .expect("actor preference read after direct set")
+                .expect("owner preference read after direct set")
                 .is_none()
         );
     }

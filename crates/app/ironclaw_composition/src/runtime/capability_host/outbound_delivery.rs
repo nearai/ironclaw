@@ -237,6 +237,32 @@ fn invocation_effective_input_ref(
         .unwrap_or(&invocation.request.input_ref)
 }
 
+/// The caller these capabilities read and write outbound state AS.
+///
+/// This answers an AUTHORIZATION question — whose delivery targets may this
+/// call see, whose notification channels may it rewrite — so it follows the
+/// ACTING user, not the thread's owner.
+///
+/// The two agree on a direct message and on an automation fire. They diverge
+/// on a shared-route channel conversation, where the scope owner is the
+/// route's configured subject (the deployment operator by default, see
+/// `channel_workflow.rs`) and the actor is whoever posted. Resolving the owner
+/// there let any participant of a shared channel enumerate the operator's
+/// connected destinations and rewrite where the operator's approval and
+/// re-auth notices are delivered.
+///
+/// This REVERSES a previously pinned preference for the owner. That pin was
+/// written before shared-route subjects defaulted to the operator, and it is
+/// wrong under the product rule that a run acts as whoever invoked it.
+///
+/// INTERIM: the same owner-preference still governs
+/// [`resource_scope_for_run`] and [`settings_scope_for_run`], which scope the
+/// approval-gate raise and the capability lease and must stay matched between
+/// raise and resume. Unifying those is the follow-up that also removes
+/// shared-route subject binding outright, so a shared channel runs entirely as
+/// its invoker; it needs approval raise/resume coverage that does not exist
+/// yet, which is why it is not folded in here.
+///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
 pub(super) fn caller_for_run(
     invocation: &SyntheticCapabilityInvocation,
@@ -244,10 +270,22 @@ pub(super) fn caller_for_run(
 ) -> ProductSurfaceCaller {
     ProductSurfaceCaller::new(
         invocation.run_context.scope.tenant_id.clone(),
-        effective_user_id(&invocation.run_context, fallback_user_id),
+        acting_user_id(&invocation.run_context, fallback_user_id),
         invocation.run_context.scope.agent_id.clone(),
         invocation.run_context.scope.project_id.clone(),
     )
+}
+
+/// The authenticated actor driving this run, falling back to the thread owner
+/// only when the run carries no actor at all (a host-initiated run), and to the
+/// configured fallback when it carries neither.
+fn acting_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
+    run_context
+        .actor
+        .as_ref()
+        .map(|actor| actor.user_id.clone())
+        .or_else(|| run_context.scope.explicit_owner_user_id().cloned())
+        .unwrap_or_else(|| fallback_user_id.clone())
 }
 
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
@@ -846,5 +884,64 @@ mod tests {
                 .expect_err("unknown fields should fail");
 
         assert!(error.to_string().contains("unsupported field `unexpected`"));
+    }
+
+    /// The interim split this PR ships: the AUTHORIZATION identity follows the
+    /// actor, while the approval-gate and lease scopes still follow the owner
+    /// so a raise and its resume keep matching. Unifying them is the follow-up
+    /// that removes shared-route subject binding.
+    #[test]
+    fn authorization_identity_follows_the_actor_while_approval_scope_follows_the_owner() {
+        let owner = UserId::new("user-route-subject").expect("owner id");
+        let actor = UserId::new("user-participant").expect("actor id");
+        let fallback = UserId::new("user-fallback").expect("fallback id");
+        let scope = ironclaw_turns::TurnScope::new_with_owner(
+            ironclaw_host_api::ids::TenantId::new("tenant-shared").expect("tenant"),
+            None,
+            None,
+            ironclaw_host_api::ids::ThreadId::new("thread-shared").expect("thread"),
+            Some(owner.clone()),
+        );
+
+        let with_actor = run_context_for_test(scope.clone(), Some(actor.clone()));
+        assert_eq!(
+            acting_user_id(&with_actor, &fallback),
+            actor,
+            "a shared-channel participant acts as themselves, not as the route subject"
+        );
+        assert_eq!(
+            effective_user_id(&with_actor, &fallback),
+            owner,
+            "approval/lease scoping deliberately still follows the owner (interim)"
+        );
+
+        // A host-initiated run carries no actor: fall back to the owner, not to
+        // the configured fallback identity.
+        let actorless = run_context_for_test(scope, None);
+        assert_eq!(acting_user_id(&actorless, &fallback), owner);
+    }
+
+    #[allow(clippy::items_after_test_module)]
+    fn run_context_for_test(
+        scope: ironclaw_turns::TurnScope,
+        actor: Option<UserId>,
+    ) -> LoopRunContext {
+        use ironclaw_loop_contracts::RunProfileResolver as _;
+        let resolved = futures::executor::block_on(
+            ironclaw_loop_contracts::InMemoryRunProfileResolver::default().resolve_run_profile(
+                ironclaw_loop_contracts::RunProfileResolutionRequest::interactive_default(),
+            ),
+        )
+        .expect("profile resolves");
+        let mut run_context = LoopRunContext::new(
+            scope,
+            ironclaw_turns::TurnId::new(),
+            ironclaw_turns::TurnRunId::new(),
+            resolved,
+        );
+        if let Some(actor) = actor {
+            run_context = run_context.with_actor(ironclaw_turns::TurnActor::new(actor));
+        }
+        run_context
     }
 }
