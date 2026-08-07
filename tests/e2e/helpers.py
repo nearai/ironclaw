@@ -324,6 +324,7 @@ SEL_V2 = {
     "inspector_panel": "[data-testid='inspector-panel']",
     "inspector_prompt_content": "[data-testid='inspector-prompt-content']",
     "inspector_tab_stats": "[data-testid='inspector-tab-stats']",
+    "inspector_stats_content": "[data-testid='inspector-stats-content']",
     "inspector_close": "[data-testid='inspector-close']",
     "inspector_open": "[data-testid='inspector-open']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble

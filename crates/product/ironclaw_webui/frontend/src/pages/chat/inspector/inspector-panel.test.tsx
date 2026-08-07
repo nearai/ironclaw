@@ -120,6 +120,42 @@ test.each(truncationCases)("prompt tab reports a truncated %s", async (_label, t
   );
 });
 
+test("stats tab formats aggregates and unavailable samples without zero fabrication", async () => {
+  inspectorState.snapshot = {
+    stats: {
+      total_model_calls: 3,
+      calls_per_model: [
+        {
+          model: { content: "provider-model", original_bytes: 14, truncated: false },
+          calls: 3,
+        },
+      ],
+      calls_per_model_truncated: false,
+      input_tokens: { known_total: 1_200, unavailable_samples: 1 },
+      output_tokens: { known_total: 80, unavailable_samples: 1 },
+      cache_read_input_tokens: { known_total: 0, unavailable_samples: 3 },
+      cache_creation_input_tokens: { known_total: 20, unavailable_samples: 1 },
+      total_latency_ms: { known_total: 900, unavailable_samples: 1 },
+    },
+  };
+
+  await act(async () =>
+    root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />),
+  );
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-stats']")?.click(),
+  );
+
+  const stats = document.querySelector("[data-testid='inspector-stats-content']");
+  assert.ok(stats);
+  assert.match(stats.textContent || "", /1,200/);
+  assert.match(stats.textContent || "", /450 ms/);
+  assert.match(stats.textContent || "", /Unavailable/);
+  assert.match(stats.textContent || "", /provider-model3/);
+  assert.doesNotMatch(stats.textContent || "", /Tool calls|Tool outcomes/);
+  assert.match(stats.textContent || "", /7 metric samples were unavailable/);
+});
+
 afterEach(async () => {
   await act(async () => root?.unmount());
   document.body.replaceChildren();

@@ -41,6 +41,9 @@ pub struct LoopModelRequest {
     /// Zero-based index into the host-resolved ordered fallback chain.
     #[serde(default)]
     pub fallback_index: u32,
+    /// Zero-based agent-loop iteration that issued this provider call.
+    #[serde(default)]
+    pub iteration: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<LoopModelCapabilityView>,
 }

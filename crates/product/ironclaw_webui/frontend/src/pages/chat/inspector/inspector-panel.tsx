@@ -239,27 +239,96 @@ function ActivityShell({
   );
 }
 
+interface DiagnosticMetricTotal {
+  known_total: number;
+  unavailable_samples: number;
+}
+
+interface SessionDiagnosticStats {
+  total_model_calls: number;
+  calls_per_model: Array<{ model: BoundedDiagnosticText; calls: number }>;
+  calls_per_model_truncated: boolean;
+  input_tokens: DiagnosticMetricTotal;
+  output_tokens: DiagnosticMetricTotal;
+  cache_read_input_tokens: DiagnosticMetricTotal;
+  cache_creation_input_tokens: DiagnosticMetricTotal;
+  total_latency_ms: DiagnosticMetricTotal;
+}
+
+function metricValue(
+  metric: DiagnosticMetricTotal,
+  sampleCount: number,
+  suffix = "",
+): string {
+  if (sampleCount > 0 && metric.unavailable_samples >= sampleCount) return "Unavailable";
+  return `${metric.known_total.toLocaleString()}${suffix}`;
+}
+
+function MetricCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
+      <p className="text-xs text-[var(--v2-text-muted)]">{label}</p>
+      <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">{value}</p>
+    </div>
+  );
+}
+
 function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) {
-  const stats = snapshot?.stats as { total_model_calls?: unknown } | undefined;
+  const stats = snapshot?.stats as SessionDiagnosticStats | undefined;
   if (!stats) {
     return (
       <EmptyTab
         title="No statistics yet"
-        description="Session totals will appear after the run records model or tool activity."
+        description="Session totals will appear after the run records model activity."
       />
     );
   }
-  const totalCalls = typeof stats.total_model_calls === "number" ? stats.total_model_calls : 0;
+  const knownLatencySamples = Math.max(
+    0,
+    stats.total_model_calls - stats.total_latency_ms.unavailable_samples,
+  );
+  const averageLatency = knownLatencySamples > 0
+    ? `${Math.round(stats.total_latency_ms.known_total / knownLatencySamples).toLocaleString()} ms`
+    : "Unavailable";
+  const partialMetricCount = [
+    stats.input_tokens,
+    stats.output_tokens,
+    stats.cache_read_input_tokens,
+    stats.cache_creation_input_tokens,
+    stats.total_latency_ms,
+  ].reduce((total, metric) => total + metric.unavailable_samples, 0);
   return (
-    <div className="grid grid-cols-2 gap-3 p-4">
-      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-        <p className="text-xs text-[var(--v2-text-muted)]">Model calls</p>
-        <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">{totalCalls}</p>
+    <div className="space-y-4 p-4" data-testid="inspector-stats-content">
+      <div className="grid grid-cols-2 gap-3">
+        <MetricCard label="Model calls" value={stats.total_model_calls.toLocaleString()} />
+        <MetricCard label="Average latency" value={averageLatency} />
+        <MetricCard label="Input tokens" value={metricValue(stats.input_tokens, stats.total_model_calls)} />
+        <MetricCard label="Output tokens" value={metricValue(stats.output_tokens, stats.total_model_calls)} />
+        <MetricCard label="Cache-read tokens" value={metricValue(stats.cache_read_input_tokens, stats.total_model_calls)} />
+        <MetricCard label="Cache-created tokens" value={metricValue(stats.cache_creation_input_tokens, stats.total_model_calls)} />
+        <MetricCard label="Total latency" value={metricValue(stats.total_latency_ms, stats.total_model_calls, " ms")} />
       </div>
-      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-        <p className="text-xs text-[var(--v2-text-muted)]">Live updates</p>
-        <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">Available</p>
+      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs">
+        <p className="font-medium text-[var(--v2-text-strong)]">Calls per model</p>
+        {stats.calls_per_model.length === 0 ? (
+          <p className="mt-2 text-[var(--v2-text-muted)]">No model breakdown available.</p>
+        ) : (
+          <dl className="mt-2 space-y-1.5">
+            {stats.calls_per_model.map((entry, index) => (
+              <div key={index} className="flex justify-between gap-3">
+                <dt className="min-w-0 truncate text-[var(--v2-text-muted)]">{entry.model.content}</dt>
+                <dd>{entry.calls.toLocaleString()}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
       </div>
+      {(partialMetricCount > 0 || stats.calls_per_model_truncated) && (
+        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
+          Statistics are partial: {partialMetricCount.toLocaleString()} metric samples were unavailable
+          {stats.calls_per_model_truncated ? " and the model breakdown was truncated" : ""}.
+        </p>
+      )}
     </div>
   );
 }

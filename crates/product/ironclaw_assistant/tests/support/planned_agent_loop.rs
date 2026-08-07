@@ -225,6 +225,7 @@ pub fn capability_call_response(
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         effective_fallback_index: Some(0),
+        diagnostic_effective_model: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
@@ -683,6 +684,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_reasoning_deltas: Vec::new(),
             usage: None,
             effective_fallback_index: Some(request.fallback_index),
+            diagnostic_effective_model: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,

@@ -4,6 +4,7 @@
 //! content out of durable events and drops all state at process restart.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::Utc;
@@ -12,6 +13,7 @@ use ironclaw_host_api::{
     turn::TurnRunId,
 };
 use ironclaw_loop_host::{
+    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticStatus,
     HostManagedModelMessageRole, HostManagedPromptDiagnosticCapture,
     HostManagedPromptDiagnosticMessage, HostManagedPromptDiagnosticSink,
     estimate_tokens_from_chars,
@@ -20,14 +22,20 @@ use ironclaw_product_contracts::inspector::{
     DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_LIVE_UPDATE_SCOPES, DEFAULT_MAX_MODEL_CALLS_PER_RUN,
     DEFAULT_MAX_RETAINED_RUNS_PER_SESSION, DEFAULT_MAX_RETAINED_UPDATES_PER_RUN,
     DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN, DEFAULT_MAX_TRACKED_SESSIONS, DiagnosticActivityEntry,
-    DiagnosticActivityEvent, DiagnosticCursor, DiagnosticScope, DiagnosticSequence,
-    DiagnosticSnapshot, DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope,
-    DiagnosticUpdateKind, ModelCallDiagnostic, PromptComponentDiagnostic, PromptComponentKind,
-    PromptDiagnostic, SessionDiagnosticStats, ToolExecutionDiagnostic,
+    DiagnosticActivityEvent, DiagnosticCursor, DiagnosticMetricTotal, DiagnosticModelCallId,
+    DiagnosticModelCount, DiagnosticScope, DiagnosticSequence, DiagnosticSnapshot,
+    DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope, DiagnosticUpdateKind,
+    InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic, ModelTokenUsage,
+    PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, SessionDiagnosticStats,
+    ToolExecutionDiagnostic, ToolExecutionStatus,
 };
 use ironclaw_safety::LeakDetector;
 use thiserror::Error;
 use tokio::sync::broadcast;
+
+// Stats replacement identity must outlive the smaller operator-display queues.
+// Bound it to the maximum retained diagnostic update horizon instead.
+const MAX_STATS_RECORDS_PER_RUN: usize = DEFAULT_MAX_RETAINED_UPDATES_PER_RUN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiagnosticStoreLimits {
@@ -163,6 +171,11 @@ struct DiagnosticRunState {
     prompt: Option<PromptDiagnostic>,
     model_calls: VecDeque<ModelCallDiagnostic>,
     tool_executions: VecDeque<ToolExecutionDiagnostic>,
+    model_stats_records: HashMap<DiagnosticModelCallId, ModelStatsContribution>,
+    model_stats_order: VecDeque<DiagnosticModelCallId>,
+    tool_stats_records:
+        HashMap<ironclaw_host_api::turn::CapabilityActivityId, ToolStatsContribution>,
+    tool_stats_order: VecDeque<ironclaw_host_api::turn::CapabilityActivityId>,
     activity: VecDeque<DiagnosticActivityEntry>,
     stats: SessionDiagnosticStats,
     updates: VecDeque<DiagnosticUpdateEnvelope>,
@@ -176,6 +189,10 @@ impl Default for DiagnosticRunState {
             prompt: None,
             model_calls: VecDeque::new(),
             tool_executions: VecDeque::new(),
+            model_stats_records: HashMap::new(),
+            model_stats_order: VecDeque::new(),
+            tool_stats_records: HashMap::new(),
+            tool_stats_order: VecDeque::new(),
             activity: VecDeque::new(),
             stats: SessionDiagnosticStats::default(),
             updates: VecDeque::new(),
@@ -361,13 +378,14 @@ impl InMemoryDiagnosticStore {
         prompt: PromptDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let prompt = prompt.into_bounded();
-        let update = DiagnosticUpdateKind::PromptUpdated {
-            component_count: u32::try_from(prompt.components.len()).unwrap_or(u32::MAX),
-            total_estimated_tokens: prompt.total_estimated_tokens,
-            truncated: prompt.any_content_truncated(),
-        };
-        self.record(scope, update, |run, _| {
+        self.record(scope, move |run, _| {
+            let update = DiagnosticUpdateKind::PromptUpdated {
+                component_count: u32::try_from(prompt.components.len()).unwrap_or(u32::MAX),
+                total_estimated_tokens: prompt.total_estimated_tokens,
+                truncated: prompt.any_content_truncated(),
+            };
             run.prompt = Some(prompt);
+            update
         })
     }
 
@@ -377,15 +395,28 @@ impl InMemoryDiagnosticStore {
         model_call: ModelCallDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let model_call = model_call.into_bounded();
-        let update = DiagnosticUpdateKind::ModelCall(model_call.clone());
         let cap = self.limits.max_model_calls_per_run;
-        self.record(scope, update, move |run, _| {
+        self.record(scope, move |run, _| {
+            let contribution = ModelStatsContribution::from(&model_call);
+            let existing = replace_bounded_state(
+                &mut run.model_stats_records,
+                &mut run.model_stats_order,
+                model_call.call_id,
+                contribution.clone(),
+                MAX_STATS_RECORDS_PER_RUN,
+            );
+            if let Some(existing) = existing.as_ref() {
+                update_model_stats(&mut run.stats, existing, false);
+            }
+            update_model_stats(&mut run.stats, &contribution, true);
+            let update = DiagnosticUpdateKind::ModelCall(model_call.clone());
             replace_or_push(
                 &mut run.model_calls,
                 model_call,
                 cap,
                 |existing, incoming| existing.call_id == incoming.call_id,
             );
+            update
         })
     }
 
@@ -395,20 +426,33 @@ impl InMemoryDiagnosticStore {
         tool: ToolExecutionDiagnostic,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let tool = tool.into_bounded();
-        let update = DiagnosticUpdateKind::ToolExecutionUpdated {
-            activity_id: tool.activity_id,
-            model_call_id: tool.model_call_id,
-            capability_name: tool.capability_name.clone(),
-            status: tool.status,
-            duration_ms: tool.duration_ms,
-            output_bytes: tool.output_bytes,
-            result_truncated: tool.result_truncated(),
-        };
         let cap = self.limits.max_tool_executions_per_run;
-        self.record(scope, update, move |run, _| {
+        self.record(scope, move |run, _| {
+            let contribution = ToolStatsContribution::from(&tool);
+            let existing = replace_bounded_state(
+                &mut run.tool_stats_records,
+                &mut run.tool_stats_order,
+                tool.activity_id,
+                contribution,
+                MAX_STATS_RECORDS_PER_RUN,
+            );
+            if let Some(existing) = existing.as_ref() {
+                update_tool_stats(&mut run.stats, existing, false);
+            }
+            update_tool_stats(&mut run.stats, &contribution, true);
+            let update = DiagnosticUpdateKind::ToolExecutionUpdated {
+                activity_id: tool.activity_id,
+                model_call_id: tool.model_call_id,
+                capability_name: tool.capability_name.clone(),
+                status: tool.status,
+                duration_ms: tool.duration_ms,
+                output_bytes: tool.output_bytes,
+                result_truncated: tool.result_truncated(),
+            };
             replace_or_push(&mut run.tool_executions, tool, cap, |existing, incoming| {
                 existing.activity_id == incoming.activity_id
             });
+            update
         })
     }
 
@@ -418,14 +462,15 @@ impl InMemoryDiagnosticStore {
         event: DiagnosticActivityEvent,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let event = event.into_bounded();
-        let update = DiagnosticUpdateKind::Activity(event.clone());
         let cap = self.limits.max_activity_entries_per_run;
-        self.record(scope, update, move |run, sequence| {
+        self.record(scope, move |run, sequence| {
+            let update = DiagnosticUpdateKind::Activity(event.clone());
             push_bounded(
                 &mut run.activity,
                 DiagnosticActivityEntry { sequence, event },
                 cap,
             );
+            update
         })
     }
 
@@ -435,11 +480,10 @@ impl InMemoryDiagnosticStore {
         stats: SessionDiagnosticStats,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let stats = stats.into_bounded();
-        self.record(
-            scope,
-            DiagnosticUpdateKind::Stats(stats.clone()),
-            move |run, _| run.stats = stats,
-        )
+        self.record(scope, move |run, _| {
+            run.stats = stats.clone();
+            DiagnosticUpdateKind::Stats(stats)
+        })
     }
 
     pub fn snapshot(
@@ -557,8 +601,7 @@ impl InMemoryDiagnosticStore {
     fn record(
         &self,
         scope: DiagnosticScope,
-        update: DiagnosticUpdateKind,
-        mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence),
+        mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence) -> DiagnosticUpdateKind,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let mut state = self
             .state
@@ -571,7 +614,7 @@ impl InMemoryDiagnosticStore {
             .checked_add(1)
             .ok_or(DiagnosticStoreError::SequenceExhausted)?;
         let sequence = DiagnosticSequence::new(next);
-        mutate(run, sequence);
+        let update = mutate(run, sequence);
         let cursor = DiagnosticCursor::new(run.stream_id, sequence);
         let envelope = DiagnosticUpdateEnvelope {
             scope,
@@ -589,6 +632,146 @@ impl InMemoryDiagnosticStore {
         state.send_live_update(envelope);
         Ok(cursor)
     }
+}
+
+fn update_counter(counter: &mut u64, value: u64, add: bool) {
+    *counter = if add {
+        counter.saturating_add(value)
+    } else {
+        counter.saturating_sub(value)
+    };
+}
+
+fn update_metric(metric: &mut DiagnosticMetricTotal, value: Option<u64>, add: bool) {
+    match value {
+        Some(value) => update_counter(&mut metric.known_total, value, add),
+        None => update_counter(&mut metric.unavailable_samples, 1, add),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModelStatsContribution {
+    model: String,
+    usage: Option<ModelTokenUsage>,
+    duration_ms: Option<u64>,
+}
+
+impl From<&ModelCallDiagnostic> for ModelStatsContribution {
+    fn from(call: &ModelCallDiagnostic) -> Self {
+        Self {
+            model: call
+                .effective_model
+                .as_ref()
+                .unwrap_or(&call.requested_model)
+                .content()
+                .to_string(),
+            usage: call.usage.clone(),
+            duration_ms: call.duration_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolStatsContribution {
+    status: ToolExecutionStatus,
+}
+
+impl From<&ToolExecutionDiagnostic> for ToolStatsContribution {
+    fn from(tool: &ToolExecutionDiagnostic) -> Self {
+        Self {
+            status: tool.status,
+        }
+    }
+}
+
+fn update_model_count(stats: &mut SessionDiagnosticStats, model: &str, add: bool) {
+    if let Some(index) = stats
+        .calls_per_model
+        .iter()
+        .position(|entry| entry.model.content() == model)
+    {
+        update_counter(&mut stats.calls_per_model[index].calls, 1, add);
+        if stats.calls_per_model[index].calls == 0 {
+            stats.calls_per_model.remove(index);
+        }
+    } else if add {
+        if stats.calls_per_model.len() < MAX_MODELS_IN_STATS {
+            stats
+                .calls_per_model
+                .push(DiagnosticModelCount::new(model, 1));
+        } else {
+            // This is a monotonic completeness marker. Once a model bucket was
+            // omitted, later removals cannot reconstruct its historical count,
+            // so clearing the flag would incorrectly claim an exact breakdown.
+            stats.calls_per_model_truncated = true;
+        }
+    }
+}
+
+fn update_model_stats(
+    stats: &mut SessionDiagnosticStats,
+    call: &ModelStatsContribution,
+    add: bool,
+) {
+    update_counter(&mut stats.total_model_calls, 1, add);
+    update_model_count(stats, &call.model, add);
+    match call.usage.as_ref() {
+        Some(usage) => {
+            update_metric(&mut stats.input_tokens, usage.input_tokens, add);
+            update_metric(&mut stats.output_tokens, usage.output_tokens, add);
+            update_metric(
+                &mut stats.cache_read_input_tokens,
+                usage.cache_read_input_tokens,
+                add,
+            );
+            update_metric(
+                &mut stats.cache_creation_input_tokens,
+                usage.cache_creation_input_tokens,
+                add,
+            );
+        }
+        None => {
+            update_metric(&mut stats.input_tokens, None, add);
+            update_metric(&mut stats.output_tokens, None, add);
+            update_metric(&mut stats.cache_read_input_tokens, None, add);
+            update_metric(&mut stats.cache_creation_input_tokens, None, add);
+        }
+    }
+    update_metric(&mut stats.total_latency_ms, call.duration_ms, add);
+}
+
+fn update_tool_stats(stats: &mut SessionDiagnosticStats, tool: &ToolStatsContribution, add: bool) {
+    update_counter(&mut stats.total_tool_calls, 1, add);
+    match tool.status {
+        ToolExecutionStatus::Succeeded => {
+            update_counter(&mut stats.successful_tool_calls, 1, add);
+        }
+        ToolExecutionStatus::Failed => {
+            update_counter(&mut stats.failed_tool_calls, 1, add);
+        }
+        ToolExecutionStatus::Started => {}
+    }
+}
+
+fn replace_bounded_state<K, V>(
+    values: &mut HashMap<K, V>,
+    order: &mut VecDeque<K>,
+    key: K,
+    value: V,
+    capacity: usize,
+) -> Option<V>
+where
+    K: Clone + Eq + Hash,
+{
+    let previous = values.insert(key.clone(), value);
+    touch(order, key);
+    while values.len() > capacity {
+        let Some(evicted) = order.pop_front() else {
+            break;
+        };
+        values.remove(&evicted);
+    }
+    previous
 }
 
 impl DiagnosticStorePort for InMemoryDiagnosticStore {
@@ -774,6 +957,58 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             tracing::debug!(%error, "prompt diagnostics could not be retained");
         }
     }
+
+    fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
+        let user_id = capture
+            .context
+            .actor
+            .as_ref()
+            .map(|actor| actor.user_id.clone())
+            .or_else(|| capture.context.scope.explicit_owner_user_id().cloned());
+        let Some(user_id) = user_id else {
+            tracing::debug!(
+                run_id = %capture.context.run_id,
+                "model-call diagnostics skipped because the run has no user scope"
+            );
+            return;
+        };
+        let scope = DiagnosticScope::new(
+            capture.context.scope.tenant_id.clone(),
+            user_id,
+            capture.context.thread_id.clone(),
+            capture.context.run_id,
+        );
+        let usage = capture.usage.map(|usage| ModelTokenUsage {
+            input_tokens: Some(u64::from(usage.input_tokens)),
+            output_tokens: Some(u64::from(usage.output_tokens)),
+            cache_read_input_tokens: Some(u64::from(usage.cache_read_input_tokens)),
+            cache_creation_input_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
+        });
+        let status = match capture.status {
+            HostManagedModelCallDiagnosticStatus::Succeeded => InspectorModelCallStatus::Succeeded,
+            HostManagedModelCallDiagnosticStatus::Failed => InspectorModelCallStatus::Failed,
+        };
+        let detector = LeakDetector::new();
+        let model_call = ModelCallDiagnostic::new(
+            ironclaw_product_contracts::inspector::DiagnosticModelCallId::new(),
+            capture.iteration,
+            diagnostic_prompt_text(&detector, &capture.requested_model),
+            capture
+                .effective_model
+                .map(|model| diagnostic_prompt_text(&detector, &model)),
+            capture.started_at,
+            Some(capture.completed_at),
+            Some(capture.duration_ms),
+            status,
+            usage,
+            capture
+                .failure_summary
+                .map(|summary| diagnostic_prompt_text(&detector, &summary)),
+        );
+        if let Err(error) = InMemoryDiagnosticStore::record_model_call(self, scope, model_call) {
+            tracing::debug!(%error, "model-call diagnostics could not be retained");
+        }
+    }
 }
 
 impl Default for InMemoryDiagnosticStore {
@@ -833,7 +1068,9 @@ mod tests {
         ids::{CapabilityId, TenantId, ThreadId, UserId},
         turn::{RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope},
     };
-    use ironclaw_loop_contracts::{LoopRunContext, ModelProfileId, ResolvedRunProfile, SkillName};
+    use ironclaw_loop_contracts::{
+        LoopModelUsage, LoopRunContext, ModelProfileId, ResolvedRunProfile, SkillName,
+    };
     use ironclaw_loop_host::ProviderModelId;
     use ironclaw_product_contracts::inspector::{
         BoundedDiagnosticText, DIAGNOSTIC_LABEL_MAX_BYTES, DIAGNOSTIC_SUMMARY_MAX_BYTES,
@@ -1220,6 +1457,7 @@ mod tests {
                 },
             )
             .expect("activity");
+
         store
             .record_stats(
                 scope.clone(),
@@ -1299,6 +1537,380 @@ mod tests {
     }
 
     #[test]
+    fn metrics_cover_provider_failover_replacements_missing_usage_and_retention() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let first_id = DiagnosticModelCallId::new();
+        let first_started = ModelCallDiagnostic::new(
+            first_id,
+            2,
+            "requested-a",
+            Some("model-a".to_string()),
+            Utc::now(),
+            None,
+            None,
+            InspectorModelCallStatus::Started,
+            None,
+            None,
+        );
+        store
+            .record_model_call(scope.clone(), first_started)
+            .expect("record start");
+        let first_completed = ModelCallDiagnostic::new(
+            first_id,
+            2,
+            "requested-a",
+            Some("model-a".to_string()),
+            Utc::now(),
+            Some(Utc::now()),
+            Some(100),
+            InspectorModelCallStatus::Succeeded,
+            Some(ModelTokenUsage {
+                input_tokens: Some(15),
+                output_tokens: Some(5),
+                cache_read_input_tokens: Some(3),
+                cache_creation_input_tokens: Some(2),
+            }),
+            None,
+        );
+        store
+            .record_model_call(scope.clone(), first_completed)
+            .expect("complete first");
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    DiagnosticModelCallId::new(),
+                    3,
+                    "requested-a",
+                    Some("model-b".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    Some(300),
+                    InspectorModelCallStatus::Failed,
+                    Some(ModelTokenUsage {
+                        input_tokens: Some(7),
+                        output_tokens: Some(1),
+                        cache_read_input_tokens: Some(0),
+                        cache_creation_input_tokens: Some(0),
+                    }),
+                    Some("provider failed".to_string()),
+                ),
+            )
+            .expect("record failed call with usage");
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    DiagnosticModelCallId::new(),
+                    4,
+                    "requested-a",
+                    Some("model-a".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    None,
+                    InspectorModelCallStatus::Succeeded,
+                    None,
+                    None,
+                ),
+            )
+            .expect("record call without usage");
+
+        let tool_id = ironclaw_host_api::turn::CapabilityActivityId::new();
+        for status in [ToolExecutionStatus::Started, ToolExecutionStatus::Succeeded] {
+            store
+                .record_tool_execution(
+                    scope.clone(),
+                    ToolExecutionDiagnostic::new(
+                        tool_id,
+                        None,
+                        "filesystem.read",
+                        None,
+                        None,
+                        status,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record tool transition");
+        }
+        store
+            .record_tool_execution(
+                scope.clone(),
+                ToolExecutionDiagnostic::new(
+                    ironclaw_host_api::turn::CapabilityActivityId::new(),
+                    None,
+                    "network.fetch",
+                    None,
+                    None,
+                    ToolExecutionStatus::Failed,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .expect("record failed tool");
+
+        let snapshot = store.snapshot(&scope).expect("snapshot").expect("present");
+        assert_eq!(snapshot.model_calls.len(), 2, "run detail stays bounded");
+        assert_eq!(snapshot.model_calls[0].iteration, 3);
+        assert_eq!(snapshot.model_calls[1].iteration, 4);
+        assert_eq!(snapshot.stats.total_model_calls, 3);
+        assert_eq!(snapshot.stats.input_tokens.known_total, 22);
+        assert_eq!(snapshot.stats.input_tokens.unavailable_samples, 1);
+        assert_eq!(snapshot.stats.output_tokens.known_total, 6);
+        assert_eq!(snapshot.stats.total_latency_ms.known_total, 400);
+        assert_eq!(snapshot.stats.total_latency_ms.unavailable_samples, 1);
+        assert_eq!(snapshot.stats.total_tool_calls, 2);
+        assert_eq!(snapshot.stats.successful_tool_calls, 1);
+        assert_eq!(snapshot.stats.failed_tool_calls, 1);
+        assert_eq!(snapshot.stats.calls_per_model.len(), 2);
+        assert_eq!(snapshot.stats.calls_per_model[0].calls, 2);
+        assert_eq!(snapshot.stats.calls_per_model[1].calls, 1);
+    }
+
+    #[test]
+    fn terminal_updates_do_not_recount_records_evicted_from_display_retention() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let first_model_id = DiagnosticModelCallId::new();
+
+        for (call_id, iteration, status) in [
+            (first_model_id, 1, InspectorModelCallStatus::Started),
+            (
+                DiagnosticModelCallId::new(),
+                2,
+                InspectorModelCallStatus::Succeeded,
+            ),
+            (
+                DiagnosticModelCallId::new(),
+                3,
+                InspectorModelCallStatus::Failed,
+            ),
+        ] {
+            store
+                .record_model_call(
+                    scope.clone(),
+                    ModelCallDiagnostic::new(
+                        call_id,
+                        iteration,
+                        "requested",
+                        Some("provider-model".to_string()),
+                        Utc::now(),
+                        None,
+                        None,
+                        status,
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record model call");
+        }
+
+        let first_tool_id = ironclaw_host_api::turn::CapabilityActivityId::new();
+        for (activity_id, status) in [
+            (first_tool_id, ToolExecutionStatus::Started),
+            (
+                ironclaw_host_api::turn::CapabilityActivityId::new(),
+                ToolExecutionStatus::Succeeded,
+            ),
+            (
+                ironclaw_host_api::turn::CapabilityActivityId::new(),
+                ToolExecutionStatus::Failed,
+            ),
+        ] {
+            store
+                .record_tool_execution(
+                    scope.clone(),
+                    ToolExecutionDiagnostic::new(
+                        activity_id,
+                        None,
+                        "filesystem.read",
+                        None,
+                        None,
+                        status,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record tool execution");
+        }
+
+        let retained = store.snapshot(&scope).expect("snapshot").expect("run");
+        assert_eq!(retained.model_calls.len(), 2);
+        assert!(
+            retained
+                .model_calls
+                .iter()
+                .all(|call| call.call_id != first_model_id)
+        );
+        assert_eq!(retained.tool_executions.len(), 2);
+        assert!(
+            retained
+                .tool_executions
+                .iter()
+                .all(|tool| tool.activity_id != first_tool_id)
+        );
+
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    first_model_id,
+                    1,
+                    "requested",
+                    Some("provider-model".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    Some(50),
+                    InspectorModelCallStatus::Succeeded,
+                    Some(ModelTokenUsage {
+                        input_tokens: Some(11),
+                        output_tokens: Some(4),
+                        cache_read_input_tokens: Some(0),
+                        cache_creation_input_tokens: Some(0),
+                    }),
+                    None,
+                ),
+            )
+            .expect("complete evicted model call");
+        store
+            .record_tool_execution(
+                scope.clone(),
+                ToolExecutionDiagnostic::new(
+                    first_tool_id,
+                    None,
+                    "filesystem.read",
+                    None,
+                    None,
+                    ToolExecutionStatus::Succeeded,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .expect("complete evicted tool execution");
+
+        let snapshot = store.snapshot(&scope).expect("snapshot").expect("run");
+        assert_eq!(snapshot.stats.total_model_calls, 3);
+        assert_eq!(snapshot.stats.input_tokens.known_total, 11);
+        assert_eq!(snapshot.stats.input_tokens.unavailable_samples, 2);
+        assert_eq!(snapshot.stats.total_tool_calls, 3);
+        assert_eq!(snapshot.stats.successful_tool_calls, 2);
+        assert_eq!(snapshot.stats.failed_tool_calls, 1);
+    }
+
+    #[test]
+    fn model_breakdown_truncation_remains_latched_after_a_bucket_is_removed() {
+        let store = InMemoryDiagnosticStore::default();
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let first_call_id = DiagnosticModelCallId::new();
+        for index in 0..=MAX_MODELS_IN_STATS {
+            let call_id = if index == 0 {
+                first_call_id
+            } else {
+                DiagnosticModelCallId::new()
+            };
+            store
+                .record_model_call(
+                    scope.clone(),
+                    ModelCallDiagnostic::new(
+                        call_id,
+                        u32::try_from(index).expect("model index"),
+                        "requested",
+                        Some(format!("model-{index}")),
+                        Utc::now(),
+                        Some(Utc::now()),
+                        Some(1),
+                        InspectorModelCallStatus::Succeeded,
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record distinct model");
+        }
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    first_call_id,
+                    0,
+                    "requested",
+                    Some("model-1".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    Some(1),
+                    InspectorModelCallStatus::Succeeded,
+                    None,
+                    None,
+                ),
+            )
+            .expect("replace first model contribution");
+
+        let snapshot = store.snapshot(&scope).expect("snapshot").expect("run");
+        assert!(snapshot.stats.calls_per_model_truncated);
+        assert_eq!(
+            snapshot.stats.total_model_calls,
+            u64::try_from(MAX_MODELS_IN_STATS + 1).expect("model count")
+        );
+        assert_eq!(
+            snapshot.stats.calls_per_model.len(),
+            MAX_MODELS_IN_STATS - 1
+        );
+    }
+
+    #[test]
+    fn metric_aggregation_saturates_instead_of_wrapping() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        store
+            .record_stats(
+                scope.clone(),
+                SessionDiagnosticStats {
+                    total_model_calls: u64::MAX,
+                    input_tokens: DiagnosticMetricTotal {
+                        known_total: u64::MAX,
+                        unavailable_samples: u64::MAX,
+                    },
+                    ..SessionDiagnosticStats::default()
+                },
+            )
+            .expect("seed saturated stats");
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    DiagnosticModelCallId::new(),
+                    0,
+                    "requested",
+                    Some("model".to_string()),
+                    Utc::now(),
+                    Some(Utc::now()),
+                    Some(1),
+                    InspectorModelCallStatus::Succeeded,
+                    None,
+                    None,
+                ),
+            )
+            .expect("aggregate at saturation");
+
+        let stats = store
+            .snapshot(&scope)
+            .expect("snapshot")
+            .expect("present")
+            .stats;
+        assert_eq!(stats.total_model_calls, u64::MAX);
+        assert_eq!(stats.input_tokens.known_total, u64::MAX);
+        assert_eq!(stats.input_tokens.unavailable_samples, u64::MAX);
+    }
+
+    #[test]
     fn host_prompt_capture_is_scoped_redacted_validated_and_bounded() {
         let store = InMemoryDiagnosticStore::default();
         let tenant_id = TenantId::new("tenant").expect("tenant");
@@ -1321,7 +1933,7 @@ mod tests {
         HostManagedPromptDiagnosticSink::record_prompt(
             &store,
             HostManagedPromptDiagnosticCapture {
-                context,
+                context: context.clone(),
                 messages: vec![
                     HostManagedPromptDiagnosticMessage {
                         role: HostManagedModelMessageRole::System,
@@ -1375,9 +1987,30 @@ mod tests {
                 context_limit: 128_000,
             },
         );
+        HostManagedPromptDiagnosticSink::record_model_call(
+            &store,
+            HostManagedModelCallDiagnosticCapture {
+                context,
+                iteration: 4,
+                requested_model: "interactive_model".to_string(),
+                effective_model: None,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                duration_ms: 42,
+                status: HostManagedModelCallDiagnosticStatus::Succeeded,
+                usage: Some(LoopModelUsage {
+                    input_tokens: 12,
+                    output_tokens: 4,
+                    cache_read_input_tokens: 2,
+                    cache_creation_input_tokens: 1,
+                }),
+                failure_summary: None,
+            },
+        );
 
+        let diagnostic_scope = DiagnosticScope::new(tenant_id, user_id, thread_id, run_id);
         let prompt = store
-            .prompt(&DiagnosticScope::new(tenant_id, user_id, thread_id, run_id))
+            .prompt(&diagnostic_scope)
             .expect("prompt read")
             .expect("prompt captured");
         assert_eq!(prompt.message_count, 4);
@@ -1412,6 +2045,15 @@ mod tests {
             prompt.components.last().map(|component| component.kind),
             Some(PromptComponentKind::Capability)
         );
+        let snapshot = store
+            .snapshot(&diagnostic_scope)
+            .expect("snapshot")
+            .expect("present");
+        assert_eq!(snapshot.model_calls.len(), 1);
+        assert_eq!(snapshot.model_calls[0].iteration, 4);
+        assert_eq!(snapshot.model_calls[0].effective_model, None);
+        assert_eq!(snapshot.stats.total_model_calls, 1);
+        assert_eq!(snapshot.stats.input_tokens.known_total, 12);
     }
 
     #[test]

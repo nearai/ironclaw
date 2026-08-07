@@ -163,38 +163,85 @@ test("bounds transient snapshot retries", async () => {
   }
 });
 
-test("deduplicates cursors, rebases snapshots, and stops on forbidden", async () => {
-  await act(async () => root?.render(<Probe />));
-  const stream = eventStreams[0];
-  await act(async () => stream.respond());
+test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidden", async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => root?.render(<Probe />));
+    const stream = eventStreams[0];
+    await act(async () => stream.respond());
 
-  const streamId = "550e8400-e29b-41d4-a716-446655440000";
-  await act(async () => {
-    stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
-    stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
-    stream.message("diagnostic_update", `${streamId}:2`, { sequence: 2 });
-  });
-  assert.equal(latestState?.updates.length, 2);
-  assert.equal(latestState?.lastCursor, `${streamId}:2`);
-
-  await act(async () => {
-    stream.message("diagnostic_update", `${streamId}:3`, {
-      update: { type: "prompt_updated" },
+    const streamId = "550e8400-e29b-41d4-a716-446655440000";
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
+      stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
+      stream.message("diagnostic_update", `${streamId}:2`, { sequence: 2 });
     });
-  });
-  assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.equal(latestState?.updates.length, 2);
+    assert.equal(latestState?.lastCursor, `${streamId}:2`);
 
-  await act(async () => {
-    stream.message("diagnostic_rebase", `${streamId}:4`, {
-      latest_cursor: { stream_id: streamId, sequence: 4 },
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:3`, {
+        update: { type: "prompt_updated" },
+      });
+      stream.message("diagnostic_update", `${streamId}:4`, {
+        update: { type: "model_call", data: {} },
+      });
+      stream.message("diagnostic_update", `${streamId}:5`, {
+        update: { type: "tool_execution_updated" },
+      });
+      stream.message("diagnostic_update", `${streamId}:6`, {
+        update: { type: "stats" },
+      });
     });
-  });
-  assert.equal(latestState?.updates.length, 0);
-  assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    assert.equal(vi.mocked(fetch).mock.calls.length, 1);
+    await act(async () => vi.advanceTimersByTimeAsync(49));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.deepEqual(stream.options.headers(), {
+      Authorization: "Bearer operator-token",
+      "Last-Event-ID": `${streamId}:6`,
+    });
 
-  await act(async () => stream.respond(403, "application/json"));
-  assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
-  assert.equal(stream.controller.abort.mock.calls.length, 1);
+    for (let sequence = 7; sequence <= 12; sequence += 1) {
+      await act(async () => {
+        stream.message("diagnostic_update", `${streamId}:${sequence}`, {
+          update: { type: "stats" },
+        });
+        await vi.advanceTimersByTimeAsync(40);
+      });
+    }
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:13`, {
+        update: { type: "stats" },
+      });
+    });
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    await act(async () => vi.advanceTimersByTimeAsync(9));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    assert.deepEqual(stream.options.headers(), {
+      Authorization: "Bearer operator-token",
+      "Last-Event-ID": `${streamId}:13`,
+    });
+
+    await act(async () => {
+      stream.message("diagnostic_rebase", `${streamId}:14`, {
+        latest_cursor: { stream_id: streamId, sequence: 14 },
+      });
+    });
+    assert.equal(latestState?.updates.length, 0);
+    assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 4);
+
+    await act(async () => stream.respond(403, "application/json"));
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
+    assert.equal(stream.controller.abort.mock.calls.length, 1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("hidden tabs release the stream and reconnect when visible", async () => {
