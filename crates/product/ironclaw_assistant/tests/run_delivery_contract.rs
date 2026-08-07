@@ -2010,6 +2010,26 @@ fn build_triggered_harness_with_preferences(
     initially_active: Vec<TestNotificationTarget>,
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
 ) -> TriggeredHarness {
+    build_triggered_harness_with_catalog(
+        states,
+        auth_url,
+        catalog,
+        initially_active,
+        communication_preferences,
+        None,
+    )
+}
+
+/// [`build_triggered_harness_with_preferences`] with an injectable catalog
+/// provider, so a test can make per-id lookups fail.
+fn build_triggered_harness_with_catalog(
+    states: Vec<ScriptedRunState>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+    initially_active: Vec<TestNotificationTarget>,
+    communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
+    delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -2043,8 +2063,10 @@ fn build_triggered_harness_with_preferences(
         communication_preferences: communication_preferences
             .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
-        delivery_targets: Arc::new(StaticTargetCatalog { targets: catalog })
-            as Arc<dyn OutboundDeliveryTargetProvider>,
+        delivery_targets: delivery_targets.unwrap_or_else(|| {
+            Arc::new(StaticTargetCatalog { targets: catalog })
+                as Arc<dyn OutboundDeliveryTargetProvider>
+        }),
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -2763,4 +2785,69 @@ async fn triggered_delivery_is_skipped_when_the_pending_queue_is_full() {
     let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
     assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Skipped);
     assert!(harness.adapter.texts().is_empty(), "nothing delivered");
+}
+
+/// A catalog whose per-id resolution always fails — a backend outage at fire
+/// time, as distinct from a target that resolves cleanly to "not yours".
+struct FailingTargetCatalog;
+
+#[async_trait]
+impl OutboundDeliveryTargetProvider for FailingTargetCatalog {
+    async fn list_outbound_delivery_targets(
+        &self,
+        _scope: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn resolve_outbound_delivery_target(
+        &self,
+        _scope: &OutboundDeliveryTargetScope,
+        _target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+}
+
+/// An outage that eats every configured channel must NOT be recorded as the
+/// benign "user configured nothing" state.
+///
+/// The notifier skips per-id lookup failures so one unreachable channel cannot
+/// suppress the rest — but when every lookup fails the target list is empty for
+/// a completely different reason, and recording `NoDefaultConfigured` there
+/// makes a backend outage durably indistinguishable from an opt-out. The
+/// sibling preference-read failure already records `Failed`; this is the same
+/// honesty one layer down.
+#[tokio::test]
+async fn triggered_all_catalog_lookups_failing_is_not_reported_as_no_configuration() {
+    let harness = build_triggered_harness_with_catalog(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000010"),
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+        vec![DM_TARGET, SHARED_TARGET],
+        None,
+        Some(Arc::new(FailingTargetCatalog) as Arc<dyn OutboundDeliveryTargetProvider>),
+    );
+    // The creator DID configure channels; the catalog cannot resolve them.
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::Failed,
+        "an outage that resolved no channels must not read as an intentional empty set"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "nothing is delivered when no channel resolves"
+    );
 }
