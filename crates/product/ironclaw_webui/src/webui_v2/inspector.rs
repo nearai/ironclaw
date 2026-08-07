@@ -11,8 +11,9 @@ use axum::{
 use futures::Stream;
 use ironclaw_product_contracts::{
     inspector::{
-        DiagnosticCursor, DiagnosticRunRequest, DiagnosticToolRequest, INSPECTOR_PROMPT_VIEW,
-        INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
+        DEFAULT_MAX_RETAINED_UPDATES_PER_RUN, DiagnosticCursor, DiagnosticRunRequest,
+        DiagnosticToolRequest, INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW,
+        INSPECTOR_UPDATES_VIEW,
     },
     surface::{
         BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
@@ -311,6 +312,10 @@ fn build_update_stream(
                         return;
                     }
                 };
+                if updates.len() > DEFAULT_MAX_RETAINED_UPDATES_PER_RUN {
+                    yield Ok(error_event(ProductSurfaceError::internal()));
+                    return;
+                }
                 for update in updates {
                     let Some(next_cursor) = cursor_from_value(update) else {
                         yield Ok(error_event(ProductSurfaceError::internal()));

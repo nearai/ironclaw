@@ -11,7 +11,8 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_contracts::{
     inspector::{
-        INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
+        DEFAULT_MAX_RETAINED_UPDATES_PER_RUN, INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW,
+        INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
     },
     surface::{
         ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceInvokeRequest,
@@ -31,6 +32,7 @@ struct QueryCall {
 #[derive(Default)]
 struct RecordingSurface {
     calls: Mutex<Vec<QueryCall>>,
+    oversized_updates: bool,
 }
 
 impl RecordingSurface {
@@ -103,6 +105,21 @@ impl ProductSurface for RecordingSurface {
                     "rebase_required": true,
                 })
             }
+            id if id == INSPECTOR_UPDATES_VIEW.id && self.oversized_updates => {
+                serde_json::json!({
+                    "updates": vec![
+                        serde_json::json!({
+                            "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+                            "sequence": 1,
+                            "update": { "type": "stats", "data": {} },
+                        });
+                        DEFAULT_MAX_RETAINED_UPDATES_PER_RUN + 1
+                    ],
+                    "retention_floor": null,
+                    "latest_cursor": null,
+                    "rebase_required": false,
+                })
+            }
             id if id == INSPECTOR_UPDATES_VIEW.id => serde_json::json!({
                 "updates": [],
                 "retention_floor": null,
@@ -124,6 +141,46 @@ impl ProductSurface for RecordingSurface {
     ) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError> {
         Err(ProductSurfaceError::service_unavailable(false))
     }
+}
+
+#[tokio::test]
+async fn updates_fail_fast_when_product_surface_exceeds_the_retention_contract() {
+    let surface = Arc::new(RecordingSurface {
+        oversized_updates: true,
+        ..RecordingSurface::default()
+    });
+    let response = router(surface, caller(true), true, 1)
+        .oneshot(
+            Request::get("/api/webchat/v2/operator/inspector/threads/thread-a/runs/run-a/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let connected = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+        .await
+        .expect("connected frame timeout")
+        .expect("connected frame")
+        .expect("valid connected frame")
+        .into_data()
+        .expect("connected data frame");
+    assert!(String::from_utf8_lossy(&connected).contains("event: diagnostic_connected"));
+
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+        .await
+        .expect("failure frame timeout")
+        .expect("failure frame")
+        .expect("valid failure frame")
+        .into_data()
+        .expect("failure data frame");
+    let failure = String::from_utf8_lossy(&failure);
+    assert!(failure.contains("event: stream_error"));
+    assert!(failure.contains(r#""error":"internal""#));
+    assert!(failure.contains(r#""retryable":false"#));
+    assert!(!failure.contains("event: diagnostic_update"));
 }
 
 #[tokio::test]
