@@ -605,38 +605,45 @@ impl TriggerRepository for LibSqlTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
         let conn = self.write_connection().await?;
-        let agent_id = agent_id.as_ref().map(AgentId::as_str);
-        let project_id = project_id.as_ref().map(ProjectId::as_str);
-        let mut rows = conn
+        let transaction = begin_immediate(&conn, "begin scoped trigger state update").await?;
+        let Some(current) = fetch_record(&transaction, &tenant_id, trigger_id).await? else {
+            return Ok(None);
+        };
+        if current.creator_user_id != creator_user_id
+            || current.agent_id != agent_id
+            || current.project_id != project_id
+            || current.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        let next_run_at = crate::next_run_at_for_state_transition(&current, new_state, Utc::now())?;
+        let mut rows = transaction
             .query(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
-                     SET state = ?6
+                     SET state = ?3,
+                         next_run_at = ?4
                      WHERE tenant_id = ?1
-                       AND creator_user_id = ?2
-                       AND agent_id IS ?3
-                       AND project_id IS ?4
-                       AND trigger_id = ?5
-                       AND state <> ?7
+                       AND trigger_id = ?2
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
                 params![
                     tenant_id.as_str(),
-                    creator_user_id.as_str(),
-                    agent_id,
-                    project_id,
                     trigger_id.to_string(),
                     crate::state_text_codec(new_state),
-                    crate::state_text_codec(TriggerState::Completed),
+                    fmt_ts(&next_run_at),
                 ],
             )
             .await
             .map_err(|error| backend_error("set scoped trigger state", error))?;
-        match rows.next().await {
-            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
-            Ok(None) => Ok(None),
-            Err(error) => Err(backend_error("read scoped trigger state row", error)),
-        }
+        let record = match rows.next().await {
+            Ok(Some(row)) => Some(row_to_record(&row)?),
+            Ok(None) => None,
+            Err(error) => return Err(backend_error("read scoped trigger state row", error)),
+        };
+        drop(rows);
+        commit(transaction, "commit scoped trigger state update").await?;
+        Ok(record)
     }
 
     async fn rename_scoped_trigger(

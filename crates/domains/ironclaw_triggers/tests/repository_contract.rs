@@ -1060,6 +1060,7 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
         "paused trigger must not be fire-eligible"
     );
 
+    let resume_started_at = Utc::now();
     let resumed = repo
         .set_scoped_trigger_state(
             tenant_id.clone(),
@@ -1073,17 +1074,65 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
         .expect("matching-scope resume")
         .expect("resumed record");
     assert_eq!(resumed.state, TriggerState::Scheduled);
+    assert!(
+        resumed.next_run_at > resume_started_at,
+        "resuming a recurring trigger must skip schedule slots missed while paused"
+    );
     let due_records = repo
-        .list_due_triggers(ts(1_704_067_200), 10)
+        .list_due_triggers(resume_started_at, 10)
         .await
         .expect("list due after resume");
+    assert!(
+        !due_records
+            .iter()
+            .any(|record| { record.tenant_id == tenant_id && record.trigger_id == trigger_id }),
+        "resumed recurring trigger must not replay a slot missed while paused"
+    );
+    let due_records = repo
+        .list_due_triggers(resumed.next_run_at, 10)
+        .await
+        .expect("list due at rebased resume slot");
     assert!(
         due_records.iter().any(|record| {
             record.tenant_id == tenant_id
                 && record.trigger_id == trigger_id
                 && record.state == TriggerState::Scheduled
         }),
-        "resumed trigger must become fire-eligible again"
+        "resumed trigger must become fire-eligible at its first future slot"
+    );
+
+    let once_trigger_id =
+        TriggerId::parse("01J00000000000000000000023").expect("once trigger ulid");
+    let once_slot = ts(1_704_067_200);
+    let mut once_record = sample_record(once_trigger_id, tenant_id.clone(), once_slot);
+    once_record.state = TriggerState::Paused;
+    once_record.schedule = TriggerSchedule::once(once_slot, "UTC").expect("valid once schedule");
+    repo.upsert_trigger(once_record.clone())
+        .await
+        .expect("insert paused one-shot");
+    let resumed_once = repo
+        .set_scoped_trigger_state(
+            tenant_id.clone(),
+            once_record.creator_user_id,
+            once_record.agent_id,
+            once_record.project_id,
+            once_trigger_id,
+            TriggerState::Scheduled,
+        )
+        .await
+        .expect("resume paused one-shot")
+        .expect("one-shot should resume");
+    assert_eq!(
+        resumed_once.next_run_at, once_slot,
+        "resuming a paused one-shot must preserve its original single fire slot"
+    );
+    assert!(
+        repo.list_due_triggers(Utc::now(), 10)
+            .await
+            .expect("list due after one-shot resume")
+            .iter()
+            .any(|record| record.trigger_id == once_trigger_id),
+        "an overdue one-shot must remain eligible to fire once after resume"
     );
 
     assert!(matches!(

@@ -183,6 +183,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
+        record.next_run_at = next_run_at_for_state_transition(record, new_state, Utc::now())?;
         record.state = new_state;
         Ok(Some(record.clone()))
     }

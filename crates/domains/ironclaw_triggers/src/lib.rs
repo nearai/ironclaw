@@ -686,6 +686,33 @@ fn validate_user_settable_trigger_state(state: TriggerState) -> Result<(), Trigg
     }
 }
 
+/// Computes the schedule position for a caller-scoped lifecycle transition.
+///
+/// Pausing a recurring trigger means its elapsed wall-clock slots are skipped,
+/// not queued for catch-up delivery. Resuming therefore rebases a paused cron
+/// trigger to the first slot strictly after the transition. Fire-once triggers
+/// retain their original slot so a paused reminder can still run once when the
+/// user resumes it.
+fn next_run_at_for_state_transition(
+    record: &TriggerRecord,
+    new_state: TriggerState,
+    transitioned_at: Timestamp,
+) -> Result<Timestamp, TriggerError> {
+    if record.state == TriggerState::Paused
+        && new_state == TriggerState::Scheduled
+        && record.schedule.is_recurring()
+    {
+        return record
+            .schedule
+            .next_slot_after(transitioned_at)?
+            .ok_or_else(|| TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::Other,
+                reason: "cannot resume recurring trigger: schedule has no future slot".to_string(),
+            });
+    }
+    Ok(record.next_run_at)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerRunStatus {
@@ -1114,7 +1141,10 @@ pub trait TriggerRepository: Send + Sync {
     /// (`Scheduled` or `Paused`). A stored `Completed` trigger is terminal and
     /// must not be moved back into the scheduler by this method; implementations
     /// return `Ok(None)` for that case so callers do not leak trigger existence
-    /// across invalid lifecycle transitions.
+    /// across invalid lifecycle transitions. Resuming a paused recurring
+    /// trigger atomically advances `next_run_at` to the first future schedule
+    /// slot so occurrences missed while paused are not replayed. Fire-once
+    /// triggers preserve their original slot and remain eligible to fire once.
     async fn set_scoped_trigger_state(
         &self,
         tenant_id: TenantId,

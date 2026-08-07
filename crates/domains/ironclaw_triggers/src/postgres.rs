@@ -378,41 +378,49 @@ impl TriggerRepository for PostgresTriggerRepository {
         new_state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
-        let client = self.connect().await?;
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin scoped trigger state update", error))?;
         let trigger_id = trigger_id.to_string();
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let Some(current) = locked_record(&tx, tenant_id.as_str(), &trigger_id).await? else {
+            return Ok(None);
+        };
+        if current.creator_user_id != creator_user_id
+            || current.agent_id.as_ref().map(AgentId::as_str) != agent_id
+            || current.project_id.as_ref().map(ProjectId::as_str) != project_id
+            || current.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        let next_run_at = crate::next_run_at_for_state_transition(&current, new_state, Utc::now())?;
         let new_state = crate::state_text_codec(new_state);
-        let completed = crate::state_text_codec(TriggerState::Completed);
-        let row = client
+        let next_run_at = fmt_ts(&next_run_at);
+        let row = tx
             .query_opt(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
-                     SET state = $6
+                     SET state = $3,
+                         next_run_at = $4
                      WHERE tenant_id = $1
-                       AND creator_user_id = $2
-                       AND agent_id IS NOT DISTINCT FROM $3
-                       AND project_id IS NOT DISTINCT FROM $4
-                       AND trigger_id = $5
-                       AND state <> $7
+                       AND trigger_id = $2
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
-                &[
-                    &tenant_id.as_str(),
-                    &creator_user_id.as_str(),
-                    &agent_id,
-                    &project_id,
-                    &trigger_id,
-                    &new_state,
-                    &completed,
-                ],
+                &[&tenant_id.as_str(), &trigger_id, &new_state, &next_run_at],
             )
             .await
             .map_err(|error| backend_error("set scoped trigger state", error))?;
-        match row {
+        let record = match row {
             Some(row) => Ok(Some(row_to_record(&row)?)),
             None => Ok(None),
-        }
+        }?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit scoped trigger state update", error))?;
+        Ok(record)
     }
 
     async fn rename_scoped_trigger(
