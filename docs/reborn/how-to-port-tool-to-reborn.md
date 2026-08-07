@@ -6,8 +6,12 @@
 > `docs/reborn/extension-runtime/overview.md` §3. The manifest examples below
 > show historical v2-era shapes (some, like top-level `[[capabilities]]` and
 > `RuntimeKind::Script`, were retired before or during the v3 cutover) and
-> must not be used as an authoring reference. The *decision tree* for
-> classifying v1 tools remains useful.
+> must not be used as an authoring reference. The *decision tree* below keeps
+> its v1 classification questions, but its `RuntimeKind::*` target column is
+> historical: v3 authoring accepts only `[runtime] kind = "wasm" |
+> "first_party"`, hosted MCP servers use a top-level `[mcp]` section instead
+> of a runtime kind, and process/CLI work goes through the sandbox lane
+> (`system.process_sandbox.run`) rather than a script runtime.
 
 This guide helps maintainers decide how an IronClaw v1 tool should move onto the Reborn capability path.
 
