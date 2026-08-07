@@ -147,10 +147,16 @@ pub struct DeliveredChannelMessage {
     pub vendor_message_ref: String,
 }
 
+/// Vendor evidence a notice-class delivery may act on afterwards (retraction
+/// targets, nudge throttling). Exhaustive on purpose: every outcome states
+/// its own answer here, so a variant added later cannot silently default to
+/// "nothing was sent".
 pub(crate) fn delivered_messages_from_outcome(
     outcome: &CoordinatedDeliveryOutcome,
 ) -> Vec<DeliveredChannelMessage> {
     match outcome {
+        // A durable `Delivered` row is the only thing that authorizes
+        // follow-up action on a vendor message ref.
         CoordinatedDeliveryOutcome::Delivered {
             conversation,
             vendor_message_refs,
@@ -162,7 +168,24 @@ pub(crate) fn delivered_messages_from_outcome(
                 vendor_message_ref: reference.clone(),
             })
             .collect(),
-        _ => Vec::new(),
+        // Real vendor evidence, but the confirming write did not land. Same
+        // rule the observer and triggered classifiers apply: the parts did
+        // reach the vendor, so nothing here may drive a resend, yet without a
+        // durable `Delivered` row the refs cannot authorize success-side
+        // follow-up such as retraction either. Recovery reconciles the row.
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => Vec::new(),
+        // Replay of an already-confirmed delivery: no egress happened on this
+        // call and the variant deliberately carries a route rather than a
+        // fabricated vendor message ref.
+        CoordinatedDeliveryOutcome::DuplicateSuppressed { .. } => Vec::new(),
+        // Claim lost before this call reached the vendor — it holds no
+        // evidence of its own.
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { .. } => Vec::new(),
+        // No vendor message ref exists to report: nothing was sent, policy
+        // refused, or the attempt failed terminally.
+        CoordinatedDeliveryOutcome::NoDelivery
+        | CoordinatedDeliveryOutcome::Rejected { .. }
+        | CoordinatedDeliveryOutcome::Failed { .. } => Vec::new(),
     }
 }
 
@@ -450,5 +473,118 @@ impl RunDeliveryServices {
                 "failed to retract channel prompt/status message"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod notice_outcome_tests {
+    use super::{CoordinatedDeliveryOutcome, delivered_messages_from_outcome};
+    use chrono::Utc;
+    use ironclaw_extension_contracts::external::ExternalConversationRef;
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
+    use ironclaw_outbound::{
+        DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus,
+        OutboundPushCandidate, OutboundPushKind, ProjectionUpdateRef,
+    };
+    use ironclaw_turns::{ReplyTargetBindingRef, TurnScope};
+
+    fn attempt(failure_kind: Option<DeliveryFailureKind>) -> OutboundDeliveryAttempt {
+        let tenant_id = TenantId::new("tenant-notice-outcome").expect("tenant id");
+        let agent_id = AgentId::new("agent-notice-outcome").expect("agent id");
+        let thread_id = ThreadId::new("thread-notice-outcome").expect("thread id");
+        let scope = TurnScope::new(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            thread_id.clone(),
+        );
+        OutboundDeliveryAttempt {
+            delivery_id: OutboundDeliveryId::new(),
+            scope,
+            candidate: OutboundPushCandidate {
+                tenant_id,
+                agent_id: Some(agent_id),
+                project_id: None,
+                thread_id,
+                turn_run_id: None,
+                target: ReplyTargetBindingRef::new("reply:notice-outcome").expect("target"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:notice-outcome")
+                    .expect("projection ref"),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Failed,
+            attempted_at: Utc::now(),
+            failure_kind,
+        }
+    }
+
+    fn conversation() -> ExternalConversationRef {
+        ExternalConversationRef::new(None, "conversation-notice-outcome", None, None)
+            .expect("conversation")
+    }
+
+    #[test]
+    fn only_confirmed_delivery_reports_vendor_messages() {
+        let delivered_conversation = conversation();
+        let delivered = delivered_messages_from_outcome(&CoordinatedDeliveryOutcome::Delivered {
+            attempt: attempt(None),
+            conversation: delivered_conversation.clone(),
+            vendor_message_refs: vec!["vendor-1".to_string(), "vendor-2".to_string()],
+        });
+        assert_eq!(delivered.len(), 2);
+        assert!(delivered.iter().all(|message| {
+            message.conversation == delivered_conversation
+                && ["vendor-1", "vendor-2"].contains(&message.vendor_message_ref.as_str())
+        }));
+
+        // Sent but not durably confirmed: the refs are real vendor evidence,
+        // yet reporting them here would authorize retraction of a message
+        // whose durable row recovery has not settled. Deliberately empty.
+        assert!(
+            delivered_messages_from_outcome(&CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+                attempt: attempt(None),
+                conversation: conversation(),
+                vendor_message_refs: vec!["vendor-unconfirmed".to_string()],
+            })
+            .is_empty()
+        );
+
+        assert!(
+            delivered_messages_from_outcome(&CoordinatedDeliveryOutcome::DuplicateSuppressed {
+                delivery_id: OutboundDeliveryId::new(),
+                conversation: Some(conversation()),
+            })
+            .is_empty()
+        );
+
+        assert!(
+            delivered_messages_from_outcome(
+                &CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                    status: OutboundDeliveryStatus::Unknown,
+                    failure_kind: Some(DeliveryFailureKind::Unknown),
+                }
+            )
+            .is_empty()
+        );
+
+        assert!(
+            delivered_messages_from_outcome(&CoordinatedDeliveryOutcome::NoDelivery).is_empty()
+        );
+
+        assert!(
+            delivered_messages_from_outcome(&CoordinatedDeliveryOutcome::Rejected {
+                attempt: attempt(Some(DeliveryFailureKind::AuthorizationRevoked)),
+            })
+            .is_empty()
+        );
+
+        assert!(
+            delivered_messages_from_outcome(&CoordinatedDeliveryOutcome::Failed {
+                attempt: attempt(Some(DeliveryFailureKind::TransportUnavailable)),
+                failure_kind: DeliveryFailureKind::TransportUnavailable,
+            })
+            .is_empty()
+        );
     }
 }
