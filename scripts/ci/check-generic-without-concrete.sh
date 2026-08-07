@@ -7,7 +7,7 @@
 # workspace crate declaring a Reborn layer — minus the concrete extension
 # crates themselves, the package inventory crate, and the sanctioned
 # assemblers (the binary and the architecture test crate).
-# This mirrors `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`;
+# This mirrors `crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`;
 # keep the two lists in sync.
 #
 # TEMPORARY_EXCEPTIONS below mirrors CONCRETE_DEPENDENCY_EXCEPTIONS in that

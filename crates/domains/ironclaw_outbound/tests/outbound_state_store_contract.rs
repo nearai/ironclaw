@@ -2723,7 +2723,7 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
 
 /// Defense-in-depth regression for the tenant-isolation indexed
 /// projection (see
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
 /// every `OutboundStateStore` write decorates its `Entry`
 /// with a `tenant_id` projection so an admin-tier query can filter
 /// explicitly by tenant and a path-rewriting bug surfaces as a

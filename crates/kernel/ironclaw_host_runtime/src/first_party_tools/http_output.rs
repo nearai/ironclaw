@@ -80,8 +80,10 @@ pub(super) fn shape_response(
 /// the manifest-declared readiness flow.
 fn unauthorized_extension_hint(status: u16) -> Option<&'static str> {
     matches!(status, 401 | 403 | 407).then_some(
-        "This request was rejected for authentication/authorization. If this host is served by \
-         an installable extension, that extension injects the required credentials for you: \
+        "This request was rejected for authentication/authorization. If the request targeted a \
+         public human-facing webpage rather than an authenticated API, retry with an available \
+         web_search tool. If this host is served by an installable extension, that extension \
+         injects the required credentials for you: \
          search for it with builtin.extension_search (by the service or domain name), then \
          builtin.extension_install, and retry through the \
          extension's tools instead of an unauthenticated builtin.http call.",
@@ -343,13 +345,16 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_responses_carry_an_extension_install_hint() {
+    fn unauthorized_responses_carry_web_search_and_extension_recovery_hints() {
         for status in [401, 403, 407] {
             let shaped = shape_response(response_with_status(status), 1024);
             let hint = shaped.output.get("auth_hint").and_then(Value::as_str);
             assert!(
-                hint.is_some_and(|hint| hint.contains("builtin.extension_search")),
-                "status {status} should nudge the model to install an extension"
+                hint.is_some_and(|hint| {
+                    hint.contains("web_search") && hint.contains("builtin.extension_search")
+                }),
+                "status {status} should nudge the model toward web search for public pages or an \
+                 authenticated extension for APIs"
             );
         }
     }

@@ -2,7 +2,8 @@
 
 ## Start Here
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
+- Read `README.md` for orientation (charter, measured deps/consumers, gates).
+  This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
 - `docs/reborn/contracts/resources.md`
@@ -16,6 +17,16 @@
 - Budget dimensions (`ResourceDimension`: `Usd`, `InputTokens`, `OutputTokens`, `WallClockMs`, `OutputBytes`, `NetworkEgressBytes`, `ProcessCount`, `ConcurrencySlots`) scoped by `ResourceAccount` (tenant/user/project/agent/mission/thread), with `ResourceLimits`, `ResourceValue`, `ResourceTally`, `ResourceDenial`, `ResourceError`, `ResourceGovernorSnapshot`.
 - Reservation/receipt vocabulary `ResourceReservation` / `ResourceReceipt`, re-exported from `ironclaw_host_api`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+
+## Guardrails
+
+- Own resource reservation, reconciliation, release, and quota accounting.
+- No costed or quota-limited work should execute without an active
+  reservation or explicit documented exception.
+- Do not import runtimes, dispatcher, capabilities, approvals, processes,
+  events, or product workflow crates.
+- Preserve tenant/user/project scope in every reservation and receipt.
+- Keep accounting deterministic and safe under concurrent reservations.
 
 ## Do Not Move In Here
 
