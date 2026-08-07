@@ -100,6 +100,25 @@ where
         Ok(())
     }
 
+    pub(super) async fn invoke_llm_config_reset(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: serde_json::Value,
+    ) -> Result<(), ProductSurfaceError> {
+        if input != serde_json::json!({}) {
+            return Err(llm_config_input_error("input"));
+        }
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        service
+            .reset_to_defaults(caller)
+            .await
+            .map_err(ProductSurfaceError::from)?;
+        Ok(())
+    }
+
     pub(super) async fn build_llm_config_view(
         &self,
         caller: ProductSurfaceCaller,

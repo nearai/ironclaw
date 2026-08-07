@@ -35,9 +35,9 @@ use ironclaw_assistant::{
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
     EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_RESET_CAPABILITY_ID, LLM_CONFIG_VIEW,
+    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
@@ -6287,6 +6287,20 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
         .expect("oneshot");
     assert_eq!(active_response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let reset_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/reset")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(reset_response.status(), StatusCode::OK);
+
     let probe_body = r#"{"provider_id":"openai","adapter":"open_ai_completions","base_url":"https://api.openai.com/v1","model":"gpt-5","api_key":"sk-test"}"#;
     let test_response = router
         .clone()
@@ -6315,7 +6329,7 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
         .expect("oneshot");
     assert_eq!(models_response.status(), StatusCode::OK);
 
-    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 4);
+    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 5);
     let view_ids: Vec<String> = services
         .view_queries
         .lock()
@@ -6349,7 +6363,7 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
         [("openai".to_string(), Some("gpt-5".to_string()))]
     );
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(invoke_calls.len(), 3);
     assert_eq!(
         invoke_calls[0].0.as_str(),
         LLM_PROVIDER_DELETE_CAPABILITY_ID
@@ -6363,6 +6377,12 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
         invoke_calls[1].1,
         serde_json::json!({ "provider_id": "openai", "model": "gpt-5" })
     );
+    assert_eq!(
+        invoke_calls[2].0.as_str(),
+        LLM_CONFIG_RESET_CAPABILITY_ID,
+        "reset must invoke the dedicated ProductSurface capability"
+    );
+    assert_eq!(invoke_calls[2].1, serde_json::json!({}));
     assert_eq!(
         services
             .test_llm_connection_calls
@@ -6396,6 +6416,7 @@ async fn llm_provider_routes_require_operator_capability() {
         ("POST", "/api/webchat/v2/llm/providers", Some(upsert_body)),
         ("POST", "/api/webchat/v2/llm/providers/acme/delete", None),
         ("POST", "/api/webchat/v2/llm/active", Some(active_body)),
+        ("POST", "/api/webchat/v2/llm/reset", None),
         (
             "POST",
             "/api/webchat/v2/llm/test-connection",

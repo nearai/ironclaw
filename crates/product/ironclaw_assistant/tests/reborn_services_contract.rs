@@ -40,14 +40,15 @@ use ironclaw_assistant::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
     FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
-    LOGS_VIEW, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    LLM_CONFIG_RESET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
@@ -10841,6 +10842,7 @@ struct SetupRecordingLlmConfigService {
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     delete_provider_calls: Mutex<Vec<String>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
+    reset_to_defaults_calls: Mutex<usize>,
     test_connection_calls: Mutex<usize>,
     list_models_calls: Mutex<usize>,
     snapshot: Mutex<LlmConfigSnapshot>,
@@ -10858,6 +10860,7 @@ impl Default for SetupRecordingLlmConfigService {
             upsert_provider_calls: Mutex::new(Vec::new()),
             delete_provider_calls: Mutex::new(Vec::new()),
             set_active_calls: Mutex::new(Vec::new()),
+            reset_to_defaults_calls: Mutex::new(0),
             test_connection_calls: Mutex::new(0),
             list_models_calls: Mutex::new(0),
             snapshot: Mutex::new(Self::empty_snapshot()),
@@ -10884,6 +10887,10 @@ impl SetupRecordingLlmConfigService {
 
     fn set_active_count(&self) -> usize {
         self.set_active_calls.lock().expect("lock").len()
+    }
+
+    fn reset_to_defaults_count(&self) -> usize {
+        *self.reset_to_defaults_calls.lock().expect("lock")
     }
 
     fn test_connection_count(&self) -> usize {
@@ -11021,6 +11028,14 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
                 provider_id: request.provider_id,
                 model: request.model,
             });
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn reset_to_defaults(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        *self.reset_to_defaults_calls.lock().expect("lock") += 1;
         Ok(self.snapshot.lock().expect("lock").clone())
     }
 
@@ -13115,6 +13130,15 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
         )
         .await
         .expect("set active provider");
+    services
+        .invoke(
+            caller(),
+            CapabilityId::new(LLM_CONFIG_RESET_CAPABILITY_ID).expect("capability id"),
+            json!({}),
+            ActivityId::new(),
+        )
+        .await
+        .expect("reset model settings");
 
     assert_eq!(
         llm_config
@@ -13131,6 +13155,7 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
             model: Some("gpt-5-mini".to_string()),
         }]
     );
+    assert_eq!(llm_config.reset_to_defaults_count(), 1);
 }
 
 #[tokio::test]

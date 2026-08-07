@@ -41,8 +41,9 @@ use ironclaw_assistant::{
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
     FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
-    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_RESET_CAPABILITY,
+    LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
+    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW,
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
@@ -3988,6 +3989,31 @@ pub async fn set_active_llm(
         caller.clone(),
         LLM_ACTIVE_SET_CAPABILITY,
         body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "llm config",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/reset`
+pub async fn reset_llm_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_CONFIG_RESET_CAPABILITY,
+        serde_json::json!({}),
     )
     .await?;
     capability_resolution_succeeded(

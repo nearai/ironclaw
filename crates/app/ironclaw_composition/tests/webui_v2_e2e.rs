@@ -856,6 +856,15 @@ fn bearer_post(uri: &str, body: Value) -> Request<Body> {
         .expect("bearer POST request")
 }
 
+fn bearer_empty_post(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+        .body(Body::empty())
+        .expect("empty bearer POST request")
+}
+
 fn bearer_get(uri: &str) -> Request<Body> {
     bearer_get_with_last_event_id(uri, None)
 }
@@ -1968,7 +1977,7 @@ async fn untrusted_request_body_cannot_inject_system_scope() {
 
 mod operator_llm_config {
     use super::*;
-    use ironclaw_config::{RebornBootConfig, RebornHome, RebornProfile};
+    use ironclaw_config::{RebornBootConfig, RebornConfigFile, RebornHome, RebornProfile};
 
     struct OperatorToken;
 
@@ -1989,7 +1998,7 @@ mod operator_llm_config {
         }
     }
 
-    async fn build_operator_harness() -> Harness {
+    async fn build_operator_harness() -> (Harness, PathBuf) {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("standalone");
         let home = RebornHome::resolve_from_env_parts(
@@ -1998,6 +2007,7 @@ mod operator_llm_config {
             None,
         )
         .expect("valid reborn home");
+        let config_file_path = home.config_file_path();
         let boot = RebornBootConfig::new(home, RebornProfile::Standalone);
 
         let gateway = Arc::new(ToolCallingGateway::default());
@@ -2029,11 +2039,14 @@ mod operator_llm_config {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
         let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
-        Harness {
-            runtime,
-            router,
-            _root: Some(root),
-        }
+        (
+            Harness {
+                runtime,
+                router,
+                _root: Some(root),
+            },
+            config_file_path,
+        )
     }
 
     fn nearai_save_payload(client_action_id: &str) -> Value {
@@ -2061,7 +2074,7 @@ mod operator_llm_config {
 
     #[tokio::test]
     async fn nearai_provider_save_persists_key_and_survives_resave() {
-        let harness = build_operator_harness().await;
+        let (harness, config_file_path) = build_operator_harness().await;
 
         // First save: persists the operator's NEAR AI key under the system scope
         // and selects it active.
@@ -2117,6 +2130,38 @@ mod operator_llm_config {
         let snapshot = read_json(get).await;
         assert_eq!(snapshot["active"]["provider_id"], "nearai");
         assert_eq!(find_nearai(&snapshot)["api_key_set"], true);
+
+        // Reset clears only the persisted active selection. The existing
+        // provider definition and system-scoped API key must survive so the
+        // operator can reselect it later without another setup flow.
+        let reset = harness
+            .router
+            .clone()
+            .oneshot(bearer_empty_post("/api/webchat/v2/llm/reset"))
+            .await
+            .expect("reset request");
+        assert_eq!(reset.status(), StatusCode::OK, "reset must succeed");
+        let reset_snapshot = read_json(reset).await;
+        assert_eq!(find_nearai(&reset_snapshot)["api_key_set"], true);
+        let config = RebornConfigFile::load(&config_file_path)
+            .expect("reset config remains valid")
+            .expect("reset preserves config file");
+        assert!(
+            config.default_llm_slot().is_none(),
+            "reset must remove the persisted active selection"
+        );
+
+        let reset_again = harness
+            .router
+            .clone()
+            .oneshot(bearer_empty_post("/api/webchat/v2/llm/reset"))
+            .await
+            .expect("idempotent reset request");
+        assert_eq!(
+            reset_again.status(),
+            StatusCode::OK,
+            "reset must be a successful no-op without a persisted selection"
+        );
 
         harness
             .runtime

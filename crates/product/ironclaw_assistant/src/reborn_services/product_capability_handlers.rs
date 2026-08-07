@@ -320,6 +320,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderUpsert,
     LlmProviderDelete,
     LlmActiveSet,
+    LlmConfigReset,
     ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
@@ -348,6 +349,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID => Some(Self::LlmProviderUpsert),
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
+            LLM_CONFIG_RESET_CAPABILITY_ID => Some(Self::LlmConfigReset),
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
@@ -377,6 +379,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderUpsert => "llm provider updated",
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
+            Self::LlmConfigReset => "llm settings reset to defaults",
             Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
@@ -417,6 +420,7 @@ impl ProductCapabilityHandler {
             }
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
+            Self::LlmConfigReset => services.invoke_llm_config_reset(caller, input).await,
             Self::ExtensionRegisterHostedMcp => {
                 let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
                     product_command_input(input)?;
@@ -607,6 +611,7 @@ mod tests {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
+            LLM_CONFIG_RESET_CAPABILITY_ID,
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,

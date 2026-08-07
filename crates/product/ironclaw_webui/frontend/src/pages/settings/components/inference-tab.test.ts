@@ -31,6 +31,16 @@ function findComponentNodes(root, component) {
   return found;
 }
 
+function componentProps(node, component) {
+  const props = {};
+  const start = node.values.indexOf(component);
+  for (let index = start + 1; index < node.values.length; index += 1) {
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    if (name) props[name] = node.values[index];
+  }
+  return props;
+}
+
 function component(name) {
   return function TestComponent() {
     return name;
@@ -40,10 +50,16 @@ function component(name) {
 function renderInferenceModule() {
   const context = {
     Badge: component("Badge"),
+    Button: component("Button"),
     Card: component("Card"),
+    ConfirmDialog: component("ConfirmDialog"),
     ProviderManagement: component("ProviderManagement"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
+    React: {
+      useCallback: (fn) => fn,
+      useState: (initial) => [initial, () => {}],
+    },
     html,
     INFERENCE_FIELDS,
     filterSettingsSections,
@@ -53,6 +69,8 @@ function renderInferenceModule() {
       selectedModel: "gpt-4.1",
       providers: [{ id: "openai", default_model: "gpt-4.1" }],
       hasActiveProvider: true,
+      isResetting: false,
+      resetToDefaults: async () => {},
     }),
     useT: () => (key) => key,
   };
@@ -87,4 +105,29 @@ test("Inference tab omits unsupported operator-config fields", () => {
     1,
     "LLM provider management should remain visible"
   );
+});
+
+test("Inference tab resets model settings only after shared-dialog confirmation", () => {
+  const { context, exports } = renderInferenceModule();
+  const rendered = exports.InferenceTab({
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "",
+  });
+
+  const buttonScalars = findComponentNodes(rendered, context.Button)
+    .flatMap((node) => node.values)
+    .filter((value) => typeof value === "string");
+  assert.ok(buttonScalars.includes("llm.resetToDefaults"));
+
+  const [dialog] = findComponentNodes(rendered, context.ConfirmDialog).map((node) =>
+    componentProps(node, context.ConfirmDialog)
+  );
+  assert.equal(dialog.open, false);
+  assert.equal(dialog.title, "llm.confirmResetToDefaults");
+  assert.equal(dialog.confirmLabel, "llm.resetToDefaults");
+  assert.equal(typeof dialog.onConfirm, "function");
 });

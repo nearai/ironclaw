@@ -462,6 +462,15 @@ impl RebornLlmConfigService {
             })?
     }
 
+    async fn clear_active_selection_async(&self) -> Result<(), crate::RebornProviderAdminError> {
+        let admin = self.admin();
+        tokio::task::spawn_blocking(move || admin.clear_active_selection())
+            .await
+            .map_err(|error| crate::RebornProviderAdminError::InvalidRequest {
+                reason: format!("provider-admin task failed: {error}"),
+            })?
+    }
+
     async fn rollback_provider_definition(
         &self,
         id: &str,
@@ -669,6 +678,17 @@ impl LlmConfigService for RebornLlmConfigService {
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.provider_id)?;
         self.set_provider_async(id, request.model)
+            .await
+            .map_err(map_admin_error)?;
+        self.refresh_running_provider().await;
+        self.snapshot(caller).await
+    }
+
+    async fn reset_to_defaults(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        self.clear_active_selection_async()
             .await
             .map_err(map_admin_error)?;
         self.refresh_running_provider().await;
@@ -2221,6 +2241,64 @@ mod tests {
             matches!(error, LlmConfigServiceError::Unavailable),
             "expected unavailable error, got {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn reset_to_defaults_clears_only_the_persisted_active_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+        service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-acme-test"), true))
+            .await
+            .expect("persist custom provider, key, and active selection");
+
+        service
+            .reset_to_defaults(caller())
+            .await
+            .expect("reset persisted selection");
+        assert!(
+            ProviderRepo::new(boot.home().providers_file_path())
+                .load()
+                .expect("load custom provider overlay")
+                .iter()
+                .any(|provider| provider.id == "acme"),
+            "custom provider overlay is preserved"
+        );
+        assert!(
+            keys.exists("acme").await.expect("check stored key"),
+            "stored key is preserved"
+        );
+        assert!(
+            ironclaw_config::RebornConfigFile::load(&boot.home().config_file_path())
+                .expect("load config")
+                .expect("config present")
+                .default_llm_slot()
+                .is_none(),
+            "reset must remove the persisted default slot"
+        );
+
+        service
+            .reset_to_defaults(caller())
+            .await
+            .expect("reset is idempotent when no slot is persisted");
+    }
+
+    #[tokio::test]
+    async fn reset_to_defaults_fails_closed_when_config_cannot_be_updated() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(reborn_home.join("config.toml")).expect("mkdir config path");
+        let service = RebornLlmConfigService::new(boot_for_home(&reborn_home), key_store());
+
+        let error = service
+            .reset_to_defaults(caller())
+            .await
+            .expect_err("config update failure must not report a reset");
+
+        assert!(matches!(error, LlmConfigServiceError::Unavailable));
     }
 
     // ✎ WS3: `upsert_builtin_nearai_with_production_secret_store_succeeds` (the

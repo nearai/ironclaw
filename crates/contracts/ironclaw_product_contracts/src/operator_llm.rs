@@ -5,8 +5,8 @@
 //!
 //! This is the product-facing contract the WebChat v2 Inference tab consumes to
 //! list providers, add/edit/remove custom providers (including an API key), pick
-//! the active provider+model, probe a provider (test connection / list models),
-//! and drive the NEAR AI / Codex logins. The implementation is
+//! or reset the active provider+model, probe a provider (test connection / list
+//! models), and drive the NEAR AI / Codex logins. The implementation is
 //! `ironclaw_operator::llm_admin::llm_config_service::RebornLlmConfigService`,
 //! which owns the provider catalog overlay, the operator-scoped secret store,
 //! the config-file writer, and the live provider-reload handle.
@@ -80,6 +80,14 @@ pub trait LlmConfigService: Send + Sync {
         &self,
         caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
+
+    /// Clear the operator-persisted active selection so boot-time LLM
+    /// resolution supplies the default again. Provider definitions and stored
+    /// credentials are deliberately preserved.
+    async fn reset_to_defaults(
+        &self,
+        caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Probe a provider's credentials/endpoint without persisting anything.
@@ -636,6 +644,13 @@ mod tests {
                     model: request.model,
                 }),
             })
+        }
+
+        async fn reset_to_defaults(
+            &self,
+            caller: ProductSurfaceCaller,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            self.snapshot(caller).await
         }
 
         async fn test_connection(

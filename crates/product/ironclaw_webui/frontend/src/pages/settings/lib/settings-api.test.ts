@@ -3,6 +3,7 @@ import { test, vi } from "vitest";
 
 import {
   settingsFromOperatorConfig,
+  resetLlmToDefaults,
   toolFromConfigEntry,
   updateToolPermission,
   upsertLlmProvider,
@@ -66,6 +67,34 @@ test("toolFromConfigEntry maps operator config tools for the tools tab", () => {
       effective_source: "global",
     }
   );
+});
+
+test("resetLlmToDefaults uses the dedicated no-body reset endpoint", async () => {
+  let call;
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async (path, options) => {
+      call = { path, options };
+      return new Response(JSON.stringify({ providers: [], active: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  );
+
+  try {
+    await resetLlmToDefaults();
+    assert.equal(call.path, "/api/webchat/v2/llm/reset");
+    assert.equal(call.options.method, "POST");
+    assert.equal(call.options.body, undefined);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test("toolFromConfigEntry normalizes legacy and malformed permission values", () => {

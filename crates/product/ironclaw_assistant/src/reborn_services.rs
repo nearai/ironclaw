@@ -315,6 +315,9 @@ pub const LLM_PROVIDER_DELETE_CAPABILITY: ProductCapabilityDescriptor =
 pub const LLM_ACTIVE_SET_CAPABILITY_ID: &str = "builtin.llm_active_set";
 pub const LLM_ACTIVE_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_ACTIVE_SET_CAPABILITY_ID);
+pub const LLM_CONFIG_RESET_CAPABILITY_ID: &str = "builtin.llm_config_reset";
+pub const LLM_CONFIG_RESET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_CONFIG_RESET_CAPABILITY_ID);
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_INSTALL_CAPABILITY_ID);

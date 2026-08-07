@@ -629,11 +629,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // host declarations; enforcement remains in host_runtime/loop_host.
         ("ironclaw_host_api", 18_784),
         ("ironclaw_loop_contracts", 14_479),
-        // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
-        // is bounded, output-only read-view descriptors. Capture, retention,
-        // authorization, and transport behavior remain in their owning
-        // non-contract crates.
-        ("ironclaw_product_contracts", 15_758),
+        // Raised 15_758 -> 15_773 for the LLM reset contract: the growth is the
+        // typed ProductSurface service method and its contract test.
+        // Configuration mutation, credential preservation, authorization, and
+        // transport behavior remain in their owning non-contract crates.
+        ("ironclaw_product_contracts", 15_773),
         ("ironclaw_prompt_envelope", 832),
     ];
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use ironclaw_config::{
     DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
-    begin_default_llm_slot_update, update_default_llm_slot,
+    begin_default_llm_slot_update, clear_default_llm_slot, update_default_llm_slot,
 };
 use ironclaw_product_contracts::operator_llm::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, LlmProbeRequest, ProviderMenuEntry,
@@ -274,6 +274,19 @@ impl RebornProviderAdmin {
             }),
             config_file: config_path,
             v1_state: RebornV1State::NotUsed,
+        })
+    }
+
+    /// Clear the persisted `[llm.default]` selection. This intentionally keeps
+    /// provider overlays and stored credentials intact: a reset only returns
+    /// active-provider resolution to the boot-time defaults.
+    pub fn clear_active_selection(&self) -> Result<(), RebornProviderAdminError> {
+        let config_path = self.boot.home().config_file_path();
+        clear_default_llm_slot(&config_path).map_err(|source| {
+            RebornProviderAdminError::UpdateConfig {
+                path: config_path,
+                source: Box::new(source),
+            }
         })
     }
 

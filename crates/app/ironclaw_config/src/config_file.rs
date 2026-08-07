@@ -669,6 +669,22 @@ impl DefaultLlmSlotUpdateSession {
         apply_llm_slot_field(&mut self.doc, "base_url", &update.base_url);
         write_edit_document(&self.path, &self.doc)
     }
+
+    /// Remove the persisted `[llm.default]` selection while leaving every
+    /// other config section, including other LLM routes, unchanged.
+    pub fn clear(mut self) -> Result<(), RebornConfigFileUpdateError> {
+        let removed = self
+            .doc
+            .get_mut("llm")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .and_then(|llm| llm.remove("default"));
+
+        if removed.is_none() {
+            return Ok(());
+        }
+
+        write_edit_document(&self.path, &self.doc)
+    }
 }
 
 /// Field update for one `[google]` string field — mirrors
@@ -1223,6 +1239,12 @@ pub fn update_default_llm_slot(
     begin_default_llm_slot_update(path)?.apply(update)
 }
 
+/// Remove the persisted `[llm.default]` selection while preserving unrelated
+/// configuration. An absent slot is intentionally a successful no-op.
+pub fn clear_default_llm_slot(path: &Path) -> Result<(), RebornConfigFileUpdateError> {
+    begin_default_llm_slot_update(path)?.clear()
+}
+
 fn llm_slot_field_label(slot: &str, field: &str) -> Cow<'static, str> {
     Cow::Owned(format!("llm.{slot}.{field}"))
 }
@@ -1647,6 +1669,57 @@ provider_id = "anthropic"
         RebornConfigFile::load(&path)
             .expect("valid config")
             .expect("config present");
+    }
+
+    #[test]
+    fn clear_default_llm_slot_preserves_other_config_and_is_idempotent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[identity]
+tenant = "acme"
+
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[llm.mission]
+provider_id = "anthropic"
+model = "claude-sonnet"
+"#,
+        )
+        .expect("write config");
+
+        clear_default_llm_slot(&path).expect("clear default slot");
+        clear_default_llm_slot(&path).expect("clearing an absent slot is a no-op");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        assert!(text.contains("[llm.mission]"), "config: {text}");
+        assert!(
+            text.contains("provider_id = \"anthropic\""),
+            "config: {text}"
+        );
+        assert!(!text.contains("[llm.default]"), "config: {text}");
+
+        let config = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        assert!(config.default_llm_slot().is_none());
+    }
+
+    #[test]
+    fn clear_default_llm_slot_does_not_create_a_missing_config_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        clear_default_llm_slot(&path).expect("clearing an absent config slot is a no-op");
+
+        assert!(!path.exists());
     }
 
     #[test]

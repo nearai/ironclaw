@@ -185,6 +185,11 @@ export function setActiveLlm(payload) {
     body: JSON.stringify(payload),
   });
 }
+export function resetLlmToDefaults() {
+  return apiFetch("/api/webchat/v2/llm/reset", {
+    method: "POST",
+  });
+}
 export function testLlmProviderConnection(payload) {
   return apiFetch("/api/webchat/v2/llm/test-connection", {
     method: "POST",

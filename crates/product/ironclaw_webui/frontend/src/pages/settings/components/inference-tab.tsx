@@ -1,5 +1,8 @@
+import React from "react";
 import { Badge } from "../../../design-system/badge";
+import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
+import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { useT } from "../../../lib/i18n";
 import { INFERENCE_FIELDS } from "../lib/settings-schema";
 import { filterSettingsSections, matchesSearch } from "../lib/settings-search";
@@ -21,10 +24,25 @@ export function InferenceTab({
   // same query the provider list below renders from) rather than the empty
   // settings/gatewayStatus stubs, which left the Model field showing "—".
   // Shares the `["llm-providers"]` react-query cache, so no extra fetch.
-  const { activeProviderId, selectedModel, providers, hasActiveProvider } = useLlmProviders({
-    settings,
-    gatewayStatus,
-  });
+  const {
+    activeProviderId,
+    selectedModel,
+    providers,
+    hasActiveProvider,
+    isResetting,
+    resetToDefaults,
+  } = useLlmProviders({ settings, gatewayStatus });
+  const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
+  const [resetError, setResetError] = React.useState(null);
+  const confirmReset = React.useCallback(async () => {
+    setResetError(null);
+    try {
+      await resetToDefaults();
+      setResetDialogOpen(false);
+    } catch (error) {
+      setResetError(error.message);
+    }
+  }, [resetToDefaults]);
   if (isLoading) {
     return (<SettingsSkeleton />);
   }
@@ -46,6 +64,8 @@ export function InferenceTab({
     backend,
     t("inference.model"),
     model,
+    t("llm.resetToDefaults"),
+    t("llm.confirmResetToDefaults"),
   ]);
   const showProviderManagement = matchesSearch(searchQuery, [
     t("llm.providers"),
@@ -86,6 +106,22 @@ export function InferenceTab({
             </div>
           </div>
         </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--v2-panel-border)] pt-4">
+          <p className="text-sm text-[var(--v2-text-muted)]">{t("llm.resetToDefaultsDesc")}</p>
+          <Button
+            type="button"
+            variant="danger"
+            size="sm"
+            onClick={() => setResetDialogOpen(true)}
+          >
+            {t("llm.resetToDefaults")}
+          </Button>
+        </div>
+        {resetError ? (
+          <p className="mt-3 text-sm text-[var(--v2-danger-text)]" role="status">
+            {resetError}
+          </p>
+        ) : null}
       </Card>
       )}
 
@@ -111,6 +147,15 @@ export function InferenceTab({
             />
           )
       )}
+      <ConfirmDialog
+        open={resetDialogOpen}
+        title={t("llm.confirmResetToDefaults")}
+        description={t("llm.resetToDefaultsWarning")}
+        confirmLabel={t("llm.resetToDefaults")}
+        isConfirming={isResetting}
+        onConfirm={confirmReset}
+        onCancel={() => setResetDialogOpen(false)}
+      />
     </div>
   );
 }
