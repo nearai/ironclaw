@@ -617,7 +617,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     /// failure message. Never counted by eye.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
-        ("ironclaw_extension_contracts", 7_727),
+        ("ironclaw_extension_contracts", 7_738),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -627,7 +627,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
-        ("ironclaw_host_api", 18_784),
+        // Raised 18_784 -> 18_804 by #7076 (RFC 7617 Basic credential target):
+        // the `RuntimeCredentialTarget::Basic` declaration, its username
+        // validation, and wire-format round-trip coverage are contract
+        // vocabulary; composition, injection, and enforcement stay in
+        // host_runtime.
+        ("ironclaw_host_api", 18_804),
         ("ironclaw_loop_contracts", 14_479),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
