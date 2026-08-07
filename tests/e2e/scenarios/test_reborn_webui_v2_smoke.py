@@ -474,15 +474,23 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             )
         ).to_have_count(1)
 
-        await page.locator("[data-testid='inspector-tab-stats']").click()
-        stats = page.locator("[data-testid='inspector-stats-content']")
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        stats = page.locator(SEL_V2["inspector_stats_content"])
         await expect(stats).to_be_visible()
-        await expect(stats.get_by_text("Model calls", exact=True).locator("..")).to_contain_text(
-            "1"
+        model_calls = (
+            stats.get_by_text("Model calls", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
         )
-        await expect(stats.get_by_text("Input tokens", exact=True).locator("..")).to_contain_text(
-            "10"
+        await expect(model_calls).to_have_text("1")
+        input_tokens = (
+            stats.get_by_text("Input tokens", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
         )
+        await expect(input_tokens).to_have_text("10")
         await expect(stats.get_by_text("Output tokens", exact=True).locator("..")).not_to_contain_text(
             "Unavailable"
         )

@@ -1575,17 +1575,15 @@ where
                     Some(error.safe_summary.as_str().to_string()),
                 ),
             };
-            let effective_model = diagnostic_effective_model
-                .or_else(|| {
-                    self.gateway
-                        .diagnostic_effective_model(
-                            &model_profile_id,
-                            request.fallback_index,
-                            self.run_context.resolved_model_route.as_ref(),
-                        )
-                        .map(ProviderModelId::into_inner)
-                })
-                .unwrap_or_else(|| model_profile_id.as_str().to_string());
+            let effective_model = diagnostic_effective_model.or_else(|| {
+                self.gateway
+                    .diagnostic_effective_model(
+                        &model_profile_id,
+                        request.fallback_index,
+                        self.run_context.resolved_model_route.as_ref(),
+                    )
+                    .map(ProviderModelId::into_inner)
+            });
             sink.record_model_call(HostManagedModelCallDiagnosticCapture {
                 context: self.run_context.clone(),
                 iteration: request.iteration,
@@ -2156,7 +2154,7 @@ pub struct HostManagedModelCallDiagnosticCapture {
     pub context: LoopRunContext,
     pub iteration: u32,
     pub requested_model: String,
-    pub effective_model: String,
+    pub effective_model: Option<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
     pub duration_ms: u64,
@@ -3140,7 +3138,7 @@ mod tests {
             context,
             iteration: 1,
             requested_model: "interactive_model".to_string(),
-            effective_model: "provider-model".to_string(),
+            effective_model: Some("provider-model".to_string()),
             started_at: now,
             completed_at: now,
             duration_ms: 1,

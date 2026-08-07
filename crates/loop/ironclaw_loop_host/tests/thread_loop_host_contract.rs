@@ -307,13 +307,47 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
     assert_eq!(model_calls[0].iteration, 7);
     assert_eq!(model_calls[0].requested_model, "interactive_model");
     assert_eq!(
-        model_calls[0].effective_model,
-        "provider-model-from-response"
+        model_calls[0].effective_model.as_deref(),
+        Some("provider-model-from-response")
     );
     assert_eq!(
         model_calls[0].usage.map(|usage| usage.input_tokens),
         Some(21)
     );
+}
+
+#[tokio::test]
+async fn model_port_keeps_effective_model_unavailable_without_provider_evidence() {
+    let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
+    let gateway = Arc::new(MissingDiagnosticModelGateway);
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 2,
+        iteration: 7,
+        capability_view: None,
+    })
+    .await
+    .expect("model response");
+
+    let model_calls = sink.model_calls.lock().expect("model calls");
+    assert_eq!(model_calls.len(), 1);
+    assert_eq!(model_calls[0].requested_model, "interactive_model");
+    assert_eq!(model_calls[0].effective_model, None);
 }
 
 #[tokio::test]
@@ -362,7 +396,10 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
         ironclaw_loop_host::HostManagedModelCallDiagnosticStatus::Failed
     );
     assert_eq!(model_calls[0].usage, Some(usage));
-    assert_eq!(model_calls[0].effective_model, "provider-model-from-error");
+    assert_eq!(
+        model_calls[0].effective_model.as_deref(),
+        Some("provider-model-from-error")
+    );
     assert_eq!(
         model_calls[0].failure_summary.as_deref(),
         Some("model provider unavailable")
@@ -6142,6 +6179,21 @@ struct RecordingGateway {
     calls: Mutex<Vec<HostManagedModelRequest>>,
     tool_definition_calls: Mutex<Vec<Vec<ProviderToolDefinition>>>,
     response: Result<HostManagedModelResponse, HostManagedModelError>,
+}
+
+struct MissingDiagnosticModelGateway;
+
+#[async_trait]
+impl HostManagedModelGateway for MissingDiagnosticModelGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(
+            HostManagedModelResponse::assistant_reply("model says hi".to_string())
+                .with_effective_fallback_index(request.fallback_index),
+        )
+    }
 }
 
 #[derive(Default)]

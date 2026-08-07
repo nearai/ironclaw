@@ -314,8 +314,8 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
           <p className="mt-2 text-[var(--v2-text-muted)]">No model breakdown available.</p>
         ) : (
           <dl className="mt-2 space-y-1.5">
-            {stats.calls_per_model.map((entry) => (
-              <div key={entry.model.content} className="flex justify-between gap-3">
+            {stats.calls_per_model.map((entry, index) => (
+              <div key={index} className="flex justify-between gap-3">
                 <dt className="min-w-0 truncate text-[var(--v2-text-muted)]">{entry.model.content}</dt>
                 <dd>{entry.calls.toLocaleString()}</dd>
               </div>

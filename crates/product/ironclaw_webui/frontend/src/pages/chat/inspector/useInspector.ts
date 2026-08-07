@@ -13,6 +13,7 @@ const MAX_RETRY_INTERVAL_MS = 30_000;
 const MAX_RETAINED_UPDATES = 1_024;
 const MAX_SNAPSHOT_ATTEMPTS = 3;
 const SNAPSHOT_RETRY_BASE_DELAY_MS = 500;
+const SNAPSHOT_REFRESH_DEBOUNCE_MS = 50;
 
 interface DiagnosticUpdate {
   stream_id?: string;
@@ -123,20 +124,36 @@ export function useInspector({
     let disposed = false;
     let connectedOnce = false;
     let terminalState = false;
+    let snapshotRefreshTimer: number | null = null;
     let controller: ReturnType<EventSourcePlus["listen"]> | null = null;
     const request = inspectorEventStreamRequest({ threadId, runId });
     const stream = new EventSourcePlus(request.url, {
       credentials: "same-origin",
-      headers: request.headers,
+      headers: () => ({
+        ...request.headers(),
+        ...(lastCursorRef.current ? { "Last-Event-ID": lastCursorRef.current } : {}),
+      }),
       maxRetryInterval: MAX_RETRY_INTERVAL_MS,
       retryStrategy: "always",
     });
 
     function terminal(healthState: InspectorHealth, message: string): void {
       terminalState = true;
+      if (snapshotRefreshTimer !== null) {
+        window.clearTimeout(snapshotRefreshTimer);
+        snapshotRefreshTimer = null;
+      }
       setHealth(healthState);
       setError(message);
       controller?.abort("terminal inspector response");
+    }
+
+    function scheduleSnapshotRefresh(): void {
+      if (snapshotRefreshTimer !== null) window.clearTimeout(snapshotRefreshTimer);
+      snapshotRefreshTimer = window.setTimeout(() => {
+        snapshotRefreshTimer = null;
+        if (!disposed) setSnapshotGeneration((generation) => generation + 1);
+      }, SNAPSHOT_REFRESH_DEBOUNCE_MS);
     }
 
     function connect(): void {
@@ -190,7 +207,7 @@ export function useInspector({
           if (message.event === "diagnostic_rebase") {
             if (cursor) lastCursorRef.current = cursor;
             setUpdates([]);
-            setSnapshotGeneration((generation) => generation + 1);
+            scheduleSnapshotRefresh();
             return;
           }
           if (message.event !== "diagnostic_update") return;
@@ -204,7 +221,7 @@ export function useInspector({
             || update?.type === "tool_execution_updated"
             || update?.type === "stats"
           ) {
-            setSnapshotGeneration((generation) => generation + 1);
+            scheduleSnapshotRefresh();
           }
           setHealth(INSPECTOR_HEALTH.CONNECTED);
         },
@@ -230,6 +247,7 @@ export function useInspector({
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       disposed = true;
+      if (snapshotRefreshTimer !== null) window.clearTimeout(snapshotRefreshTimer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       controller?.abort("inspector disposed");
     };

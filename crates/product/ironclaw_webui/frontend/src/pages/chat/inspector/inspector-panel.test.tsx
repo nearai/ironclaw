@@ -153,7 +153,7 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
   assert.match(stats.textContent || "", /Unavailable/);
   assert.match(stats.textContent || "", /provider-model3/);
   assert.doesNotMatch(stats.textContent || "", /Tool calls|Tool outcomes/);
-  assert.match(stats.textContent || "", /metric samples were unavailable/);
+  assert.match(stats.textContent || "", /7 metric samples were unavailable/);
 });
 
 afterEach(async () => {
