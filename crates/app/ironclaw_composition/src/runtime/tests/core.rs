@@ -686,7 +686,7 @@ use ironclaw_loop_host::{
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedToolResultContent, HostSkillContextBuildError,
     HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
-    SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
+    SubagentKindId, SubagentThreadKind, SubagentThreadMetadata, ToolDisclosureMode,
 };
 use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
@@ -2967,6 +2967,7 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             )),
         ))),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-observer-reject-tenant".to_string(),
         agent_id: "runtime-observer-reject-agent".to_string(),
@@ -3723,6 +3724,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
         )
         .with_local_runtime_confirmed_host_home_root(host_home),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-auth-gate-tenant".to_string(),
         agent_id: "runtime-auth-gate-agent".to_string(),
@@ -4001,6 +4003,7 @@ async fn standalone_runtime_exposes_host_runtime_capabilities_to_model_calls() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-tools-tenant".to_string(),
         agent_id: "runtime-tools-agent".to_string(),
@@ -4145,6 +4148,7 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-trajectory-tenant".to_string(),
         agent_id: "runtime-trajectory-agent".to_string(),
@@ -4221,6 +4225,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-preview-tenant".to_string(),
         agent_id: "runtime-preview-agent".to_string(),
@@ -5079,6 +5084,7 @@ async fn standalone_runtime_maps_workspace_to_configured_root() {
         .with_local_runtime_workspace_root(workspace_root.path().to_path_buf())
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-workspace-tenant".to_string(),
         agent_id: "runtime-workspace-agent".to_string(),
@@ -6603,6 +6609,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-multi-tool-surface-tenant".to_string(),
         agent_id: "runtime-multi-tool-surface-agent".to_string(),

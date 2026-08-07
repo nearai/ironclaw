@@ -1,7 +1,9 @@
 import React from "react";
 import { EventSourcePlus } from "event-source-plus";
 
+import { ActivityKind } from "./activity-kind";
 import { fetchInspectorSnapshot, inspectorEventStreamRequest } from "./inspector-api";
+import { subscribeProductInspectorActivity } from "./product-activity";
 import {
   INSPECTOR_HEALTH,
   healthForInspectorStatus,
@@ -16,9 +18,10 @@ const SNAPSHOT_RETRY_BASE_DELAY_MS = 500;
 const SNAPSHOT_REFRESH_DEBOUNCE_MS = 50;
 const SNAPSHOT_REFRESH_MAX_WAIT_MS = 250;
 
-interface DiagnosticUpdate {
+export interface DiagnosticUpdate {
   stream_id?: string;
   sequence?: number;
+  local_id?: string;
   update?: unknown;
   [key: string]: unknown;
 }
@@ -69,12 +72,38 @@ export function useInspector({
   const [error, setError] = React.useState<string | null>(null);
   const [snapshotGeneration, setSnapshotGeneration] = React.useState(0);
   const lastCursorRef = React.useRef<string | null>(null);
+  const transportSequenceRef = React.useRef(0);
 
   React.useEffect(() => {
     lastCursorRef.current = null;
     setSnapshot(null);
     setUpdates([]);
     setError(null);
+    transportSequenceRef.current = 0;
+  }, [enabled, threadId, runId]);
+
+  React.useEffect(() => {
+    if (!enabled || !threadId || !runId) return undefined;
+    return subscribeProductInspectorActivity(threadId, runId, (activity) => {
+      setUpdates((current) => [...current, {
+        local_id: activity.localId,
+        update: {
+          type: "activity",
+          data: {
+            occurred_at: activity.occurredAt,
+            kind: activity.kind,
+            iteration: null,
+            activity_id: activity.activityId,
+            model_call_id: null,
+            summary: {
+              content: activity.summary,
+              original_bytes: activity.summary.length,
+              truncated: false,
+            },
+          },
+        },
+      }].slice(-MAX_RETAINED_UPDATES));
+    });
   }, [enabled, threadId, runId]);
 
   React.useEffect(() => {
@@ -124,6 +153,7 @@ export function useInspector({
 
     let disposed = false;
     let connectedOnce = false;
+    let transportDisconnected = false;
     let terminalState = false;
     let snapshotRefreshTimer: number | null = null;
     let snapshotRefreshMaxWaitTimer: number | null = null;
@@ -145,6 +175,39 @@ export function useInspector({
       setHealth(healthState);
       setError(message);
       controller?.abort("terminal inspector response");
+    }
+
+    function appendTransportActivity(
+      kind: ActivityKind.StreamDisconnected | ActivityKind.StreamResumed,
+    ): void {
+      transportSequenceRef.current += 1;
+      const summary = kind === ActivityKind.StreamDisconnected
+        ? "Diagnostics stream disconnected"
+        : "Diagnostics stream resumed";
+      setUpdates((current) => [...current, {
+        local_id: `transport-${transportSequenceRef.current}`,
+        update: {
+          type: "activity",
+          data: {
+            occurred_at: new Date().toISOString(),
+            kind,
+            iteration: null,
+            activity_id: null,
+            model_call_id: null,
+            summary: {
+              content: summary,
+              original_bytes: summary.length,
+              truncated: false,
+            },
+          },
+        },
+      }].slice(-MAX_RETAINED_UPDATES));
+    }
+
+    function noteDisconnected(): void {
+      if (transportDisconnected) return;
+      transportDisconnected = true;
+      appendTransportActivity(ActivityKind.StreamDisconnected);
     }
 
     function cancelSnapshotRefresh(): void {
@@ -184,11 +247,16 @@ export function useInspector({
           }
         },
         onRequestError() {
-          if (!disposed) setHealth(INSPECTOR_HEALTH.RECONNECTING);
+          if (!disposed) {
+            noteDisconnected();
+            setHealth(INSPECTOR_HEALTH.RECONNECTING);
+          }
         },
         onResponse({ response }) {
           if (disposed) return;
           if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
+            if (transportDisconnected) appendTransportActivity(ActivityKind.StreamResumed);
+            transportDisconnected = false;
             connectedOnce = true;
             setError(null);
             setHealth(INSPECTOR_HEALTH.CONNECTED);
@@ -210,6 +278,7 @@ export function useInspector({
           const payload = safeJson(message.data);
           if (!payload) return;
           if (message.event === "stream_error") {
+            noteDisconnected();
             const nextHealth = payload.retryable === false
               ? INSPECTOR_HEALTH.DISCONNECTED
               : INSPECTOR_HEALTH.RECONNECTING;
@@ -222,7 +291,9 @@ export function useInspector({
           const cursor = message.id || null;
           if (message.event === "diagnostic_rebase") {
             if (cursor) lastCursorRef.current = cursor;
-            setUpdates([]);
+            setUpdates((current) => current.filter(
+              (update) => typeof update.local_id === "string",
+            ));
             scheduleSnapshotRefresh();
             return;
           }
@@ -247,6 +318,7 @@ export function useInspector({
     function onVisibilityChange(): void {
       if (disposed || terminalState) return;
       if (document.visibilityState === "hidden") {
+        noteDisconnected();
         controller?.abort("inspector hidden");
         setHealth(INSPECTOR_HEALTH.IDLE);
       } else {
