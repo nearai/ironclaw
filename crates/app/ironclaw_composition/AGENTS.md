@@ -1,7 +1,7 @@
 # Agent Map — ironclaw_composition
 
-**Read [`CLAUDE.md`](./CLAUDE.md) — it is this crate's module spec** (named in
-the root `CLAUDE.md` Module Specs table): the guardrails, the WebUI v2
+**Read [`CONTRACT.md`](./CONTRACT.md) — it is this crate's module spec** (named
+in the root `AGENTS.md` Module Specs table): the guardrails, the WebUI v2
 surface, product-auth wiring rules, security invariants, and tests. Code
 follows the spec; the spec is the tiebreaker. Consolidated per
 `docs/reborn/guidance-conventions.md`, this file is a pointer, not a second

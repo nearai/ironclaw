@@ -2212,7 +2212,7 @@ pub struct RebornServices<
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
-    diagnostic_store: Arc<crate::inspector_store::InMemoryDiagnosticStore>,
+    diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -2303,7 +2303,7 @@ where
     /// inspector. Capture adapters and this read surface must share one store.
     pub fn with_diagnostic_store(
         mut self,
-        diagnostic_store: Arc<crate::inspector_store::InMemoryDiagnosticStore>,
+        diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
     ) -> Self {
         self.diagnostic_store = diagnostic_store;
         self
@@ -2764,7 +2764,7 @@ where
     /// implicit owner; otherwise the caller's persisted role must be admin or
     /// owner. The role is read from the directory on EVERY call (never cached),
     /// so a demoted admin loses access immediately — see
-    /// `product_surface/CLAUDE.md` ("No caching. Caching the authz result is
+    /// this crate's `AGENTS.md` ("No caching. Caching the authz result is
     /// explicitly forbidden").
     async fn authorize_admin(
         &self,
@@ -4001,7 +4001,7 @@ where
                         ProductSurfaceValidationCode::InvalidValue,
                     )
                 })?;
-                inspector::snapshot(&self.diagnostic_store, caller, request)
+                inspector::snapshot(self.diagnostic_store.as_ref(), caller, request)
             }
             id if id == INSPECTOR_PROMPT_VIEW.id => {
                 let request = serde_json::from_value(query.params).map_err(|_| {
@@ -4010,7 +4010,7 @@ where
                         ProductSurfaceValidationCode::InvalidValue,
                     )
                 })?;
-                inspector::prompt(&self.diagnostic_store, caller, request)
+                inspector::prompt(self.diagnostic_store.as_ref(), caller, request)
             }
             id if id == INSPECTOR_TOOL_VIEW.id => {
                 let request = serde_json::from_value(query.params).map_err(|_| {
@@ -4019,7 +4019,7 @@ where
                         ProductSurfaceValidationCode::InvalidValue,
                     )
                 })?;
-                inspector::tool(&self.diagnostic_store, caller, request)
+                inspector::tool(self.diagnostic_store.as_ref(), caller, request)
             }
             id if id == INSPECTOR_UPDATES_VIEW.id => {
                 let request = serde_json::from_value(query.params).map_err(|_| {
@@ -4028,7 +4028,12 @@ where
                         ProductSurfaceValidationCode::InvalidValue,
                     )
                 })?;
-                inspector::updates(&self.diagnostic_store, caller, request, query.cursor)
+                inspector::updates(
+                    self.diagnostic_store.as_ref(),
+                    caller,
+                    request,
+                    query.cursor,
+                )
             }
             id if id == LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)

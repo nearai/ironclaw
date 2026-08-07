@@ -40,6 +40,7 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    open_reborn_v2_page,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_first_run_server,  # noqa: F401 - imported fixture
@@ -426,6 +427,52 @@ async def test_inspector_debug_activation_and_responsive_shell(
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
         await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
         await expect(panel).to_have_count(0)
+    finally:
+        await context.close()
+
+
+async def test_inspector_prompt_renders_host_resolved_diagnostics(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """A real model turn reaches the bounded operator-only Prompt tab."""
+    marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+        )
+    run_id = assistant.get("turn_run_id") or submitted.get("run_id")
+    assert run_id, f"completed turn did not expose its run id: {assistant!r}"
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    try:
+        await open_reborn_v2_page(
+            page,
+            reborn_v2_server,
+            path=f"/chat/{thread_id}?debug=true",
+            ready_selector=SEL_V2["inspector_prompt_content"],
+        )
+        prompt = page.locator(SEL_V2["inspector_prompt_content"])
+        await expect(prompt).to_be_visible(timeout=30000)
+        await expect(prompt.get_by_text("Estimated prompt tokens", exact=True)).to_be_visible()
+        await expect(prompt.get_by_text("mock-model", exact=True).first).to_be_visible()
+
+        conversation = prompt.locator("details").filter(has_text=marker).first
+        await expect(conversation).to_have_count(1)
+        await conversation.locator("summary").click()
+        await expect(conversation.locator("pre")).to_contain_text(marker)
+        await expect(
+            prompt.get_by_text(
+                "Reconstructed content reflects the latest host prompt boundary",
+            )
+        ).to_have_count(1)
     finally:
         await context.close()
 

@@ -47,8 +47,8 @@ mod config;
 
 pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
 use ironclaw_loop_host::{
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
-    ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostManagedPromptDiagnosticSink,
+    NoExtraLoopInputPort, ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
 };
 
 // Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
@@ -1020,6 +1020,7 @@ where
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
@@ -1137,6 +1138,7 @@ where
             config,
             skill_context_source: None,
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
@@ -1230,6 +1232,14 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_prompt_diagnostic_sink(
+        mut self,
+        sink: Arc<dyn HostManagedPromptDiagnosticSink>,
+    ) -> Self {
+        self.prompt_diagnostic_sink = Some(sink);
         self
     }
 
@@ -1907,6 +1917,7 @@ where
                         prompt_authority,
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
+                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
                     },
                 ))
             } else {
@@ -1925,6 +1936,7 @@ where
                         prompt_authority,
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
+                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
                     },
                 ))
             };

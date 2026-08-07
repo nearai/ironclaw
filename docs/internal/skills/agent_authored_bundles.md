@@ -94,4 +94,3 @@ So the reachability problem is elicitation, not filtering. A floor-score strateg
 bought no reach for exactly this reason, and it demoted chain-loaded companions. `Full`
 injection mode is the one place the gate genuinely hides a skill, since only activated bundles
 render there.
-

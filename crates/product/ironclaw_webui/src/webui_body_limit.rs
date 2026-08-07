@@ -4,7 +4,7 @@
 //! `crate::webui_v2::webui_v2_routes()` carries a [`BodyLimitPolicy`]
 //! per route (16 KiB for `create_thread`, 14 MiB for `send_message`, 4
 //! KiB for `cancel_run`/`resolve_gate`, `NoBody` for the read /
-//! streaming routes). The v2 crate's CLAUDE.md designates enforcement
+//! streaming routes). The v2 crate's CONTRACT.md designates enforcement
 //! as host-composition responsibility; this module is that enforcement.
 //!
 //! Wiring:

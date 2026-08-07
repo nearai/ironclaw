@@ -8,6 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     future::Future,
     sync::{
         Arc,
@@ -59,6 +60,7 @@ mod token_estimator;
 mod tool_disclosure;
 mod tool_disclosure_mode;
 mod tool_disclosure_port;
+mod tool_search;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -193,7 +195,7 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
-use ironclaw_host_api::ids::RunId;
+use ironclaw_host_api::ids::{CapabilityId, RunId};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
@@ -1186,6 +1188,7 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
+    prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -1216,6 +1219,7 @@ where
             identity_context_source: None,
             attachment_read_port: None,
             stream_sink: None,
+            prompt_diagnostic_sink: None,
         }
     }
 
@@ -1243,6 +1247,7 @@ where
             identity_context_source: None,
             attachment_read_port: None,
             stream_sink: None,
+            prompt_diagnostic_sink: None,
         }
     }
 
@@ -1297,6 +1302,14 @@ where
 
     pub fn with_stream_sink(mut self, sink: Arc<dyn HostManagedModelStreamSink>) -> Self {
         self.stream_sink = Some(sink);
+        self
+    }
+
+    pub fn with_prompt_diagnostic_sink(
+        mut self,
+        sink: Arc<dyn HostManagedPromptDiagnosticSink>,
+    ) -> Self {
+        self.prompt_diagnostic_sink = Some(sink);
         self
     }
 
@@ -1398,6 +1411,53 @@ where
         // exclusively in the outer port (see #3841 follow-up "delete dead
         // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
+
+        if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
+            let effective_model = self.gateway.diagnostic_effective_model(
+                &model_profile_id,
+                request.fallback_index,
+                self.run_context.resolved_model_route.as_ref(),
+            );
+            let capability_ids = if let Some(view) = request.capability_view.as_ref() {
+                view.visible_capability_ids.clone()
+            } else if let Some(capabilities) = self.capabilities.as_ref() {
+                match capabilities.tool_definitions() {
+                    Ok(definitions) => definitions
+                        .into_iter()
+                        .map(|definition| definition.capability_id)
+                        .collect(),
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            "prompt diagnostics could not capture capability ids"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            sink.record_prompt(HostManagedPromptDiagnosticCapture {
+                context: self.run_context.clone(),
+                messages: resolved_messages
+                    .iter()
+                    .map(|message| HostManagedPromptDiagnosticMessage {
+                        role: message.role,
+                        content_ref: message.content_ref.clone(),
+                        content: message.content.clone(),
+                    })
+                    .collect(),
+                identity_message_count: prompt_grant.diagnostic_metadata.identity_message_count,
+                instruction_snippet_count: prompt_grant
+                    .diagnostic_metadata
+                    .instruction_snippet_count,
+                active_skills: prompt_grant.diagnostic_metadata.active_skills,
+                capability_ids,
+                requested_model: requested_model_profile_id.clone(),
+                effective_model,
+                context_limit: self.prompt_context_budget.context_limit_tokens,
+            });
+        }
 
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
@@ -1815,6 +1875,21 @@ where
 /// profile policy, retry/circuit behavior, and sanitization.
 #[async_trait]
 pub trait HostManagedModelGateway: Send + Sync {
+    /// Best-effort provider model identity for operator diagnostics. Gateways
+    /// that own provider selection should override this so callers do not
+    /// mistake a logical model profile for the concrete provider model.
+    fn diagnostic_effective_model(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<ProviderModelId> {
+        if fallback_index != 0 {
+            return None;
+        }
+        resolved_model_route.and_then(|route| ProviderModelId::new(route.model_id()).ok())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -1860,6 +1935,125 @@ pub trait HostManagedModelGateway: Send + Sync {
 #[async_trait::async_trait]
 pub trait HostManagedModelStreamSink: Send + Sync {
     async fn safe_text_update(&self, safe_text: String);
+}
+
+/// Best-effort, process-local observation of the exact text prompt resolved at
+/// the host boundary. Implementations must keep this data out of ordinary
+/// product events and apply their own authorization, redaction, and bounds.
+pub trait HostManagedPromptDiagnosticSink: Send + Sync {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture);
+}
+
+/// Validated concrete provider model identifier used only for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderModelId(String);
+
+impl ProviderModelId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        ironclaw_loop_contracts::validate_model_route_component_value(
+            "provider model id",
+            &value,
+            256,
+            |character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '-' | '.' | ':' | '/')
+            },
+        )?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ProviderModelId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ProviderModelId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Bounded, non-blocking decorator for best-effort prompt diagnostics.
+///
+/// Captures are dropped when the worker cannot keep up so diagnostic work
+/// never adds backpressure to the provider request path.
+pub struct BufferedPromptDiagnosticSink {
+    sender: tokio::sync::mpsc::Sender<HostManagedPromptDiagnosticCapture>,
+}
+
+pub const DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY: usize = 8;
+
+impl BufferedPromptDiagnosticSink {
+    pub fn new(
+        inner: Arc<dyn HostManagedPromptDiagnosticSink>,
+        capacity: usize,
+    ) -> Result<Self, String> {
+        if capacity == 0 {
+            return Err("prompt diagnostic queue capacity must be nonzero".to_string());
+        }
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "prompt diagnostic worker requires a Tokio runtime".to_string())?;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(capacity);
+        runtime.spawn(async move {
+            while let Some(capture) = receiver.recv().await {
+                let sink = Arc::clone(&inner);
+                if let Err(error) =
+                    tokio::task::spawn_blocking(move || sink.record_prompt(capture)).await
+                {
+                    tracing::debug!(%error, "prompt diagnostic worker failed");
+                }
+            }
+        });
+        Ok(Self { sender })
+    }
+}
+
+impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        if let Err(error) = self.sender.try_send(capture) {
+            let queue_state = match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "closed",
+            };
+            tracing::debug!(
+                %run_id,
+                queue_state,
+                "dropping best-effort prompt diagnostic capture"
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedPromptDiagnosticCapture {
+    pub context: LoopRunContext,
+    pub messages: Vec<HostManagedPromptDiagnosticMessage>,
+    pub identity_message_count: u32,
+    pub instruction_snippet_count: u32,
+    pub active_skills: Vec<ironclaw_loop_contracts::SkillName>,
+    pub capability_ids: Vec<CapabilityId>,
+    pub requested_model: Option<ModelProfileId>,
+    pub effective_model: Option<ProviderModelId>,
+    pub context_limit: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedPromptDiagnosticMessage {
+    pub role: HostManagedModelMessageRole,
+    pub content_ref: LoopMessageRef,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2683,6 +2877,120 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    struct BlockingPromptDiagnosticSink {
+        calls: std::sync::atomic::AtomicUsize,
+        first_started: tokio::sync::Notify,
+        release_first: (std::sync::Mutex<bool>, std::sync::Condvar),
+    }
+
+    impl BlockingPromptDiagnosticSink {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                first_started: tokio::sync::Notify::new(),
+                release_first: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            }
+        }
+
+        fn release(&self) {
+            let (lock, condvar) = &self.release_first;
+            *lock.lock().expect("release lock") = true;
+            condvar.notify_all();
+        }
+    }
+
+    impl HostManagedPromptDiagnosticSink for BlockingPromptDiagnosticSink {
+        fn record_prompt(&self, _capture: HostManagedPromptDiagnosticCapture) {
+            let previous = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.first_started.notify_waiters();
+            if previous == 0 {
+                let (lock, condvar) = &self.release_first;
+                let mut released = lock.lock().expect("release lock");
+                while !*released {
+                    released = condvar.wait(released).expect("release wait");
+                }
+            }
+        }
+    }
+
+    fn prompt_diagnostic_capture_for_test() -> HostManagedPromptDiagnosticCapture {
+        let context = LoopRunContext::new(
+            TurnScope::new(
+                ironclaw_host_api::ids::TenantId::new("diagnostic-tenant").expect("tenant"),
+                None,
+                None,
+                ironclaw_host_api::ids::ThreadId::new("diagnostic-thread").expect("thread"),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            ironclaw_loop_contracts::ResolvedRunProfile::legacy_compatibility(
+                ironclaw_host_api::turn::RunProfileId::interactive_default(),
+                ironclaw_host_api::turn::RunProfileVersion::new(1),
+                true,
+            ),
+        );
+        HostManagedPromptDiagnosticCapture {
+            context,
+            messages: Vec::new(),
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
+            active_skills: Vec::new(),
+            capability_ids: Vec::new(),
+            requested_model: None,
+            effective_model: None,
+            context_limit: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_prompt_diagnostics_drop_when_the_bounded_queue_is_full() {
+        let inner = Arc::new(BlockingPromptDiagnosticSink::new());
+        let buffered = BufferedPromptDiagnosticSink::new(
+            inner.clone() as Arc<dyn HostManagedPromptDiagnosticSink>,
+            1,
+        )
+        .expect("buffered sink");
+        let capture = prompt_diagnostic_capture_for_test();
+
+        buffered.record_prompt(capture.clone());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let notified = inner.first_started.notified();
+                if inner.calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("first capture starts");
+
+        buffered.record_prompt(capture.clone());
+        buffered.record_prompt(capture);
+        inner.release();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while inner.calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued capture drains");
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn provider_model_id_enforces_bounded_route_grammar() {
+        assert_eq!(
+            ProviderModelId::new("openai/gpt-5.1")
+                .expect("valid model")
+                .as_str(),
+            "openai/gpt-5.1"
+        );
+        assert!(ProviderModelId::new(" model ").is_err());
+        assert!(ProviderModelId::new("sk-secret-model").is_err());
+    }
 
     #[test]
     fn missing_model_route_evidence_stays_explicit_after_deserialization() {
