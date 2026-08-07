@@ -305,7 +305,7 @@ impl axum::response::IntoResponse for OpenAiCompatHttpError {
 
         let status = StatusCode::from_u16(self.status_code).unwrap_or_else(|_| {
             tracing::error!(
-                target = "ironclaw_openai_compat::error",
+                target: "ironclaw_openai_compat::error",
                 status_code = self.status_code,
                 "OpenAI-compatible error carried a non-HTTP status; coercing to 500"
             );

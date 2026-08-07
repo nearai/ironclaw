@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React from "react";
+import { useLocation } from "react-router";
 import { useT } from "../../lib/i18n";
 import { toast } from "../../lib/toast";
 import {
@@ -31,7 +32,7 @@ import { useInterfacePreferences } from "../../lib/interface-preferences";
 import {
   inspectorDebugEnabled,
   latestInspectorRunId,
-} from "./inspector/inspector-state";
+} from "./inspector/inspector-shell";
 
 let LazyInspectorPanel: React.LazyExoticComponent<
   React.ComponentType<{ threadId: string | null; runId: string | null }>
@@ -92,6 +93,7 @@ export function Chat({
   onConnectionStatusChange,
 }) {
   const t = useT();
+  const location = useLocation();
   const { showChatLogsShortcut } = useInterfacePreferences();
   const {
     messages,
@@ -161,10 +163,7 @@ export function Chat({
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const activeRunId = activeRun?.runId || null;
-  const inspectorEnabled = React.useMemo(
-    () => inspectorDebugEnabled(window.location.search),
-    [],
-  );
+  const inspectorEnabled = inspectorDebugEnabled(location.search);
   const inspectorRunId = React.useMemo(
     () => latestInspectorRunId(activeRun, messages),
     [activeRun, messages],

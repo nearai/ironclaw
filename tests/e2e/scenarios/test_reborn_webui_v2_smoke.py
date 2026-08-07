@@ -393,7 +393,7 @@ async def test_inspector_debug_activation_and_responsive_shell(
         viewport={"width": 1440, "height": 900}
     )
     page = await context.new_page()
-    panel = page.locator("[data-testid='inspector-panel']")
+    panel = page.locator(SEL_V2["inspector_panel"])
     try:
         await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
@@ -405,12 +405,12 @@ async def test_inspector_debug_activation_and_responsive_shell(
         await expect(panel).to_be_visible(timeout=15000)
         await expect(panel).to_have_attribute("data-layout", "sidebar")
 
-        stats_tab = page.locator("[data-testid='inspector-tab-stats']")
+        stats_tab = page.locator(SEL_V2["inspector_tab_stats"])
         await stats_tab.click()
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
-        await page.locator("[data-testid='inspector-close']").click()
+        await page.locator(SEL_V2["inspector_close"]).click()
         await expect(panel).to_have_count(0)
-        await page.locator("[data-testid='inspector-open']").click()
+        await page.locator(SEL_V2["inspector_open"]).click()
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
 
         await page.set_viewport_size({"width": 900, "height": 900})

@@ -1,36 +1,18 @@
-# Agent Map — ironclaw_network
+# ironclaw_network — guidance pointer
 
-## Start Here
+Canonical guidance for this crate lives in:
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
-- Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/network.md`
-- `docs/reborn/contracts/kernel-boundary.md`
-- `docs/reborn/contracts/resources.md`
+- [`CLAUDE.md`](./CLAUDE.md) — the crate's working rules (fail-closed policy,
+  host-matching shape, forbidden dependencies).
+- [`README.md`](./README.md) — orientation: what the crate is, public surface,
+  measured edges, tests.
+- [`../AGENTS.md`](../AGENTS.md) — the `substrates/` family boundary and its
+  gates.
 
-## What This Crate Owns
+Contracts of record: `docs/reborn/contracts/network.md`,
+`docs/reborn/contracts/kernel-boundary.md`,
+`docs/reborn/contracts/resources.md`.
 
-- Network policy boundary and hardened host/provider HTTP transport substrate, currently:
-- Policy enforcement: `StaticNetworkPolicyEnforcer` (`policy`) and internal URL targeting / private-IP checks (`url_target`).
-- Address resolution: `NetworkResolver` (`resolver`).
-- Hardened transport: `ReqwestNetworkTransport` (`transport`) and the egress service `NetworkHttpEgress` / `PolicyNetworkHttpEgress` / `NetworkHttpTransport` (`egress`).
-- Request/response/usage types: `NetworkRequest`, `NetworkHttpRequest`, `NetworkHttpResponse`, `NetworkTransportRequest`, `NetworkUsage`, `DEFAULT_RESPONSE_BODY_LIMIT` (`types`); `NetworkHttpError` (`error`).
-- Crate-local public API, tests, and fixtures needed to prove that ownership.
-
-## Do Not Move In Here
-
-- runtime-lane behavior above the boundary or manual credential injection.
-- Secrets, raw host paths, backend error details, and unredacted user content in errors, events, snapshots, logs, or docs.
-
-## Validation
-
-- Fast local check: `cargo test -p ironclaw_network`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
-- If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
-
-## Agent Notes
-
-- Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
-- Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
-- If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.
+Consolidated 2026-08-05 per `docs/reborn/guidance-conventions.md` rule 1 (one
+canonical home per fact); this file previously duplicated the guardrails'
+ownership and validation content.

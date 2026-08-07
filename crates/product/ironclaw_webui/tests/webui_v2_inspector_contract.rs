@@ -84,6 +84,16 @@ impl ProductSurface for RecordingSurface {
                     "rebase_required": true,
                 })
             }
+            id if id == INSPECTOR_UPDATES_VIEW.id
+                && request.cursor.as_deref() == Some("550e8400-e29b-41d4-a716-446655440000:99") =>
+            {
+                serde_json::json!({
+                    "updates": [],
+                    "retention_floor": null,
+                    "latest_cursor": null,
+                    "rebase_required": true,
+                })
+            }
             id if id == INSPECTOR_UPDATES_VIEW.id => serde_json::json!({
                 "updates": [],
                 "retention_floor": null,
@@ -229,6 +239,10 @@ async fn updates_rejects_bad_cursor_and_bounds_concurrent_streams() {
         .await
         .expect("response");
     assert_eq!(bad_cursor.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        surface.calls().is_empty(),
+        "invalid cursor must be rejected before ProductSurface dispatch"
+    );
 
     let first = app
         .clone()
@@ -296,4 +310,42 @@ async fn updates_rejects_bad_cursor_and_bounds_concurrent_streams() {
             .as_deref(),
         Some(cursor)
     );
+}
+
+#[tokio::test]
+async fn missing_run_with_stale_cursor_emits_one_rebase_then_clears_resume_position() {
+    let surface = Arc::new(RecordingSurface::default());
+    let stale_cursor = "550e8400-e29b-41d4-a716-446655440000:99";
+    let response = router(Arc::clone(&surface), caller(true), true, 1)
+        .oneshot(
+            Request::get("/api/webchat/v2/operator/inspector/threads/thread-a/runs/missing/events")
+                .header("last-event-id", stale_cursor)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+        .await
+        .expect("SSE frame timeout")
+        .expect("SSE frame")
+        .expect("valid SSE frame");
+    let data = frame.into_data().expect("data frame");
+    let event = String::from_utf8_lossy(&data);
+    assert!(event.contains("event: diagnostic_rebase"));
+    assert!(!event.contains("id:"), "missing runs have no resume cursor");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(750), body.frame())
+            .await
+            .is_err(),
+        "clearing the stale cursor must prevent repeated rebase events"
+    );
+
+    let calls = surface.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].request.cursor.as_deref(), Some(stale_cursor));
+    assert_eq!(calls[1].request.cursor, None);
 }

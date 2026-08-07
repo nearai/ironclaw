@@ -1,6 +1,7 @@
 import React from "react";
 import { EventSourcePlus } from "event-source-plus";
 
+import { ActivityKind } from "./activity-kind";
 import { fetchInspectorSnapshot, inspectorEventStreamRequest } from "./inspector-api";
 import { subscribeProductInspectorActivity } from "./product-activity";
 import {
@@ -12,6 +13,8 @@ import {
 
 const MAX_RETRY_INTERVAL_MS = 30_000;
 const MAX_RETAINED_UPDATES = 1_024;
+const MAX_SNAPSHOT_ATTEMPTS = 3;
+const SNAPSHOT_RETRY_BASE_DELAY_MS = 500;
 
 export interface DiagnosticUpdate {
   stream_id?: string;
@@ -108,25 +111,39 @@ export function useInspector({
     }
 
     const controller = new AbortController();
+    let retryTimer: number | null = null;
     setHealth(INSPECTOR_HEALTH.LOADING);
-    fetchInspectorSnapshot({ threadId, runId, signal: controller.signal })
-      .then((response) => {
-        if (controller.signal.aborted) return;
-        setSnapshot((response as InspectorSnapshotResponse)?.snapshot ?? null);
-        setError(null);
-        setHealth((current) =>
-          current === INSPECTOR_HEALTH.LOADING ? INSPECTOR_HEALTH.CONNECTING : current,
-        );
-      })
-      .catch((cause) => {
-        if (controller.signal.aborted) return;
-        const nextHealth = healthForInspectorStatus(errorStatus(cause));
-        setHealth(nextHealth);
-        setError(nextHealth === INSPECTOR_HEALTH.FORBIDDEN
-          ? "This session is not authorized to inspect diagnostics."
-          : "Diagnostics are currently unavailable.");
-      });
-    return () => controller.abort();
+
+    function loadSnapshot(attempt: number): void {
+      fetchInspectorSnapshot({ threadId, runId, signal: controller.signal })
+        .then((response) => {
+          if (controller.signal.aborted) return;
+          setSnapshot((response as InspectorSnapshotResponse)?.snapshot ?? null);
+          setError(null);
+          setHealth((current) =>
+            current === INSPECTOR_HEALTH.LOADING ? INSPECTOR_HEALTH.CONNECTING : current,
+          );
+        })
+        .catch((cause) => {
+          if (controller.signal.aborted) return;
+          const nextHealth = healthForInspectorStatus(errorStatus(cause));
+          setHealth(nextHealth);
+          setError(nextHealth === INSPECTOR_HEALTH.FORBIDDEN
+            ? "This session is not authorized to inspect diagnostics."
+            : "Diagnostics are currently unavailable.");
+
+          if (nextHealth === INSPECTOR_HEALTH.RECONNECTING && attempt < MAX_SNAPSHOT_ATTEMPTS) {
+            const delay = SNAPSHOT_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1));
+            retryTimer = window.setTimeout(() => loadSnapshot(attempt + 1), delay);
+          }
+        });
+    }
+
+    loadSnapshot(1);
+    return () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      controller.abort();
+    };
   }, [enabled, threadId, runId, snapshotGeneration]);
 
   React.useEffect(() => {
@@ -135,6 +152,7 @@ export function useInspector({
     let disposed = false;
     let connectedOnce = false;
     let transportDisconnected = false;
+    let terminalState = false;
     let controller: ReturnType<EventSourcePlus["listen"]> | null = null;
     const request = inspectorEventStreamRequest({ threadId, runId });
     const stream = new EventSourcePlus(request.url, {
@@ -145,14 +163,17 @@ export function useInspector({
     });
 
     function terminal(healthState: InspectorHealth, message: string): void {
+      terminalState = true;
       setHealth(healthState);
       setError(message);
       controller?.abort("terminal inspector response");
     }
 
-    function appendTransportActivity(kind: "stream_disconnected" | "stream_resumed"): void {
+    function appendTransportActivity(
+      kind: ActivityKind.StreamDisconnected | ActivityKind.StreamResumed,
+    ): void {
       transportSequenceRef.current += 1;
-      const summary = kind === "stream_disconnected"
+      const summary = kind === ActivityKind.StreamDisconnected
         ? "Diagnostics stream disconnected"
         : "Diagnostics stream resumed";
       setUpdates((current) => [...current, {
@@ -178,7 +199,7 @@ export function useInspector({
     function noteDisconnected(): void {
       if (transportDisconnected) return;
       transportDisconnected = true;
-      appendTransportActivity("stream_disconnected");
+      appendTransportActivity(ActivityKind.StreamDisconnected);
     }
 
     function connect(): void {
@@ -201,7 +222,7 @@ export function useInspector({
         onResponse({ response }) {
           if (disposed) return;
           if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
-            if (transportDisconnected) appendTransportActivity("stream_resumed");
+            if (transportDisconnected) appendTransportActivity(ActivityKind.StreamResumed);
             transportDisconnected = false;
             connectedOnce = true;
             setError(null);
@@ -260,14 +281,18 @@ export function useInspector({
     }
 
     function onVisibilityChange(): void {
-      if (disposed) return;
+      if (disposed || terminalState) return;
       if (document.visibilityState === "hidden") {
         noteDisconnected();
         controller?.abort("inspector hidden");
         setHealth(INSPECTOR_HEALTH.IDLE);
       } else {
-        setHealth(INSPECTOR_HEALTH.RECONNECTING);
-        controller?.reconnect();
+        if (controller) {
+          setHealth(INSPECTOR_HEALTH.RECONNECTING);
+          controller.reconnect();
+        } else {
+          connect();
+        }
       }
     }
 

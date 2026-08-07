@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "vitest";
 
+import { ActivityKind } from "./activity-kind";
 import {
   publishProductInspectorActivity,
   subscribeProductInspectorActivity,
@@ -21,7 +22,7 @@ test("product activity is scoped and deduplicates replayed lifecycle states", ()
   const started = {
     threadId: "thread-product-activity",
     runId: "run-product-activity",
-    kind: "tool_started",
+    kind: ActivityKind.ToolStarted,
     activityId: "activity-a",
     summary: "Tool invocation started",
     dedupeKey: "tool:activity-a:started",
@@ -30,7 +31,7 @@ test("product activity is scoped and deduplicates replayed lifecycle states", ()
   publishProductInspectorActivity(started);
   publishProductInspectorActivity({
     ...started,
-    kind: "tool_completed",
+    kind: ActivityKind.ToolCompleted,
     summary: "Tool invocation completed",
     dedupeKey: "tool:activity-a:completed",
   });
@@ -59,11 +60,40 @@ test("product activity is inert when inspector mode is disabled", () => {
   publishProductInspectorActivity({
     threadId: "thread-disabled",
     runId: "run-disabled",
-    kind: "progress",
+    kind: ActivityKind.Progress,
     summary: "Run progress",
     dedupeKey: "progress:disabled",
   });
   unsubscribe();
+
+  assert.deepEqual(observed, []);
+});
+
+test("product activity fails closed when debug query parsing throws", () => {
+  const OriginalURLSearchParams = globalThis.URLSearchParams;
+  globalThis.URLSearchParams = class URLSearchParamsFailure {
+    constructor() {
+      throw new TypeError("query parsing unavailable");
+    }
+  } as typeof URLSearchParams;
+  const observed: string[] = [];
+  const unsubscribe = subscribeProductInspectorActivity(
+    "thread-query-failure",
+    "run-query-failure",
+    (activity) => observed.push(activity.kind),
+  );
+  try {
+    publishProductInspectorActivity({
+      threadId: "thread-query-failure",
+      runId: "run-query-failure",
+      kind: ActivityKind.Progress,
+      summary: "Run progress",
+      dedupeKey: "progress:query-failure",
+    });
+  } finally {
+    unsubscribe();
+    globalThis.URLSearchParams = OriginalURLSearchParams;
+  }
 
   assert.deepEqual(observed, []);
 });

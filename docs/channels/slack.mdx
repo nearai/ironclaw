@@ -233,13 +233,15 @@ under **Extensions** — the tokens go straight into the encrypted secret store.
 
 There is no key that turns Slack on. The webhook route is always mounted, and it starts
 accepting events once the Slack extension is installed and its signing secret is
-registered. Until then it answers `503`.
+registered. Until then it answers `503`. There is no `IRONCLAW_REBORN_SLACK_ENABLED`
+environment variable either — the gate it fed was removed in #6116.
 
 <Note>
 An older configuration file may still carry a `[slack]` section. Nothing reads it. A
 leftover setup field — `api_app_id`, `team_id`, `bot_token_env`, `signing_secret_env`,
 `channel_routes`, and the rest — now stops startup with a pointer to the web interface
-instead of being quietly ignored, so delete the section.
+instead of being quietly ignored, so delete the section. `[slack].enabled` is accepted
+but inert, so an older install keeps booting.
 </Note>
 
 ---

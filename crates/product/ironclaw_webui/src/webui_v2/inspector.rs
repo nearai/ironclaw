@@ -280,6 +280,8 @@ fn build_update_stream(
                 if let Some(next_cursor) = next_cursor {
                     cursor = Some(next_cursor.clone());
                     event = event.id(next_cursor);
+                } else {
+                    cursor = None;
                 }
                 yield Ok(event);
             } else {

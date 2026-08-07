@@ -6,7 +6,7 @@
 //! Backend selection (libSQL, PostgreSQL, in-memory, local-disk) is made at
 //! the `RootFilesystem` layer — the consumer-store level no longer carries
 //! per-backend impls. See
-//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//! `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
 mod attachment_context;

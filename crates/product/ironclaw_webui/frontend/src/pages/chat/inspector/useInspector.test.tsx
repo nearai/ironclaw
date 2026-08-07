@@ -15,6 +15,7 @@ vi.mock("event-source-plus", () => ({
     url: string;
     options: Record<string, unknown>;
     hooks: Record<string, Function> = {};
+    listenCalls = 0;
     controller: { abort: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> };
 
     constructor(url: string, options: Record<string, unknown>) {
@@ -28,6 +29,7 @@ vi.mock("event-source-plus", () => ({
     }
 
     listen(hooks: Record<string, Function>) {
+      this.listenCalls += 1;
       this.hooks = hooks;
       hooks.onRequest?.({});
       return this.controller;
@@ -51,8 +53,8 @@ vi.mock("event-source-plus", () => ({
 let latestState: ReturnType<typeof useInspector> | null = null;
 let root: ReturnType<typeof createRoot> | null = null;
 
-function Probe() {
-  latestState = useInspector({ enabled: true, threadId: "thread-a", runId: "run-a" });
+function Probe({ enabled = true }: { enabled?: boolean }) {
+  latestState = useInspector({ enabled, threadId: "thread-a", runId: "run-a" });
   return <div data-health={latestState.health} />;
 }
 
@@ -108,6 +110,61 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
 
   await act(async () => stream.respond());
   assert.equal((latestState?.updates[1].update as any)?.data?.kind, "stream_resumed");
+});
+
+test("recovers a transient snapshot failure after the diagnostics stream connects", async () => {
+  vi.useFakeTimers();
+  const recoveredSnapshot = { prompt: { system: "Recovered prompt" } };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "temporarily_unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ snapshot: recoveredSnapshot }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })),
+  );
+
+  try {
+    await act(async () => root?.render(<Probe />));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 1);
+    assert.equal(latestState?.snapshot, null);
+
+    const stream = eventStreams[0];
+    await act(async () => stream.respond());
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.deepEqual(latestState?.snapshot, recoveredSnapshot);
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+    assert.equal(latestState?.error, null);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("bounds transient snapshot retries", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(JSON.stringify({ error: "temporarily_unavailable" }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    })),
+  );
+
+  try {
+    await act(async () => root?.render(<Probe />));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.RECONNECTING);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("deduplicates cursors, rebases snapshots, and stops on forbidden", async () => {
@@ -169,4 +226,66 @@ test("hidden tabs release the stream and reconnect when visible", async () => {
   });
   await act(async () => document.dispatchEvent(new Event("visibilitychange")));
   assert.equal(stream.controller.reconnect.mock.calls.length, 1);
+});
+
+test("starts the diagnostics stream when an initially hidden tab becomes visible", async () => {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+  await act(async () => root?.render(<Probe />));
+
+  const stream = eventStreams[0];
+  assert.equal(stream.listenCalls, 0);
+
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  assert.equal(stream.listenCalls, 1);
+  assert.equal(stream.controller.reconnect.mock.calls.length, 0);
+
+  await act(async () => stream.respond());
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+});
+
+test("preserves forbidden terminal state across visibility changes", async () => {
+  await act(async () => root?.render(<Probe />));
+  const stream = eventStreams[0];
+  await act(async () => stream.respond(403, "application/json"));
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
+
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
+  assert.equal(stream.controller.abort.mock.calls.length, 1);
+
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  assert.equal(stream.listenCalls, 1);
+  assert.equal(stream.controller.reconnect.mock.calls.length, 0);
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
+});
+
+test("disabling releases the diagnostics stream and reenabling starts a fresh one", async () => {
+  await act(async () => root?.render(<Probe />));
+  const firstStream = eventStreams[0];
+  await act(async () => firstStream.respond());
+
+  await act(async () => root?.render(<Probe enabled={false} />));
+  assert.equal(firstStream.controller.abort.mock.calls.at(-1)?.[0], "inspector disposed");
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.IDLE);
+
+  await act(async () => root?.render(<Probe />));
+  assert.equal(eventStreams.length, 2);
+  const secondStream = eventStreams[1];
+  await act(async () => secondStream.respond());
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
 });
