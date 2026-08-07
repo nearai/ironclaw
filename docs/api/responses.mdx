@@ -179,6 +179,20 @@ Other OpenAI request fields not listed above (for example `max_output_tokens`)
 are **accepted and ignored**: the endpoint deliberately tolerates unknown
 fields so newer SDK payloads keep working, but unlisted fields have no effect.
 
+{/* doc-fact:responses-request-policy
+    Machine-checked contract for the table and rejection list above — parsed
+    and verified against the real router by
+    crates/product/ironclaw_openai_compat/tests/docs_responses_contract.rs.
+    Edit these values only together with the prose they pin.
+request_fields = model,input,stream,temperature,instructions,previous_response_id,metadata,tools,tool_choice,x_context
+rejected_always = tool_choice
+rejected_without_external_tools = tools
+ignored_unknown_fields = true
+temperature_min = 0.0
+temperature_max = 2.0
+model_max_bytes = 256
+*/}
+
 ---
 
 ## Session continuity
