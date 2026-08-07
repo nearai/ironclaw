@@ -1,6 +1,7 @@
 import { Icon } from "../../../design-system/icons";
 import { Button } from "../../../design-system/button";
 import React from "react";
+import { useFilePicker } from "../../../hooks/useFilePicker";
 import { useT } from "../../../lib/i18n";
 import { authScope } from "../../../lib/auth-scope";
 import { stageFiles } from "../lib/attachments";
@@ -44,6 +45,8 @@ export function ChatInput({
   const storageScope = authScope();
   const isHero = variant === "hero";
   const limits = useAttachmentConfig();
+  const acceptAttr =
+    limits.accept.length > 0 ? limits.accept.join(",") : undefined;
   const [text, setText] = React.useState(() => getDraft(draftKey));
   const [attachments, setAttachments] = React.useState(() =>
     getStagedAttachments(draftKey)
@@ -56,7 +59,12 @@ export function ChatInput({
   const currentDraftContextRef = React.useRef({ draftKey, resetKey });
   currentDraftContextRef.current.draftKey = draftKey;
   const textareaRef = React.useRef(null);
-  const fileInputRef = React.useRef(null);
+  const [openFilePicker, fileInputProps] = useFilePicker({
+    accept: acceptAttr,
+    multiple: true,
+    disabled,
+    onSelect: (files) => addFiles(files),
+  });
   const sendBlockedRef = React.useRef(false);
   const sendBlocked = disabled || sendDisabled || isSending;
   const submitDisabledRef = React.useRef(disabled || sendDisabled);
@@ -294,21 +302,6 @@ export function ChatInput({
     setAttachments(next);
     setAttachmentError("");
   }, [draftKey]);
-
-  const openFilePicker = React.useCallback(() => {
-    if (disabled) return;
-    fileInputRef.current?.click();
-  }, [disabled]);
-
-  const onFileInputChange = React.useCallback(
-    (e) => {
-      const files = Array.from(e.target.files || []);
-      addFiles(files);
-      // Reset so picking the same file again re-fires `change`.
-      e.currentTarget.value = "";
-    },
-    [addFiles]
-  );
 
   const handleSend = React.useCallback(async () => {
     // Read the live refs instead of the values captured by the last render.
@@ -604,7 +597,6 @@ export function ChatInput({
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
-  const acceptAttr = limits.accept.length > 0 ? limits.accept.join(",") : undefined;
   const shellClass = isHero
     ? "w-full"
     : "px-4 py-3 sm:px-5 lg:px-8";
@@ -846,12 +838,7 @@ export function ChatInput({
         />
 
         <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept={acceptAttr}
-          className="hidden"
-          onChange={onFileInputChange}
+          {...fileInputProps}
         />
 
         <div className="mt-2 flex items-center gap-2">

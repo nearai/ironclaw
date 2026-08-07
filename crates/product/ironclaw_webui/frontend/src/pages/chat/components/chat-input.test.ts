@@ -33,6 +33,18 @@ function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
     INITIAL_COMMAND_MENU_SELECTION: { index: 0, dismissed: false },
     NEW_DRAFT_KEY: "new",
     useAttachmentConfig: () => ({ accept: [] }),
+    useFilePicker: ({ accept, multiple = false, disabled = false }) => [
+      () => {},
+      {
+        ref: { current: null },
+        type: "file",
+        accept,
+        multiple,
+        disabled,
+        hidden: true,
+        onChange: () => {},
+      },
+    ],
     useT: () => (key) => key,
   };
 
