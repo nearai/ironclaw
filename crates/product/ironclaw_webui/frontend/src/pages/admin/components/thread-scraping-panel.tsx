@@ -70,7 +70,9 @@ export function ThreadScrapingPanel({ userId }) {
       loadMoreAbortRef.current?.abort();
       loadMoreAbortRef.current = null;
     };
-  }, [t, userId]);
+    // `t` only supplies a fallback error message; locale changes must not reset
+    // the selected thread or restart the request.
+  }, [userId]);
 
   const selectThread = async (threadId) => {
     const requestId = artifactRequestRef.current + 1;

@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { test, vi } from "vitest";
+import "../../../i18n/de";
 import "../../../i18n/en";
-import { I18nProvider } from "../../../lib/i18n";
+import { I18nProvider, useI18n } from "../../../lib/i18n";
 
 const requests = vi.hoisted(() => ({
   fetchThreads: vi.fn(),
@@ -22,6 +23,18 @@ vi.mock("../lib/admin-api", () => ({
 vi.mock("../../../lib/download", () => ({ saveBlob: vi.fn() }));
 
 import { ThreadScrapingPanel } from "./thread-scraping-panel";
+
+function LanguageSwitchingPanel() {
+  const { setLang } = useI18n();
+  return (
+    <>
+      <button type="button" data-testid="switch-language" onClick={() => setLang("de")}>
+        Deutsch
+      </button>
+      <ThreadScrapingPanel userId="user-target" />
+    </>
+  );
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -171,6 +184,50 @@ test("switching target users discards the previous user's pending artifact", asy
       requests.fetchThreads.mock.calls.map((call) => call[0]),
       ["user-one", "user-two"],
     );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("switching locales preserves the loaded thread and artifact", async () => {
+  requests.fetchThreads.mockResolvedValue({
+    threads: [{ thread_id: "thread-one", title: "One" }],
+    next_cursor: null,
+  });
+  requests.fetchArtifact.mockResolvedValue({
+    thread_id: "thread-one",
+    messages: [{ message_id: "message-one", kind: "assistant", content: "loaded transcript" }],
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <LanguageSwitchingPanel />
+        </I18nProvider>,
+      );
+    });
+    const threadButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-thread"]',
+    );
+    assert.ok(threadButton);
+    await act(async () => threadButton.click());
+    assert.match(container.textContent ?? "", /loaded transcript/);
+
+    const languageButton = container.querySelector<HTMLButtonElement>('[data-testid="switch-language"]');
+    assert.ok(languageButton);
+    await act(async () => languageButton.click());
+
+    assert.match(container.textContent ?? "", /Thread-Scraping/);
+    assert.match(container.textContent ?? "", /loaded transcript/);
+    assert.equal(requests.fetchThreads.mock.calls.length, 1);
   } finally {
     act(() => root.unmount());
     container.remove();

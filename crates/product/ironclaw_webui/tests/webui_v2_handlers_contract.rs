@@ -368,6 +368,63 @@ fn service_unavailable_error(retryable: bool) -> ProductSurfaceError {
     }
 }
 
+fn stub_thread_artifact(thread_id: String) -> RebornThreadArtifact {
+    RebornThreadArtifact {
+        schema: THREAD_ARTIFACT_SCHEMA.to_string(),
+        generated_at: Utc::now(),
+        thread_id,
+        messages: Vec::new(),
+        logs: RunArtifactLogs {
+            source: "test".to_string(),
+            available: true,
+            complete: false,
+            truncated: false,
+            unavailable_reason: None,
+            entries: Vec::new(),
+        },
+        redaction: RunArtifactRedaction {
+            pipeline: "deterministic-trace-redactor-v1".to_string(),
+            applied: false,
+        },
+    }
+}
+
+fn stub_run_artifact(thread_id: String, run_id: TurnRunId) -> RebornRunArtifact {
+    RebornRunArtifact {
+        schema: RUN_ARTIFACT_SCHEMA.to_string(),
+        generated_at: Utc::now(),
+        thread_id,
+        run: RebornGetRunStateResponse {
+            turn_id: "turn-artifact".to_string(),
+            run_id,
+            status: TurnStatus::Completed,
+            event_cursor: EventCursor(1),
+            accepted_message_ref: AcceptedMessageRef::new("msg:artifact").expect("message ref"),
+            resolved_run_profile_id: "default".to_string(),
+            resolved_run_profile_version: 1,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            failure: None,
+            usage: None,
+            cost: None,
+        },
+        messages: Vec::new(),
+        logs: RunArtifactLogs {
+            source: "test".to_string(),
+            available: true,
+            complete: false,
+            truncated: false,
+            unavailable_reason: None,
+            entries: Vec::new(),
+        },
+        redaction: RunArtifactRedaction {
+            pipeline: "deterministic-trace-redactor-v1".to_string(),
+            applied: false,
+        },
+    }
+}
+
 fn successful_resolution(activity_id: ActivityId) -> Resolution {
     Resolution::Done(Outcome {
         refs: OutcomeRefs {
@@ -816,40 +873,7 @@ impl StubServices {
                 let request: RebornRunArtifactRequest =
                     serde_json::from_value(query.params).expect("artifact params");
                 let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
-                let artifact = RebornRunArtifact {
-                    schema: RUN_ARTIFACT_SCHEMA.to_string(),
-                    generated_at: Utc::now(),
-                    thread_id: request.thread_id,
-                    run: RebornGetRunStateResponse {
-                        turn_id: "turn-artifact".to_string(),
-                        run_id,
-                        status: TurnStatus::Completed,
-                        event_cursor: EventCursor(1),
-                        accepted_message_ref: AcceptedMessageRef::new("msg:artifact")
-                            .expect("message ref"),
-                        resolved_run_profile_id: "default".to_string(),
-                        resolved_run_profile_version: 1,
-                        received_at: Utc::now(),
-                        checkpoint_id: None,
-                        gate_ref: None,
-                        failure: None,
-                        usage: None,
-                        cost: None,
-                    },
-                    messages: Vec::new(),
-                    logs: RunArtifactLogs {
-                        source: "test".to_string(),
-                        available: true,
-                        complete: false,
-                        truncated: false,
-                        unavailable_reason: None,
-                        entries: Vec::new(),
-                    },
-                    redaction: RunArtifactRedaction {
-                        pipeline: "deterministic-trace-redactor-v1".to_string(),
-                        applied: false,
-                    },
-                };
+                let artifact = stub_run_artifact(request.thread_id, run_id);
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(artifact).expect("artifact payload"),
                     next_cursor: None,
@@ -995,25 +1019,8 @@ impl StubServices {
                 let request: RebornAdminThreadScrapeArtifactRequest =
                     serde_json::from_value(query.params).expect("thread scrape artifact params");
                 Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornThreadArtifact {
-                        schema: THREAD_ARTIFACT_SCHEMA.to_string(),
-                        generated_at: Utc::now(),
-                        thread_id: request.thread_id,
-                        messages: Vec::new(),
-                        logs: RunArtifactLogs {
-                            source: "test".to_string(),
-                            available: true,
-                            complete: false,
-                            truncated: false,
-                            unavailable_reason: None,
-                            entries: Vec::new(),
-                        },
-                        redaction: RunArtifactRedaction {
-                            pipeline: "deterministic-trace-redactor-v1".to_string(),
-                            applied: false,
-                        },
-                    })
-                    .expect("thread scrape artifact payload"),
+                    payload: serde_json::to_value(stub_thread_artifact(request.thread_id))
+                        .expect("thread scrape artifact payload"),
                     next_cursor: None,
                 })
             }
@@ -1023,41 +1030,8 @@ impl StubServices {
                         .expect("thread scrape run artifact params");
                 let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
                 Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornRunArtifact {
-                        schema: RUN_ARTIFACT_SCHEMA.to_string(),
-                        generated_at: Utc::now(),
-                        thread_id: request.thread_id,
-                        run: RebornGetRunStateResponse {
-                            turn_id: "turn-artifact".to_string(),
-                            run_id,
-                            status: TurnStatus::Completed,
-                            event_cursor: EventCursor(1),
-                            accepted_message_ref: AcceptedMessageRef::new("msg:artifact")
-                                .expect("message ref"),
-                            resolved_run_profile_id: "default".to_string(),
-                            resolved_run_profile_version: 1,
-                            received_at: Utc::now(),
-                            checkpoint_id: None,
-                            gate_ref: None,
-                            failure: None,
-                            usage: None,
-                            cost: None,
-                        },
-                        messages: Vec::new(),
-                        logs: RunArtifactLogs {
-                            source: "test".to_string(),
-                            available: true,
-                            complete: false,
-                            truncated: false,
-                            unavailable_reason: None,
-                            entries: Vec::new(),
-                        },
-                        redaction: RunArtifactRedaction {
-                            pipeline: "deterministic-trace-redactor-v1".to_string(),
-                            applied: false,
-                        },
-                    })
-                    .expect("thread scrape run artifact payload"),
+                    payload: serde_json::to_value(stub_run_artifact(request.thread_id, run_id))
+                        .expect("thread scrape run artifact payload"),
                     next_cursor: None,
                 })
             }
@@ -1415,24 +1389,7 @@ impl StubServices {
             id if id == THREAD_ARTIFACT_VIEW.id => {
                 let request: RebornThreadArtifactRequest =
                     serde_json::from_value(query.params).expect("thread artifact params");
-                let artifact = RebornThreadArtifact {
-                    schema: THREAD_ARTIFACT_SCHEMA.to_string(),
-                    generated_at: Utc::now(),
-                    thread_id: request.thread_id,
-                    messages: Vec::new(),
-                    logs: RunArtifactLogs {
-                        source: "test".to_string(),
-                        available: true,
-                        complete: false,
-                        truncated: false,
-                        unavailable_reason: None,
-                        entries: Vec::new(),
-                    },
-                    redaction: RunArtifactRedaction {
-                        pipeline: "deterministic-trace-redactor-v1".to_string(),
-                        applied: false,
-                    },
-                };
+                let artifact = stub_thread_artifact(request.thread_id);
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(artifact).expect("thread artifact payload"),
                     next_cursor: None,
