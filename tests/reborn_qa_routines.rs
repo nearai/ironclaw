@@ -10,6 +10,21 @@
 //!   near.ai address to my Google Sheet called ABC." → Routine created.
 //! - "Every hour, check Hacker News for new posts mentioning 'IronClaw' or
 //!   'NEAR AI' and send a summary to Slack." → Routine created.
+//! - "Every 5 minutes, send me a telegram message with a summary of the
+//!   latest BTC news." → Routine created.
+//! - "Every 5 minutes, send me an updated technical analysis on BTC to
+//!   Telegram." → Routine created.
+//!
+//! Not covered here, deliberately: the QA row "whenever I send a slack
+//! message starting with 'bug:', add it as a row to my Google Sheet"
+//! (UC7). Reborn's `TriggerSchedule` has exactly two kinds — `Cron` and
+//! `Once` (`crates/ironclaw_triggers/src/lib.rs`) — so there is no
+//! message-matched trigger to create; `builtin.trigger_create` rejects any
+//! other `kind`. That row is a product gap, not a test gap, and writing a
+//! cron trigger for it here would assert a routine the QA script never
+//! asked for. The one-shot half of UC7 (a `bug:` message running the
+//! logging action) is covered by
+//! `reborn_qa_channel_delivery::reborn_qa_slack_bug_prefix_message_runs_logging_action`.
 //!
 //! Creation runs through the Reborn binary-E2E harness (chat turn →
 //! `builtin.trigger_create` → `builtin.trigger_list`). Firing runs through
@@ -208,6 +223,46 @@ async fn reborn_qa_routine_created_for_crm_inbox_sweep_every_30_minutes() {
     .await;
 }
 
+/// UC1 (Daily news digest): the recurring form of "summarize the latest BTC
+/// news", delivered to Telegram. The one-shot content half is
+/// `reborn_qa_web_fetch::reborn_qa_btc_news_summary_from_web_search`; the
+/// Telegram inbound half is
+/// `reborn_qa_channel_delivery::reborn_qa_telegram_dm_routine_request_is_acknowledged_in_same_thread`.
+#[tokio::test]
+async fn reborn_qa_routine_created_for_btc_news_telegram_every_5_minutes() {
+    run_routine_creation(RoutineCreationCase {
+        room: "room-qa-routine-btc-news",
+        event_id: "event-qa-routine-btc-news",
+        user_request: "Every 5 minutes, send me a telegram message with a summary of the latest BTC news.",
+        trigger_name: "BTC news digest",
+        cron: "*/5 * * * *",
+        prompt: "Summarize the latest BTC news and send it to the user as a Telegram message",
+        created_reply: "Routine created: BTC news digest to Telegram every 5 minutes",
+    })
+    .await;
+}
+
+/// UC10 (Custom tool use with Telegram): the recurring form of "give me a
+/// quick technical analysis on BTC", delivered to Telegram. Distinct from
+/// the sibling BTC case above on the axis the QA script cares about — the
+/// routine prompt drives a user-installed custom tool rather than a web
+/// search. Custom-tool install and dispatch itself is owned by
+/// `tests/e2e/scenarios/test_reborn_private_tool_installs.py`.
+#[tokio::test]
+async fn reborn_qa_routine_created_for_btc_technical_analysis_telegram_every_5_minutes() {
+    run_routine_creation(RoutineCreationCase {
+        room: "room-qa-routine-btc-analysis",
+        event_id: "event-qa-routine-btc-analysis",
+        user_request:
+            "Every 5 minutes, send me an updated technical analysis on BTC to Telegram.",
+        trigger_name: "BTC technical analysis",
+        cron: "*/5 * * * *",
+        prompt: "Run the technical-analysis tool on BTC and send the resulting chart summary to the user as a Telegram message",
+        created_reply: "Routine created: BTC technical analysis to Telegram every 5 minutes",
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn reborn_qa_routine_created_for_hacker_news_monitor_every_hour() {
     run_routine_creation(RoutineCreationCase {
@@ -220,6 +275,179 @@ async fn reborn_qa_routine_created_for_hacker_news_monitor_every_hour() {
         created_reply: "Routine created: Hacker News monitor every hour",
     })
     .await;
+}
+
+/// Cross-usage coverage: several routine VARIATIONS coexisting for one user.
+///
+/// Every sibling case in this file creates exactly one routine, and the
+/// group-tier lifecycle scenario
+/// (`tests/integration/group_triggers/scenario_verbs_lifecycle.rs`) also
+/// only ever has one trigger in the repository at a time — so nothing
+/// covered the shape QA actually hits, which is a user who has built up
+/// several automations that differ only in cadence and destination.
+///
+/// Regression surface (historically filed against exactly this flow):
+/// - #2232 "[QA] Routines dashboard shows wrong count — only 1 of 4
+///   routines visible" — `trigger_list` must return ALL of them.
+/// - #5420 "Routine delivery target is a global per-user default, not
+///   per-routine — setting Slack for one routine reroutes [the others]" —
+///   each routine must keep ITS OWN destination. The `delivery_target_id`
+///   field is the other half of that bug and is deliberately not set here:
+///   this harness registers no outbound delivery providers, so a target id
+///   is rejected fail-closed (pinned by
+///   `group_triggers/scenario_delivery_target_fail_closed.rs`). What is
+///   asserted instead is the half that IS reachable here — three routines
+///   whose prompts name three different destinations do not clobber each
+///   other in the store.
+#[tokio::test]
+async fn reborn_qa_multiple_routine_variations_coexist_with_their_own_destinations() {
+    const TELEGRAM_PROMPT: &str =
+        "Summarize the latest BTC news and send it to the user as a Telegram message";
+    const SLACK_PROMPT: &str =
+        "Ping the deployment health endpoint and send a Slack DM if it is not HTTP 200";
+    const EMAIL_PROMPT: &str = "Summarize the next meeting from Google Drive and the latest news, then email it to the user";
+    const REPLY: &str = "You now have 3 routines: BTC news digest to Telegram every 5 minutes, deployment health watcher to Slack every 5 minutes, and meeting prep by email every 30 minutes.";
+
+    let trigger_create =
+        CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("valid capability id");
+    let trigger_list = CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("valid capability id");
+
+    // One model turn emitting three parallel creates, then a list — the
+    // shape a user gets when they set up their automations in one sitting.
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![
+                RebornScriptedProviderToolCall::new(
+                    trigger_create.clone(),
+                    "call_qa_create_btc_telegram",
+                    json!({
+                        "name": "BTC news digest",
+                        "prompt": TELEGRAM_PROMPT,
+                        "schedule": {"kind": "cron", "expression": "*/5 * * * *", "timezone": "UTC"},
+                    }),
+                ),
+                RebornScriptedProviderToolCall::new(
+                    trigger_create.clone(),
+                    "call_qa_create_health_slack",
+                    json!({
+                        "name": "Deployment health watcher",
+                        "prompt": SLACK_PROMPT,
+                        "schedule": {"kind": "cron", "expression": "*/5 * * * *", "timezone": "UTC"},
+                    }),
+                ),
+                RebornScriptedProviderToolCall::new(
+                    trigger_create.clone(),
+                    "call_qa_create_meeting_email",
+                    json!({
+                        "name": "Meeting prep email",
+                        "prompt": EMAIL_PROMPT,
+                        "schedule": {"kind": "cron", "expression": "*/30 * * * *", "timezone": "UTC"},
+                    }),
+                ),
+            ],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                trigger_list.clone(),
+                "call_qa_list_all_routines",
+                json!({}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(REPLY),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_trigger_management_capabilities(
+        "room-qa-routine-variations",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-qa-routine-variations",
+            "Set up three automations: BTC news to Telegram every 5 minutes, a deployment health check to Slack every 5 minutes, and a meeting prep email every 30 minutes.",
+        )
+        .await
+        .expect("submit multi-routine request");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("completed run");
+
+    let results = harness.capability_results();
+    assert_eq!(results.len(), 4, "three creates plus one list");
+
+    // Each create must mint its OWN routine — not overwrite a shared one.
+    let created_ids: Vec<&str> = results[..3]
+        .iter()
+        .map(|result| {
+            result.output["trigger"]["trigger_id"]
+                .as_str()
+                .expect("created trigger id")
+        })
+        .collect();
+    let unique: std::collections::BTreeSet<&str> = created_ids.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        3,
+        "each routine variation should get its own id, got {created_ids:?}"
+    );
+
+    // #2232: the list must show every routine, not just the newest.
+    let listed = results[3].output["triggers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        listed.len(),
+        3,
+        "trigger_list should return all three routines, got {listed:?}"
+    );
+
+    // #5420: each routine keeps its OWN cadence and delivery target —
+    // creating the Slack one must not have rewritten the Telegram one.
+    //
+    // `prompt` is deliberately not asserted: `trigger_list`'s model-facing
+    // projection omits it (only name/schedule/delivery_target_id/state and
+    // run history are exposed —
+    // `crates/ironclaw_host_runtime/src/first_party_tools/trigger_management.rs`),
+    // so the destination each routine carries in its prompt is not
+    // observable through any capability surface. The observable half of the
+    // per-routine-isolation contract is asserted here; the unobservable
+    // half is recorded as a gap in `tests/CLAUDE.md` §7.
+    for (name, cron) in [
+        ("BTC news digest", "*/5 * * * *"),
+        ("Deployment health watcher", "*/5 * * * *"),
+        ("Meeting prep email", "*/30 * * * *"),
+    ] {
+        let entry = listed
+            .iter()
+            .find(|trigger| trigger["name"] == json!(name))
+            .unwrap_or_else(|| panic!("routine {name} should be listed, got {listed:?}"));
+        assert_eq!(
+            entry["schedule"]["expression"],
+            json!(cron),
+            "routine {name} should keep its own cadence"
+        );
+        assert_eq!(entry["state"], json!("scheduled"));
+        // No outbound providers are registered on this harness, so every
+        // routine must be target-less rather than inheriting a sibling's.
+        assert_eq!(
+            entry["delivery_target_id"],
+            Value::Null,
+            "routine {name} must not inherit a delivery target from a sibling routine"
+        );
+    }
+
+    harness.assert_model_exhausted();
+    harness.shutdown().await;
 }
 
 // --- Routine firing -------------------------------------------------------

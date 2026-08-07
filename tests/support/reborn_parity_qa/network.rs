@@ -148,6 +148,7 @@ fn is_sensitive_header(name: &str) -> bool {
 #[derive(Clone)]
 pub struct LiveLoopbackHttpState {
     requests: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
 }
 
 #[allow(dead_code)]
@@ -162,12 +163,23 @@ impl LiveLoopbackHttpState {
                     .unwrap_or_else(|| uri.path().to_string()),
             );
     }
+
+    /// Record a mutating request together with its body, so a write leg can
+    /// be asserted at the wire rather than only through the model's reply.
+    pub fn record_with_body(&self, uri: &Uri, body: &str) {
+        self.record(uri);
+        self.bodies
+            .lock()
+            .expect("live loopback HTTP body log lock poisoned")
+            .push(body.to_string());
+    }
 }
 
 #[allow(dead_code)] // Shared test support; instantiated by QA web/doc tests.
 pub struct LiveLoopbackHttpServer {
     port: u16,
     requests: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -179,8 +191,10 @@ impl LiveLoopbackHttpServer {
             .expect("bind live loopback HTTP test server");
         let port = listener.local_addr().expect("local addr").port();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
         let app = routes.with_state(LiveLoopbackHttpState {
             requests: Arc::clone(&requests),
+            bodies: Arc::clone(&bodies),
         });
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -188,6 +202,7 @@ impl LiveLoopbackHttpServer {
         Self {
             port,
             requests,
+            bodies,
             task,
         }
     }
@@ -204,6 +219,15 @@ impl LiveLoopbackHttpServer {
         self.requests
             .lock()
             .expect("live loopback HTTP request log lock poisoned")
+            .clone()
+    }
+
+    /// Bodies of requests recorded via
+    /// [`LiveLoopbackHttpState::record_with_body`], in arrival order.
+    pub fn request_bodies(&self) -> Vec<String> {
+        self.bodies
+            .lock()
+            .expect("live loopback HTTP body log lock poisoned")
             .clone()
     }
 }
