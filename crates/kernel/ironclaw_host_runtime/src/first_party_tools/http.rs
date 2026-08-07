@@ -245,7 +245,24 @@ pub(super) async fn dispatch(
     )
     .await?
     .map_err(|error| http_error(error, save_mode))?;
-    Ok(shape_response(response, response_body_limit))
+    let status = response.status;
+    let shaped = shape_response(response, response_body_limit);
+    if (400..=599).contains(&status) {
+        let diagnostic = serde_json::to_string(&shaped.output).map_err(|_| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode).with_usage(
+                ResourceUsage::default().set_network_egress_bytes(shaped.network_egress_bytes),
+            )
+        })?;
+        return Err(FirstPartyCapabilityError::dispatch_with_diagnostic(
+            RuntimeDispatchErrorKind::OperationFailed,
+            Some(format!("HTTP request returned status {status}")),
+            diagnostic,
+        )
+        .with_usage(
+            ResourceUsage::default().set_network_egress_bytes(shaped.network_egress_bytes),
+        ));
+    }
+    Ok(shaped)
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {

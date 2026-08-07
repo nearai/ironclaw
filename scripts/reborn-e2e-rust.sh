@@ -104,6 +104,10 @@ run_architecture_runtime() {
   run_test ironclaw_host_runtime reborn_e2e_gate
   run_test ironclaw_host_runtime reborn_invoke_vertical_slice
   run_test ironclaw_host_runtime runtime_http_egress_contract
+  # Pins docs/reborn/contracts/host-runtime.md: an HTTP 4xx/5xx response is a
+  # model-visible failed capability outcome, not transport-level success.
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_surfaces_http_error_status_as_failed_outcome
   run_test ironclaw_host_runtime builtin_obligation_handler_contract
   run_test ironclaw_host_runtime obligation_services_composition_contract
   run_test ironclaw_host_runtime production_trust_contract

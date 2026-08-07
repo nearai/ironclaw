@@ -4434,6 +4434,64 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
 }
 
 #[tokio::test]
+async fn builtin_http_surfaces_http_error_status_as_failed_outcome() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        br#"{"message":"authentication required"}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/private"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 403")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["body_text"],
+        json!(r#"{"message":"authentication required"}"#)
+    );
+    assert!(response["auth_hint"].as_str().is_some_and(|hint| {
+        hint.contains("authentication/authorization") && hint.contains("extension")
+    }));
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_http_keeps_redirect_responses_model_visible() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(302, Vec::new())
+            .with_headers(vec![("location".to_string(), "/next".to_string())]),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/redirect"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .expect("redirect responses must remain inspectable results");
+
+    assert_eq!(output["status"], json!(302));
+    assert_eq!(output["headers"][0]["name"], json!("location"));
+    assert_eq!(output["headers"][0]["value"], json!("/next"));
+}
+
+#[tokio::test]
 async fn builtin_http_requires_tool_call_http_egress_for_inline_output() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
     let runtime = runtime_with_strict_http_egress_only(Arc::clone(&egress));
