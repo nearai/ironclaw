@@ -1,8 +1,14 @@
 # Agent Map — ironclaw_assistant
 
+Working rules for the product-facing orchestration crate. Orientation lives in
+`README.md`; family rules in `crates/product/AGENTS.md`.
+
 ## Start Here
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
+- Read `CLAUDE.md` first; it is the crate-local guardrail file — and it is
+  **gate-pinned**: the `reborn_services` module-charter map in it is enforced
+  by `tests/reborn_services_module_charter.rs`, so edit it only with
+  `cargo test -p ironclaw_assistant` green, and do not reflow the map.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these local contracts as the source of truth before changing behavior:
 - `tests/product_surface_contract.rs`

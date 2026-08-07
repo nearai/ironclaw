@@ -142,7 +142,7 @@ impl GenericChannelOutboundTargetProvider {
         };
         let Ok(installation_id) = AdapterInstallationId::new(&active.installation_id) else {
             tracing::warn!(
-                target = "ironclaw::reborn::channel_outbound_targets",
+                target: "ironclaw::reborn::channel_outbound_targets",
                 extension_id = %active.extension_id,
                 "active installation id is not a valid adapter installation id; \
                  extension offers no outbound targets"
@@ -177,7 +177,7 @@ impl GenericChannelOutboundTargetProvider {
                 Ok(routes) => subject_routes = routes,
                 Err(error) => {
                     tracing::warn!(
-                        target = "ironclaw::reborn::channel_outbound_targets",
+                        target: "ironclaw::reborn::channel_outbound_targets",
                         extension_id = %active.extension_id,
                         handle,
                         %error,
@@ -209,7 +209,7 @@ impl GenericChannelOutboundTargetProvider {
             .await
             .map_err(|error| {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_outbound_targets",
+                    target: "ironclaw::reborn::channel_outbound_targets",
                     extension_id = %extension_id,
                     handle,
                     %error,
@@ -342,7 +342,7 @@ impl GenericChannelOutboundTargetProvider {
             .await
             .map_err(|error| {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_outbound_targets",
+                    target: "ironclaw::reborn::channel_outbound_targets",
                     extension_id = %context.extension_id,
                     %error,
                     "channel DM-target store unavailable while resolving outbound targets"
@@ -509,7 +509,7 @@ pub fn register_generic_channel_outbound_targets(
         Arc::new(GenericChannelOutboundTargetProvider::new(deps)),
     ) {
         tracing::warn!(
-            target = "ironclaw::reborn::channel_outbound_targets",
+            target: "ironclaw::reborn::channel_outbound_targets",
             error = ?error,
             "generic channel outbound-target provider could not be registered"
         );

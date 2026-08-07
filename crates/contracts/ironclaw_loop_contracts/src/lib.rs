@@ -138,6 +138,7 @@ pub use runtime_context::{
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
     Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
 };
+pub use skill_context::SkillName;
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
     SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,

@@ -1,12 +1,17 @@
-# Agent Map — ironclaw_common
+# ironclaw_common — working rules
+
+Canonical crate guidance (this crate has no `CLAUDE.md`, by design — it is not
+in the root module-spec table). Orientation and public surface:
+[`README.md`](./README.md). Family boundary and admission test:
+[`../AGENTS.md`](../AGENTS.md).
 
 ## Start Here
 
-- No crate-local `CLAUDE.md` exists yet; use this map plus the repo rules below.
-- Read `Cargo.toml` for actual dependencies and feature shape.
+- Read `README.md` for what the crate is; read `Cargo.toml` for actual
+  dependencies and feature shape.
 - Use these sources of truth before changing shared types:
-- `.claude/rules/types.md`
-- `CLAUDE.md`
+- `.claude/rules/types.md` (the newtype template contract is anchored here)
+- the repo root `CLAUDE.md`
 
 ## What This Crate Owns
 
@@ -42,10 +47,17 @@ tree and each move is blocked by a **pinned rule**, not by taste:
 - `llm_costs` — `ironclaw_llm` uses exactly two of its seven public items
   (`model_cost`, `default_cost`); the dominant consumers are `ironclaw_turn_runner`,
   `ironclaw_composition`, and `ironclaw_assistant` (`RunCost`, a product
-  wire DTO). Moving it would hand `ironclaw_assistant` — the crate §6.9.1 exists
-  to narrow — a `reqwest`/`rig-core`/Bedrock provider dependency for a pricing
-  table. The real seam already exists as `ModelCostTable`; routing the static
-  table behind that port is a design change, not a narrowing.
+  wire DTO). Moving it today would hand `ironclaw_assistant` — the crate
+  §6.9.1 exists to narrow — a `reqwest`/`rig-core`/Bedrock provider dependency
+  for a pricing table. **Ruled 2026-08-02 (PROPOSAL §12.11 D-F):** the seam is
+  *not* `ModelCostTable` (its composition override is test-only and its lane
+  is dead); the ruling is a read-only pricer port declared beside
+  `ActiveModelReader` in `ironclaw_product_contracts::operator_llm`,
+  implemented in `ironclaw_operator`, owner WS5 — and once that pricer lands,
+  the original `llm_costs -> ironclaw_llm` eviction is **reinstated as the end
+  state**. Until then the module also sits inside the family vendor census as
+  a frozen, shrink-only residue (9 vendors / 91 occurrences at capture —
+  `reborn_contracts_vendor_census.rs`, #7150): do not add a vendor name to it.
 
 Do not treat these as precedent, and do not add a fourth.
 

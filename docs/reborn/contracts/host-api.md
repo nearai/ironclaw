@@ -30,7 +30,7 @@ carriers consumed by host assembly at the HTTP boundary:
 `PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount` in
 `crates/product/ironclaw_host_ingress/src/lib.rs`.
 
-The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extension_registry`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
+*(Historical build order:)* the first implementation PR created this crate before `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extension_registry`, `ironclaw_wasm`, or the dispatch layer (originally the separate `ironclaw_dispatcher` crate, since merged into `ironclaw_capabilities`' `dispatch` module — see the note in `dispatcher.md`).
 
 ---
 
@@ -48,7 +48,7 @@ The first implementation PR should create this crate before implementing `ironcl
 
 ### Must not depend on
 
-- `ironclaw_dispatcher`
+- `ironclaw_capabilities` (the dispatch layer — formerly the separate `ironclaw_dispatcher` crate)
 - `ironclaw_filesystem`
 - `ironclaw_resources`
 - `ironclaw_extension_registry`
@@ -777,7 +777,7 @@ Rules:
 - `RuntimeDispatchErrorKind::OperationFailed` is for model-visible capability-domain failures after a valid invocation reaches the capability implementation; runtime-lane execution failures such as guest traps remain runtime failures, not operation failures.
 - Runtime output contract failures such as `OutputDecode` and `InvalidResult` must not be conflated with malformed caller input.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.
-- `ironclaw_dispatcher` implements the port; it does not own the port vocabulary.
+- `ironclaw_capabilities`' `dispatch` module implements the port (formerly the separate `ironclaw_dispatcher` crate); it does not own the port vocabulary.
 
 ---
 

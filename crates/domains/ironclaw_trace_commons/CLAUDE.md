@@ -15,6 +15,7 @@ pins the *absence* of the raw value, not just the presence of the redacted one.
 | Module | Owns |
 |---|---|
 | `contribution` | The whole contribution pipeline. Its own module charter is in `src/contribution/mod.rs` — **read that before adding code there**; it says which of the 13 submodules a new item belongs to and why. |
+| `capture` | The autonomous turn-end capture pipeline: standing-policy gate, envelope build, queue, immediate flush, and the periodic queue-flush worker. Keyed on a scope string + `ConversationMessage`, so it names no turn, thread, or runtime type — `ironclaw_turn_runner` hands it those two inputs. |
 | `client` | The host-facing trace client. |
 | `onboarding` | Device-key enrollment, invites, and the onboarding protocol. |
 | `redaction` | `redact_sensitive_json`, the shared JSON scrubber `contribution` builds on. |
@@ -67,8 +68,19 @@ These are recorded so they are not rediscovered as bugs. See PROPOSAL §6.4.14.
 - **Raw `dirs`/`std::env`/`std::fs` access.** The crate resolves its own paths
   instead of taking a `ScopedFilesystem` like every other domain crate. It has
   no `ironclaw_filesystem` dependency and carries a direct `dirs` dependency.
-- **Two boundary-laundering re-export modules** in `lib.rs` — `recording`
-  (re-exports `ironclaw_llm::recording`) and `paths` (re-exports
-  `ironclaw_common::paths`). They exist so `ironclaw_cli` avoids a
-  direct dependency on those crates; their three call sites are all in the CLI.
-- **The crate is slated to be renamed** to `ironclaw_trace_commons`.
+  Re-measured 2026-08-04 (WS6): 39 production call sites across 5 files; the
+  8 in `onboarding/device_key.rs` carry 0700-permission logic the mount plane
+  cannot express yet, so adoption is two decisions, not one conversion. Do
+  not add new raw-filesystem call sites.
+
+Two former entries here are **discharged** (verified 2026-08-05, WS12 F3a) and
+struck rather than left to be re-attempted:
+
+- ~~The `recording`/`paths` boundary-laundering re-export modules in
+  `lib.rs`.~~ Both are gone; the CLI migrated
+  (`commands/traces/mod.rs::trace_contribution_dir` delegates to
+  `contribution::trace_contribution_dir_for_scope(None)`). Do not
+  re-introduce a re-export module whose only purpose is sparing a consumer a
+  dependency declaration.
+- ~~The rename to `ironclaw_trace_commons`.~~ Done — this crate *is*
+  `ironclaw_trace_commons`, at `crates/domains/ironclaw_trace_commons/`.

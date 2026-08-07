@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::instruction_bundle::InstructionBundleFingerprint;
 use crate::refs::ModelProfileId;
+use crate::skill_context::SkillName;
 use ironclaw_host_api::turn::{CapabilityActivityId, LoopMessageRef, TurnRunId};
 
 use super::capability::ProviderToolCallReplay;
@@ -142,7 +143,7 @@ pub struct LoopPromptBundleGrant {
 pub struct LoopPromptDiagnosticMetadata {
     pub identity_message_count: u32,
     pub instruction_snippet_count: u32,
-    pub active_skills: Vec<String>,
+    pub active_skills: Vec<SkillName>,
 }
 
 #[derive(Clone, Default)]

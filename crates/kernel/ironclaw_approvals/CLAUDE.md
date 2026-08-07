@@ -1,8 +1,7 @@
-# ironclaw_approvals guardrails
+# ironclaw_approvals
 
-- Own durable approval requests, gate records, and the approval resolution
-  workflow from pending record to scoped lease or denial.
-- Do not prompt users, dispatch capabilities, manage processes, reserve resources, or import runtime/dispatcher/capability workflow crates.
-- Approve fail-closed: persist `approve` (the authority record) first, then issue the lease. If the lease store fails after approval is persisted, the request stays `Approved` and the caller surfaces the lease error — no rollback to `Pending`. The approval record is the durable decision; lease re-issuance against an already-decided request is recoverable.
-- Denials issue no lease.
-- Audit emission is metadata-only and best-effort. Failures are logged at `debug!` and never alter resolution outcomes.
+Canonical guidance for this crate lives in [`AGENTS.md`](./AGENTS.md)
+(working rules + guardrails) and [`README.md`](./README.md) (orientation).
+This file is a pointer, kept so tooling that loads `CLAUDE.md` lands there —
+do not add rules here (one canonical home per fact,
+`docs/reborn/guidance-conventions.md`).

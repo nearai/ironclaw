@@ -25,13 +25,17 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, HostManagedPromptDiagnosticSink,
+    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolFailureCategory,
     HostManagedToolInputDiagnosticCapture, HostManagedToolResultDiagnosticCapture,
     HostManagedToolResultDiagnosticStatus, HostManagedToolStartedDiagnosticCapture,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ThreadScopeResolver, loop_driver_execution_extension_id,
 };
-use ironclaw_product_contracts::project_service::ProjectService;
+#[cfg(test)]
+use ironclaw_product_contracts::inspector::TOOL_RESULT_MAX_BYTES;
+use ironclaw_product_contracts::{
+    inspector::TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, project_service::ProjectService,
+};
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -400,15 +404,11 @@ impl StagedCapabilityIo {
         let Some(sink) = self.tool_diagnostic_sink.as_ref() else {
             return;
         };
-        let Ok(arguments) = serde_json::to_string(arguments) else {
-            tracing::debug!("tool arguments could not be serialized for diagnostics");
-            return;
-        };
         sink.record_tool_input(HostManagedToolInputDiagnosticCapture {
             context: run_context.clone(),
             input_ref: input_ref.as_str().to_string(),
             capability_name: capability_name.to_string(),
-            arguments,
+            arguments: arguments.clone(),
         });
     }
 
@@ -870,8 +870,9 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         let diagnostic_result = self
             .tool_diagnostic_sink
             .as_ref()
-            .and_then(|_| String::from_utf8(output_content.clone()).ok());
-        let diagnostic_result_original_bytes = u64::try_from(output_content.len()).ok();
+            .and_then(|_| bounded_tool_diagnostic_result(&output_content));
+        let diagnostic_result_original_bytes =
+            self.tool_diagnostic_sink.as_ref().map(|_| output_bytes);
         // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
@@ -977,7 +978,7 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
                 result: None,
                 result_original_bytes: None,
                 status: HostManagedToolResultDiagnosticStatus::Failed,
-                failure_category: Some("capability_failed".to_string()),
+                failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
                 failure_summary: Some(summary.to_string()),
             });
         }
@@ -1044,6 +1045,23 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
         ));
     }
     Ok(content)
+}
+
+/// Copies only the retained Inspector result plus bounded leak-redaction
+/// lookahead. `serialized_result_output` produces valid UTF-8, so an invalid
+/// suffix here can only be a code point split by the byte cap.
+fn bounded_tool_diagnostic_result(serialized: &[u8]) -> Option<String> {
+    let candidate = &serialized[..serialized
+        .len()
+        .min(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES)];
+    match std::str::from_utf8(candidate) {
+        Ok(text) => Some(text.to_owned()),
+        Err(error) if error.error_len().is_none() => {
+            let valid_prefix = &candidate[..error.valid_up_to()];
+            std::str::from_utf8(valid_prefix).ok().map(str::to_owned)
+        }
+        Err(_) => None,
+    }
 }
 
 /// A bounded, UTF-8-safe first-look slice of a serialized result payload,

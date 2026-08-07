@@ -1,16 +1,19 @@
 import React from "react";
 
 import { cn } from "../../../utils/cn";
+import { ActivityKind } from "./activity-kind";
 import { fetchInspectorTool } from "./inspector-api";
+import {
+  reduceInspectorActivity,
+  rememberInspectorRun,
+  type InspectorActivityRow,
+} from "./inspector-activity";
 import {
   INSPECTOR_HEALTH,
   INSPECTOR_TABS,
   inspectorViewportMode,
-  reduceInspectorActivity,
   readInspectorPreferences,
-  rememberInspectorRun,
   writeInspectorPreferences,
-  type InspectorActivityRow,
   type InspectorPreferences,
   type InspectorTab,
 } from "./inspector-state";
@@ -311,20 +314,20 @@ function TurnNavigation({
   );
 }
 
-const ACTIVITY_LABELS: Record<string, string> = {
-  turn_started: "Turn started",
-  prompt_prepared: "Prompt prepared",
-  model_call_started: "Model call started",
-  model_call_completed: "Model call completed",
-  model_call_failed: "Model call failed",
-  progress: "Progress",
-  tool_started: "Tool started",
-  tool_completed: "Tool completed",
-  tool_failed: "Tool failed",
-  gate_blocked: "Gate blocked",
-  final_response_completed: "Final response completed",
-  stream_disconnected: "Stream disconnected",
-  stream_resumed: "Stream resumed",
+const ACTIVITY_LABELS: Record<ActivityKind, string> = {
+  [ActivityKind.TurnStarted]: "Turn started",
+  [ActivityKind.PromptPrepared]: "Prompt prepared",
+  [ActivityKind.ModelCallStarted]: "Model call started",
+  [ActivityKind.ModelCallCompleted]: "Model call completed",
+  [ActivityKind.ModelCallFailed]: "Model call failed",
+  [ActivityKind.Progress]: "Progress",
+  [ActivityKind.ToolStarted]: "Tool started",
+  [ActivityKind.ToolCompleted]: "Tool completed",
+  [ActivityKind.ToolFailed]: "Tool failed",
+  [ActivityKind.GateBlocked]: "Gate blocked",
+  [ActivityKind.FinalResponseCompleted]: "Final response completed",
+  [ActivityKind.StreamDisconnected]: "Stream disconnected",
+  [ActivityKind.StreamResumed]: "Stream resumed",
 };
 
 function shortId(value: string | null): string | null {
@@ -429,7 +432,12 @@ function ActivityEntry({
   threadId: string | null;
   runId: string | null;
 }) {
-  const failed = entry.kind.endsWith("_failed") || entry.kind === "gate_blocked";
+  const failed = entry.kind === ActivityKind.ModelCallFailed
+    || entry.kind === ActivityKind.ToolFailed
+    || entry.kind === ActivityKind.GateBlocked;
+  const hasToolDetails = entry.kind === ActivityKind.ToolStarted
+    || entry.kind === ActivityKind.ToolCompleted
+    || entry.kind === ActivityKind.ToolFailed;
   const correlation = shortId(entry.activity_id || entry.model_call_id);
   const timestamp = new Date(entry.occurred_at);
   return (
@@ -461,7 +469,7 @@ function ActivityEntry({
         {entry.iteration != null ? ` · iteration ${entry.iteration}` : ""}
         {correlation ? ` · ${correlation}` : ""}
       </p>
-      {entry.kind.startsWith("tool_") && entry.activity_id && threadId && runId && (
+      {hasToolDetails && entry.activity_id && threadId && runId && (
         <ToolDetailDisclosure
           threadId={threadId}
           runId={runId}

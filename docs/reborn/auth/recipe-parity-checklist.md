@@ -125,7 +125,7 @@ secret is deliberately dropped from the front-channel authorization URL
 
 The `github` tool credential is a **manual token**, not OAuth
 (`assets/github/manifest.toml` → `source = { provider = "github" }`, no `setup = {kind="oauth"}`).
-(The `ironclaw_reborn_webui_ingress` GitHub *sign-in* is a separate login system, out of scope here.)
+(The WebUI GitHub *sign-in* — formerly the `ironclaw_reborn_webui_ingress` crate, consolidated into `ironclaw_webui` in #6194 — is a separate login system, out of scope here.)
 
 - [x] Handshake — ⚪ N/A (no OAuth authorization-code flow for this credential).
 - [x] **Manual-token submit validates format + stores under the credential owner.** Proven:

@@ -2,11 +2,13 @@
 
 ## Start Here
 
-- No crate-local `CLAUDE.md` exists yet; use this map plus the skills rules below.
-- Read `Cargo.toml` for actual dependencies, feature flags, and catalog/registry shape.
+- This file is the canonical crate-local rules; orientation, measured
+  surface/deps, and test commands are in [`README.md`](./README.md), and the
+  family boundary is [`../AGENTS.md`](../AGENTS.md).
+- Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these sources of truth before changing behavior:
 - `.claude/rules/skills.md`
-- `CLAUDE.md`
+- the repo-root `CLAUDE.md` ("Skills System" section)
 - `docs/reborn/contracts/extensions.md`
 
 ## What This Crate Owns

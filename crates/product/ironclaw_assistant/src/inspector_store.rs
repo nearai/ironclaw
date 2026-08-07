@@ -4,7 +4,7 @@
 //! content out of durable events and drops all state at process restart.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::Utc;
 use ironclaw_host_api::{
@@ -12,8 +12,12 @@ use ironclaw_host_api::{
     turn::TurnRunId,
 };
 use ironclaw_loop_contracts::LoopRunContext;
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedModelCallDiagnostic;
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedToolFailureCategory;
 use ironclaw_loop_host::{
-    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticStatus,
+    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticOutcome,
     HostManagedModelMessageRole, HostManagedPromptDiagnosticCapture,
     HostManagedPromptDiagnosticMessage, HostManagedPromptDiagnosticSink,
     HostManagedToolInputDiagnosticCapture, HostManagedToolResultDiagnosticCapture,
@@ -30,7 +34,7 @@ use ironclaw_product_contracts::inspector::{
     DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope, DiagnosticUpdateKind,
     InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic, ModelTokenUsage,
     PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, SessionDiagnosticStats,
-    ToolExecutionDiagnostic, ToolExecutionStatus,
+    TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, ToolExecutionDiagnostic, ToolExecutionStatus,
 };
 use ironclaw_safety::LeakDetector;
 use thiserror::Error;
@@ -174,6 +178,7 @@ struct DiagnosticRunState {
     stats: SessionDiagnosticStats,
     updates: VecDeque<DiagnosticUpdateEnvelope>,
     latest_sequence: DiagnosticSequence,
+    turn_started_recorded: bool,
 }
 
 impl Default for DiagnosticRunState {
@@ -187,6 +192,7 @@ impl Default for DiagnosticRunState {
             stats: SessionDiagnosticStats::default(),
             updates: VecDeque::new(),
             latest_sequence: DiagnosticSequence::ZERO,
+            turn_started_recorded: false,
         }
     }
 }
@@ -326,7 +332,41 @@ fn touch<T: PartialEq>(order: &mut VecDeque<T>, value: T) {
 #[derive(Debug)]
 pub struct InMemoryDiagnosticStore {
     limits: DiagnosticStoreLimits,
-    state: Mutex<DiagnosticStoreState>,
+    state: RwLock<DiagnosticStoreState>,
+}
+
+/// Operator inspection store surface exposed by product composition.
+///
+/// Capture remains behind [`HostManagedPromptDiagnosticSink`]; consumers of
+/// diagnostics do not depend on the in-memory implementation.
+pub trait DiagnosticStorePort: Send + Sync {
+    fn record_activity(
+        &self,
+        scope: DiagnosticScope,
+        event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError>;
+
+    fn snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError>;
+
+    fn prompt(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError>;
+
+    fn tool_execution(
+        &self,
+        scope: &DiagnosticScope,
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError>;
+
+    fn updates_after(
+        &self,
+        scope: &DiagnosticScope,
+        after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError>;
 }
 
 impl InMemoryDiagnosticStore {
@@ -334,7 +374,7 @@ impl InMemoryDiagnosticStore {
         let limits = limits.validate()?;
         Ok(Self {
             limits,
-            state: Mutex::new(DiagnosticStoreState::default()),
+            state: RwLock::new(DiagnosticStoreState::default()),
         })
     }
 
@@ -346,7 +386,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<(), DiagnosticStoreError> {
         let mut state = self
             .state
-            .lock()
+            .write()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let key = (scope, input_ref);
         if !state.pending_tool_inputs.contains_key(&key) {
@@ -370,7 +410,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<Option<PendingToolInput>, DiagnosticStoreError> {
         let mut state = self
             .state
-            .lock()
+            .write()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let key = (scope.clone(), input_ref.to_string());
         state
@@ -475,6 +515,28 @@ impl InMemoryDiagnosticStore {
         })
     }
 
+    fn record_turn_started_once(
+        &self,
+        scope: DiagnosticScope,
+        event: DiagnosticActivityEvent,
+    ) -> Result<Option<DiagnosticCursor>, DiagnosticStoreError> {
+        let event = event.into_bounded();
+        let cap = self.limits.max_activity_entries_per_run;
+        self.record_optional(scope, move |run, sequence| {
+            if run.turn_started_recorded {
+                return None;
+            }
+            run.turn_started_recorded = true;
+            let update = DiagnosticUpdateKind::Activity(event.clone());
+            push_bounded(
+                &mut run.activity,
+                DiagnosticActivityEntry { sequence, event },
+                cap,
+            );
+            Some(update)
+        })
+    }
+
     pub fn record_stats(
         &self,
         scope: DiagnosticScope,
@@ -493,7 +555,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
         let state = self
             .state
-            .lock()
+            .read()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let Some(run) = state.run(scope) else {
             return Ok(None);
@@ -516,7 +578,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
         let state = self
             .state
-            .lock()
+            .read()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         Ok(state.run(scope).and_then(|run| run.prompt.clone()))
     }
@@ -528,7 +590,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
         let state = self
             .state
-            .lock()
+            .read()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         Ok(state.run(scope).and_then(|run| {
             run.tool_executions
@@ -545,7 +607,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
         let state = self
             .state
-            .lock()
+            .read()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let Some(run) = state.run(scope) else {
             return Ok(DiagnosticUpdateBatch {
@@ -589,7 +651,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<DiagnosticSubscription, DiagnosticStoreError> {
         let mut state = self
             .state
-            .lock()
+            .write()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let receiver = state.subscribe(
             scope,
@@ -604,9 +666,18 @@ impl InMemoryDiagnosticStore {
         scope: DiagnosticScope,
         mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence) -> DiagnosticUpdateKind,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        self.record_optional(scope, |run, sequence| Some(mutate(run, sequence)))?
+            .ok_or(DiagnosticStoreError::Invariant)
+    }
+
+    fn record_optional(
+        &self,
+        scope: DiagnosticScope,
+        mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence) -> Option<DiagnosticUpdateKind>,
+    ) -> Result<Option<DiagnosticCursor>, DiagnosticStoreError> {
         let mut state = self
             .state
-            .lock()
+            .write()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let run = state.run_mut(&scope, self.limits)?;
         let next = run
@@ -615,7 +686,9 @@ impl InMemoryDiagnosticStore {
             .checked_add(1)
             .ok_or(DiagnosticStoreError::SequenceExhausted)?;
         let sequence = DiagnosticSequence::new(next);
-        let update = mutate(run, sequence);
+        let Some(update) = mutate(run, sequence) else {
+            return Ok(None);
+        };
         let cursor = DiagnosticCursor::new(run.stream_id, sequence);
         let envelope = DiagnosticUpdateEnvelope {
             scope,
@@ -631,7 +704,7 @@ impl InMemoryDiagnosticStore {
             self.limits.max_updates_per_run,
         );
         state.send_live_update(envelope);
-        Ok(cursor)
+        Ok(Some(cursor))
     }
 }
 
@@ -721,12 +794,63 @@ fn update_tool_stats(
     }
 }
 
+impl DiagnosticStorePort for InMemoryDiagnosticStore {
+    fn record_activity(
+        &self,
+        scope: DiagnosticScope,
+        event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::record_activity(self, scope, event)
+    }
+
+    fn snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::snapshot(self, scope)
+    }
+
+    fn prompt(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::prompt(self, scope)
+    }
+
+    fn tool_execution(
+        &self,
+        scope: &DiagnosticScope,
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::tool_execution(self, scope, activity_id)
+    }
+
+    fn updates_after(
+        &self,
+        scope: &DiagnosticScope,
+        after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::updates_after(self, scope, after)
+    }
+}
+
 fn diagnostic_prompt_text(detector: &LeakDetector, value: &str) -> String {
     let validated = value
         .chars()
         .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
         .collect::<String>();
     detector.redact_all_secrets(&validated).0
+}
+
+fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end] // safety: `end` is a verified UTF-8 boundary.
 }
 
 fn diagnostic_scope_for_context(context: &LoopRunContext) -> Option<DiagnosticScope> {
@@ -741,6 +865,11 @@ fn diagnostic_scope_for_context(context: &LoopRunContext) -> Option<DiagnosticSc
         context.thread_id.clone(),
         context.run_id,
     ))
+}
+
+fn prompt_leak_detector() -> &'static LeakDetector {
+    static DETECTOR: OnceLock<LeakDetector> = OnceLock::new();
+    DETECTOR.get_or_init(LeakDetector::new)
 }
 
 fn prompt_component_kind(
@@ -801,8 +930,13 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             capture.context.thread_id.clone(),
             capture.context.run_id,
         );
-        let detector = LeakDetector::new();
-        let mut reconstructed = String::new();
+        let detector = prompt_leak_detector();
+        let reconstruction_capacity = capture
+            .messages
+            .iter()
+            .map(|message| message.content.len().saturating_add(32))
+            .sum();
+        let mut reconstructed = String::with_capacity(reconstruction_capacity);
         let mut total_estimated_tokens = 0u64;
         let mut components = Vec::with_capacity(
             capture
@@ -812,18 +946,19 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
         );
         for (index, message) in capture.messages.iter().enumerate() {
             let kind = prompt_component_kind(index, capture.identity_message_count, message);
-            let content = diagnostic_prompt_text(&detector, &message.content);
+            let label = prompt_component_label(kind, index);
+            let content = diagnostic_prompt_text(detector, &message.content);
             let estimated_tokens = estimate_tokens_from_chars(&message.content).as_u64();
             total_estimated_tokens = total_estimated_tokens.saturating_add(estimated_tokens);
             if !reconstructed.is_empty() {
                 reconstructed.push_str("\n\n");
             }
-            reconstructed.push_str(&prompt_component_label(kind, index));
+            reconstructed.push_str(&label);
             reconstructed.push_str(":\n");
             reconstructed.push_str(&content);
             components.push(PromptComponentDiagnostic::new(
                 kind,
-                prompt_component_label(kind, index),
+                label,
                 content,
                 Some(estimated_tokens),
             ));
@@ -839,13 +974,16 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
         let active_skills = capture
             .active_skills
             .iter()
-            .map(|skill| diagnostic_prompt_text(&detector, skill))
+            .map(|skill| diagnostic_prompt_text(detector, skill.as_str()))
             .collect();
         let requested_model = capture
             .requested_model
-            .as_deref()
-            .map(|model| diagnostic_prompt_text(&detector, model));
-        let effective_model = diagnostic_prompt_text(&detector, &capture.effective_model);
+            .as_ref()
+            .map(|model| diagnostic_prompt_text(detector, model.as_str()));
+        let effective_model = capture
+            .effective_model
+            .as_ref()
+            .map(|model| diagnostic_prompt_text(detector, model.as_str()));
         let prompt = PromptDiagnostic::new(
             Utc::now(),
             components,
@@ -857,28 +995,24 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             active_skills,
             u32::try_from(capture.capability_ids.len()).unwrap_or(u32::MAX),
             requested_model,
-            Some(effective_model),
+            effective_model,
             Some(capture.context_limit),
         );
-        let is_first_observation = matches!(self.snapshot(&scope), Ok(None));
-        if is_first_observation
-            && let Err(error) = self.record_activity(
-                scope.clone(),
-                DiagnosticActivityEvent::new(
-                    Utc::now(),
-                    DiagnosticActivityKind::TurnStarted,
-                    None,
-                    None,
-                    None,
-                    Some("Turn started".to_string()),
-                ),
-            )
-        {
+        if let Err(error) = self.record_turn_started_once(
+            scope.clone(),
+            DiagnosticActivityEvent::new(
+                Utc::now(),
+                DiagnosticActivityKind::TurnStarted,
+                None,
+                None,
+                None,
+                Some("Turn started".to_string()),
+            ),
+        ) {
             tracing::debug!(%error, "turn-start diagnostics could not be retained");
         }
         if let Err(error) = InMemoryDiagnosticStore::record_prompt(self, scope.clone(), prompt) {
             tracing::debug!(%error, "prompt diagnostics could not be retained");
-            return;
         }
         if let Err(error) = self.record_activity(
             scope,
@@ -896,49 +1030,97 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
     }
 
     fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
-        let user_id = capture
+        let (
+            diagnostic,
+            completed_at,
+            duration_ms,
+            status,
+            usage,
+            failure_summary,
+            kind,
+            default_summary,
+        ) = match capture {
+            HostManagedModelCallDiagnosticCapture::Started(diagnostic) => (
+                diagnostic,
+                None,
+                None,
+                InspectorModelCallStatus::Started,
+                None,
+                None,
+                DiagnosticActivityKind::ModelCallStarted,
+                Some("Model call started".to_string()),
+            ),
+            HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic,
+                completed_at,
+                duration_ms,
+                outcome,
+            } => match outcome {
+                HostManagedModelCallDiagnosticOutcome::Succeeded { usage } => (
+                    diagnostic,
+                    Some(completed_at),
+                    Some(duration_ms),
+                    InspectorModelCallStatus::Succeeded,
+                    usage,
+                    None,
+                    DiagnosticActivityKind::ModelCallCompleted,
+                    Some("Model call completed".to_string()),
+                ),
+                HostManagedModelCallDiagnosticOutcome::Failed {
+                    usage,
+                    failure_summary,
+                } => (
+                    diagnostic,
+                    Some(completed_at),
+                    Some(duration_ms),
+                    InspectorModelCallStatus::Failed,
+                    usage,
+                    Some(failure_summary),
+                    DiagnosticActivityKind::ModelCallFailed,
+                    None,
+                ),
+            },
+        };
+        let user_id = diagnostic
             .context
             .actor
             .as_ref()
             .map(|actor| actor.user_id.clone())
-            .or_else(|| capture.context.scope.explicit_owner_user_id().cloned());
+            .or_else(|| diagnostic.context.scope.explicit_owner_user_id().cloned());
         let Some(user_id) = user_id else {
             tracing::debug!(
-                run_id = %capture.context.run_id,
+                run_id = %diagnostic.context.run_id,
                 "model-call diagnostics skipped because the run has no user scope"
             );
             return;
         };
         let scope = DiagnosticScope::new(
-            capture.context.scope.tenant_id.clone(),
+            diagnostic.context.scope.tenant_id.clone(),
             user_id,
-            capture.context.thread_id.clone(),
-            capture.context.run_id,
+            diagnostic.context.thread_id.clone(),
+            diagnostic.context.run_id,
         );
-        let usage = capture.usage.map(|usage| ModelTokenUsage {
+        let usage = usage.map(|usage| ModelTokenUsage {
             input_tokens: Some(u64::from(usage.input_tokens)),
             output_tokens: Some(u64::from(usage.output_tokens)),
             cache_read_input_tokens: Some(u64::from(usage.cache_read_input_tokens)),
             cache_creation_input_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
         });
-        let status = match capture.status {
-            HostManagedModelCallDiagnosticStatus::Started => InspectorModelCallStatus::Started,
-            HostManagedModelCallDiagnosticStatus::Succeeded => InspectorModelCallStatus::Succeeded,
-            HostManagedModelCallDiagnosticStatus::Failed => InspectorModelCallStatus::Failed,
-        };
-        let detector = LeakDetector::new();
-        let failure_summary = capture
-            .failure_summary
-            .map(|summary| diagnostic_prompt_text(&detector, &summary));
-        let call_id = DiagnosticModelCallId::from_uuid(capture.call_id);
+        let detector = prompt_leak_detector();
+        let failure_summary =
+            failure_summary.map(|summary| diagnostic_prompt_text(detector, &summary));
+        let call_id = DiagnosticModelCallId::from_uuid(diagnostic.call_id);
         let model_call = ModelCallDiagnostic::new(
             call_id,
-            capture.iteration,
-            diagnostic_prompt_text(&detector, &capture.requested_model),
-            Some(diagnostic_prompt_text(&detector, &capture.effective_model)),
-            capture.started_at,
-            capture.completed_at,
-            capture.duration_ms,
+            diagnostic.iteration,
+            diagnostic_prompt_text(detector, &diagnostic.requested_model),
+            Some(diagnostic_prompt_text(
+                detector,
+                &diagnostic.effective_model,
+            )),
+            diagnostic.started_at,
+            completed_at,
+            duration_ms,
             status,
             usage,
             failure_summary.clone(),
@@ -947,27 +1129,14 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             InMemoryDiagnosticStore::record_model_call(self, scope.clone(), model_call)
         {
             tracing::debug!(%error, "model-call diagnostics could not be retained");
-            return;
         }
-        let (kind, summary) = match capture.status {
-            HostManagedModelCallDiagnosticStatus::Started => (
-                DiagnosticActivityKind::ModelCallStarted,
-                Some("Model call started".to_string()),
-            ),
-            HostManagedModelCallDiagnosticStatus::Succeeded => (
-                DiagnosticActivityKind::ModelCallCompleted,
-                Some("Model call completed".to_string()),
-            ),
-            HostManagedModelCallDiagnosticStatus::Failed => {
-                (DiagnosticActivityKind::ModelCallFailed, failure_summary)
-            }
-        };
+        let summary = failure_summary.or(default_summary);
         if let Err(error) = self.record_activity(
             scope,
             DiagnosticActivityEvent::new(
                 Utc::now(),
                 kind,
-                Some(capture.iteration),
+                Some(diagnostic.iteration),
                 None,
                 Some(call_id),
                 summary,
@@ -985,15 +1154,21 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             );
             return;
         };
-        let detector = LeakDetector::new();
+        let arguments = match serde_json::to_string(&capture.arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                tracing::debug!(%error, "tool input diagnostics could not serialize arguments");
+                return;
+            }
+        };
+        let detector = prompt_leak_detector();
         let input = PendingToolInput {
             capability_name: BoundedDiagnosticText::label(diagnostic_prompt_text(
-                &detector,
+                detector,
                 &capture.capability_name,
             )),
             arguments: BoundedDiagnosticText::tool_arguments(diagnostic_prompt_text(
-                &detector,
-                &capture.arguments,
+                detector, &arguments,
             )),
         };
         if let Err(error) = self.record_pending_tool_input(scope, capture.input_ref, input) {
@@ -1065,15 +1240,18 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
                 return;
             }
         };
-        let detector = LeakDetector::new();
+        let detector = prompt_leak_detector();
         let result = match capture.result {
             Some(result) => {
-                let safe_result = diagnostic_prompt_text(&detector, &result);
-                let retained_bytes = u64::try_from(safe_result.len()).unwrap_or(u64::MAX);
-                let original_bytes = capture
-                    .result_original_bytes
-                    .unwrap_or(retained_bytes)
-                    .max(retained_bytes);
+                let Some(original_bytes) = capture.result_original_bytes else {
+                    tracing::debug!(
+                        "tool result diagnostics omitted the required original byte count"
+                    );
+                    return;
+                };
+                let bounded_result =
+                    bounded_utf8_prefix(&result, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+                let safe_result = diagnostic_prompt_text(detector, bounded_result);
                 match BoundedDiagnosticText::retained_tool_result(safe_result, original_bytes) {
                     Ok(result) => Some(result),
                     Err(error) => {
@@ -1085,10 +1263,10 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             None => None,
         };
         let failure_category = capture.failure_category.map(|category| {
-            BoundedDiagnosticText::label(diagnostic_prompt_text(&detector, &category))
+            BoundedDiagnosticText::label(diagnostic_prompt_text(detector, category.as_str()))
         });
         let failure_summary = capture.failure_summary.map(|summary| {
-            BoundedDiagnosticText::summary(diagnostic_prompt_text(&detector, &summary))
+            BoundedDiagnosticText::summary(diagnostic_prompt_text(detector, &summary))
         });
         let status = match capture.status {
             HostManagedToolResultDiagnosticStatus::Succeeded => ToolExecutionStatus::Succeeded,
@@ -1102,7 +1280,7 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
                 .map(|tool| tool.capability_name.clone())
                 .unwrap_or_else(|| {
                     BoundedDiagnosticText::label(diagnostic_prompt_text(
-                        &detector,
+                        detector,
                         &capture.capability_name,
                     ))
                 }),
@@ -1142,7 +1320,7 @@ impl Default for InMemoryDiagnosticStore {
         let limits = DiagnosticStoreLimits::default();
         Self {
             limits,
-            state: Mutex::new(DiagnosticStoreState::default()),
+            state: RwLock::new(DiagnosticStoreState::default()),
         }
     }
 }
@@ -1194,7 +1372,10 @@ mod tests {
         ids::{CapabilityId, TenantId, ThreadId, UserId},
         turn::{RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope},
     };
-    use ironclaw_loop_contracts::{LoopModelUsage, LoopRunContext, ResolvedRunProfile};
+    use ironclaw_loop_contracts::{
+        LoopModelUsage, LoopRunContext, ModelProfileId, ResolvedRunProfile, SkillName,
+    };
+    use ironclaw_loop_host::ProviderModelId;
     use ironclaw_product_contracts::inspector::{
         BoundedDiagnosticText, DIAGNOSTIC_LABEL_MAX_BYTES, DIAGNOSTIC_SUMMARY_MAX_BYTES,
         DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticModelCallId,
@@ -1339,6 +1520,18 @@ mod tests {
 
         assert_eq!(limits.validate(), Ok(limits));
         assert_eq!(InMemoryDiagnosticStore::default().limits, limits);
+    }
+
+    #[test]
+    fn inspector_state_allows_concurrent_readers() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let first_reader = store.state.read().expect("first reader");
+        let second_reader = store
+            .state
+            .try_read()
+            .expect("read-only inspector queries must not exclude each other");
+
+        drop((first_reader, second_reader));
     }
 
     #[test]
@@ -1848,75 +2041,81 @@ mod tests {
         )
         .with_actor(TurnActor::new(user_id.clone()));
         let secret = format!("sk-{}", "diagnostictestvalue0123456789");
-        HostManagedPromptDiagnosticSink::record_prompt(
-            &store,
-            HostManagedPromptDiagnosticCapture {
-                context: context.clone(),
-                messages: vec![
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::System,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:identity.system",
-                        )
+        let prompt_capture = HostManagedPromptDiagnosticCapture {
+            context: context.clone(),
+            messages: vec![
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                        "msg:identity.system",
+                    )
+                    .expect("ref"),
+                    content: format!(
+                        "identity sk-diagnostic\u{1b}testvalue0123456789 {}",
+                        "x".repeat(70 * 1024)
+                    ),
+                },
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                        "msg:instruction.system.0.deadbeef",
+                    )
+                    .expect("ref"),
+                    content: "Follow the workspace instructions.".to_string(),
+                },
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                        "msg:snippet.skill.workspace-search.0.deadbeef",
+                    )
+                    .expect("ref"),
+                    content: "Use workspace search when needed.".to_string(),
+                },
+                HostManagedPromptDiagnosticMessage {
+                    role: HostManagedModelMessageRole::User,
+                    content_ref: ironclaw_host_api::turn::LoopMessageRef::new("msg:thread.user")
                         .expect("ref"),
-                        content: format!(
-                            "identity sk-diagnostic\u{1b}testvalue0123456789 {}",
-                            "x".repeat(70 * 1024)
-                        ),
-                    },
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::System,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:instruction.system.0.deadbeef",
-                        )
-                        .expect("ref"),
-                        content: "Follow the workspace instructions.".to_string(),
-                    },
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::System,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:snippet.skill.workspace-search.0.deadbeef",
-                        )
-                        .expect("ref"),
-                        content: "Use workspace search when needed.".to_string(),
-                    },
-                    HostManagedPromptDiagnosticMessage {
-                        role: HostManagedModelMessageRole::User,
-                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
-                            "msg:thread.user",
-                        )
-                        .expect("ref"),
-                        content: "hello".to_string(),
-                    },
-                ],
-                identity_message_count: 1,
-                instruction_snippet_count: 2,
-                active_skills: vec!["workspace-search".to_string(), secret.clone()],
-                capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
-                requested_model: Some(secret.clone()),
-                effective_model: secret.clone(),
-                context_limit: 128_000,
-            },
-        );
+                    content: "hello".to_string(),
+                },
+            ],
+            identity_message_count: 1,
+            instruction_snippet_count: 2,
+            active_skills: vec![
+                SkillName::new("workspace-search").expect("skill name"),
+                SkillName::new(secret.clone()).expect("secret-like skill name"),
+            ],
+            capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
+            requested_model: Some(
+                ModelProfileId::new("diagnostic-profile").expect("model profile"),
+            ),
+            effective_model: Some(
+                ProviderModelId::new("provider/diagnostic-model").expect("provider model"),
+            ),
+            context_limit: 128_000,
+        };
+        HostManagedPromptDiagnosticSink::record_prompt(&store, prompt_capture.clone());
+        HostManagedPromptDiagnosticSink::record_prompt(&store, prompt_capture);
         HostManagedPromptDiagnosticSink::record_model_call(
             &store,
-            HostManagedModelCallDiagnosticCapture {
-                call_id: uuid::Uuid::new_v4(),
-                context: context.clone(),
-                iteration: 4,
-                requested_model: "interactive_model".to_string(),
-                effective_model: "provider-model".to_string(),
-                started_at: Utc::now(),
-                completed_at: Some(Utc::now()),
-                duration_ms: Some(42),
-                status: HostManagedModelCallDiagnosticStatus::Succeeded,
-                usage: Some(LoopModelUsage {
-                    input_tokens: 12,
-                    output_tokens: 4,
-                    cache_read_input_tokens: 2,
-                    cache_creation_input_tokens: 1,
-                }),
-                failure_summary: None,
+            HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic: HostManagedModelCallDiagnostic {
+                    call_id: uuid::Uuid::new_v4(),
+                    context: context.clone(),
+                    iteration: 4,
+                    requested_model: "interactive_model".to_string(),
+                    effective_model: "provider-model".to_string(),
+                    started_at: Utc::now(),
+                },
+                completed_at: Utc::now(),
+                duration_ms: 42,
+                outcome: HostManagedModelCallDiagnosticOutcome::Succeeded {
+                    usage: Some(LoopModelUsage {
+                        input_tokens: 12,
+                        output_tokens: 4,
+                        cache_read_input_tokens: 2,
+                        cache_creation_input_tokens: 1,
+                    }),
+                },
             },
         );
         let first_tool_id = uuid::Uuid::new_v4();
@@ -1931,7 +2130,7 @@ mod tests {
                     context: context.clone(),
                     input_ref: input_ref.to_string(),
                     capability_name: "filesystem.read".to_string(),
-                    arguments: format!(r#"{{"path":"{secret}"}}"#),
+                    arguments: serde_json::json!({"path": secret}),
                 },
             );
             HostManagedPromptDiagnosticSink::record_tool_started(
@@ -1962,14 +2161,27 @@ mod tests {
         HostManagedPromptDiagnosticSink::record_tool_result(
             &store,
             HostManagedToolResultDiagnosticCapture {
-                context,
+                context: context.clone(),
                 activity_id: second_tool_id,
                 capability_name: "filesystem.read".to_string(),
                 result: None,
                 result_original_bytes: None,
                 status: HostManagedToolResultDiagnosticStatus::Failed,
-                failure_category: Some("invalid_input".to_string()),
+                failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
                 failure_summary: Some(format!("could not read {secret}")),
+            },
+        );
+        HostManagedPromptDiagnosticSink::record_tool_result(
+            &store,
+            HostManagedToolResultDiagnosticCapture {
+                context,
+                activity_id: uuid::Uuid::new_v4(),
+                capability_name: "filesystem.read".to_string(),
+                result: Some("untrusted size".to_string()),
+                result_original_bytes: None,
+                status: HostManagedToolResultDiagnosticStatus::Succeeded,
+                failure_category: None,
+                failure_summary: None,
             },
         );
 
@@ -1985,17 +2197,13 @@ mod tests {
         assert_eq!(prompt.active_skills[0].content(), "workspace-search");
         assert!(prompt.active_skills[1].content().contains("[REDACTED]"));
         assert!(!prompt.active_skills[1].content().contains(&secret));
-        assert!(
-            prompt
-                .requested_model
-                .as_ref()
-                .is_some_and(|model| model.content().contains("[REDACTED]"))
+        assert_eq!(
+            prompt.requested_model.as_ref().map(|model| model.content()),
+            Some("diagnostic-profile")
         );
-        assert!(
-            prompt
-                .effective_model
-                .as_ref()
-                .is_some_and(|model| model.content().contains("[REDACTED]"))
+        assert_eq!(
+            prompt.effective_model.as_ref().map(|model| model.content()),
+            Some("provider/diagnostic-model")
         );
         assert!(prompt.components[0].content.truncated());
         assert!(!prompt.components[0].content.content().contains(&secret));
@@ -2022,7 +2230,11 @@ mod tests {
         assert_eq!(snapshot.model_calls[0].iteration, 4);
         assert_eq!(snapshot.stats.total_model_calls, 1);
         assert_eq!(snapshot.stats.input_tokens.known_total, 12);
-        assert_eq!(snapshot.tool_executions.len(), 2);
+        assert_eq!(
+            snapshot.tool_executions.len(),
+            2,
+            "a successful capture without its original byte count must be dropped"
+        );
         assert_eq!(
             snapshot.tool_executions[0].activity_id.as_uuid(),
             first_tool_id
@@ -2061,6 +2273,14 @@ mod tests {
         assert_eq!(snapshot.stats.total_tool_calls, 2);
         assert_eq!(snapshot.stats.successful_tool_calls, 1);
         assert_eq!(snapshot.stats.failed_tool_calls, 1);
+        assert_eq!(
+            snapshot
+                .activity
+                .iter()
+                .filter(|entry| entry.event.kind == DiagnosticActivityKind::TurnStarted)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2326,7 +2546,7 @@ mod tests {
         assert_eq!(first.recv().await.expect("first update").scope, first_scope);
         assert_eq!(third.recv().await.expect("third update").scope, third_scope);
         assert_eq!(
-            store.state.lock().expect("state").live_updates.len(),
+            store.state.read().expect("state").live_updates.len(),
             limits.max_live_update_scopes
         );
     }
@@ -2449,7 +2669,7 @@ mod tests {
     fn poisoned_state_returns_a_redacted_error() {
         let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = store.state.lock().expect("lock before poison");
+            let _guard = store.state.write().expect("lock before poison");
             panic!("poison store lock");
         }));
         let error = store
