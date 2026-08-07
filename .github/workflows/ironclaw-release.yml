@@ -337,6 +337,38 @@ jobs:
     secrets:
       DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
+  # Point the public docs deployment branch at each stable release. The
+  # Mintlify GitHub App deploys the docs site from `docs-live` (dashboard
+  # config, out-of-repo — see docs/internal/weekly-release-strategy.md,
+  # "Docs publication"), so the published site tracks the latest stable
+  # binary instead of main. This is a FORCED pointer update by design:
+  # successive stable tags need not be ancestor-related (release-branch
+  # cherry-picks), and docs-live is a pointer, not a history — its content
+  # is always exactly the tagged tree. Prereleases never move it.
+  publish-docs-live:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - name: Point docs-live at the stable release commit
+        run: |
+          # PATCH force-moves the existing branch pointer; the POST fallback
+          # bootstraps refs/heads/docs-live on the very first stable release
+          # after this job ships. Ref updates raise ordinary push events, so
+          # the Mintlify App deploys from them like any push.
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/git/refs/heads/docs-live" \
+            -f "sha=${GITHUB_SHA}" -F "force=true" \
+          || gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/heads/docs-live" -f "sha=${GITHUB_SHA}"
+
   announce:
     needs:
       - plan

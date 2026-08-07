@@ -38,7 +38,12 @@ owner, and deployment approver can synchronize on a predictable window.
    `.github/workflows/ironclaw-release.yml`; a tag without that namespace never
    invokes the publisher. The release owner creates that tag with the
    `Cut Ironclaw Release` workflow, supplying the exact approved commit SHA and
-   matching Cargo version.
+   matching Cargo version. **At the Monday cut, write the `docs/changelog.mdx`
+   entry for the target stable version on the release branch** — the cut
+   workflow refuses a stable (non-rc) tag whose candidate commit has no
+   `v X.Y.Z` changelog entry (`scripts/ci/cut_ironclaw_release.py`), and
+   writing it Monday keeps Wednesday's promotion a re-tag of the approved
+   commit rather than a last-minute branch amendment.
 4. Freeze the release branch after the cut. Do not add features, merge `main`
    into it, or rebase it. The approximately 30 PRs per day that continue landing
    on `main` are for the next release.
@@ -47,6 +52,11 @@ owner, and deployment approver can synchronize on a predictable window.
    same commit, so confirm the recorded artifact digest matches the approved
    candidate before promotion. If a future promotion step can reuse the approved
    artifact without rebuilding, prefer it and record which path was used.
+6. A stable tag automatically repoints the `docs-live` branch at the released
+   commit (`publish-docs-live` in `.github/workflows/ironclaw-release.yml`),
+   which redeploys the public docs site. After promotion, verify the Mintlify
+   deployment reflects the release (see "Docs publication" below). Prerelease
+   tags never move `docs-live`.
 
 ## Test and promotion gates
 
@@ -116,6 +126,41 @@ automated results, QA sign-off and evidence, known issues, forward-port status,
 approvals, deployment timestamps, canary outcome, and rollback instructions.
 This provides the traceability needed to demonstrate that the production
 artifact was tested and independently authorized.
+
+## Docs publication
+
+The public Mintlify docs site deploys from the **`docs-live` branch**, not
+`main`, so the site always describes the latest stable release instead of
+unreleased `main` behavior (issue #7317). The moving parts:
+
+- **Automatic repoint.** The `publish-docs-live` job in
+  `.github/workflows/ironclaw-release.yml` force-updates
+  `refs/heads/docs-live` to the released commit on every **stable** tag —
+  a pointer update, not a merge; successive stable tags need not be
+  ancestor-related, and the branch's content is always exactly the tagged
+  tree. The job bootstraps the branch if it does not exist yet.
+- **One-time, out-of-repo configuration.** In the Mintlify dashboard
+  (Settings → Git → deployment branch), point the docs deployment at
+  `docs-live`. This is the single manual configuration this pipeline cannot
+  verify from CI; the post-promotion check below is the compensating
+  control.
+- **Post-promotion check (Wednesday).** After the stable tag lands, confirm
+  the deployed site reflects the release — the changelog page is the quick
+  probe, since its newest entry is the version just shipped.
+- **Branch protection (recommended).** Restrict direct pushes to
+  `docs-live` to GitHub Actions; anything pushed there manually is
+  overwritten at the next stable release by design.
+- **Emergency manual repoint.** If the automation is unavailable and the
+  site must move now:
+  `git push origin +ironclaw-vX.Y.Z^{commit}:refs/heads/docs-live`.
+- **Changelog gate.** `scripts/ci/cut_ironclaw_release.py` refuses to create
+  a stable tag when the candidate's `docs/changelog.mdx` lacks the
+  release's `vX.Y.Z` entry; rc tags are exempt. Write the entry at the
+  Monday cut (Candidate and artifact rules, step 3).
+- **Older releases.** Every tag preserves its docs tree
+  (`https://github.com/nearai/ironclaw/tree/ironclaw-vX.Y.Z/docs`); the
+  public changelog page links this instead of the site carrying versioned
+  page sets.
 
 Emergency releases are reserved for material production incidents. They keep the
 same approval chain as a regular release: the two required approvals and a
