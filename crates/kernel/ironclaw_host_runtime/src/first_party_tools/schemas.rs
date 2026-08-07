@@ -718,6 +718,29 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "url": {
                     "type": "string",
                     "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
+                },
+                "files": {
+                    "type": "array",
+                    "description": "Additional bundle files installed alongside SKILL.md, e.g. `scripts/analyze.py`, `references/units.md`, `schemas/report.xsd`. Put a reusable computation in a script rather than describing it in prose: a future run loads the file instead of re-deriving the method. SKILL.md should name the files it relies on.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Bundle-relative path, e.g. `scripts/analyze.py`"
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "UTF-8 file contents. Use this for scripts, references and schemas."
+                            },
+                            "bytes_base64": {
+                                "type": "string",
+                                "description": "Base64 contents. Only for binary files; prefer `text` otherwise."
+                            }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
                 }
             },
             "oneOf": [

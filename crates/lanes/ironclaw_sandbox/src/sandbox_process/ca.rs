@@ -1,5 +1,5 @@
 //! Internal per-tenant CA for the sandbox egress proxy (W5 — design doc
-//! `docs/plans/2026-07-26-sandbox-credential-firewall-design.md` §4).
+//! `docs/internal/plans/2026-07-26-sandbox-credential-firewall-design.md` §4).
 //!
 //! Generates a root key/cert pair **in memory only**, at construction, and
 //! signs short-lived leaf certificates for hosts the credential firewall

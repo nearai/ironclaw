@@ -20,7 +20,7 @@
 
 // arch-exempt: large_file, the ported gate-route e2e coverage stays one
 // suite; decomposition tracked in
-// docs/plans/2026-07-02-reborn-internal-module-refactor.md.
+// docs/internal/plans/2026-07-02-reborn-internal-module-refactor.md.
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
