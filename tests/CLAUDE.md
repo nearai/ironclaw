@@ -180,7 +180,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Behavior | Evidence |
 |---|---|
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
-| Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths, and invalid JSON produces model-visible correction guidance | `tool_call.rs` |
+| Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
@@ -457,7 +457,7 @@ verify it.
 | **Sub-agents** have no group scenario | `reborn_subagent_spawn_e2e.rs` + `subagent_await_edge.rs` only. |
 | **Python E2E skip/xfail debt** | Tracked separately in `tests/e2e/E2E_DEBT.md` (ClawHub skills, legacy Gmail/MCP OAuth prerequisites, Telegram OAuth placeholders, portfolio widget, v2 auth/OAuth xfails). Do not silently un-xfail. |
 | **Live-model tool-misuse patterns** are documented but not gated | `tests/e2e/LIVE_TOOL_FAILURES.md` — the assistant claiming a write it never made, etc. No test fails on these today. |
-| **Observability** has no scenario coverage | Only `log` and `noop` backends ship (root `CLAUDE.md` → Current Limitations). |
+| **Observability** has no scenario coverage | `crates/substrates/ironclaw_observability` is latency-trace macros over `tracing` only — there is no exporter backend to exercise. |
 
 ---
 

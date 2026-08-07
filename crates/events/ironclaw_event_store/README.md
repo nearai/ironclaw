@@ -76,8 +76,8 @@ cargo test -p ironclaw_architecture_tests
 
 ## See also
 
-- Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance — this
-  crate has no `CLAUDE.md`, by design).
+- Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance; the
+  sibling `CLAUDE.md` is a symlink alias of it).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.3.2;
   `docs/reborn/target-architecture/families/events.md`; storage-placement

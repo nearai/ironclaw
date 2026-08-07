@@ -1478,7 +1478,6 @@ where
             (requested_model.clone(), effective_model)
         });
         let diagnostic_started_at = Utc::now();
-        let diagnostic_timer = Instant::now();
         let diagnostic_call_id = diagnostic_model.as_ref().map(|_| Uuid::new_v4());
         if let (Some(sink), Some((requested_model, effective_model)), Some(call_id)) = (
             self.prompt_diagnostic_sink.as_ref(),
@@ -1497,6 +1496,7 @@ where
             ));
         }
         self.emit_model_started(requested_model_profile_id).await;
+        let diagnostic_timer = Instant::now();
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
             fallback_index: request.fallback_index,

@@ -319,7 +319,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// C-MULTIUSER seam: when `true`, [`create_capability_port`] resolves the
     /// capability-execution user from the RUN's owner/actor (mirroring
     /// production `visible_capability_request`,
-    /// `crates/ironclaw_composition/src/runtime.rs`) instead of
+    /// `crates/app/ironclaw_composition/src/runtime/capability_host.rs`) instead of
     /// this harness's single fixed `user_id`. That is what lets two distinct
     /// actors dispatching over the group's ONE shared capability backend run
     /// under DISTINCT `(tenant, user)` scopes, so memory, auto-approve, and

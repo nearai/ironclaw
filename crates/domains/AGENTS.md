@@ -132,9 +132,9 @@ crate path is given.
   ADR-held exception.
 - **Module charters are contracts, not comments:** `cargo test -p
   ironclaw_auth --test module_charter` and `cargo test -p ironclaw_llm --test
-  module_charter` each enforce their crate's `CLAUDE.md` sub-owner map
-  (every `src/**/*.rs` file has exactly one owner; auth's two engines must not
-  name each other).
+  module_charter` enforce the sub-owner maps in auth's `AGENTS.md` and llm's
+  `CONTRACT.md` respectively (every `src/**/*.rs` file has exactly one owner;
+  auth's two engines must not name each other).
 
 **Gate for adding a crate here:** it must own a genuinely distinct record
 grammar with independent consumers — otherwise it is a module inside an

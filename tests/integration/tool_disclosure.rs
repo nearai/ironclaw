@@ -18,7 +18,7 @@
 //! 2. **Threshold gate**: `Bridged` mode alone does NOT defer — deferral is
 //!    additionally gated on the catalog exceeding `DisclosureCaps::default()`
 //!    (`max_tools: 32` / ~12k estimated schema tokens; `select_active_set`,
-//!    `crates/ironclaw_loop_host/src/tool_disclosure.rs`). The
+//!    `crates/loop/ironclaw_loop_host/src/tool_disclosure.rs`). The
 //!    `GithubIssueTools` backend surfaces all 48 `github.*` manifest
 //!    capabilities (`github_support::capability_ids()`), none of which is
 //!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id), so

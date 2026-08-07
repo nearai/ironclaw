@@ -2015,9 +2015,9 @@ impl RebornIntegrationHarness {
     /// dispatch-time execution-context resolution actually stamps on the run.
     ///
     /// That user is NOT the capability harness's fixed constructor user: the
-    /// production capability surface (`standalone_visible_capability_request` /
-    /// `standalone_resource_scope_for_run` in
-    /// `crates/ironclaw_composition/src/runtime/standalone.rs`) resolves
+    /// production capability surface (`visible_capability_request` /
+    /// `resource_scope_for_run` in
+    /// `crates/app/ironclaw_composition/src/runtime/capability_host.rs`) resolves
     /// the execution user per run as `thread owner → run actor → fixed
     /// fallback`, and every harness thread run carries an actor — so the fixed
     /// fallback never applies here. Seeding under the harness's fixed
