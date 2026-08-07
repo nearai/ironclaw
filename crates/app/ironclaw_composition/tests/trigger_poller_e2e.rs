@@ -281,8 +281,8 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// the same seam a production LLM-provider-backed gateway uses to turn a raw
 /// tool-call response into a `CapabilityCallCandidate`
 /// (`LoopCapabilityPort::register_provider_tool_call`), so registering
-/// through it here exercises the *real* `PerSurfaceCapabilityDenyDecorator` /
-/// `CapabilitySurfaceDenyFilter` composition chain, not a stand-in.
+/// through it here exercises the *real* `CapabilitySurfacePolicyFilter` /
+/// `ToolDisclosureCapabilityDecorator` composition chain, not a stand-in.
 ///
 /// Generalized from a single `trigger_create`-only attempt (PR #5515 review:
 /// "production mutator deny set only has create covered end-to-end — the
@@ -296,7 +296,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// while only `trigger_create` stayed covered by a full-path (real host
 /// composition) test.
 ///
-/// `CapabilitySurfaceDenyFilter::register_provider_tool_call` resolves each
+/// `CapabilitySurfacePolicyFilter::register_provider_tool_call` resolves each
 /// provider tool call to a capability id via its OWN
 /// `provider_tool_call_capability_ids` override (delegating to `inner` so
 /// deferred/disclosed tools still resolve — see #5149's progressive tool
@@ -1927,8 +1927,8 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other three
 /// targeting the already-created legitimate trigger. See
 /// `TriggerMutatorAttemptGateway`'s doc comment for why this exercises the real
-/// `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter` chain
-/// instead of a stand-in, and for why all four mutators — not just
+/// `CapabilitySurfacePolicyFilter` and disclosure chain instead of a stand-in,
+/// and for why all four mutators — not just
 /// `trigger_create` — are covered here (PR #5515 review comment: a
 /// full-path test that only exercised `trigger_create` would not catch the
 /// production deny constant accidentally dropping one of the other three).
@@ -1941,12 +1941,10 @@ async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
 /// but with the runtime built under `ToolDisclosureMode::Bridged` instead of
 /// the default `Off`.
 ///
-/// This is not a redundant copy of the `Off` variant above. PR #5515
-/// self-review: the deny decorator (`PerSurfaceCapabilityDenyDecorator` /
-/// `CapabilitySurfaceDenyFilter`) is deliberately wired in `runtime.rs`
-/// *after* the conditional `ToolDisclosureCapabilityDecorator` so the
-/// mutator denial stays outermost — and therefore still wins — even when
-/// bridged tool disclosure is enabled. Before this test, `Bridged` had
+/// This is not a redundant copy of the `Off` variant above. The one resolved
+/// capability-surface policy is shared by the gate and the conditional
+/// `ToolDisclosureCapabilityDecorator`, so denied mutators stay absent even
+/// when bridged tool disclosure is enabled. Before this test, `Bridged` had
 /// exactly one usage anywhere in the repo (an unrelated system-prompt test),
 /// so nothing exercised that decorator-ordering composition end-to-end; a
 /// decorator-order or bridged-disclosure regression could have re-exposed
@@ -2047,11 +2045,10 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator
     // registration, not just `trigger_create`. Each of these ids is on the
-    // scheduled_trigger deny set (the fix's `PerSurfaceCapabilityDenyDecorator`
-    // / `CapabilitySurfaceDenyFilter`), so `register_provider_tool_call`'s own
-    // scope check on the resolved capability id fails closed before a
-    // candidate is ever built — see `TriggerMutatorAttemptGateway`'s doc comment
-    // for the exact call chain.
+    // scheduled_trigger deny set folded into the run's one
+    // `CapabilitySurfacePolicy`, so `register_provider_tool_call`'s scope check
+    // fails closed before a candidate is ever built — see
+    // `TriggerMutatorAttemptGateway`'s doc comment for the exact call chain.
     //
     // GUARD AGAINST FALSE-PASS: pre-fix (or if the production deny constant
     // ever drops one of these ids), the scheduled_trigger capability surface
@@ -2064,10 +2061,10 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // dispatch that mutator against the staged input, and either the marker
     // trigger asserted absent below WOULD exist, or the original trigger's
     // state WOULD have changed. Reverting any one entry of the
-    // scheduled_trigger deny map turns that entry's assertion here into a
+    // scheduled_trigger policy turns that entry's assertion here into a
     // `Some(Ok(()))` and one of the repository-state assertions below into a
     // failure — both catch the regression independently, per mutator.
-    const DENIED_SUMMARY: &str = "provider tool call targets a disabled capability";
+    const DENIED_SUMMARY: &str = "provider tool call is outside the visible capability surface";
     assert_eq!(
         registration_outcomes.get(TRIGGER_CREATE_CAPABILITY_ID),
         Some(&Err(DENIED_SUMMARY.to_string())),

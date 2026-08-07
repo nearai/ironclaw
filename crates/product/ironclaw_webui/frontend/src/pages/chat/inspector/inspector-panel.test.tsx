@@ -26,6 +26,39 @@ vi.mock("./useInspector", () => ({
 
 let root: ReturnType<typeof createRoot> | null = null;
 
+function boundedText(content: string, truncated = false) {
+  return {
+    content,
+    original_bytes: content.length + (truncated ? 10 : 0),
+    truncated,
+  };
+}
+
+function promptDiagnostic() {
+  return {
+    components: [
+      {
+        kind: "identity",
+        label: boundedText("Identity 1"),
+        content: boundedText("You are a careful assistant."),
+        estimated_tokens: 8,
+      },
+    ],
+    components_truncated: false,
+    reconstructed_prompt: boundedText("Identity 1:\nYou are a careful assistant."),
+    total_estimated_tokens: 32,
+    message_count: 4,
+    identity_message_count: 1,
+    instruction_snippet_count: 2,
+    active_skills: [boundedText("workspace-search")],
+    active_skills_truncated: false,
+    capability_count: 3,
+    requested_model: boundedText("interactive_model"),
+    effective_model: boundedText("provider-model"),
+    context_limit: 128_000,
+  };
+}
+
 function setViewport(width: number) {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
@@ -47,46 +80,44 @@ beforeEach(() => {
 });
 
 test("prompt tab renders metadata, bounded components, and reconstruction notice", async () => {
-  const text = (content: string, truncated = false) => ({
-    content,
-    original_bytes: content.length + (truncated ? 10 : 0),
-    truncated,
-  });
+  const prompt = promptDiagnostic();
+  prompt.components[0].content = boundedText("You are a careful assistant.", true);
   inspectorState.snapshot = {
-    prompt: {
-      components: [
-        {
-          kind: "identity",
-          label: text("Identity 1"),
-          content: text("You are a careful assistant.", true),
-          estimated_tokens: 8,
-        },
-      ],
-      components_truncated: false,
-      reconstructed_prompt: text("Identity 1:\nYou are a careful assistant."),
-      total_estimated_tokens: 32,
-      message_count: 4,
-      identity_message_count: 1,
-      instruction_snippet_count: 2,
-      active_skills: [text("workspace-search")],
-      active_skills_truncated: false,
-      capability_count: 3,
-      requested_model: text("interactive_model"),
-      effective_model: text("provider-model"),
-      context_limit: 128_000,
-    },
+    prompt,
   };
 
   await act(async () =>
     root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />),
   );
-  const prompt = document.querySelector("[data-testid='inspector-prompt-content']");
-  assert.ok(prompt);
-  assert.match(prompt.textContent || "", /provider-model/);
-  assert.match(prompt.textContent || "", /workspace-search/);
-  assert.match(prompt.textContent || "", /Some prompt content was safely truncated/);
-  assert.match(prompt.textContent || "", /may differ from a specific historical model call/);
+  const promptContent = document.querySelector("[data-testid='inspector-prompt-content']");
+  assert.ok(promptContent);
+  assert.match(promptContent.textContent || "", /provider-model/);
+  assert.match(promptContent.textContent || "", /workspace-search/);
+  assert.match(promptContent.textContent || "", /Some prompt content was safely truncated/);
+  assert.match(promptContent.textContent || "", /may differ from a specific historical model call/);
   assert.equal(document.querySelectorAll("details").length, 2);
+});
+
+const truncationCases: Array<[string, (prompt: ReturnType<typeof promptDiagnostic>) => void]> = [
+  ["component label", (prompt) => { prompt.components[0].label.truncated = true; }],
+  ["requested model", (prompt) => { prompt.requested_model.truncated = true; }],
+  ["effective model", (prompt) => { prompt.effective_model.truncated = true; }],
+  ["active skill", (prompt) => { prompt.active_skills[0].truncated = true; }],
+];
+
+test.each(truncationCases)("prompt tab reports a truncated %s", async (_label, truncate) => {
+  const prompt = promptDiagnostic();
+  truncate(prompt);
+  inspectorState.snapshot = { prompt };
+
+  await act(async () =>
+    root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />),
+  );
+
+  assert.match(
+    document.querySelector("[role='status']")?.textContent || "",
+    /Some prompt content was safely truncated/,
+  );
 });
 
 test("stats tab formats aggregates and unavailable samples without zero fabrication", async () => {

@@ -40,6 +40,7 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    open_reborn_v2_page,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_first_run_server,  # noqa: F401 - imported fixture
@@ -436,8 +437,7 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
 ):
     """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
     marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
-    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
-    async with httpx.AsyncClient(headers=headers) as client:
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
         submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
         assistant = await _wait_for_assistant_message(
@@ -453,11 +453,13 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
     )
     page = await context.new_page()
     try:
-        await page.goto(
-            f"{reborn_v2_server}/chat/{thread_id}"
-            f"?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        await open_reborn_v2_page(
+            page,
+            reborn_v2_server,
+            path=f"/chat/{thread_id}?debug=true",
+            ready_selector=SEL_V2["inspector_prompt_content"],
         )
-        prompt = page.locator("[data-testid='inspector-prompt-content']")
+        prompt = page.locator(SEL_V2["inspector_prompt_content"])
         await expect(prompt).to_be_visible(timeout=30000)
         await expect(prompt.get_by_text("Estimated prompt tokens", exact=True)).to_be_visible()
         await expect(prompt.get_by_text("mock-model", exact=True).first).to_be_visible()

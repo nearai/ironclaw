@@ -25,6 +25,7 @@
 #![warn(unreachable_pub)]
 
 use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
@@ -147,7 +148,7 @@ pub use services::{
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RegisteredRuntimeHealth,
 };
-pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
+pub use surface::{VisibleCapability, VisibleCapabilityAccess};
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);
