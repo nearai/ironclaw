@@ -4828,7 +4828,7 @@ async fn generic_dm_target_inherits_active_workspace_when_record_omits_space() {
         format!("slack:personal-dm:{TEAM}:{USER}")
     );
     let conversation = SlackPreferenceTargetCodec
-        .conversation_for_target(external_reply_target(dm))
+        .conversation_for_target(&dm.destination)
         .expect("personal-DM binding ref decodes");
     assert_eq!(conversation.space_id(), Some(TEAM));
     assert_eq!(conversation.conversation_id(), CHANNEL);
