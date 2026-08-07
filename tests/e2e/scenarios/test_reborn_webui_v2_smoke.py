@@ -404,13 +404,17 @@ async def test_inspector_debug_activation_and_responsive_shell(
         )
         await expect(panel).to_be_visible(timeout=15000)
         await expect(panel).to_have_attribute("data-layout", "sidebar")
+        inspector_toggle = page.locator(SEL_V2["inspector_open"])
+        await expect(inspector_toggle).to_be_visible()
+        await expect(inspector_toggle).to_have_attribute("aria-pressed", "true")
 
         stats_tab = page.locator(SEL_V2["inspector_tab_stats"])
         await stats_tab.click()
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
         await page.locator(SEL_V2["inspector_close"]).click()
         await expect(panel).to_have_count(0)
-        await page.locator(SEL_V2["inspector_open"]).click()
+        await expect(inspector_toggle).to_have_attribute("aria-pressed", "false")
+        await inspector_toggle.click()
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
 
         await page.set_viewport_size({"width": 900, "height": 900})
@@ -425,6 +429,10 @@ async def test_inspector_debug_activation_and_responsive_shell(
         await expect(panel).to_be_visible(timeout=15000)
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
         await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(panel).to_be_visible(timeout=15000)
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=false&token={REBORN_V2_AUTH_TOKEN}"
+        )
         await expect(panel).to_have_count(0)
     finally:
         await context.close()
@@ -529,14 +537,28 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
 
         second_marker = f"turn-navigation-e2e-{uuid.uuid4()}"
+        await page.locator(SEL_V2["inspector_close"]).click()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_have_count(0)
+        inspector_run_prefix = (
+            f"/operator/inspector/threads/{thread_id}/runs/"
+        )
+        async with page.expect_request(
+            lambda request: inspector_run_prefix in request.url
+            and run_id not in request.url,
+            timeout=30000,
+        ) as background_observation:
+            async with httpx.AsyncClient(headers=headers) as client:
+                await _send_and_settle(
+                    client,
+                    reborn_v2_server,
+                    thread_id,
+                    second_marker,
+                    expected=2,
+                )
+        observed_request = await background_observation.value
+        assert inspector_run_prefix in observed_request.url
+
         async with httpx.AsyncClient(headers=headers) as client:
-            await _send_and_settle(
-                client,
-                reborn_v2_server,
-                thread_id,
-                second_marker,
-                expected=2,
-            )
             second_assistant = await _wait_for_assistant_message(
                 client,
                 reborn_v2_server,
@@ -544,7 +566,9 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             )
         second_run_id = second_assistant.get("turn_run_id")
         assert second_run_id and second_run_id != run_id, second_assistant
+        assert second_run_id in observed_request.url
 
+        await page.locator(SEL_V2["inspector_open"]).click()
         await page.locator("[data-testid='inspector-tab-activity']").click()
         activity = page.locator("[data-testid='inspector-activity-content']")
         await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible(
