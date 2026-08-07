@@ -148,6 +148,83 @@ fn chat_turn_rejects_multi_process_runs() {
     assert!(error.contains("--scenario chat-turn requires --processes 1"));
 }
 
+fn scripted_api_args() -> Args {
+    let mut args = test_args();
+    args.scenario = Scenario::ApiUserCapacity;
+    args.api_base_url = Some("http://127.0.0.1:4216".to_string());
+    args.api_scripted_tool = Some("memory_roundtrip".to_string());
+    args.mock_llm_bind = Some("127.0.0.1:19090".parse().expect("bind address parses"));
+    args
+}
+
+#[test]
+fn scripted_api_requires_api_scenario() {
+    let mut args = scripted_api_args();
+    args.scenario = Scenario::ChatTurn;
+
+    let error = validate_args(&args).expect_err("scripted mode needs the api scenario");
+
+    assert!(error.contains("--api-scripted-tool requires --scenario api-user-capacity"));
+}
+
+#[test]
+fn scripted_api_rejects_unknown_script_key() {
+    let mut args = scripted_api_args();
+    args.api_scripted_tool = Some("not_a_script".to_string());
+
+    let error = validate_args(&args).expect_err("unknown script key should be rejected");
+
+    assert!(error.contains("unknown --api-scripted-tool"));
+}
+
+#[test]
+fn scripted_api_requires_mock_llm_bind() {
+    let mut args = scripted_api_args();
+    args.mock_llm_bind = None;
+
+    let error = validate_args(&args).expect_err("scripted mode needs the mock sidecar");
+
+    assert!(error.contains("--api-scripted-tool requires --mock-llm-bind"));
+}
+
+#[test]
+fn scripted_api_requires_wait_for_assistant() {
+    let mut args = scripted_api_args();
+    args.api_wait_for_assistant = false;
+
+    let error = validate_args(&args).expect_err("scripted mode needs verdict polling");
+
+    assert!(error.contains("--api-scripted-tool requires --api-wait-for-assistant"));
+}
+
+#[test]
+fn scripted_api_rejects_out_of_range_doc_sizes() {
+    let mut args = scripted_api_args();
+    args.api_scripted_doc_sizes = vec![0];
+
+    let error = validate_args(&args).expect_err("zero-byte documents are meaningless");
+
+    assert!(error.contains("--api-scripted-doc-sizes values must be between 1 and"));
+}
+
+#[test]
+fn scripted_api_hot_writers_require_script_key() {
+    let mut args = test_args();
+    args.scenario = Scenario::ApiUserCapacity;
+    args.api_base_url = Some("http://127.0.0.1:4216".to_string());
+    args.api_hot_writers = 2;
+
+    let error = validate_args(&args).expect_err("hot writers need a script");
+
+    assert!(error.contains("--api-hot-writers requires --api-scripted-tool"));
+}
+
+#[test]
+fn scripted_api_accepts_valid_configuration() {
+    let args = scripted_api_args();
+    validate_args(&args).expect("valid scripted api configuration should pass validation");
+}
+
 #[test]
 fn prewarm_dispatches_secret_and_process_local_scenarios() {
     assert_eq!(
@@ -1370,6 +1447,9 @@ fn test_args() -> Args {
         api_poll_interval_ms: 250,
         api_request_timeout_ms: 10_000,
         api_setup_concurrency: 16,
+        api_scripted_tool: None,
+        api_scripted_doc_sizes: vec![4096, 32768, 131072, 1048576],
+        api_hot_writers: 0,
         api_threads_per_user: 1,
         thread_list_untitled: false,
         api_background_users: 0,
