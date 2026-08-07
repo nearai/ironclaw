@@ -169,7 +169,9 @@ print(resp.output_text)
 
 These are rejected with `400` so callers know they were not honoured:
 
-- `tool_choice` (always — there is no per-request tool-choice surface)
+- `tool_choice` on a deployment without external-tools support (with external
+  tools enabled it is accepted but currently ignored — there is no per-request
+  tool-choice surface)
 - Non-empty `tools` on a deployment without external-tools support
 - `temperature` outside `0.0`–`2.0`
 - A malformed `model` (empty, surrounding whitespace, over 256 bytes, or control characters)
