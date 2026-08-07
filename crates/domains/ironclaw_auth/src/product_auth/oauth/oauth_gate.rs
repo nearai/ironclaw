@@ -465,6 +465,19 @@ mod tests {
         resolved
     }
 
+    /// The shape a vendor that declares no scopes resolves to: every
+    /// hosted-MCP registration, whose dynamically registered vendor has no
+    /// manifest to declare them, and the bundled `notion-mcp` manifest, which
+    /// ships `scopes = []`.
+    fn acme_empty_ceiling_recipe() -> ResolvedVendorAuthRecipe {
+        let mut resolved = acme_vendor_recipe();
+        let VendorAuthRecipe::Oauth2Code(recipe) = &mut resolved.recipe else {
+            panic!("acme fixture is an oauth2_code recipe");
+        };
+        recipe.scopes.clear();
+        resolved
+    }
+
     fn engine_with_credentials(
         credentials: Arc<dyn crate::EngineClientCredentialsSource>,
     ) -> Arc<AuthEngine> {
@@ -631,6 +644,37 @@ mod tests {
         assert!(
             scopes.contains("msg:write"),
             "the sibling extension's scope must ride the same consent; got {scopes}"
+        );
+    }
+
+    /// A vendor with no declared scopes must produce an authorize URL with no
+    /// scope parameter at all, not one carrying `scope=`. RFC 6749 §3.3 makes
+    /// the parameter optional but requires at least one token when present,
+    /// and servers enforce that — Attio answers `scope=` with
+    /// `400 invalid_scope` (#7308). The gate is the caller that reaches this
+    /// first for a hosted-MCP vendor, since a blocked turn builds the URL
+    /// before any Settings-initiated connect ever runs.
+    #[tokio::test]
+    async fn gate_challenge_omits_scope_param_for_empty_ceiling() {
+        let mut fixture = GateFixture::with_recipe(acme_empty_ceiling_recipe());
+        fixture.requirement.provider_scopes.clear();
+        fixture.requirement.setup =
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                scopes: Vec::new(),
+            };
+        let flow = fixture.challenge().await;
+        let AuthChallenge::OAuthUrl {
+            authorization_url: url,
+            ..
+        } = flow.challenge.expect("authorization challenge")
+        else {
+            panic!("expected OAuth URL challenge");
+        };
+        let parsed = url::Url::parse(url.as_str()).expect("authorize URL is a valid URL");
+        assert!(
+            !parsed.query_pairs().any(|(name, _)| name == "scope"),
+            "an empty scope ceiling must omit the scope parameter, not send it \
+             empty; got {parsed}"
         );
     }
 

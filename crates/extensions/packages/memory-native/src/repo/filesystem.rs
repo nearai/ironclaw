@@ -30,7 +30,7 @@
 //! requires conflict detection (append, chunk replace). The
 //! `RootFilesystem::begin` multi-key transaction op is intentionally
 //! not relied upon — every consumer must work against backends that
-//! expose only CAS (see `ironclaw_filesystem/CLAUDE.md` invariant 2).
+//! expose only CAS (see `ironclaw_filesystem/CONTRACT.md` invariant 2).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

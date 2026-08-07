@@ -120,3 +120,27 @@ test("page-session stats tolerate malformed snapshot fields", () => {
     unavailable_samples: 0,
   });
 });
+
+test("page-session stats do not fabricate missing tool totals as zero", () => {
+  const accumulator = new InspectorSessionStatsAccumulator();
+  const missingToolTotals = stats({
+    model: "model-a",
+    calls: 1,
+    inputTokens: 10,
+  });
+  delete missingToolTotals.total_tool_calls;
+  delete missingToolTotals.successful_tool_calls;
+  delete missingToolTotals.failed_tool_calls;
+
+  accumulator.record("operator-a", "thread-a/run-1", missingToolTotals);
+  const total = accumulator.record("operator-a", "thread-a/run-2", stats({
+    model: "model-a",
+    calls: 1,
+    inputTokens: 10,
+    tools: 1,
+  }));
+
+  assert.equal(total.total_tool_calls, null);
+  assert.equal(total.successful_tool_calls, null);
+  assert.equal(total.failed_tool_calls, null);
+});

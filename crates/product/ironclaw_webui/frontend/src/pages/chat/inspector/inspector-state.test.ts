@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import { setAuthScope } from "../../../lib/auth-scope";
 import { ActivityKind } from "./activity-kind";
 import {
   INSPECTOR_RUN_HISTORY_KEY,
@@ -218,6 +219,78 @@ test("activity reducer replaces local lifecycle hints with authoritative diagnos
   assert.equal(rows.find((row) => row.kind === ActivityKind.TurnStarted)?.sequence, 1);
 });
 
+test("activity reducer gives mixed server and local rows one transitive order", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-mixed",
+      activity: [
+        { sequence: 1, event: activity("model_call_started", {
+          occurred_at: "2026-08-06T10:00:00Z",
+          model_call_id: "call-1",
+        }) },
+        { sequence: 2, event: activity("model_call_completed", {
+          occurred_at: "2026-08-06T08:00:00Z",
+          model_call_id: "call-1",
+        }) },
+      ],
+    },
+    [
+      {
+        local_id: "local-before-next-sequence",
+        update: { type: "activity", data: activity("stream_disconnected", {
+          occurred_at: "2026-08-06T09:00:00Z",
+        }) },
+      },
+      {
+        stream_id: "stream-mixed",
+        sequence: 3,
+        update: { type: "activity", data: activity("progress", {
+          occurred_at: "2026-08-06T07:00:00Z",
+        }) },
+      },
+      {
+        local_id: "local-after-next-sequence",
+        update: { type: "activity", data: activity("stream_resumed", {
+          occurred_at: "2026-08-06T06:00:00Z",
+        }) },
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    [
+      "stream-mixed:1",
+      "stream-mixed:2",
+      "local:local-before-next-sequence",
+      "stream-mixed:3",
+      "local:local-after-next-sequence",
+    ],
+  );
+  assert.equal(rows[0].pending, false);
+});
+
+test("activity reducer retains prompt preparation for every loop iteration", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-prompts",
+      activity: [
+        { sequence: 1, event: activity("prompt_prepared") },
+        { sequence: 2, event: activity("model_call_started", { model_call_id: "call-1" }) },
+        { sequence: 3, event: activity("model_call_completed", { model_call_id: "call-1" }) },
+        { sequence: 4, event: activity("prompt_prepared") },
+        { sequence: 5, event: activity("model_call_started", { model_call_id: "call-2" }) },
+      ],
+    },
+    [],
+  );
+
+  assert.deepEqual(
+    rows.filter((row) => row.kind === ActivityKind.PromptPrepared).map((row) => row.sequence),
+    [1, 4],
+  );
+});
+
 test("run navigation history is thread-scoped, deduplicated, and bounded", () => {
   const memory = storage();
   assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-1"]);
@@ -227,6 +300,14 @@ test("run navigation history is thread-scoped, deduplicated, and bounded", () =>
   const saved = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY]);
   assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
   assert.deepEqual(saved["thread-b"], ["run-b"]);
+
+  for (let index = 1; index <= 33; index += 1) {
+    rememberInspectorRun("bounded-thread", `run-${index}`, memory);
+  }
+  const bounded = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY])["bounded-thread"];
+  assert.equal(bounded.length, 32);
+  assert.equal(bounded[0], "run-2");
+  assert.equal(bounded.at(-1), "run-33");
 });
 
 test("stream metrics persist in the browser session without duplicate update counts", () => {
@@ -275,4 +356,28 @@ test("stream metrics persist in the browser session without duplicate update cou
   assert.equal(bounded.scopeOrder.length, 32);
   assert.equal(Object.keys(bounded.cursors).length, 32);
   assert.equal(bounded.scopeOrder[0], "thread-8/run-8");
+});
+
+test("stream metrics and cursors reset when the authenticated caller changes", () => {
+  const memory = storage();
+  try {
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-a" });
+    recordInspectorReconnect(memory);
+    recordInspectorDiagnosticUpdate(
+      "thread-a/run-a",
+      "stream-a:1",
+      "2026-08-06T10:00:00.000Z",
+      memory,
+    );
+
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-b" });
+    assert.deepEqual(readInspectorStreamMetrics(memory), {
+      reconnectCount: 0,
+      receivedUpdateCount: 0,
+      lastUpdateAt: null,
+    });
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), null);
+  } finally {
+    setAuthScope(null);
+  }
 });

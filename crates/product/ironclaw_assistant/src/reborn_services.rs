@@ -2748,7 +2748,7 @@ where
     /// implicit owner; otherwise the caller's persisted role must be admin or
     /// owner. The role is read from the directory on EVERY call (never cached),
     /// so a demoted admin loses access immediately — see
-    /// `product_surface/CLAUDE.md` ("No caching. Caching the authz result is
+    /// this crate's `AGENTS.md` ("No caching. Caching the authz result is
     /// explicitly forbidden").
     async fn authorize_admin(
         &self,

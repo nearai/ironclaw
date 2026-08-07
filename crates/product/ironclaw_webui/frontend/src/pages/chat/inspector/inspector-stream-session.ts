@@ -1,3 +1,4 @@
+import { authScope } from "../../../lib/auth-scope";
 import { shouldAcceptInspectorCursor } from "./inspector-state";
 
 export const INSPECTOR_STREAM_SESSION_KEY = "ironclaw:inspector-stream-session";
@@ -10,6 +11,7 @@ export interface InspectorStreamMetrics {
 }
 
 interface InspectorStreamSession extends InspectorStreamMetrics {
+  callerScope: string;
   cursors: Record<string, string>;
   scopeOrder: string[];
 }
@@ -23,8 +25,9 @@ function browserSessionStorage(): Storage | null {
   }
 }
 
-function emptySession(): InspectorStreamSession {
+function emptySession(callerScope = authScope()): InspectorStreamSession {
   return {
+    callerScope,
     reconnectCount: 0,
     receivedUpdateCount: 0,
     lastUpdateAt: null,
@@ -42,9 +45,17 @@ function safeCount(value: unknown): number {
 }
 
 function loadSession(storage: Pick<Storage, "getItem"> | null): InspectorStreamSession {
+  const callerScope = authScope();
   try {
     const parsed = JSON.parse(storage?.getItem(INSPECTOR_STREAM_SESSION_KEY) || "null");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptySession();
+    if (
+      !parsed
+      || typeof parsed !== "object"
+      || Array.isArray(parsed)
+      || parsed.callerScope !== callerScope
+    ) {
+      return emptySession(callerScope);
+    }
     const rawCursors = parsed.cursors && typeof parsed.cursors === "object"
       && !Array.isArray(parsed.cursors)
       ? parsed.cursors as Record<string, unknown>
@@ -57,6 +68,7 @@ function loadSession(storage: Pick<Storage, "getItem"> | null): InspectorStreamS
       : [];
     const scopeOrder = [...new Set(requestedOrder)].slice(-MAX_INSPECTOR_STREAM_SCOPES);
     return {
+      callerScope,
       reconnectCount: safeCount(parsed.reconnectCount),
       receivedUpdateCount: safeCount(parsed.receivedUpdateCount),
       lastUpdateAt: typeof parsed.lastUpdateAt === "string" ? parsed.lastUpdateAt : null,
@@ -66,7 +78,7 @@ function loadSession(storage: Pick<Storage, "getItem"> | null): InspectorStreamS
       scopeOrder,
     };
   } catch (_) {
-    return emptySession();
+    return emptySession(callerScope);
   }
 }
 

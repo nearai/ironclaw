@@ -37,6 +37,12 @@
 //! `ironclaw_authorization` / `ironclaw_capabilities`; nothing in this crate
 //! filters tools.
 
+/// Hot-swappable skill-activation strategies (profile `skill.activation.v1`).
+///
+/// Mirrors the memory-provider binding pattern: named strategies, fail-closed
+/// resolution, behavior-preserving default. See the module docs for why an
+/// agent-authored skill is unreachable under the historical criteria-only rule.
+pub mod activation_strategy;
 pub mod install_metadata;
 pub mod learning;
 pub mod management;

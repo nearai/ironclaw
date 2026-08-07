@@ -35,6 +35,7 @@ use ironclaw_host_api::turn::{
     TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgressRequest,
     ids::{CapabilityId, InvocationId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -164,9 +165,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
     tool_disclosure: ToolDisclosureMode,
-    /// #5647 RED-pin seam: pass-through to
-    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
-    narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
+    /// Test-only override for the Bridged-mode capability surface policy.
+    /// `None` preserves today's forced `CapabilitySurfacePolicy::allow_all()` behavior.
+    bridged_policy_override: Option<CapabilitySurfacePolicy>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -472,18 +473,26 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// #5647 RED-pin seam: pass-through to
-    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`.
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_surface_policy_for_bridged_test`.
     /// Only takes effect when paired with `.with_tool_disclosure_bridged()` —
     /// see that method's docs for the fail-fast guard on misuse.
-    pub fn with_narrowed_capability_allow_set_for_bridged_test(
-        mut self,
+    pub fn with_narrowed_capability_surface_policy_for_bridged_test(
+        self,
         ids: impl IntoIterator<Item = &'static str>,
     ) -> Self {
-        self.narrowed_bridged_allow_set = Some(
+        self.with_capability_surface_policy_for_bridged_test(CapabilitySurfacePolicy::allow_only(
             ids.into_iter()
-                .map(|id| CapabilityId::new(id).expect("test capability id must be valid"))
-                .collect(),
-        );
+                .map(|id| CapabilityId::new(id).expect("test capability id must be valid")),
+        ))
+    }
+
+    /// Pass a complete policy through the same production resolve-once wiring
+    /// used by Bridged disclosure and the capability-surface filter.
+    pub fn with_capability_surface_policy_for_bridged_test(
+        mut self,
+        policy: CapabilitySurfacePolicy,
+    ) -> Self {
+        self.bridged_policy_override = Some(policy);
         self
     }
 
@@ -709,8 +718,8 @@ impl RebornIntegrationHarnessBuilder {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
         }
-        if let Some(ids) = self.narrowed_bridged_allow_set {
-            group_builder = group_builder.with_narrowed_capability_allow_set_for_bridged_test(ids);
+        if let Some(policy) = self.bridged_policy_override {
+            group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
         }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
@@ -852,7 +861,7 @@ impl RebornIntegrationHarness {
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
             tool_disclosure: ToolDisclosureMode::Off,
-            narrowed_bridged_allow_set: None,
+            bridged_policy_override: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -2006,9 +2015,9 @@ impl RebornIntegrationHarness {
     /// dispatch-time execution-context resolution actually stamps on the run.
     ///
     /// That user is NOT the capability harness's fixed constructor user: the
-    /// production capability surface (`standalone_visible_capability_request` /
-    /// `standalone_resource_scope_for_run` in
-    /// `crates/ironclaw_composition/src/runtime/standalone.rs`) resolves
+    /// production capability surface (`visible_capability_request` /
+    /// `resource_scope_for_run` in
+    /// `crates/app/ironclaw_composition/src/runtime/capability_host.rs`) resolves
     /// the execution user per run as `thread owner → run actor → fixed
     /// fallback`, and every harness thread run carries an actor — so the fixed
     /// fallback never applies here. Seeding under the harness's fixed
