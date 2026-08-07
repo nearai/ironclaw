@@ -2442,6 +2442,25 @@ default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
 
+pub(crate) const WASM_SECRET_EXISTS_MANIFEST: &str = r#"
+id = "wasm-secrets"
+name = "WASM Secret Exists"
+version = "0.1.0"
+description = "WASM secret-exists probe extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/secret-exists.wasm"
+
+[[capabilities]]
+id = "wasm-secrets.secret_exists"
+description = "Probe secret-exists for attio_api_key"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
 pub(crate) const WASM_OPERATION_FAILED_MANIFEST: &str = r#"
 id = "wasm-accounting"
 name = "WASM Accounting Operation Failed"
@@ -2560,6 +2579,87 @@ pub(crate) const HTTP_TOOL_WAT: &str = r#"
     i32.store
     i32.const 56
     i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.3.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
+  (export "near:agent/tool@0.3.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
+  (export "near:agent/tool@0.3.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+pub(crate) const SECRET_EXISTS_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 1)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 128) "attio_api_key")
+  (data (i32.const 1024) "{\"type\":\"object\"}")
+  (data (i32.const 2048) "fixture description")
+  (data (i32.const 3072) "true")
+  (data (i32.const 3104) "false")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 19
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    (local $ptr i32)
+    (local $len i32)
+    i32.const 128
+    i32.const 13
+    call $secret_exists
+    if
+      i32.const 3072
+      local.set $ptr
+      i32.const 4
+      local.set $len
+    else
+      i32.const 3104
+      local.set $ptr
+      i32.const 5
+      local.set $len
+    end
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    local.get $ptr
+    i32.store
+    i32.const 56
+    local.get $len
     i32.store
     i32.const 60
     i32.const 0

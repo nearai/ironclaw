@@ -66,6 +66,7 @@ use ironclaw_wasm::{
     WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
+use secrecy::ExposeSecret;
 
 use crate::obligations::{
     NetworkObligationPolicyStore, RuntimeCredentialAccountResolver, RuntimeSecretInjectionStore,
@@ -94,6 +95,7 @@ mod tool_resolver;
 mod wasm_blocking;
 mod wasm_diagnostics;
 mod wasm_execution;
+mod wasm_secrets;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,
@@ -369,6 +371,17 @@ impl ProductAuthProviderRuntimePorts {
             .consume(source_scope, lease.id)
             .await
             .map_err(stage_secret_error)?;
+        // A "Configured" account whose resolved material is empty cannot
+        // authenticate anything. Stage the typed re-auth signal instead of a
+        // slot the guest would fail opaquely on (#7307) — mirrors the
+        // obligation-handler `stage_credential_material` boundary.
+        if secret.expose_secret().is_empty() {
+            tracing::debug!(
+                secret_handle = %source_handle.as_str(),
+                "stage_material_once: resolved credential material is empty; requiring re-auth"
+            );
+            return Err(ProductAuthCredentialStageError::AuthRequired);
+        }
         self.secret_injection_store
             .insert(target_scope, capability_id, target_handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)

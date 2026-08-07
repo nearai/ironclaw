@@ -877,6 +877,7 @@ where
             Arc::clone(&self.network_policy_store),
             Arc::clone(&self.runtime_http_egress),
             self.wasm_credential_provider.clone(),
+            Arc::clone(&self.secret_injection_store),
         )?);
         Ok(self.with_wasm_runtime(adapter))
     }
