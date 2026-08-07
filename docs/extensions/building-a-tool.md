@@ -14,8 +14,9 @@ The guide is grounded in the current GitHub, GSuite, and Notion implementations:
 
 - GitHub: bundled WASM capability provider under
   `crates/extensions/packages/github/`.
-- GSuite: bundled WASM capability providers for Gmail, Calendar, Docs, Drive,
-  Sheets, and Slides.
+- GSuite: bundled WASM capability providers for Docs, Drive, Sheets, and
+  Slides; Gmail and Calendar are bundled `first_party` runtimes sharing the
+  same `google` vendor.
 - Notion: bundled hosted HTTP MCP capability provider under
   `crates/extensions/packages/notion-mcp/`, with product
   auth / OAuth DCR wiring in Reborn composition.
@@ -75,7 +76,7 @@ Pick one lane first. Do not blend lanes to make a tool work.
 
 | Lane | Use when | Current examples | Main files |
 | --- | --- | --- | --- |
-| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
+| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Google Drive, Google Docs, Google Sheets, Google Slides (Gmail and Google Calendar are `first_party` runtimes, not WASM) | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
 | Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `crates/extensions/packages/<id>-mcp/manifest.toml`, schemas/prompts, `crates/extensions/ironclaw_extension_host/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
 | Channel surface (formerly "product adapter") | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram channel surfaces, not the main focus of this guide | the package's `[channel]` manifest section + its `ChannelAdapter` (`crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`); worked examples `crates/extensions/packages/{slack,telegram}`; see the `reborn-extension-surfaces` skill |
 
@@ -251,16 +252,25 @@ display_name = "Example account"
 authorization_endpoint = "https://example.com/oauth/authorize"
 token_endpoint = "https://example.com/oauth/token"
 scopes = ["records.read"]
+
+[auth.example.token_response]
+access_token = "/access_token"
 ```
+
+`token_response` is required for `oauth2_code` recipes — it maps JSON
+pointers in the provider's token response (at minimum `access_token`; add
+`refresh_token` / `expires_in` for expiring tokens, as Notion does).
 
 Host ports are derived from effects in v3 — do not declare
 `required_host_ports`. The derived entries are validation vocabulary checked
 against the host's `HostPortCatalog` allowlist; concrete host-port adapters
 are constructed by host-runtime services only after authorization and
-obligation preparation, never from the manifest. The full auth-recipe
-vocabulary (`oauth2_code`,
-`api_key`, token-response captures, identity maps) is worked in
-`crates/extensions/packages/slack/manifest.toml`.
+obligation preparation, never from the manifest. The worked `oauth2_code`
+examples (token-response captures, identity maps) are
+`crates/extensions/packages/slack/manifest.toml` and
+`crates/extensions/packages/notion-mcp/manifest.toml`; the worked `api_key`
+example (form fields plus a validation probe) is in
+`crates/extensions/packages/github/manifest.toml`.
 
 Do not use the legacy `[[host_api]]` / `[capability_provider.tools]` shape or
 top-level `[[capabilities]]` for new work. The registry still parses
@@ -603,7 +613,9 @@ The package module:
 - is collected through its row in `PACKAGES` in
   `crates/extensions/ironclaw_extension_support/src/packages/mod.rs`.
 
-Composition and the CLI consume packages as opaque bundles and never name one.
+Composition consumes packages as opaque bundles and never names one; the
+binary alone links the concrete channel-adapter crates (slack, telegram) and
+builds their binding table.
 Do not register package assets in composition — the old
 `available_extensions.rs` home is being dissolved.
 
@@ -759,8 +771,8 @@ extending it.
   `crates/extensions/packages/github/manifest.toml`
 - Google Drive WASM OAuth scopes by operation:
   `crates/extensions/packages/google-drive/manifest.toml`
-- Gmail and Google Calendar follow the bundled WASM GSuite manifest and runtime
-  shape.
+- Gmail and Google Calendar are bundled `first_party` runtimes sharing the
+  `google` vendor — a reference for the first-party lane, not for WASM.
 - Notion hosted MCP credential/effect semantics:
   `crates/extensions/packages/notion-mcp/manifest.toml`
 - Hosted MCP egress planner:
@@ -771,15 +783,19 @@ extending it.
   `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs`
 - Host HTTP egress service:
   `crates/kernel/ironclaw_host_runtime/src/egress/`
-- Manifest v2 contract:
-  `crates/extensions/ironclaw_extension_registry/src/v2.rs`
+- Manifest v3 contract (v2 remains the legacy/resolved model):
+  `crates/extensions/ironclaw_extension_registry/src/v3.rs`
 
 ## Quick implementation checklist
 
-1. Pick lane: WASM, hosted MCP, script, or product adapter.
-2. Create package assets under `assets/<extension>/`.
-3. Write manifest v2 with the capability-provider host API and make it flow
-   through extension registry discovery/publication.
+1. Pick the implementation: WASM (`[runtime] kind = "wasm"`), hosted MCP
+   (`[mcp]`), or a channel surface (`[channel]`).
+2. Create the package directory `crates/extensions/packages/<extension>/`
+   with `manifest.toml`, `schemas/`, `prompts/`, and any `wasm/` module.
+3. Write a `reborn.extension_manifest.v3` manifest with `[[tools]]` entries
+   (each with an `origin_gate_matrix`), `[[tools.credentials]]`, and an
+   `[auth.<vendor>]` recipe per credential vendor, and make it flow through
+   extension registry discovery/publication.
 4. Add schemas and prompt docs for every model-visible capability.
 5. Implement runtime code using host services only.
 6. Declare credentials with narrow HTTPS audiences and provider scopes.

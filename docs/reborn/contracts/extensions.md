@@ -202,11 +202,13 @@ the v2 resolved model this contract describes. Already-installed v2 manifests
 still parse as the legacy compatibility format; the older top-level
 `parameters_schema` manifest shape is no longer parsed on production discovery
 paths. The v3 authoring surface (`[[tools]]`, `[channel]`, `[auth.<vendor>]`,
-`[mcp]`, `origin_gate_matrix`) is specified in
-`docs/reborn/extension-runtime/overview.md` §3.
+`[mcp]`) is specified in `docs/reborn/extension-runtime/overview.md` §3;
+`origin_gate_matrix` is defined by `OriginGateMatrix` in
+`crates/contracts/ironclaw_host_api/src/capability.rs` and documented in
+`docs/extensions/building-a-tool.md`.
 
-In the legacy v2 authoring format shown in the examples below, every
-manifest — host-bundled exactly as installed — declares its sections through
+In the legacy v2 authoring format shown in the examples below — which no
+shipped package uses any more — a manifest declares its sections through
 `[[host_api]]` contracts; tools live under
 `[[host_api]] id = "ironclaw.capability_provider/v1"`. Top-level
 `[[capabilities]]` is rejected for every manifest source.
