@@ -8,6 +8,12 @@ import {
   isFinalAssistantMessage,
   isRunActivityMessage,
 } from "./stream-order-memory";
+import {
+  REQUEST_FAILURE_ID_PREFIX,
+  RUN_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  isRunFailureMessageId,
+} from "./message-types";
 
 function useHistorySourceForTest() {
   const helpers = readFileSync(
@@ -39,7 +45,13 @@ function useHistorySourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${helperLines.join("\n")}\n${lines.join(
+  const messageTypeHelpers = [
+    `const REQUEST_FAILURE_ID_PREFIX = ${JSON.stringify(REQUEST_FAILURE_ID_PREFIX)};`,
+    `const RUN_FAILURE_ID_PREFIX = ${JSON.stringify(RUN_FAILURE_ID_PREFIX)};`,
+    `const STREAM_FAILURE_ID_PREFIX = ${JSON.stringify(STREAM_FAILURE_ID_PREFIX)};`,
+    `const isRunFailureMessageId = ${isRunFailureMessageId.toString()};`,
+  ];
+  return `${helperLines.join("\n")}\n${messageTypeHelpers.join("\n")}\n${lines.join(
     "\n",
   )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh, nextCursorAfterFullRefresh, cursorPageCanMerge };`;
 }
@@ -906,7 +918,7 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   assert.equal(toolCard.toolResultPreview, "ok");
 });
 
-test("mergeFullRefresh keeps client-only failures beside the prompt that failed", () => {
+test("mergeFullRefresh keeps run failures beside the prompt that failed", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
@@ -939,6 +951,71 @@ test("mergeFullRefresh keeps client-only failures beside the prompt that failed"
   const firstFailure = merged.findIndex((message) => message.id === "err-run-1");
   const secondPrompt = merged.findIndex((message) => message.id === "msg-user-2");
   assert.equal(firstFailure + 1, secondPrompt);
+});
+
+test("mergeFullRefresh keeps a failed request with its client-only prompt", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const failedPrompt = {
+    id: "pending-failed",
+    role: "user",
+    content: "first attempt",
+    isOptimistic: false,
+    status: "error",
+  };
+  const requestFailure = {
+    id: "err-request-pending-failed",
+    role: "error",
+    content: "request failed",
+    requestForMessageId: failedPrompt.id,
+  };
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      failedPrompt,
+      requestFailure,
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,msg-assistant-1,pending-failed,err-request-pending-failed,msg-user-2,msg-assistant-2",
+  );
+
+  const mergedAtStart = mergeFullRefresh(
+    [
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    [
+      failedPrompt,
+      requestFailure,
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    mergedAtStart.map((message) => message.id).join(","),
+    "pending-failed,err-request-pending-failed,msg-user-2,msg-assistant-2",
+  );
 });
 
 test("mergeFullRefresh preserves paginated older timeline messages", () => {

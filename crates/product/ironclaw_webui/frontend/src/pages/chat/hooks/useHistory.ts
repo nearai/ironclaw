@@ -4,6 +4,11 @@ import { fetchTimeline } from "../../../lib/api";
 import { authScope } from "../../../lib/auth-scope";
 import { messagesFromTimeline } from "../lib/history-messages";
 import {
+  REQUEST_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  isRunFailureMessageId,
+} from "../lib/message-types";
+import {
   carryFinalAssistantOrderFlags,
   isFinalAssistantMessage,
   isLiveAssistantMessage,
@@ -503,6 +508,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
       freshSequenceWindow,
       currentSequenceWindow,
     );
+  const requestFailureTargetIds = requestFailureTargets(current);
   const preserved = current.filter((message, index) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -522,13 +528,16 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return latestLiveAssistantIndexByFinalizedRun.get(message.turnRunId) !== index;
     }
     if (isSeededOptimisticMessage(message)) return true;
+    if (preserveClientOnly && requestFailureTargetIds.has(message.id)) {
+      return true;
+    }
     if (
       preserveLoadedOlderTimelineMessages &&
       isLoadedOlderTimelineMessage(message, freshSequenceWindow.oldest)
     ) {
       return true;
     }
-    return preserveClientOnly && message.id.startsWith("err-");
+    return preserveClientOnly && isClientOnlyFailureMessage(message);
   });
   return preserved.length > 0
     ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
@@ -711,16 +720,20 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const currentAnchors = current.map((message) =>
     freshIndexForCurrentMessage(message, freshIndexById),
   );
+  const requestFailureTargetIds = requestFailureTargets(current);
+  const before = new Map();
   const after = new Map();
   const append = [];
 
   for (const message of anchoredPreserved) {
-    const isClientOnlyError =
-      typeof message?.id === "string" && message.id.startsWith("err-");
+    const isRequestFailurePairMember =
+      requestFailureTargetIds.has(message?.id) ||
+      requestFailureTargetId(message) !== null;
     if (
       !isRunActivityMessage(message) &&
       !isLiveAssistantMessage(message) &&
-      !isClientOnlyError
+      !isRunFailureMessageId(message?.id) &&
+      !isRequestFailurePairMember
     ) {
       append.push(message);
       continue;
@@ -737,19 +750,63 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
       const group = after.get(previousAnchor) || [];
       group.push(message);
       after.set(previousAnchor, group);
-    } else {
-      append.push(message);
+      continue;
     }
+    if (!isRequestFailurePairMember) {
+      append.push(message);
+      continue;
+    }
+    let nextAnchor = null;
+    for (let index = originalIndex + 1; index < currentAnchors.length; index += 1) {
+      if (currentAnchors[index] !== null) {
+        nextAnchor = currentAnchors[index];
+        break;
+      }
+    }
+    if (nextAnchor === null) {
+      append.push(message);
+      continue;
+    }
+    const group = before.get(nextAnchor) || [];
+    group.push(message);
+    before.set(nextAnchor, group);
   }
 
   const merged = [];
   for (const [index, message] of base.entries()) {
+    const beforeGroup = before.get(index);
+    if (beforeGroup) merged.push(...beforeGroup);
     merged.push(message);
     const group = after.get(index);
     if (group) merged.push(...group);
   }
   merged.push(...append);
   return merged;
+}
+
+function requestFailureTargetId(message) {
+  if (
+    typeof message?.id !== "string" ||
+    !message.id.startsWith(REQUEST_FAILURE_ID_PREFIX) ||
+    typeof message.requestForMessageId !== "string" ||
+    !message.requestForMessageId
+  ) {
+    return null;
+  }
+  return message.requestForMessageId;
+}
+
+function requestFailureTargets(messages) {
+  return new Set(messages.map(requestFailureTargetId).filter(Boolean));
+}
+
+function isClientOnlyFailureMessage(message) {
+  const id = typeof message?.id === "string" ? message.id : "";
+  return (
+    isRunFailureMessageId(id) ||
+    requestFailureTargetId(message) !== null ||
+    id.startsWith(STREAM_FAILURE_ID_PREFIX)
+  );
 }
 
 function mergeTimelineMessagesBySequence(fresh, preserved) {
