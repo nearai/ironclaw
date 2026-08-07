@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously stored shared-channel notification preferences fail closed at
   resolution.
 
+### Added
+
+- `telegram_allowed_channels` in the Telegram extension's deployment
+  configuration: group/supergroup chats are served only when listed there
+  (fail-closed), with each participant running as themselves once paired.
+  Previously any group the bot was added to ran as the deployment operator.
+
 ### Removed
 
 - The `slack_shared_subject_user_id` and `slack_subject_routes` Slack
