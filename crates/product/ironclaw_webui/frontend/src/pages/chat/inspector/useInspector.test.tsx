@@ -178,12 +178,19 @@ test("deduplicates cursors, rebases snapshots, and stops on forbidden", async ()
   assert.equal(latestState?.lastCursor, `${streamId}:2`);
 
   await act(async () => {
-    stream.message("diagnostic_rebase", `${streamId}:3`, {
-      latest_cursor: { stream_id: streamId, sequence: 3 },
+    stream.message("diagnostic_update", `${streamId}:3`, {
+      update: { type: "prompt_updated" },
+    });
+  });
+  assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+
+  await act(async () => {
+    stream.message("diagnostic_rebase", `${streamId}:4`, {
+      latest_cursor: { stream_id: streamId, sequence: 4 },
     });
   });
   assert.equal(latestState?.updates.length, 0);
-  assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+  assert.equal(vi.mocked(fetch).mock.calls.length, 3);
 
   await act(async () => stream.respond(403, "application/json"));
   assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);

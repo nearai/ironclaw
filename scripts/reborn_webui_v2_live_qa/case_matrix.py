@@ -339,8 +339,8 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_10e_slack_error_honesty": {
         "rows": ["10E"],
         "feature": (
-            "Slack error honesty: the exact Slack error code "
-            "(channel_not_found) reaches the user (pins host error-code erasure)"
+            "Slack error honesty: the canonical messaging error code "
+            "(messaging.unknown_conversation) reaches the user"
         ),
         "gate": "requires live Slack personal OAuth",
     },

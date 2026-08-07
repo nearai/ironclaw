@@ -17,7 +17,7 @@
 //! They never name the underlying `TurnCoordinator`, `SessionThreadService`,
 //! `LoopExitApplier`, `HostManagedModelGateway`, etc. directly. That is the
 //! property that satisfies the "narrow Reborn public surface" requirement
-//! pinned by `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
+//! pinned by `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -32,7 +32,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_assistant::inspector_store::InMemoryDiagnosticStore;
 use ironclaw_assistant::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
@@ -554,6 +553,7 @@ pub struct RebornRuntime {
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
+    pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -664,9 +664,6 @@ pub struct RebornRuntime {
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
-    /// Process-local inspector state shared by capture adapters and the
-    /// operator product surface. It is intentionally not persisted.
-    pub(crate) diagnostic_store: Arc<InMemoryDiagnosticStore>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
@@ -3638,6 +3635,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
+    let prompt_diagnostic_sink = Arc::new(
+        ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+            diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+            ironclaw_loop_host::DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY,
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+    )
+        as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),
@@ -3651,6 +3660,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
+        prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone
@@ -4228,6 +4238,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         scoped_filesystem,
         admin_secret_provisioner,
         project_service,
+        diagnostic_store,
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
@@ -4299,7 +4310,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,
-        diagnostic_store: Arc::new(InMemoryDiagnosticStore::default()),
         approval_interaction_service,
         auth_interaction_service,
         #[cfg(any(test, feature = "test-support"))]

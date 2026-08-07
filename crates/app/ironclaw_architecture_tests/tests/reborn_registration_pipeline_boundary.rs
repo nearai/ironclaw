@@ -217,7 +217,7 @@ struct ResolvedScopes {
 ///
 /// Same rule as `scripts/ci/lib/crate_tree.py`: a crate directory is the
 /// outermost directory under `crates/` that owns a `Cargo.toml`, so
-/// `crates/ironclaw_safety/fuzz/` and the bundled `assets/*/wasm-src/` guests
+/// `crates/substrates/ironclaw_safety/fuzz/` and the bundled `assets/*/wasm-src/` guests
 /// are attributed to the crate that already encloses them.
 struct CrateInventory {
     directories: Vec<String>,
@@ -296,7 +296,7 @@ fn collect_manifest_directories(
             // Build outputs, vendored frontend packages, and dotted directories
             // can hold manifests that are not workspace crates (`cargo-fuzz`
             // builds into `crates/<x>/fuzz/target/` by default; a pnpm install
-            // fills `crates/ironclaw_webui/frontend/node_modules` with thousands
+            // fills `crates/product/ironclaw_webui/frontend/node_modules` with thousands
             // of packages, some of which ship a `Cargo.toml` and `src/*.rs`).
             if name == "target" || name == "node_modules" || name.starts_with('.') {
                 continue;

@@ -26,8 +26,8 @@ use crate::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
-    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadContextWindowCache,
+    HostManagedToolResultContent, ModelCost, ProviderModelId, StaticModelCostTable,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
@@ -403,6 +403,24 @@ impl<P> HostManagedModelGateway for LlmProviderModelGateway<P>
 where
     P: LlmProvider + ?Sized + Send + Sync,
 {
+    fn diagnostic_effective_model(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<ProviderModelId> {
+        let route = self.policy.route_for(model_profile_id)?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        resolve_fallback_route(self.provider.as_ref(), fallback_index, &model_override)
+            .ok()
+            .and_then(|route| ProviderModelId::new(route.model).ok())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,

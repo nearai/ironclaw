@@ -11,7 +11,7 @@ Working rules for the claimed-work control plane. Orientation lives in
   - `crates/loop/ironclaw_agent_loop/AGENTS.md`
   - `crates/loop/ironclaw_loop_host/AGENTS.md`
   - `crates/kernel/ironclaw_turns/AGENTS.md`
-  - `crates/app/ironclaw_composition/CLAUDE.md`
+  - `crates/app/ironclaw_composition/CONTRACT.md`
 
 ## What This Crate Owns
 

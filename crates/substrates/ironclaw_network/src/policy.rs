@@ -94,7 +94,7 @@ pub fn parse_egress_limit(raw: &str) -> Result<u64, NetworkPolicyError> {
 ///
 /// This is the chokepoint for turning untrusted "extra allowed domain"
 /// strings into policy the enforcer will actually honor. It is stricter than
-/// [`NetworkTargetPattern::validate_declaration`] (`crates/ironclaw_host_api/
+/// [`NetworkTargetPattern::validate_declaration`] (`crates/contracts/ironclaw_host_api/
 /// src/action.rs`): that method accepts a bare `*` because some
 /// host-authored grants — e.g. `CapabilityNetworkProfile::DevWildcard`'s
 /// local-dev shell profile — legitimately mean "every host" and are reviewed

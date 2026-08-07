@@ -576,7 +576,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     //    registration-sourced list is unpopulated exactly when it matters.
     //
     // Pinned by `inline_secret_guard_is_a_safety_denylist_not_package_inventory`
-    // in `crates/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
+    // in `crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
     (
         "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
         "github",

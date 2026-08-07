@@ -5,7 +5,7 @@
 //! invisible to every integration test before this seam PR.
 //!
 //! Ground truth (verified against
-//! `crates/ironclaw_composition/src/runtime/standalone/surface_disclosure.rs`,
+//! `crates/loop/ironclaw_loop_host/src/surface_disclosure.rs`,
 //! NOT the plan doc's "must deny rather than execute" framing, which does not
 //! match the code): `wrap_surface_disclosure` never hides or denies
 //! a capability. It is a description/schema ANNOTATION layer, disabled unless

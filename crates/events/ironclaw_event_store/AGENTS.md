@@ -1,7 +1,7 @@
 # ironclaw_event_store — working rules
 
-Canonical crate guidance (this crate has no `CLAUDE.md`, by design — it is not
-in the root module-spec table). Orientation and public surface:
+Canonical crate guidance (the sibling `CLAUDE.md` is a symlink alias of this
+file, per `docs/reborn/guidance-conventions.md`). Orientation and public surface:
 [`README.md`](./README.md). Family boundary and the one-way pipeline rule:
 [`../AGENTS.md`](../AGENTS.md).
 

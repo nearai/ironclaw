@@ -10,7 +10,7 @@ use axum::{
 use http_body_util::BodyExt;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_contracts::{
-    inspector::{INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_UPDATES_VIEW},
+    inspector::{INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_UPDATES_VIEW},
     surface::{
         ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceInvokeRequest,
         ProductSurfaceInvokeResponse, ProductSurfaceQueryPage, ProductSurfaceQueryRequest,
@@ -58,6 +58,12 @@ impl ProductSurface for RecordingSurface {
         });
         let payload = match request.view_id.as_str() {
             id if id == INSPECTOR_SNAPSHOT_VIEW.id => serde_json::json!({ "snapshot": null }),
+            id if id == INSPECTOR_PROMPT_VIEW.id => serde_json::json!({
+                "prompt": {
+                    "components": [],
+                    "reconstructed_prompt": { "content": "system", "original_bytes": 6, "truncated": false },
+                }
+            }),
             id if id == INSPECTOR_UPDATES_VIEW.id
                 && request.cursor.as_deref() == Some("550e8400-e29b-41d4-a716-446655440000:7") =>
             {
@@ -109,6 +115,41 @@ impl ProductSurface for RecordingSurface {
     ) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError> {
         Err(ProductSurfaceError::service_unavailable(false))
     }
+}
+
+#[tokio::test]
+async fn prompt_requires_operator_access_and_dispatches_authenticated_scope() {
+    let surface = Arc::new(RecordingSurface::default());
+    let denied = router(Arc::clone(&surface), caller(false), true, 1)
+        .oneshot(
+            Request::get("/api/webchat/v2/operator/inspector/threads/thread-a/runs/run-a/prompt")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert!(surface.calls().is_empty());
+
+    let allowed = router(Arc::clone(&surface), caller(true), true, 1)
+        .oneshot(
+            Request::get("/api/webchat/v2/operator/inspector/threads/thread-a/runs/run-a/prompt")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    let calls = surface.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.view_id, INSPECTOR_PROMPT_VIEW.id);
+    assert_eq!(
+        calls[0].request.input,
+        serde_json::json!({ "thread_id": "thread-a", "run_id": "run-a" })
+    );
+    assert_eq!(calls[0].caller.tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(calls[0].caller.user_id.as_str(), "user-alpha");
 }
 
 fn caller(operator: bool) -> ProductSurfaceCaller {

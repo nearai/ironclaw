@@ -1097,7 +1097,7 @@ mod tests {
     // We render through `LlmError::AuthFailed { .. }.to_string()`
     // rather than calling `auth_guidance()` directly so that a change
     // to the outer `#[error(..)]` format string is also caught
-    // (test-through-the-caller discipline, per CLAUDE.md).
+    // (test-through-the-caller discipline, per `.claude/rules/testing.md`).
     // ------------------------------------------------------------------
 
     fn render_auth_failed(provider: &str) -> String {

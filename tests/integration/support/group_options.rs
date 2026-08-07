@@ -122,10 +122,22 @@ impl RebornIntegrationGroupBuilder {
     /// `build_text_only_host_with_profiled_capabilities` form is for test
     /// construction.
     pub fn with_narrowed_capability_surface_policy_for_bridged_test(
-        mut self,
+        self,
         ids: impl IntoIterator<Item = CapabilityId>,
     ) -> Self {
-        self.narrowed_bridged_policy = Some(CapabilitySurfacePolicy::allow_only(ids));
+        self.with_capability_surface_policy_for_bridged_test(CapabilitySurfacePolicy::allow_only(
+            ids,
+        ))
+    }
+
+    /// Override every dimension of the Bridged-mode capability surface policy.
+    /// This is the full-policy counterpart to the capability-id-only helper
+    /// above and exercises the same production resolve-once wiring.
+    pub fn with_capability_surface_policy_for_bridged_test(
+        mut self,
+        policy: CapabilitySurfacePolicy,
+    ) -> Self {
+        self.narrowed_bridged_policy = Some(policy);
         self
     }
 

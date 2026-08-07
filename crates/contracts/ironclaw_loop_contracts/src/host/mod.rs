@@ -43,7 +43,8 @@ pub use model::{
     AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,
     LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
     LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRequest, LoopPromptPort, ModelStreamChunk, ParentLoopOutput, PromptMode,
+    LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort, ModelStreamChunk,
+    ParentLoopOutput, PromptMode,
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,
