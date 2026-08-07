@@ -118,7 +118,11 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
 /// messaging framework, which landed through the queue's tolerance window;
 /// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_423;
+/// ✎ Re-equalized 2026-08-07 (gate audit): + 101 of merged main-side growth
+/// through the tolerance window since 08-05 had left 49 LOC of live headroom;
+/// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`,
+/// restoring the designed 150-LOC working window.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_524;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
