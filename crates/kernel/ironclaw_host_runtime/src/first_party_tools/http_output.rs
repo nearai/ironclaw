@@ -120,10 +120,11 @@ pub(super) fn classify_status(
 /// Serialize the shaped output as the failure diagnostic, trimming the response
 /// body so the serialized diagnostic stays within the model-visible diagnostic
 /// budget. The resolution boundary truncates the whole diagnostic string at
-/// `MODEL_DIAGNOSTIC_MAX_BYTES`, and `serde_json::Map` serializes keys in
-/// sorted order, so an untrimmed diagnostic would cut `status`, `auth_hint`,
-/// and the truncation envelope out of the model-visible text. Trimming here
-/// keeps the verdict fields intact and the diagnostic valid JSON.
+/// `MODEL_DIAGNOSTIC_MAX_BYTES` keeping the head, and `serde_json::Map`
+/// serializes keys in sorted order, so an untrimmed diagnostic would cut
+/// `status` and the truncation envelope (the last-sorted keys) out of the
+/// model-visible text. Trimming here keeps the verdict fields intact and the
+/// diagnostic valid JSON.
 fn bounded_failure_diagnostic(output: Value, status: u16) -> String {
     let Value::Object(mut output) = output else {
         return fallback_diagnostic(status);
