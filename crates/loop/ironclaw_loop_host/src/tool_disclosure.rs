@@ -64,7 +64,6 @@ const BRIDGE_CAPABILITY_PREFIX: &str = "ironclaw";
 pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
-const MAX_KEYWORD_SCORE: u32 = 30;
 
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
@@ -100,8 +99,6 @@ pub(crate) struct CapabilityCatalog {
 pub(crate) struct CatalogEntry {
     definition: ProviderToolDefinition,
     est_schema_tokens: u32,
-    search_blob: String,
-    search_terms: HashSet<String>,
     tier: ToolTier,
 }
 
@@ -138,9 +135,6 @@ impl CapabilityCatalog {
             })
             .map(|definition| {
                 let est_schema_tokens = estimate_definition_tokens(definition);
-                let search_blob =
-                    format!("{} {}", definition.name, definition.description).to_lowercase();
-                let search_terms = search_terms(&search_blob);
                 let tier = if is_core_tool_definition(definition)
                     || pinned_names.contains(definition.name.as_str())
                 {
@@ -151,8 +145,6 @@ impl CapabilityCatalog {
                 CatalogEntry {
                     definition: definition.clone(),
                     est_schema_tokens,
-                    search_blob,
-                    search_terms,
                     tier,
                 }
             })
@@ -418,10 +410,10 @@ impl DisclosureCaps {
 
 static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = LazyLock::new(
     || {
-        let definitions = vec![
+        let definitions = [
             bridge_tool_definition(
                 TOOL_SEARCH_NAME,
-                "Search the deferred tool catalog by name and description.",
+                "Search deferred tools by name, provider, capability, or parameter vocabulary.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -676,58 +668,6 @@ pub(crate) fn select_active_set(
     }
 }
 
-/// `permits` narrows results to the caller's capability-surface policy (#5712) —
-/// applied before `.take(limit)` so limit counts against the caller's own
-/// visible candidate set, not the full catalog.
-pub(crate) fn tool_search_rank(
-    catalog: &CapabilityCatalog,
-    query: &str,
-    limit: usize,
-    permits: impl Fn(&CapabilityId) -> bool,
-) -> Vec<String> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let query_lower = query.to_lowercase();
-    let query_terms: Vec<&str> = query_lower
-        .split_whitespace()
-        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
-        .filter(|term| !term.is_empty())
-        .collect();
-
-    if query_terms.is_empty() {
-        return Vec::new();
-    }
-
-    let mut scored: Vec<(String, u32)> = catalog
-        .entries
-        .iter()
-        .filter_map(|entry| {
-            if !permits(&entry.definition.capability_id) {
-                return None;
-            }
-            let score = score_tool_entry(entry, &query_terms);
-            if score > 0 {
-                Some((entry.definition.name.to_string(), score))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    scored.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| left.0.as_str().cmp(right.0.as_str()))
-    });
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(name, _score)| name)
-        .collect()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CatalogSearchResult {
     pub(crate) name: String,
@@ -838,29 +778,6 @@ fn sum_definition_tokens(definitions: &[(ProviderToolDefinition, u32)]) -> u32 {
         .fold(0_u32, |total, (_definition, est_schema_tokens)| {
             total.saturating_add(*est_schema_tokens)
         })
-}
-
-fn score_tool_entry(entry: &CatalogEntry, query_terms: &[&str]) -> u32 {
-    let mut keyword_score = 0_u32;
-    for term in query_terms {
-        if entry.definition.name.as_str().eq_ignore_ascii_case(term)
-            || entry.search_terms.contains(*term)
-        {
-            keyword_score = keyword_score.saturating_add(10);
-        } else if entry.search_blob.contains(term) {
-            keyword_score = keyword_score.saturating_add(5);
-        }
-    }
-    keyword_score.min(MAX_KEYWORD_SCORE)
-}
-
-fn search_terms(search_blob: &str) -> HashSet<String> {
-    search_blob
-        .split_whitespace()
-        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
-        .filter(|term| !term.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 fn bridge_tool_definition(
@@ -1411,7 +1328,7 @@ mod tests {
         );
         assert_eq!(
             bridges[0].description,
-            "Search the deferred tool catalog by name and description."
+            "Search deferred tools by name, provider, capability, or parameter vocabulary."
         );
     }
 
@@ -1982,8 +1899,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_rank_scores_deterministically() {
-        let definitions = vec![
+    fn tool_search_index_scores_deterministically() {
+        let definitions = [
             fixture_tool(
                 "http_fetch",
                 "Fetch an HTTP URL and return status and body.",
@@ -2000,35 +1917,13 @@ mod tests {
                 medium_schema(3),
             ),
         ];
-        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let index = crate::tool_search::AuthorizedToolSearchIndex::new(definitions.iter());
 
         assert_eq!(
-            tool_search_rank(&catalog, "search issue", 2, |_| true),
+            index.search("search issue", 2).names,
             vec!["github_issue_search"]
         );
-        assert_eq!(
-            tool_search_rank(&catalog, "read", 2, |_| true),
-            vec!["read_file"]
-        );
-        // #5712: a non-permitting allow-set filters a scoring match out.
-        assert_eq!(
-            tool_search_rank(&catalog, "read", 2, |_| false),
-            Vec::<String>::new()
-        );
-
-        let permit_checks = std::cell::Cell::new(0);
-        assert_eq!(
-            tool_search_rank(&catalog, "read", 2, |_| {
-                permit_checks.set(permit_checks.get() + 1);
-                false
-            }),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            permit_checks.get(),
-            definitions.len(),
-            "allow-set filtering must run before query scoring, including for non-matching entries"
-        );
+        assert_eq!(index.search("read", 2).names, vec!["read_file"]);
     }
 
     #[test]

@@ -1301,6 +1301,9 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            prompt_diagnostic_sink: Some(Arc::new(
+                ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default(),
+            )),
             reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the

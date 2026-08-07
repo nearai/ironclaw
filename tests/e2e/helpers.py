@@ -322,6 +322,7 @@ SEL_V2 = {
     "connection_status_toggle": "[data-testid='connection-status-toggle']",
     "connection_status_label": "[data-testid='connection-status-label']",
     "inspector_panel": "[data-testid='inspector-panel']",
+    "inspector_prompt_content": "[data-testid='inspector-prompt-content']",
     "inspector_tab_stats": "[data-testid='inspector-tab-stats']",
     "inspector_close": "[data-testid='inspector-close']",
     "inspector_open": "[data-testid='inspector-open']",

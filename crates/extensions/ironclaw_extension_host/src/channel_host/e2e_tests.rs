@@ -4648,6 +4648,94 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
     }
 }
 
+/// REGRESSION (OAuth post-bind provisioning): Slack's `conversations.open`
+/// response supplies the DM conversation id but not the workspace id. The
+/// generic target provider must complete that record with the active,
+/// connection-scoped workspace claim or the creator's personal destination
+/// disappears and trigger creation cannot bind delivery to their own DM.
+#[tokio::test]
+async fn generic_dm_target_inherits_active_workspace_when_record_omits_space() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(None, CHANNEL),
+        )
+        .await
+        .expect("provision DM target without workspace");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list");
+    let dm = listed
+        .iter()
+        .find(|entry| entry.summary.target_id.as_str().contains("personal-dm"))
+        .expect("workspace-less provisioned DM should remain available");
+    assert_eq!(
+        dm.summary.target_id.as_str(),
+        format!("slack:personal-dm:{TEAM}:{USER}")
+    );
+    let conversation = SlackPreferenceTargetCodec
+        .conversation_for_target(external_reply_target(dm))
+        .expect("personal-DM binding ref decodes");
+    assert_eq!(conversation.space_id(), Some(TEAM));
+    assert_eq!(conversation.conversation_id(), CHANNEL);
+
+    let resolved = provider
+        .resolve_outbound_delivery_target(&operator_caller(), &dm.summary.target_id)
+        .await
+        .expect("resolve succeeds")
+        .expect("listed personal-DM target resolves");
+    assert_eq!(resolved.summary.target_id, dm.summary.target_id);
+}
+
+/// A DM record from a different workspace must never be rebound to the
+/// currently active Slack connection. This prevents stale or tampered state
+/// from turning the compatibility fallback into cross-workspace delivery.
+#[tokio::test]
+async fn generic_dm_target_rejects_record_from_a_different_workspace() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some("T_OTHER_WORKSPACE"), CHANNEL),
+        )
+        .await
+        .expect("provision DM target for a different workspace");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list");
+    assert!(
+        listed
+            .iter()
+            .all(|entry| !entry.summary.target_id.as_str().contains("personal-dm")),
+        "a DM record from another workspace must fail closed: {listed:?}"
+    );
+
+    let active_workspace_binding = dm_reply_target_binding_ref();
+    assert!(
+        provider
+            .resolve_reply_target_binding(&operator_caller(), &active_workspace_binding)
+            .await
+            .expect("reply-target resolution succeeds")
+            .is_none(),
+        "an active-workspace binding must not resolve through a stored record from another workspace"
+    );
+}
+
 /// REGRESSION (migration tolerance): stored beta preferences embed the
 /// RETIRED setup installation id in their binding refs. Resolution must
 /// tolerate both ids — ownership is proven against caller-scoped generic
