@@ -44,6 +44,11 @@ function selectFiles(input, files) {
     configurable: true,
     value: files,
   });
+  Object.defineProperty(input, "value", {
+    configurable: true,
+    writable: true,
+    value: files.length > 0 ? `C:\\fakepath\\${files[0].name}` : "",
+  });
   act(() => input.dispatchEvent(new Event("change", { bubbles: true })));
 }
 
