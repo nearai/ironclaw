@@ -3839,10 +3839,10 @@ async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, FailureKind::FilesystemDenied);
+    assert_eq!(error, FailureKind::UnsupportedRunner);
     assert!(
         process_port.requests.lock().unwrap().is_empty(),
-        "hosted shell must fail at invocation-service resolution before the handler can run"
+        "hosted shell must fail at user-sandbox process resolution before the handler can run"
     );
 }
 
