@@ -847,6 +847,19 @@ fn classify_triggered_delivery_outcome(
             status,
             failure_kind,
         }),
+        // The parts did reach the vendor, so this must not drive a resend —
+        // but without a durable `Delivered` row it cannot authorize
+        // success-side state such as gate routes or terminal cleanup either,
+        // so it reports the same non-success failure as the claim-loss case.
+        // The vendor refs are dropped here: no triggered consumer acts on
+        // refs from an unconfirmed send. `Sending` is the last durably
+        // committed state.
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => {
+            Err(TriggeredNotificationFailure::DeliveryUnconfirmed {
+                status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+                failure_kind: None,
+            })
+        }
         CoordinatedDeliveryOutcome::DuplicateSuppressed { conversation, .. } => {
             Ok(ConfirmedTriggeredDelivery {
                 delivered_messages: Vec::new(),
@@ -1115,6 +1128,28 @@ mod outcome_classification_tests {
         ));
         assert_eq!(
             triggered_outcome_for_failure(&unconfirmed),
+            TriggeredRunDeliveryOutcomeKind::Failed
+        );
+
+        // Sent but not durably confirmed: not success, so no gate routes or
+        // terminal cleanup are authorized — but it is also not a resend
+        // trigger, since the parts did reach the vendor.
+        let delivered_unconfirmed =
+            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+                attempt: attempt(None),
+                conversation: conversation(),
+                vendor_message_refs: vec!["triggered-unconfirmed-ref".to_string()],
+            })
+            .expect_err("an unconfirmed send is not success");
+        assert!(matches!(
+            &delivered_unconfirmed,
+            TriggeredNotificationFailure::DeliveryUnconfirmed {
+                status: OutboundDeliveryStatus::Sending,
+                failure_kind: None
+            }
+        ));
+        assert_eq!(
+            triggered_outcome_for_failure(&delivered_unconfirmed),
             TriggeredRunDeliveryOutcomeKind::Failed
         );
 

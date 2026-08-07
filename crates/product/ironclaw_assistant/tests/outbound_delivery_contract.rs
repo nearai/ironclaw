@@ -1337,9 +1337,11 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
 /// would confirm it fails (e.g. a backend outage right after vendor egress).
 /// The coordinator must not report `Delivered` in that case — this repo's
 /// stated invariant is that only a durable `Delivered` row confirms success
-/// — so it reports the same `ExistingDeliveryUnconfirmed` non-success outcome
-/// used elsewhere in this file for "the authoritative state does not prove
-/// successful vendor delivery", rather than a false confirmation.
+/// — so it reports `DeliveredUnconfirmed`, the weaker success-shaped outcome
+/// that still carries the real vendor message refs it just obtained. It must
+/// not report `ExistingDeliveryUnconfirmed`: that variant is the claim-loss
+/// case, where no vendor egress happened on this call and there are no refs
+/// to carry.
 #[tokio::test]
 async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
     let scope = scope();
@@ -1377,15 +1379,22 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         .await
         .expect("delivery drives even when the terminal write fails");
 
-    assert!(
-        matches!(
-            outcome,
-            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
-                status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
-                failure_kind: None,
-            }
-        ),
-        "expected an unconfirmed non-success outcome, got {outcome:?}"
+    let CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+        conversation,
+        vendor_message_refs,
+        ..
+    } = &outcome
+    else {
+        panic!("expected an unconfirmed-but-sent outcome, got {outcome:?}");
+    };
+    // The refs are the real ones the adapter returned, not a placeholder: the
+    // send happened, only its durable confirmation did not.
+    assert_eq!(vendor_message_refs, &vec!["ts-100".to_string()]);
+    assert_eq!(
+        conversation,
+        &ExternalConversationRef::new(None, "tg-chat-123", Some("topic-7"), Some("msg-42"))
+            .expect("valid external conversation"),
+        "the resolved target conversation rides along, not a placeholder"
     );
     assert_eq!(
         adapter.deliver_calls(),

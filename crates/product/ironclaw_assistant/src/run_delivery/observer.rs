@@ -1354,6 +1354,19 @@ fn classify_observed_delivery_outcome(
             status,
             failure_kind,
         }),
+        // The parts did reach the vendor, so this must not drive a resend —
+        // but without a durable `Delivered` row it cannot authorize
+        // success-side route publication or cleanup either, so it reports the
+        // same non-success error as the claim-loss case. The vendor refs are
+        // dropped here: nothing downstream of this classifier consumes refs
+        // from an unconfirmed send, and `DeliveryUnconfirmed` carries no slot
+        // for them. `Sending` is the last durably committed state.
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => {
+            Err(RunDeliveryError::DeliveryUnconfirmed {
+                status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+                failure_kind: None,
+            })
+        }
         CoordinatedDeliveryOutcome::Delivered {
             conversation,
             vendor_message_refs,
@@ -1688,6 +1701,25 @@ mod outcome_classification_tests {
             }
         ));
         assert_eq!(delivery_failure_feedback(&unconfirmed), None);
+
+        // Sent but not durably confirmed: still not success (no route
+        // publication), and still no user-facing feedback — the message did
+        // reach the vendor, so nothing here should invite a resend.
+        let delivered_unconfirmed =
+            classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+                attempt: attempt(None),
+                conversation: conversation(),
+                vendor_message_refs: vec!["vendor-unconfirmed".to_string()],
+            })
+            .expect_err("an unconfirmed send is not success");
+        assert!(matches!(
+            &delivered_unconfirmed,
+            RunDeliveryError::DeliveryUnconfirmed {
+                status: OutboundDeliveryStatus::Sending,
+                failure_kind: None
+            }
+        ));
+        assert_eq!(delivery_failure_feedback(&delivered_unconfirmed), None);
 
         let delivered_conversation = conversation();
         let delivered = classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::Delivered {

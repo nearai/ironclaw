@@ -211,14 +211,15 @@ pub enum CoordinatedDeliveryOutcome {
         /// route, but does not fabricate a vendor message reference.
         conversation: Option<ExternalConversationRef>,
     },
-    /// The durable delivery fact does not prove successful vendor delivery,
-    /// either because another caller already advanced it past `Prepared`
-    /// without reaching `Delivered`, or because this call's own terminal
-    /// write did not durably land (the adapter may have reported success,
-    /// but the store write that would confirm it failed). `status` and
-    /// `failure_kind` reflect the best-known durable state — the last state
-    /// this call is certain committed, not necessarily a fresh read — never
-    /// a fabricated `Delivered`.
+    /// Another caller already advanced the durable delivery row past
+    /// `Prepared` without reaching `Delivered`, so this call lost the
+    /// sole-writer claim and performed no vendor egress of its own — it holds
+    /// no vendor evidence to report. `status` and `failure_kind` reflect the
+    /// best-known durable state — the last state this call is certain
+    /// committed, not necessarily a fresh read — never a fabricated
+    /// `Delivered`. The case where this call *did* reach the vendor but could
+    /// not durably confirm it is
+    /// [`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`], not this variant.
     ExistingDeliveryUnconfirmed {
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
@@ -228,6 +229,24 @@ pub enum CoordinatedDeliveryOutcome {
         attempt: OutboundDeliveryAttempt,
         /// The resolved target conversation, so emitters can record follow-up
         /// state (gate routes, cleanup targets) without vendor knowledge.
+        conversation: ExternalConversationRef,
+        vendor_message_refs: Vec<String>,
+    },
+    /// The adapter reported every part sent — `vendor_message_refs` are real
+    /// vendor evidence — but the terminal `Sending -> Delivered` write that
+    /// would confirm it did not durably land. Only a durable `Delivered` row
+    /// confirms success, so this call may not report
+    /// [`CoordinatedDeliveryOutcome::Delivered`]; `Sending` is the last state
+    /// it is certain committed and recovery reconciles the row from there.
+    ///
+    /// Unlike [`CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed`] —
+    /// the claim-loss case, where this call never reached the vendor — the
+    /// send genuinely happened here, so consumers must not treat this as a
+    /// reason to resend. It is deliberately success-shaped rather than an
+    /// error: the message already reached the vendor.
+    DeliveredUnconfirmed {
+        attempt: OutboundDeliveryAttempt,
+        /// The resolved target conversation the parts were sent to.
         conversation: ExternalConversationRef,
         vendor_message_refs: Vec<String>,
     },
@@ -751,14 +770,18 @@ impl DeliveryCoordinator {
                             // The adapter accepted every part, but the
                             // durable row never reached `Delivered` — the
                             // PR invariant is that only a durable
-                            // `Delivered` row confirms success, so report
-                            // the closest existing non-success fit instead
-                            // of a false confirmation. `Sending` is the
-                            // last state this call is certain committed;
-                            // recovery reconciles the row from there.
-                            return Ok(CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
-                                status: OutboundDeliveryStatus::Sending,
-                                failure_kind: None,
+                            // `Delivered` row confirms success, so this must
+                            // not report a false confirmation. The vendor
+                            // refs just obtained are real evidence though, so
+                            // report the weaker success-shaped outcome that
+                            // carries them rather than discarding them.
+                            // `Sending` is the last state this call is
+                            // certain committed; recovery reconciles the row
+                            // from there.
+                            return Ok(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+                                attempt,
+                                conversation,
+                                vendor_message_refs: sent_refs,
                             });
                         }
                         return Ok(CoordinatedDeliveryOutcome::Delivered {
