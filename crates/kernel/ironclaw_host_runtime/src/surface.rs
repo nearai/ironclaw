@@ -50,8 +50,9 @@ pub struct VisibleCapability {
     /// Redacted declarative capability descriptor from the extension registry.
     pub descriptor: CapabilityDescriptor,
     /// Provenance-backed trust for the model-visible description. Unknown
-    /// sources remain untrusted; only registry-installed packages cross the
-    /// signature/digest-verifying catalog boundary.
+    /// sources remain untrusted; registry-installed packages cross the
+    /// signature/digest-verifying catalog boundary, and host-bundled
+    /// packages are compiled or shipped with the binary itself.
     pub description_trust: CapabilityDescriptionTrust,
     /// Current visibility status for this context and policy.
     pub access: VisibleCapabilityAccess,
@@ -248,13 +249,21 @@ impl<'a> CapabilityCatalog<'a> {
             .get_extension(&descriptor.provider)
             .map(|package| package.manifest.source)
         {
-            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
-            Some(
-                ManifestSource::HostBundled
-                | ManifestSource::InstalledLocal
-                | ManifestSource::UserRegistered,
-            )
-            | None => CapabilityDescriptionTrust::Untrusted,
+            // Host-bundled manifests are compiled or shipped with the binary —
+            // the only source eligible for effective FirstParty/System trust
+            // (`ManifestSource` docs) — so their repo-authored descriptions
+            // cross the verified boundary exactly like signature/digest-
+            // verified catalog installs. Leaving them untrusted routes
+            // compiled-in text through the strict prompt-text denylist, which
+            // silently omitted `builtin.extension_register_hosted_mcp` from
+            // every model prompt ("browser authorization-code flow" matched
+            // the "authorization" credential pattern).
+            Some(ManifestSource::HostBundled | ManifestSource::RegistryInstalled) => {
+                CapabilityDescriptionTrust::VerifiedCatalog
+            }
+            Some(ManifestSource::InstalledLocal | ManifestSource::UserRegistered) | None => {
+                CapabilityDescriptionTrust::Untrusted
+            }
         }
     }
 

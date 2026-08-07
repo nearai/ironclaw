@@ -1,17 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import { ActivityKind } from "./activity-kind";
+import {
+  INSPECTOR_RUN_HISTORY_KEY,
+  MAX_INSPECTOR_ACTIVITY_ENTRIES,
+  reduceInspectorActivity,
+  rememberInspectorRun,
+} from "./inspector-activity";
 import {
   INSPECTOR_HEALTH,
   INSPECTOR_PREFERENCES_KEY,
   healthForInspectorStatus,
-  inspectorDebugEnabled,
   inspectorViewportMode,
-  latestInspectorRunId,
   readInspectorPreferences,
   shouldAcceptInspectorCursor,
   writeInspectorPreferences,
 } from "./inspector-state";
+import {
+  inspectorDebugEnabled,
+  latestInspectorRunId,
+} from "./inspector-shell";
 
 function storage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -28,6 +37,20 @@ test("debug activation accepts only the explicit true query value", () => {
   assert.equal(inspectorDebugEnabled("?debug=false"), false);
   assert.equal(inspectorDebugEnabled("?debug=1"), false);
   assert.equal(inspectorDebugEnabled(""), false);
+});
+
+test("debug activation fails closed when query parsing throws", () => {
+  const OriginalURLSearchParams = globalThis.URLSearchParams;
+  globalThis.URLSearchParams = class URLSearchParamsFailure {
+    constructor() {
+      throw new TypeError("query parsing unavailable");
+    }
+  } as typeof URLSearchParams;
+  try {
+    assert.equal(inspectorDebugEnabled("?debug=true"), false);
+  } finally {
+    globalThis.URLSearchParams = OriginalURLSearchParams;
+  }
 });
 
 test("preferences are session-scoped, validated, and round-trip", () => {
@@ -93,4 +116,176 @@ test("HTTP status classification distinguishes auth, absence, and retry", () => 
   assert.equal(healthForInspectorStatus(404), INSPECTOR_HEALTH.UNAVAILABLE);
   assert.equal(healthForInspectorStatus(503), INSPECTOR_HEALTH.RECONNECTING);
   assert.equal(healthForInspectorStatus(400), INSPECTOR_HEALTH.DISCONNECTED);
+});
+
+function activity(kind: string, options: Record<string, unknown> = {}) {
+  return {
+    occurred_at: options.occurred_at || "2026-08-06T10:00:00Z",
+    kind,
+    iteration: options.iteration ?? null,
+    activity_id: options.activity_id ?? null,
+    model_call_id: options.model_call_id ?? null,
+    summary: options.summary ?? null,
+  };
+}
+
+test("activity reducer orders, deduplicates, and settles correlated model calls", () => {
+  const snapshot = {
+    stream_id: "stream-a",
+    activity: [
+      { sequence: 3, event: activity("model_call_completed", { model_call_id: "call-a" }) },
+      { sequence: 1, event: activity("turn_started") },
+      { sequence: 2, event: activity("model_call_started", { model_call_id: "call-a" }) },
+    ],
+  };
+  const rows = reduceInspectorActivity(snapshot, [
+    {
+      stream_id: "stream-a",
+      sequence: 3,
+      update: { type: "activity", data: activity("model_call_completed", { model_call_id: "call-a" }) },
+    },
+    {
+      stream_id: "stream-a",
+      sequence: 4,
+      update: { type: "activity", data: activity("model_call_started", { model_call_id: "call-b" }) },
+    },
+  ]);
+  assert.deepEqual(rows.map((row) => row.sequence), [1, 2, 3, 4]);
+  assert.equal(rows[1].pending, false);
+  assert.equal(rows[3].pending, true);
+});
+
+test("activity reducer bounds retention and keeps transport events", () => {
+  const activityEntries = Array.from(
+    { length: MAX_INSPECTOR_ACTIVITY_ENTRIES + 5 },
+    (_, index) => ({ sequence: index + 1, event: activity("progress") }),
+  );
+  const rows = reduceInspectorActivity(
+    { stream_id: "stream-a", activity: activityEntries },
+    [{
+      local_id: "transport-1",
+      update: { type: "activity", data: activity("stream_resumed", { occurred_at: "2026-08-06T11:00:00Z" }) },
+    }],
+  );
+  assert.equal(rows.length, MAX_INSPECTOR_ACTIVITY_ENTRIES);
+  assert.equal(rows.at(-1)?.kind, "stream_resumed");
+  assert.equal(rows[0].sequence, 7);
+});
+
+test("activity reducer replaces local lifecycle hints with authoritative diagnostics", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-authoritative",
+      activity: [{ sequence: 1, event: activity("turn_started") }],
+    },
+    [
+      {
+        local_id: "product-turn",
+        update: { type: "activity", data: activity("turn_started") },
+      },
+      {
+        local_id: "disconnect-1",
+        update: { type: "activity", data: activity("stream_disconnected") },
+      },
+      {
+        local_id: "disconnect-2",
+        update: { type: "activity", data: activity("stream_disconnected") },
+      },
+    ],
+  );
+
+  assert.equal(rows.filter((row) => row.kind === ActivityKind.TurnStarted).length, 1);
+  assert.equal(rows.filter((row) => row.kind === ActivityKind.StreamDisconnected).length, 2);
+  assert.equal(rows.find((row) => row.kind === ActivityKind.TurnStarted)?.sequence, 1);
+});
+
+test("activity reducer gives mixed server and local rows one transitive order", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-mixed",
+      activity: [
+        { sequence: 1, event: activity("model_call_started", {
+          occurred_at: "2026-08-06T10:00:00Z",
+          model_call_id: "call-1",
+        }) },
+        { sequence: 2, event: activity("model_call_completed", {
+          occurred_at: "2026-08-06T08:00:00Z",
+          model_call_id: "call-1",
+        }) },
+      ],
+    },
+    [
+      {
+        local_id: "local-before-next-sequence",
+        update: { type: "activity", data: activity("stream_disconnected", {
+          occurred_at: "2026-08-06T09:00:00Z",
+        }) },
+      },
+      {
+        stream_id: "stream-mixed",
+        sequence: 3,
+        update: { type: "activity", data: activity("progress", {
+          occurred_at: "2026-08-06T07:00:00Z",
+        }) },
+      },
+      {
+        local_id: "local-after-next-sequence",
+        update: { type: "activity", data: activity("stream_resumed", {
+          occurred_at: "2026-08-06T06:00:00Z",
+        }) },
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    [
+      "stream-mixed:1",
+      "stream-mixed:2",
+      "local:local-before-next-sequence",
+      "stream-mixed:3",
+      "local:local-after-next-sequence",
+    ],
+  );
+  assert.equal(rows[0].pending, false);
+});
+
+test("activity reducer retains prompt preparation for every loop iteration", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-prompts",
+      activity: [
+        { sequence: 1, event: activity("prompt_prepared") },
+        { sequence: 2, event: activity("model_call_started", { model_call_id: "call-1" }) },
+        { sequence: 3, event: activity("model_call_completed", { model_call_id: "call-1" }) },
+        { sequence: 4, event: activity("prompt_prepared") },
+        { sequence: 5, event: activity("model_call_started", { model_call_id: "call-2" }) },
+      ],
+    },
+    [],
+  );
+
+  assert.deepEqual(
+    rows.filter((row) => row.kind === ActivityKind.PromptPrepared).map((row) => row.sequence),
+    [1, 4],
+  );
+});
+
+test("run navigation history is thread-scoped, deduplicated, and bounded", () => {
+  const memory = storage();
+  assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-1"]);
+  assert.deepEqual(rememberInspectorRun("thread-a", "run-2", memory), ["run-1", "run-2"]);
+  assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-2", "run-1"]);
+  assert.deepEqual(rememberInspectorRun("thread-b", "run-b", memory), ["run-b"]);
+  const saved = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY]);
+  assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
+  assert.deepEqual(saved["thread-b"], ["run-b"]);
+
+  for (let index = 1; index <= 33; index += 1) {
+    rememberInspectorRun("bounded-thread", `run-${index}`, memory);
+  }
+  const bounded = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY])["bounded-thread"];
+  assert.equal(bounded.length, 32);
+  assert.equal(bounded[0], "run-2");
+  assert.equal(bounded.at(-1), "run-33");
 });
