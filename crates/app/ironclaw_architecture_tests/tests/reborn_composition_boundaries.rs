@@ -20,14 +20,12 @@ use ratchet_support::{crate_path, workspace_root};
 const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_auth",
     "ironclaw_host_api",
-    "ironclaw_storage",
     "ironclaw_filesystem",
     "ironclaw_event_log",
     "ironclaw_event_projections",
     "ironclaw_event_streams",
     "ironclaw_extension_registry",
     "ironclaw_authorization",
-    "ironclaw_approvals",
     "ironclaw_approvals",
     "ironclaw_resources",
     "ironclaw_trust",
@@ -47,7 +45,6 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_openai_compat",
     "ironclaw_telegram_extension",
     "ironclaw_assistant",
-    "ironclaw_assistant",
     "ironclaw_triggers",
 ];
 
@@ -55,8 +52,14 @@ const SUBSTRATE_CRATES: &[&str] = &[
 fn no_substrate_crate_depends_on_composition_root() {
     let dependencies = workspace_dependencies();
     for substrate in SUBSTRATE_CRATES {
+        // Fail closed on an unresolvable entry: the silent `continue` this
+        // replaces let `ironclaw_storage` sit in this list long after the
+        // crate was deleted — a row that resolves to nothing polices nothing.
         let Some(actual) = dependencies.get(*substrate) else {
-            continue;
+            panic!(
+                "{substrate} is listed in SUBSTRATE_CRATES but is not a workspace package; \
+                 remove the stale entry (or fix the name) so this list keeps matching the tree"
+            );
         };
         assert!(
             !actual.iter().any(|dep| dep == COMPOSITION_CRATE),
