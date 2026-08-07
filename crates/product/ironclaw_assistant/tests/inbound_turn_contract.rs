@@ -16,6 +16,7 @@ use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
@@ -27,14 +28,14 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, InMemoryHostInputQueue,
-    JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
+    CapabilityWriteResult, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostInputBatch, HostInputEnqueuePort, HostInputEnvelope, HostInputQueue, HostInputQueueError,
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, InMemoryHostInputQueue, JsonSpawnSubagentInputCodec,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
@@ -316,8 +317,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 
@@ -776,6 +777,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
@@ -949,6 +951,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
@@ -1138,6 +1141,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,

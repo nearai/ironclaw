@@ -1,6 +1,6 @@
 /// Test double substituting the bottom-of-stack `NetworkHttpTransport` (the
 /// would-be socket) underneath the REAL production `PolicyNetworkHttpEgress`
-/// (`crates/ironclaw_network/src/egress.rs`). Real network-policy enforcement
+/// (`crates/substrates/ironclaw_network/src/egress.rs`). Real network-policy enforcement
 /// (allowlist/scheme/port, private-IP denial) and DNS resolution run before
 /// this transport is ever reached — it only sees requests that already
 /// cleared policy. Distinct from `RecordingNetworkHttpEgress`, which

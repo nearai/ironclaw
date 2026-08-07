@@ -4340,6 +4340,7 @@ dependencies = [
  "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_memory",
+ "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_openai_compat",
  "ironclaw_outbound",

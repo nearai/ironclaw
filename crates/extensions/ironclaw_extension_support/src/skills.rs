@@ -102,13 +102,9 @@ struct ParsedInstallFile {
 
 /// Normalize a `builtin.skill_install` input before [`dispatch`] sees it.
 ///
-/// Inline-`content` installs pass through untouched. A `url` install is
-/// resolved here — the HTTPS/GitHub source is fetched through the mediated
-/// egress port on `fetch`, and the fetched SKILL.md plus any bundle files are
-/// rewritten into the same `content`/`files` shape the inline form uses, with
-/// `source`/`source_url` recording the provenance. Anything else (both, or
-/// neither, or `url` combined with `files`/`source`/`source_url`) is an input
-/// error.
+/// Inline installs (`content`, optionally with `files`) pass through untouched. A `url` install is
+/// fetched through the mediated egress port and rewritten into that same shape, with
+/// `source`/`source_url` recording provenance. Anything else is an input error.
 ///
 /// `usage` accumulates the fetch's network egress so the host runtime can
 /// account for a failed install exactly as it accounts for a successful one.
@@ -127,32 +123,46 @@ pub async fn resolve_install_input(
         .get("url")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    // `files`, `source` and `source_url` are PROVENANCE fields this resolver
-    // sets itself on the url path. A caller may never supply them, on either
-    // arm, and the two arms refuse them differently on purpose:
+    // `source` and `source_url` are PROVENANCE fields this resolver sets itself
+    // on the url path. A caller may never supply them, on either arm, and the two
+    // arms refuse them differently on purpose:
     //
-    //   * inline `content` + any of them -> hard `InputEncode`, nothing written.
-    //     Accepting them would let a caller forge provenance (claim an inline
-    //     skill was installed from a trusted URL) or smuggle arbitrary bundle
-    //     files past the fetch. Pinned by
-    //     `builtin_skill_install_rejects_hidden_url_install_fields`.
-    //   * `url` + any of them -> the url arm below rebuilds a fresh object from
-    //     the fetched payload and simply does not carry them over, so the
-    //     install succeeds with the caller's files DROPPED (`files_installed`
-    //     is 0). Pinned by
+    //   * inline `content` + either of them -> hard `InputEncode`, nothing
+    //     written. Accepting them would let a caller forge provenance: claim its
+    //     own output was fetched from a trusted URL. Pinned by
+    //     `builtin_skill_install_rejects_forged_provenance_fields` and, with a
+    //     bundle attached as well, by
+    //     `builtin_skill_install_rejects_a_bundle_that_also_forges_provenance`.
+    //   * `url` + either of them, or `url` + `files` -> the url arm below
+    //     rebuilds a fresh object from the fetched payload and simply does not
+    //     carry them over, so the install succeeds with the caller's files
+    //     DROPPED (`files_installed` is 0). Pinned by
     //     `builtin_skill_install_url_path_ignores_caller_supplied_hidden_bundle_files`.
     //
-    // Do not "fix" the asymmetry by making the url arm reject, and do not relax
-    // the inline arm to accept a bundle: `dispatch_install` reading `files` is
-    // not evidence that a *caller* may send it — that support exists for the
-    // rewritten payload this resolver constructs. Both were proposed in review
-    // on #7141 and both are refuted by the two integration tests named above.
+    // Do not "fix" that asymmetry by making the url arm reject; a fetch is the
+    // authority on what a fetched skill contains, and dropping is what the
+    // rebuild already does.
+    //
+    // `files` is NOT in that set. It sat here because the pre-move host-runtime
+    // copy of this resolver refused it, and #7141 carried that refusal across the
+    // move to this crate verbatim — correctly, since a move-only refactor is the
+    // wrong place to change behavior, which is also why it declined a reviewer's
+    // suggestion to relax the arm there. This is that change, made on purpose.
+    //
+    // `files` is ordinary caller content: an agent authoring a skill has to be
+    // able to attach the script the skill exists to preserve. Refusing it did not
+    // drop the file, it failed the WHOLE install — measured on the 31-task
+    // SkillsBench subset (nearai/benchmarks#287), 18 correctly-shaped
+    // `{path, text}` entries across 9 calls were all refused, and 0 of 27
+    // agent-authored skills shipped a resource file against 18 of 31
+    // human-curated ones. Pinned by
+    // `builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts`. What
+    // makes it safe is not the shape check: each entry's path is normalized and
+    // confined to the skill's own directory downstream
+    // (`install_bundle::normalize_safe_relative_path`), pinned by
+    // `builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory`.
     match (has_content, url) {
-        (true, None)
-            if !object.contains_key("files")
-                && !object.contains_key("source")
-                && !object.contains_key("source_url") =>
-        {
+        (true, None) if !object.contains_key("source") && !object.contains_key("source_url") => {
             Ok(input.clone())
         }
         (false, Some(url)) => {
@@ -480,7 +490,14 @@ fn parse_install_files(
             .and_then(Value::as_str)
             .ok_or_else(input_error)?
             .to_string();
-        let contents = if let Some(encoded) = file.get("bytes_base64") {
+        // `text` first: a bundle file an AGENT authors is a script, a reference doc or a
+        // schema fragment -- all UTF-8. Requiring base64 (or a JSON array of byte
+        // integers) for those made the capability effectively unusable by a model: it
+        // burns ~33% more tokens, and an encoding slip fails the whole install with
+        // InputEncode. Binary payloads keep using `bytes_base64`/`bytes`.
+        let contents = if let Some(text) = file.get("text") {
+            text.as_str().ok_or_else(input_error)?.as_bytes().to_vec()
+        } else if let Some(encoded) = file.get("bytes_base64") {
             let encoded = encoded.as_str().ok_or_else(input_error)?;
             BASE64_STANDARD.decode(encoded).map_err(|_| input_error())?
         } else {
@@ -582,5 +599,163 @@ mod tests {
                 .unwrap(),
             runtime_http_egress: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod install_files_encoding_tests {
+    use super::parse_install_files;
+    use serde_json::json;
+
+    /// The encoding an agent actually produces. Before `text` existed, a self-authored
+    /// bundle had to be base64'd, and measured on the 31-task SkillsBench subset
+    /// (nearai/benchmarks#287) **0 of 27** agent-authored skills shipped any resource
+    /// file at all -- the schema did not advertise `files` and the encoding was hostile.
+    #[test]
+    fn text_files_are_accepted_as_utf8() {
+        let input = json!({
+            "content": "# skill",
+            "files": [
+                { "path": "scripts/analyze.py", "text": "import sys\nprint(sys.argv)\n" },
+                { "path": "references/units.md", "text": "mg/dL -> mmol/L: x 0.0555\n" }
+            ]
+        });
+        let parsed = parse_install_files(&input).expect("text files parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].path, "scripts/analyze.py");
+        assert_eq!(
+            String::from_utf8(parsed[0].contents.clone()).unwrap(),
+            "import sys\nprint(sys.argv)\n"
+        );
+        assert!(
+            String::from_utf8(parsed[1].contents.clone())
+                .unwrap()
+                .contains("0.0555")
+        );
+    }
+
+    /// Binary payloads keep working; `text` is additive, not a replacement.
+    #[test]
+    fn base64_still_accepted_and_text_takes_precedence() {
+        let b64 =
+            json!({ "content": "# s", "files": [{ "path": "a.bin", "bytes_base64": "aGVsbG8=" }] });
+        let parsed = parse_install_files(&b64).expect("base64 parses");
+        assert_eq!(parsed[0].contents, b"hello");
+
+        // both present -> `text` wins, since that is the documented preference
+        let both = json!({ "content": "# s",
+            "files": [{ "path": "a.txt", "text": "plain", "bytes_base64": "aGVsbG8=" }] });
+        let parsed = parse_install_files(&both).expect("parses");
+        assert_eq!(parsed[0].contents, b"plain");
+    }
+
+    /// Absent `files` stays a no-op, so prose-only installs are unchanged.
+    #[test]
+    fn no_files_key_is_empty_not_an_error() {
+        assert!(
+            parse_install_files(&json!({ "content": "# s" }))
+                .expect("ok")
+                .is_empty()
+        );
+    }
+
+    /// A file entry with no usable encoding must fail rather than install an empty file.
+    #[test]
+    fn entry_without_any_content_is_rejected() {
+        assert!(parse_install_files(&json!({ "files": [{ "path": "x.py" }] })).is_err());
+        assert!(parse_install_files(&json!({ "files": [{ "text": "no path" }] })).is_err());
+    }
+}
+
+/// Which inline inputs [`resolve_install_input`] admits.
+///
+/// The fetch context carries no egress port, so a case that wrongly routes to the url arm fails
+/// closed rather than passing for the wrong reason. Asserted end to end in
+/// `ironclaw_host_runtime/tests/first_party_builtin_tools.rs`.
+#[cfg(test)]
+mod resolve_install_input_tests {
+    use ironclaw_host_api::{
+        ids::{CapabilityId, InvocationId, UserId},
+        resource::{ResourceScope, ResourceUsage},
+    };
+    use serde_json::json;
+
+    use super::{SkillUrlFetchContext, resolve_install_input};
+
+    fn fetch_context() -> SkillUrlFetchContext {
+        SkillUrlFetchContext {
+            capability_id: CapabilityId::new("builtin.skill_install").expect("capability id"),
+            scope: ResourceScope::local_default(
+                UserId::new("ada").expect("user"),
+                InvocationId::new(),
+            )
+            .expect("scope"),
+            runtime_http_egress: None,
+        }
+    }
+
+    async fn resolve(input: serde_json::Value) -> Option<serde_json::Value> {
+        let mut usage = ResourceUsage::default();
+        resolve_install_input(&input, &fetch_context(), &mut usage)
+            .await
+            .ok()
+    }
+
+    /// The bundle an agent authors is forwarded whole, `files` included.
+    #[tokio::test]
+    async fn an_inline_bundle_is_forwarded_unchanged() {
+        let input = json!({
+            "name": "verify-bib",
+            "content": "# Verify BibTeX\n\nRun scripts/verify_bib.py\n",
+            "files": [{ "path": "scripts/verify_bib.py", "text": "#!/usr/bin/env python3\n" }]
+        });
+        assert_eq!(
+            resolve(input.clone()).await.as_ref(),
+            Some(&input),
+            "the resolver must not rewrite an inline install; `dispatch` reads `files` from it"
+        );
+    }
+
+    /// Prose-only installs are unaffected by admitting `files`.
+    #[tokio::test]
+    async fn prose_only_still_resolves() {
+        let input = json!({ "name": "x", "content": "# x" });
+        assert_eq!(resolve(input.clone()).await.as_ref(), Some(&input));
+    }
+
+    /// Provenance stays the resolver's to set, with or without a bundle attached.
+    #[tokio::test]
+    async fn forged_provenance_is_refused_with_or_without_files() {
+        for input in [
+            json!({ "content": "# x", "source": "installed_url" }),
+            json!({ "content": "# x", "source_url": "https://e.example/SKILL.md" }),
+            json!({
+                "content": "# x",
+                "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+                "source": "installed_url"
+            }),
+        ] {
+            assert!(
+                resolve(input.clone()).await.is_none(),
+                "must refuse caller-set provenance: {input}"
+            );
+        }
+    }
+
+    /// Neither `content` nor `url`, or both, is still an input error.
+    #[tokio::test]
+    async fn ambiguous_and_empty_inputs_are_refused() {
+        assert!(resolve(json!({ "name": "x" })).await.is_none());
+        assert!(
+            resolve(json!({ "content": "# x", "url": "https://github.com/o/r" }))
+                .await
+                .is_none()
+        );
+        assert!(
+            resolve(json!({ "files": [{ "path": "a.py", "text": "" }] }))
+                .await
+                .is_none(),
+            "a bundle with no SKILL.md has nothing to install"
+        );
     }
 }

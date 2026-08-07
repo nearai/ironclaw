@@ -158,7 +158,6 @@ QA_HARNESS_PREFIXES = (
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 SANDBOX_DOCKER_EXACT_PATHS = {
     "Dockerfile.sandbox-worker",
-    "docker/reborn/entrypoint.sh",
     "crates/lanes/ironclaw_sandbox/Cargo.toml",
     "crates/lanes/ironclaw_sandbox/src/lib.rs",
     "crates/app/ironclaw_cli/src/runtime/mod.rs",

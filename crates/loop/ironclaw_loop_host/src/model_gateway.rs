@@ -26,8 +26,8 @@ use crate::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
-    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadContextWindowCache,
+    HostManagedToolResultContent, ModelCost, ProviderModelId, StaticModelCostTable,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
@@ -403,6 +403,24 @@ impl<P> HostManagedModelGateway for LlmProviderModelGateway<P>
 where
     P: LlmProvider + ?Sized + Send + Sync,
 {
+    fn diagnostic_effective_model(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<ProviderModelId> {
+        let route = self.policy.route_for(model_profile_id)?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        resolve_fallback_route(self.provider.as_ref(), fallback_index, &model_override)
+            .ok()
+            .and_then(|route| ProviderModelId::new(route.model).ok())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -437,7 +455,8 @@ where
             )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             None,
@@ -446,8 +465,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_progress(
@@ -485,7 +504,8 @@ where
             )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             None,
@@ -494,8 +514,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities(
@@ -537,7 +557,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             Some(capabilities),
@@ -546,8 +567,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -590,7 +611,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             Some(capabilities),
@@ -599,8 +621,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 }
 
@@ -765,7 +787,8 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             None,
@@ -774,8 +797,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_progress(
@@ -806,7 +829,8 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             None,
@@ -815,8 +839,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities(
@@ -851,7 +875,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             Some(capabilities),
@@ -860,8 +885,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -897,7 +922,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             Some(capabilities),
@@ -906,8 +932,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 }
 
@@ -947,6 +973,20 @@ fn add_request_metadata(
     completion
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
+}
+
+fn with_model_diagnostic_evidence(
+    result: Result<HostManagedModelResponse, HostManagedModelError>,
+    effective_fallback_index: u32,
+    effective_model: String,
+) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    result
+        .map(|response| {
+            response
+                .with_effective_fallback_index(effective_fallback_index)
+                .with_diagnostic_effective_model(effective_model.clone())
+        })
+        .map_err(|error| error.with_diagnostic_effective_model(effective_model))
 }
 
 fn resolve_fallback_route<P>(

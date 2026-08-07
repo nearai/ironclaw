@@ -498,7 +498,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_user_sandbox_worker_change_selects_real_docker_lane(self) -> None:
         for path in (
             "Dockerfile.sandbox-worker",
-            "docker/reborn/entrypoint.sh",
             "crates/lanes/ironclaw_sandbox/Cargo.toml",
             "crates/lanes/ironclaw_sandbox/src/lib.rs",
             "crates/app/ironclaw_cli/src/runtime/mod.rs",
@@ -737,6 +736,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["affected_packages"], [])
                 self.assertEqual(plan["crate_buckets"], [])
                 self.assertEqual(plan["integration_lanes"], [])
+                self.assertEqual(plan["root_partitions"], [])
 
     def test_repo_root_metadata_class_is_owned_by_other_lanes(self) -> None:
         """The repo-root metadata class de-escalates instead of failing closed.
@@ -1510,6 +1510,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["integration_lanes"], [expected_lane])
+
+    def test_unowned_snapshot_still_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan("pull_request", ["tests/snapshots/unowned__case.snap"])
 
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])

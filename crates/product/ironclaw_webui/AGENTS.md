@@ -7,7 +7,7 @@ one `products`-layer crate above `ironclaw_composition`. Driven by the
 
 ## Start here
 
-- Read `CLAUDE.md` first — it is the module spec (full route table, streaming
+- Read `CONTRACT.md` first — it is the module spec (full route table, streaming
   model, SSE caps, OAuth login security contract). Code follows the spec; the
   spec is the tiebreaker. It is **gate-pinned**: the `handlers.rs`
   module-charter map is enforced by `tests/handlers_module_charter.rs`.

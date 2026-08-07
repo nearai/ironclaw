@@ -81,7 +81,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
 /// names `cargo metadata` reports, which are package names. A crate whose
 /// directory and package disagree therefore has one spelling that guards and
 /// one that is inert — and the inert one fails *silently*, because a forbidden
-/// entry that matches nothing simply never fires. `crates/ironclaw_cli/`
+/// entry that matches nothing simply never fires. `crates/app/ironclaw_cli/`
 /// declaring `name = "ironclaw"` is the only such crate in the tree today, and
 /// it is exactly the one an author reaches for by directory name.
 ///
@@ -624,11 +624,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // constants, and the test-support conformance module. Declarations
         // only; executable validation stays in ironclaw_host_runtime. Rationale
         // reviewed in the PR body's architecture-audit section.
-        // Raised 18_570 -> 18_578 by #7214: the user-sandbox backend rename
+        // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
+        // CapabilitySurfacePolicy and capability-id scope algebra are neutral
+        // host declarations; enforcement remains in host_runtime/loop_host.
+        // Raised 18_784 -> 18_792 by #7214: the user-sandbox backend rename
         // preserves the legacy `tenant_sandbox` wire value and pins canonical
         // reserialization. The growth is contract vocabulary and its serde
         // compatibility proof; execution remains in the sandbox runtime lane.
-        ("ironclaw_host_api", 18_578),
+        ("ironclaw_host_api", 18_792),
         ("ironclaw_loop_contracts", 14_479),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
@@ -1801,7 +1804,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
 /// (`ironclaw_turn_runner::driver_registry::DriverRegistry`, etc.). The wall was
 /// pure speculative public API.
 ///
-/// This test pins the cleanup: `crates/ironclaw_turn_runner/src/lib.rs` must be a
+/// This test pins the cleanup: `crates/loop/ironclaw_turn_runner/src/lib.rs` must be a
 /// directory of `pub mod` declarations and nothing else. A future contributor
 /// who tries to re-add the convenience `pub use` block fails this test
 /// alongside the boundary rule that forbids any non-composition crate from
@@ -2972,7 +2975,7 @@ fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
         "shared WASM sandbox core should stay as a module inside ironclaw_wasm after W2.3"
     );
     let guardrails =
-        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/CLAUDE.md"))
+        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/AGENTS.md"))
             .expect("ironclaw_wasm guardrails must be readable");
     assert!(
         guardrails.contains("wasm_sandbox_core")
@@ -3170,7 +3173,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     //
     // KNOWN GAP, deliberately not closed here: the trailing comment below
     // describes a WebChat v2 route-surface entry that is absent, so the rule
-    // does not cover `crates/ironclaw_webui/src` at all. Adding it turns this
+    // does not cover `crates/product/ironclaw_webui/src` at all. Adding it turns this
     // gate red (that tree carries `axum::serve` and `TcpListener::bind` hits),
     // which is an architecture decision — either webui owns server lifecycle it
     // should not, or the rule owes it an `exempt`. Not a gate repoint; recorded
@@ -4260,7 +4263,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_host_ingress",
                 "ironclaw_operator",
-                // The CLI, by its PACKAGE name. `crates/ironclaw_cli/`
+                // The CLI, by its PACKAGE name. `crates/app/ironclaw_cli/`
                 // is only the directory; `forbidden` is matched against
                 // `cargo metadata` package names, so the directory spelling
                 // is an entry that can never fire. Pinned by
@@ -4945,7 +4948,7 @@ struct LayerMatrixException {
 ///
 /// ```text
 /// rg -c "^    LayerMatrixException \{" \
-///   crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
+///   crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
 /// ```
 ///
 /// The target is the empty list (PROPOSAL §11.2.2, CHECKLIST WS12). This

@@ -6,7 +6,7 @@
 //! The ACCEPT path (a host that can resolve outbound targets) is covered at
 //! the dispatch tier with a validating hook
 //! (`builtin_trigger_create_with_delivery_target_persists_it_when_host_validates`,
-//! `crates/ironclaw_host_runtime/tests/first_party_builtin_tools.rs`) and at
+//! `crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs`) and at
 //! the composition tier against the real Slack provider + registry
 //! (`slack_delivery.rs` driver tests,
 //! `factory.rs::trigger_delivery_target_validation_resolves_through_the_outbound_registry`).

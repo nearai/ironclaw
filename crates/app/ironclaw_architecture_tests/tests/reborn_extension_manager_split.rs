@@ -215,7 +215,7 @@ fn crate_src(root: &Path, name: &str) -> PathBuf {
 /// on #7003.
 ///
 /// ⚠ Follow-up, deliberately not done inside this split PR: ~19 other ratchets
-/// under `crates/ironclaw_architecture_tests/tests/` still roll their own `read_dir`
+/// under `crates/app/ironclaw_architecture_tests/tests/` still roll their own `read_dir`
 /// walk. Migrating them belongs in a dedicated change against
 /// `ratchet_support`, not in a crate split — the two this reviewer named are
 /// the pair that shared the `cfg_test_only_files` recipe, and they are the two
