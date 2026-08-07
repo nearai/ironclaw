@@ -729,11 +729,14 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
     const isRequestFailurePairMember =
       requestFailureTargetIds.has(message?.id) ||
       requestFailureTargetId(message) !== null;
+    const isBoundaryFailure =
+      isRunFailureMessageId(message?.id) ||
+      isStreamFailureMessageId(message?.id) ||
+      isRequestFailurePairMember;
     if (
       !isRunActivityMessage(message) &&
       !isLiveAssistantMessage(message) &&
-      !isRunFailureMessageId(message?.id) &&
-      !isRequestFailurePairMember
+      !isBoundaryFailure
     ) {
       append.push(message);
       continue;
@@ -752,7 +755,7 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
       after.set(previousAnchor, group);
       continue;
     }
-    if (!isRequestFailurePairMember) {
+    if (!isBoundaryFailure) {
       append.push(message);
       continue;
     }
@@ -800,12 +803,16 @@ function requestFailureTargets(messages) {
   return new Set(messages.map(requestFailureTargetId).filter(Boolean));
 }
 
+function isStreamFailureMessageId(value) {
+  return typeof value === "string" && value.startsWith(STREAM_FAILURE_ID_PREFIX);
+}
+
 function isClientOnlyFailureMessage(message) {
   const id = typeof message?.id === "string" ? message.id : "";
   return (
     isRunFailureMessageId(id) ||
     requestFailureTargetId(message) !== null ||
-    id.startsWith(STREAM_FAILURE_ID_PREFIX)
+    isStreamFailureMessageId(id)
   );
 }
 

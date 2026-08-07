@@ -1018,6 +1018,38 @@ test("mergeFullRefresh keeps a failed request with its client-only prompt", () =
   );
 });
 
+test("mergeFullRefresh keeps stream failures at their original boundary", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "msg-user-2", role: "user" },
+    ],
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      {
+        id: "err-stream-service_unavailable-terminal-1",
+        role: "error",
+        content: "stream failed",
+      },
+      { id: "msg-user-2", role: "user" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,msg-assistant-1,err-stream-service_unavailable-terminal-1,msg-user-2",
+  );
+});
+
 test("mergeFullRefresh preserves paginated older timeline messages", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
