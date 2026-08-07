@@ -2645,7 +2645,11 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
 
     // 6. Mint through the web-side pairing service and consume through the
     // real verified webhook again. No direct store/service mutation repairs
-    // the actor binding in this journey.
+    // the actor binding in this journey. This leg pairs via the plain
+    // `/pair CODE` alias (the manifest's second declared prefix — kept for
+    // muscle-memory compatibility while all suggested wording stays
+    // `/start`), so both declared prefixes and the untargeted command shape
+    // stay pinned through the real bundled manifest.
     let repaired_code = services
         .pairing_mint_for_test("telegram", &paired_user)
         .await
@@ -2653,7 +2657,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &targeted_start_body(606, 515151, &repaired_code),
+            &dm_body(606, 515151, &format!("/pair {repaired_code}")),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
