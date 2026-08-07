@@ -429,7 +429,7 @@ const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/
 /// isolation is structural rather than a convention. `/tenant-shared`
 /// resolves to `/tenants/<tenant>/shared`; `/system/{settings,
 /// extensions, skills}` route globally as read-only. See
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::resource::ResourceScope::system`]) routes records under

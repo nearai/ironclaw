@@ -1,7 +1,7 @@
 //! Post-dispatch output validation for standard messaging operations.
 //!
 //! The standardized messaging framework (spec:
-//! `docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`)
+//! `docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`)
 //! gives every core [`StandardMessagingOp`] a canonical output JSON Schema
 //! (`StandardOpContract::output_schema`, `ironclaw_host_api::messaging`).
 //! Extensions implement vendor mechanics only; they cannot narrow or widen

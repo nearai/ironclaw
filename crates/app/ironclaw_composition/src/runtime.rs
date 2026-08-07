@@ -32,6 +32,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use ironclaw_assistant::inspector_store::InMemoryDiagnosticStore;
 use ironclaw_assistant::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
@@ -664,6 +665,9 @@ pub struct RebornRuntime {
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
+    /// Process-local inspector state shared by capture adapters and the
+    /// operator product surface. It is intentionally not persisted.
+    pub(crate) diagnostic_store: Arc<InMemoryDiagnosticStore>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
@@ -4276,6 +4280,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,
+        diagnostic_store: Arc::new(InMemoryDiagnosticStore::default()),
         approval_interaction_service,
         auth_interaction_service,
         #[cfg(any(test, feature = "test-support"))]

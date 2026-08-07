@@ -620,7 +620,7 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 // per-backend run-state + approval stores were deleted along with their
 // `with_libsql_run_state_approval_store` /
 // `with_postgres_run_state_approval_store` builder methods (see
-// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
 // Durability across reopen is now a property of the underlying
 // `RootFilesystem` (`LibSqlRootFilesystem`, `PostgresRootFilesystem`, …)
 // composed through `with_filesystem_run_state`; the run-state store layer
