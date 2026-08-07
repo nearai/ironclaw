@@ -638,7 +638,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // delivery model. The final count includes 96 prompt-inspection lines
         // and 3 model-accounting lines subsequently merged from main; #7157
         // remains a net 229-line reduction against that main baseline.
-        ("ironclaw_loop_contracts", 13_949),
+        // 13_949 -> 13_115 (2026-08-07, #7157 review round): the
+        // connected-channels line gained a byte budget so the runtime-context
+        // slice cannot exceed the 4 KiB prompt surface it is validated on (a
+        // worst case measured 4,391 bytes, which would end every run for that
+        // user), and `runtime_context.rs`'s 919-line inline `#[cfg(test)]`
+        // module was split verbatim into a `runtime_context/tests.rs` sibling
+        // — which `production_rust_files` excludes, unlike an inline module in
+        // a production file. Net effect is a smaller crate than before the
+        // fixes, so the ceiling ratchets DOWN rather than being raised. Count
+        // read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_115),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
