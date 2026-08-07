@@ -12,6 +12,7 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, SandboxQuota},
+    result_meta::MODEL_DIAGNOSTIC_MAX_BYTES,
     runtime::RuntimeKind,
 };
 use serde_json::Value;
@@ -131,6 +132,10 @@ fn http_resource_profile() -> ResourceProfile {
 pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
+    // Failure-path usage accounting mirrors the sibling dispatches in
+    // `first_party_tools/mod.rs`: wall time is measured over the whole
+    // dispatch and attached to the capability error.
+    let started = std::time::Instant::now();
     let egress = request
         .services
         .runtime_http_egress
@@ -246,8 +251,17 @@ pub(super) async fn dispatch(
     .await?
     .map_err(|error| http_error(error, save_mode))?;
     let status = response.status;
-    let shaped = shape_response(response, response_body_limit);
-    classify_status(shaped, status)
+    // Error responses are consumed by the failure diagnostic (a few KiB of
+    // budget), so shape them at the diagnostic budget instead of the success
+    // inline limit: the success-budget trim would be discarded wholesale.
+    let shape_limit = if (400..=599).contains(&status) {
+        u64::try_from(MODEL_DIAGNOSTIC_MAX_BYTES).unwrap_or(response_body_limit)
+    } else {
+        response_body_limit
+    };
+    let shaped = shape_response(response, shape_limit);
+    let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    classify_status(shaped, status, wall_clock_ms)
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {

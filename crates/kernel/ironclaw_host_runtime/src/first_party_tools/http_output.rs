@@ -87,6 +87,7 @@ pub(super) fn shape_response(
 pub(super) fn classify_status(
     shaped: HttpDispatchOutput,
     status: u16,
+    wall_clock_ms: u64,
 ) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
     if !(400..=599).contains(&status) {
         return Ok(shaped);
@@ -96,7 +97,9 @@ pub(super) fn classify_status(
         dispatch_error_kind = RuntimeDispatchErrorKind::OperationFailed.as_str(),
         "first-party HTTP response status classified as capability failure"
     );
-    let usage = ResourceUsage::default().set_network_egress_bytes(shaped.network_egress_bytes);
+    let usage = ResourceUsage::default()
+        .set_network_egress_bytes(shaped.network_egress_bytes)
+        .set_wall_clock_ms(wall_clock_ms);
     Err(FirstPartyCapabilityError::dispatch_with_diagnostic(
         RuntimeDispatchErrorKind::OperationFailed,
         Some(format!("HTTP request returned status {status}")),
@@ -346,10 +349,11 @@ fn enforce_final_model_visible_output_budget(
     fit_output_to_budget(output, final_budget)
 }
 
-/// Shared one-pass budget trim: shrink the inline body (text then base64),
-/// then pop headers until the serialized output fits `final_budget`. Each
-/// branch re-measures incrementally so at most three serializations happen
-/// per output. Used by the success-path final budget and by the failure
+/// Shared budget trim: shrink the inline body (text then base64), then pop
+/// headers until the serialized output fits `final_budget`. Each branch
+/// re-measures the running serialized length incrementally, so full-output
+/// serializations stay bounded by the number of trim passes rather than one
+/// per trimmed key. Used by the success-path final budget and by the failure
 /// diagnostic budget trim, which differ only in the target size.
 fn fit_output_to_budget(output: &mut Map<String, Value>, final_budget: usize) -> FinalBudgetTrim {
     let mut trim = FinalBudgetTrim::default();
@@ -639,6 +643,21 @@ mod tests {
             trimmed_base64.len() % 4,
             0,
             "trimmed base64 must stay multiple-of-4 aligned"
+        );
+    }
+
+    #[test]
+    fn truncation_envelope_fits_its_reserved_budget() {
+        // The failure diagnostic trims to MODEL_DIAGNOSTIC_MAX_BYTES minus
+        // MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES and inserts the
+        // envelope afterwards; the envelope must never exceed the reserved
+        // bytes or the diagnostic would blow the 4 KiB budget at the
+        // resolution boundary.
+        let mut output = Map::new();
+        insert_truncation_envelope(&mut output, true, Some(usize::MAX));
+        assert!(
+            serialized_output_len(&output) < MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES,
+            "truncation envelope must fit its reserved budget"
         );
     }
 
