@@ -12,6 +12,7 @@ use ironclaw_host_api::{
     ids::{InvocationId, UserId},
     resolution::Resolution,
     result_meta::FailureKind,
+    turn::LoopResultRef,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
@@ -243,10 +244,24 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
             "total_bytes": total_bytes,
             "next_offset": next_offset,
         });
+        // `parse_result_read_input` already validated this value against the
+        // durable result-reference grammar. Preserve that pageable identity as
+        // the completed outcome's origin so the transcript and replay surface
+        // exactly the ref the next `result_read` call can use.
+        let continuation_result_ref =
+            LoopResultRef::new(input.result_ref.clone()).map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "validated result reference could not be represented",
+                )
+                .with_detail(format!("loop result reference validation failed: {error}"))
+            })?;
         // `InlineOnly` (see `DurablePersistence` doc comment): this chunk is
         // already fully delivered to the model inline via
         // `result_read_observation`'s `preview`. The ORIGINAL result this
-        // chunk was paged from stays durable and untouched.
+        // chunk was paged from stays durable and untouched. The writer still
+        // mints an internal staging/display ref for byte accounting and output
+        // evidence, but that inline-only ref is not continuation authority.
         let mut write = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -267,7 +282,7 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
             sanitize_model_visible_text(content),
         ));
         Ok(resolution::completed(
-            write.result_ref,
+            continuation_result_ref,
             "result chunk returned".to_string(),
             CapabilityProgress::MadeProgress,
             false,

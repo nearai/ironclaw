@@ -316,7 +316,7 @@ impl ServeCommand {
             );
         } else {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %listen_addr,
                 "product-auth OAuth is not configured because the WebChat v2 listener origin is not a stable loopback HTTP origin"
             );
@@ -385,7 +385,7 @@ impl ServeCommand {
         // see the same signal.
         if !host.is_loopback() {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %host,
                 "binding WebChat v2 listener on a non-loopback interface",
             );
@@ -704,7 +704,7 @@ async fn start_hosted_single_tenant_startup_listener(
     match bound_rx.await {
         Ok(bound) => {
             tracing::info!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %bound,
                 "hosted single-tenant WebChat v2 startup listener is serving healthchecks before runtime assembly"
             );
@@ -758,7 +758,7 @@ fn webui_shutdown_signal() -> tokio::sync::oneshot::Receiver<()> {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!(
-            target = "ironclaw::reborn::cli::serve",
+            target: "ironclaw::reborn::cli::serve",
             "shutdown signal (SIGTERM/SIGINT) received; signalling WebChat v2 graceful shutdown",
         );
         let _ = shutdown_tx.send(());

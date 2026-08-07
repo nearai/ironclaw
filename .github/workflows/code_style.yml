@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
+      has_docs: ${{ steps.non_pr.outputs.has_docs || steps.diff.outputs.has_docs }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
       has_clippy: ${{ steps.non_pr.outputs.has_clippy || steps.diff.outputs.has_clippy }}
       clippy_packages: ${{ steps.non_pr.outputs.clippy_packages || steps.diff.outputs.clippy_packages }}
@@ -49,6 +50,7 @@ jobs:
         if: github.event_name == 'push'
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
+          echo "has_docs=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           echo "has_clippy=true" >> "$GITHUB_OUTPUT"
           echo 'clippy_packages=[]' >> "$GITHUB_OUTPUT"
@@ -78,11 +80,22 @@ jobs:
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
+          fi
+
+          # docs/ is deliberately NOT in the has_code scope above, so a
+          # docs-only PR skips every Rust lane — the publication-boundary gate
+          # needs its own trigger. The gate's own files are in scope so the
+          # guardrail runs when it changes (review-discipline.md: "Guardrails
+          # are code").
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(docs/|scripts/ci/docs_publication_boundary\.py$|scripts/ci/test_docs_publication_boundary\.py$|\.github/workflows/code_style\.yml$)'; then
+            echo "has_docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_docs=false" >> "$GITHUB_OUTPUT"
           fi
 
           # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
@@ -166,6 +179,12 @@ jobs:
           python3 scripts/ci/test_ws12_workflow_contracts.py
           python3 scripts/ci/test-check-target-tree.py
           scripts/ci/test-hermetic-test-process.sh
+          scripts/ci/test-reborn-docker-entrypoint.sh
+          # #7144: this 204-test module had never been run by any lane, so five
+          # of its assertions had silently drifted out of sync with the code they
+          # gate — including the live-canary shard roster, which pinned a
+          # `reborn-e2e.yml` string that no longer existed.
+          python3 -m unittest scripts.reborn_webui_v2_live_qa.test_run_live_qa
           bash .github/scripts/test-pr-labeler.sh
       - name: Self-test panic checker
         if: github.event_name != 'push'
@@ -359,6 +378,24 @@ jobs:
       - name: Check all-target lints
         if: github.event_name != 'pull_request'
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+      # #7119. The PR lane above lints only the *changed* packages, so a crate
+      # that is merely a dependency of that set compiles with whatever features
+      # the set happens to enable. `--lib --bins` builds no dev-dependencies, and
+      # in this workspace `test-support` is turned on exclusively through
+      # dev-dependency edges — so it is OFF here and ON in every `--tests` lane.
+      # Code behind `cfg(any(test, feature = "test-support"))` then vanishes and
+      # a `use` that only it names becomes an unused import, which no
+      # whole-workspace lane could see: `--all --tests` builds the dev-deps that
+      # unify the feature back on. This step is that missing shape, workspace-
+      # wide, so the failure lands at merge time instead of waiting for the one
+      # PR whose diff happens to produce the tripping package set.
+      #
+      # Deliberately the `default` flavor: `--all-features` re-enables
+      # `test-support` on every selected package and masks the exact class this
+      # step exists to catch.
+      - name: Check production-target lints (workspace, no dev-dependency features)
+        if: github.event_name != 'pull_request' && matrix.name == 'default'
+        run: cargo clippy --all --lib --bins -- -D warnings
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
@@ -454,6 +491,33 @@ jobs:
       - name: Test Reborn architecture boundaries
         run: cargo test -p ironclaw_architecture_tests reborn
 
+  # docs/ mixes the public Mintlify site with internal engineering docs.
+  # Omission from docs.json navigation is NOT a publication boundary — a page
+  # left out of navigation is still deployed, reachable by URL, and indexable.
+  # This gate fails when a .md/.mdx under docs/ is neither in navigation nor
+  # fenced by docs/.mintignore (nor explicitly marked `hidden: true`), when
+  # navigation references a page with no source file, and when .mintignore
+  # grows a new entry — the fence list is frozen; new internal docs belong
+  # under docs/internal/.
+  docs-publication-boundary:
+    name: Docs publication boundary
+    needs: changes
+    if: needs.changes.outputs.has_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Self-test the publication boundary check
+        run: python3 scripts/ci/test_docs_publication_boundary.py
+      - name: Check every docs/ page is published or fenced
+        run: python3 scripts/ci/docs_publication_boundary.py
+
   code-style:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
@@ -465,12 +529,20 @@ jobs:
       - clippy-windows
       - reborn-cli-smoke
       - webui-v2-js-lint
+      - docs-publication-boundary
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - run: |
+          # A docs-only PR has has_code=false, so the boundary gate must be
+          # checked before the early exit below or it could never block.
+          if [[ "${{ needs.changes.outputs.has_docs }}" == "true" && "${{ needs.docs-publication-boundary.result }}" != "success" ]]; then
+            echo "Docs publication boundary failed: ${{ needs.docs-publication-boundary.result }}"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
             if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
               echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"

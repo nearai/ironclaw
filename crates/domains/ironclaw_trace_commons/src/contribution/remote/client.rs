@@ -76,6 +76,21 @@ pub(crate) async fn pinned_trace_remote_http_client(
             "trace remote endpoint is not a valid URL: {error}"
         ))
     })?;
+    // Every request built here carries the enrolled bearer token, so the
+    // endpoint has to be TLS (or literal loopback for standalone). The comment
+    // above claimed this lane was "validated ... via
+    // `validate_trace_commons_ingest_url`", but nothing on the
+    // submit/status/revoke path ever called it — that validator only ran from
+    // `community_profile_url_from_policy`. Meanwhile `ironclaw traces opt-in
+    // --endpoint <url>` writes `policy.ingestion_endpoint` unvalidated, so
+    // `--endpoint http://public-host/...` plus a bearer shipped the token in
+    // clear text (#7144). Validating in the builder makes the claim true: this
+    // is what attaches the credential, so this is where it fails closed.
+    validate_trace_commons_ingest_url(&url).map_err(|error| {
+        TraceRemoteRequestFailure::endpoint_invalid(format!(
+            "trace remote endpoint rejected: {error}"
+        ))
+    })?;
     let host = url
         .host_str()
         .ok_or_else(|| {

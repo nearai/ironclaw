@@ -2,7 +2,7 @@ name: OpenWiki Update
 
 # Regenerates the narrative code wiki (openwiki/) and opens a PR for HUMAN review.
 #
-# Decisions (see docs/plans/2026-07-02 discovery rollout):
+# Decisions (see docs/internal/plans/2026-07-02 discovery rollout):
 #   - Provider: Anthropic via ANTHROPIC_API_KEY (already a repo secret).
 #   - Publish: open a pull request; a human reviews and merges. NO auto-merge —
 #     SOC 2 change management (CC8.1 / separation of duties) requires every change

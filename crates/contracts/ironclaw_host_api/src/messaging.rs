@@ -1,6 +1,6 @@
 //! Standard messaging operations: closed vocabulary, canonical contracts, and
 //! the error-code taxonomy for the standardized messaging framework
-//! (`docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`).
+//! (`docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`).
 //!
 //! Channel extensions bind their own tools to one of these operations via the
 //! manifest `standard_op` field (see `ironclaw_extensions`); this module is the

@@ -1114,9 +1114,9 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
             let observation: serde_json::Value =
                 serde_json::from_str(&tool_result.content).expect("result_read observation");
             let detail = &observation["model_observation"]["detail"];
-            assert_ne!(
+            assert_eq!(
                 detail["result_ref"], observation["result_ref"],
-                "result_read replay must retain the original result reference, not its own output ref"
+                "result_read replay must expose only the original pageable result reference"
             );
             assert!(
                 detail["total_bytes"]
@@ -3904,6 +3904,7 @@ async fn cancel_run_propagates_to_subagent_children() {
                     subagent_kind: SubagentKindId::new("general").unwrap(),
                     mode: SpawnSubagentMode::Blocking,
                     result_ref,
+                    spawn_provider_call_id: None,
                     handoff: None,
                     parent_run_context: parent_run_context.clone(),
                     gate_ref: ironclaw_host_api::turn::TurnGateRef::new(

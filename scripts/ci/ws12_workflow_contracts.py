@@ -61,6 +61,16 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "github.event.schedule == '30 5 * * 1'",
         "provider-matrix:",
     ),
+    ".github/workflows/code_style.yml": (
+        # The docs publication-boundary gate: the job, its self-test step, its
+        # check step, and the roll-up guard that fails closed BEFORE the
+        # has_code early exit (docs-only PRs have has_code=false, so a guard
+        # placed after it could never block).
+        "docs-publication-boundary:",
+        "python3 scripts/ci/test_docs_publication_boundary.py",
+        "python3 scripts/ci/docs_publication_boundary.py",
+        '"${{ needs.docs-publication-boundary.result }}" != "success"',
+    ),
     ".github/workflows/reborn-playwright.yml": (
         "python3 scripts/ci/ws12_suite_shards.py --github-output",
         'test "${{ matrix.retry }}" = "never"',
@@ -115,7 +125,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("Cargo.toml", True),
     # Still out of scope: the filter must stay a filter.
     ("README.md", False),
-    ("docs/plans/whatever.md", False),
+    ("docs/internal/plans/whatever.md", False),
     (".github/workflows/code_style.yml", False),
     ("src/main.rs", False),
 )
@@ -182,6 +192,66 @@ def validate_e2e_scope_filters(text: str) -> list[str]:
 CODE_STYLE_WORKFLOW = ".github/workflows/code_style.yml"
 PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
+
+# ---------------------------------------------------------------------------
+# Docs publication-boundary guard ordering
+#
+# The guard in the code-style roll-up must run BEFORE the has_code early
+# exit: a docs-only PR has has_code=false, so a guard placed after `exit 0`
+# can never block. REQUIRED_MARKERS is presence-only and cannot see order —
+# relocating the guard below the early exit leaves every marker in the file
+# while the gate is fully broken — so the ordering is pinned separately here.
+# ---------------------------------------------------------------------------
+
+CODE_STYLE_DOCS_GUARD_MARKER = (
+    '"${{ needs.docs-publication-boundary.result }}" != "success"'
+)
+CODE_STYLE_HAS_CODE_EXIT_MARKER = (
+    'echo "No code changes — style checks skipped correctly"'
+)
+
+
+def validate_code_style_docs_guard_order(text: str) -> list[str]:
+    """Return every way the docs-gate guard could sit past the early exit.
+
+    Only executable occurrences count: comment lines are stripped first, so a
+    commented-out copy of the guard above the early exit (a refactor
+    leftover) cannot satisfy the pin, and EVERY live guard occurrence must
+    precede the first early-exit occurrence.
+    """
+
+    executable = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    early_exit = executable.find(CODE_STYLE_HAS_CODE_EXIT_MARKER)
+    guard_positions: list[int] = []
+    cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER)
+    while cursor != -1:
+        guard_positions.append(cursor)
+        cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER, cursor + 1)
+    if not guard_positions or early_exit == -1:
+        # Presence itself is REQUIRED_MARKERS' job; report only what this pin
+        # cannot delegate — a missing EXECUTABLE anchor makes the order
+        # unassertable (a comment-only occurrence lands here on purpose).
+        missing = "guard" if not guard_positions else "has_code early-exit"
+        return [
+            (
+                f"{CODE_STYLE_WORKFLOW}: docs-gate guard order unassertable — "
+                f"no executable {missing} marker"
+            )
+        ]
+    if any(position > early_exit for position in guard_positions):
+        return [
+            (
+                f"{CODE_STYLE_WORKFLOW}: the docs publication-boundary guard "
+                "sits after the has_code early exit — docs-only PRs "
+                "(has_code=false) exit 0 before the guard runs, so the gate "
+                "cannot block them. Move the guard above the early exit in "
+                "the roll-up step"
+            )
+        ]
+    return []
+
 
 # ---------------------------------------------------------------------------
 # Per-package clippy target selection (#6965)
@@ -370,7 +440,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
-        out_of_scope=("README.md", "docs/plans/whatever.md", "openwiki/index.md"),
+        out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
@@ -394,6 +464,37 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
             "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
+        ),
+    ),
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_docs",
+        # Not crate-keyed: docs/ is deliberately outside the has_code scope,
+        # so this trigger is the ONLY thing that runs the publication-boundary
+        # gate on a docs-only PR. A narrowed grep here skips the gate with
+        # nothing red anywhere — the same silent-skip class as the crate
+        # filters, pinned the same way.
+        anchor="docs_publication_boundary",
+        kind="regex",
+        in_scope=(
+            "docs/index.mdx",
+            # Both halves of the gate's contract: navigation (docs.json) and
+            # the fence (.mintignore). A future markdown-only narrowing of
+            # the grep would drop them while every .mdx probe stays green.
+            "docs/docs.json",
+            "docs/.mintignore",
+            "docs/internal/plans/whatever.md",
+            # The gate's own files (review-discipline.md "Guardrails are
+            # code": checks must run when their own files change).
+            "scripts/ci/docs_publication_boundary.py",
+            "scripts/ci/test_docs_publication_boundary.py",
+            ".github/workflows/code_style.yml",
+        ),
+        out_of_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            "README.md",
+            "openwiki/index.md",
         ),
     ),
     CrateScopeFilter(
@@ -870,6 +971,7 @@ def validate_workflow_texts(
     code_style = workflows.get(CODE_STYLE_WORKFLOW)
     if code_style is not None:
         errors.extend(validate_production_lint_targets(code_style))
+        errors.extend(validate_code_style_docs_guard_order(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))

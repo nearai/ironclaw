@@ -2,7 +2,8 @@
 
 ## Start Here
 
-- No crate-local CLAUDE.md exists yet; use this map plus `Cargo.toml` and source files.
+- Read `README.md` for orientation (surfaces, vendor, runtime, tests); this
+  map plus `Cargo.toml` and source files carry the working rules.
 - This directory is the whole Telegram **package**: the crate *and* its
   `manifest.toml` live together, per PROPOSAL §5's package rule.
 - Read `src/lib.rs` first, then:

@@ -3,7 +3,7 @@
 **Status:** Current (standardized messaging framework).
 **Authority module:** `ironclaw_host_api::messaging`
 (`crates/contracts/ironclaw_host_api/src/messaging.rs`).
-**Design source:** `docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
+**Design source:** `docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
 (§§4-8, Appendix A/B). This page condenses that spec into the durable
 reference for anyone binding, calling, or reviewing a standard messaging
 operation. It does not fork the spec's semantics — where landed code diverges
@@ -323,7 +323,7 @@ direct assertions against the Task 1 registry instead of hand-rolling
 An extension binding standard ops runs its own protocol tests through these
 helpers. The framework itself is covered at every tier:
 
-- **`ironclaw_extensions` contract tests**
+- **`ironclaw_extension_registry` contract tests**
   (`crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`): one rejection
   test per binding validation in §3 (reserved, id mismatch, schema-ref
   present, effects floor, duplicate, v2-declares, MCP-incompatible,
@@ -343,7 +343,7 @@ helpers. The framework itself is covered at every tier:
   `messaging.unknown_conversation` with the run continuing, and the
   bespoke-coexistence scenario (§8) asserting `send_note` still dispatches
   alongside the standard ops on the same extension.
-- `cargo test -p ironclaw_architecture` before and after any change here —
+- `cargo test -p ironclaw_architecture_tests` before and after any change here —
   no new gate was added; the existing specificity gate already keeps the
   canonical contracts vendor-blind (no extension names in generic crates).
 
