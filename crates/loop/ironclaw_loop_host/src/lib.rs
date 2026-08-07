@@ -1420,11 +1420,17 @@ where
                 request.fallback_index,
                 self.run_context.resolved_model_route.as_ref(),
             );
-            let capability_ids = request
-                .capability_view
-                .as_ref()
-                .map(|view| view.visible_capability_ids.clone())
-                .unwrap_or_default();
+            let capability_ids = if let Some(view) = request.capability_view.as_ref() {
+                view.visible_capability_ids.clone()
+            } else if let Some(capabilities) = self.capabilities.as_ref() {
+                capabilities
+                    .tool_definitions()?
+                    .into_iter()
+                    .map(|definition| definition.capability_id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             sink.record_prompt(HostManagedPromptDiagnosticCapture {
                 context: self.run_context.clone(),
                 messages: resolved_messages

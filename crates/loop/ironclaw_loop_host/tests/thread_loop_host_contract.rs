@@ -291,6 +291,46 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
 }
 
 #[tokio::test]
+async fn model_port_records_full_capability_surface_when_request_has_no_view() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+    let capability_id = CapabilityId::new("demo.full_surface").expect("capability");
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_capability_port(Arc::new(StaticToolDefinitionPort::new(vec![
+        provider_tool_definition(capability_id.clone(), "demo__full_surface"),
+    ])))
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        capability_view: None,
+    })
+    .await
+    .expect("model response");
+
+    let captures = sink.captures.lock().expect("captures");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].capability_ids, vec![capability_id]);
+    assert_eq!(
+        gateway.tool_definition_calls()[0][0].name.as_str(),
+        "demo__full_surface"
+    );
+}
+
+#[tokio::test]
 async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
     let fixture = GatedThreadFixture::new().await;
     let context_window_cache = Arc::new(ThreadContextWindowCache::default());
