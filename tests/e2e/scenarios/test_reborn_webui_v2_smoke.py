@@ -40,6 +40,7 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    install_fake_v2_event_stream,
     open_reborn_v2_page,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
@@ -226,138 +227,10 @@ async def _wait_for_automation(
 
 
 async def _install_fake_v2_event_stream(page) -> None:
-    script = """
-        (() => {
-          const nativeFetch = window.fetch.bind(window);
-          const encoder = new TextEncoder();
-          const expectedAuthorization = __EXPECTED_AUTHORIZATION__;
-          let activeStream = null;
-          let holdNextConnection = false;
-
-          const currentStream = () => {
-            if (!activeStream || activeStream.closed) {
-              throw new Error("no event stream is open");
-            }
-            return activeStream;
-          };
-
-          // Readiness probes so tests do not race forced failures against the
-          // fake stream lifecycle. A hidden RECONNECTING badge can no longer
-          // double as a wait for reconnect readiness.
-          window.__v2SseHasOpenStream = () =>
-            Boolean(activeStream && !activeStream.closed && activeStream.controller);
-          window.__v2SseHasHeldConnection = () =>
-            Boolean(activeStream && !activeStream.closed && activeStream.resolve);
-
-          const closeStream = (stream, error = null) => {
-            if (!stream || stream.closed) return;
-            stream.closed = true;
-            if (stream.controller) {
-              if (error) {
-                stream.controller.error(error);
-              } else {
-                stream.controller.close();
-              }
-            }
-            if (activeStream === stream) activeStream = null;
-          };
-
-          const openStreamResponse = (signal) => {
-            const stream = { closed: false, controller: null };
-            const body = new ReadableStream({
-              start(controller) {
-                stream.controller = controller;
-              },
-              cancel() {
-                stream.closed = true;
-                if (activeStream === stream) activeStream = null;
-              },
-            });
-            if (activeStream && !activeStream.closed) {
-              closeStream(activeStream);
-            }
-            activeStream = stream;
-            signal?.addEventListener(
-              "abort",
-              () => closeStream(stream),
-              { once: true },
-            );
-            return new Response(body, {
-              status: 200,
-              headers: { "content-type": "text/event-stream" },
-            });
-          };
-
-          window.fetch = async (input, init = {}) => {
-            const request = new Request(input, init);
-            const url = new URL(request.url, window.location.href);
-            if (!url.pathname.endsWith("/events")) {
-              return nativeFetch(input, init);
-            }
-            if (url.searchParams.has("token")) {
-              return new Response("", { status: 400 });
-            }
-            if (request.headers.get("Authorization") !== expectedAuthorization) {
-              return new Response("", { status: 401 });
-            }
-            if (!holdNextConnection) {
-              return openStreamResponse(request.signal);
-            }
-            return new Promise((resolve, reject) => {
-              const stream = {
-                closed: false,
-                controller: null,
-                resolve,
-                reject,
-              };
-              activeStream = stream;
-              request.signal?.addEventListener(
-                "abort",
-                () => {
-                  if (stream.closed) return;
-                  stream.closed = true;
-                  if (activeStream === stream) activeStream = null;
-                  reject(new DOMException("Aborted", "AbortError"));
-                },
-                { once: true },
-              );
-            });
-          };
-
-          window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
-            const stream = currentStream();
-            if (!stream.controller) throw new Error("event stream is reconnecting");
-            stream.controller.enqueue(encoder.encode(
-              `id: ${id}\\nevent: ${type}\\ndata: ${
-                JSON.stringify({ type, ...frame })
-              }\\n\\n`
-            ));
-          };
-
-          window.__failLatestV2Sse = (readyState = 2) => {
-            const stream = currentStream();
-            if (readyState === 0) {
-              holdNextConnection = true;
-              closeStream(stream, new TypeError("event stream interrupted"));
-              return;
-            }
-            holdNextConnection = false;
-            if (stream.resolve) {
-              stream.closed = true;
-              if (activeStream === stream) activeStream = null;
-              stream.resolve(new Response("", { status: 401 }));
-              return;
-            }
-            closeStream(stream, new TypeError("event stream interrupted"));
-          };
-        })();
-        """
-    await page.add_init_script(
-        script.replace(
-            "__EXPECTED_AUTHORIZATION__",
-            json.dumps(f"Bearer {REBORN_V2_AUTH_TOKEN}"),
-        )
-    )
+    # Shared with the legacy WebChat v2 suites: the fetch-based fake matching
+    # the `event-source-plus` transport the SPA actually uses (see
+    # reborn_webui_harness.install_fake_v2_event_stream for the contract).
+    await install_fake_v2_event_stream(page)
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
