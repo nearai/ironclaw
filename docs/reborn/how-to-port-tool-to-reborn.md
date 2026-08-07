@@ -5,7 +5,9 @@
 > `origin_gate_matrix`) — see `docs/extensions/building-a-tool.md` and
 > `docs/reborn/extension-runtime/overview.md` §3. The manifest examples below
 > show historical v2-era shapes (some, like top-level `[[capabilities]]` and
-> `RuntimeKind::Script`, were retired before or during the v3 cutover) and
+> `script` manifest authoring, were retired before or during the v3 cutover —
+> the `RuntimeKind::Script` symbol itself survives as the process-sandbox
+> lane's runtime kind) and
 > must not be used as an authoring reference. The *decision tree* below keeps
 > its v1 classification questions, but its `RuntimeKind::*` target column is
 > historical: v3 authoring accepts only `[runtime] kind = "wasm" |
