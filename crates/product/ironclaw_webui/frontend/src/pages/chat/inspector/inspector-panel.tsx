@@ -1,0 +1,281 @@
+import React from "react";
+
+import { cn } from "../../../utils/cn";
+import {
+  INSPECTOR_HEALTH,
+  INSPECTOR_TABS,
+  inspectorViewportMode,
+  readInspectorPreferences,
+  writeInspectorPreferences,
+  type InspectorPreferences,
+  type InspectorTab,
+} from "./inspector-state";
+import { useInspector } from "./useInspector";
+
+const HEALTH_LABELS = {
+  [INSPECTOR_HEALTH.IDLE]: "Idle",
+  [INSPECTOR_HEALTH.LOADING]: "Loading",
+  [INSPECTOR_HEALTH.CONNECTING]: "Connecting",
+  [INSPECTOR_HEALTH.CONNECTED]: "Live",
+  [INSPECTOR_HEALTH.RECONNECTING]: "Reconnecting",
+  [INSPECTOR_HEALTH.DISCONNECTED]: "Disconnected",
+  [INSPECTOR_HEALTH.FORBIDDEN]: "Forbidden",
+  [INSPECTOR_HEALTH.UNAVAILABLE]: "Unavailable",
+};
+
+function useViewportMode(): "mobile" | "overlay" | "sidebar" {
+  const [mode, setMode] = React.useState(() =>
+    inspectorViewportMode(typeof window === "undefined" ? 0 : window.innerWidth),
+  );
+  React.useEffect(() => {
+    const update = () => setMode(inspectorViewportMode(window.innerWidth));
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return mode;
+}
+
+function EmptyTab({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="grid min-h-48 place-items-center px-5 py-8 text-center">
+      <div>
+        <p className="text-sm font-medium text-[var(--v2-text-strong)]">{title}</p>
+        <p className="mt-2 max-w-64 text-xs leading-5 text-[var(--v2-text-muted)]">
+          {description}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function PromptShell({ snapshot }: { snapshot: Record<string, unknown> | null }) {
+  if (!snapshot?.prompt) {
+    return (
+      <EmptyTab
+        title="No prompt captured"
+        description="Prompt components will appear here when diagnostics are available for this run."
+      />
+    );
+  }
+  return (
+    <EmptyTab
+      title="Prompt diagnostics ready"
+      description="Prompt component rendering is available in the next inspector workflow."
+    />
+  );
+}
+
+function ActivityShell({
+  snapshot,
+  updateCount,
+}: {
+  snapshot: Record<string, unknown> | null;
+  updateCount: number;
+}) {
+  const retained = Array.isArray(snapshot?.activity) ? snapshot.activity.length : 0;
+  if (retained === 0 && updateCount === 0) {
+    return (
+      <EmptyTab
+        title="No activity yet"
+        description="Ordered model and tool activity will appear here as the run progresses."
+      />
+    );
+  }
+  return (
+    <div className="space-y-3 p-4">
+      <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
+        <p className="text-xs uppercase tracking-wide text-[var(--v2-text-faint)]">Activity</p>
+        <p className="mt-1 text-sm text-[var(--v2-text-strong)]">
+          {retained} retained · {updateCount} live updates
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) {
+  const stats = snapshot?.stats as { total_model_calls?: unknown } | undefined;
+  if (!stats) {
+    return (
+      <EmptyTab
+        title="No statistics yet"
+        description="Session totals will appear after the run records model or tool activity."
+      />
+    );
+  }
+  const totalCalls = typeof stats.total_model_calls === "number" ? stats.total_model_calls : 0;
+  return (
+    <div className="grid grid-cols-2 gap-3 p-4">
+      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
+        <p className="text-xs text-[var(--v2-text-muted)]">Model calls</p>
+        <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">{totalCalls}</p>
+      </div>
+      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
+        <p className="text-xs text-[var(--v2-text-muted)]">Live updates</p>
+        <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">Available</p>
+      </div>
+    </div>
+  );
+}
+
+function StatusNotice({ health, error }: { health: string; error: string | null }) {
+  if (!error && health !== INSPECTOR_HEALTH.DISCONNECTED) return null;
+  return (
+    <div
+      role="status"
+      data-testid="inspector-status-notice"
+      className="m-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]"
+    >
+      {error || "The diagnostics stream is disconnected. Chat remains available."}
+    </div>
+  );
+}
+
+function InspectorPanelCore({
+  threadId,
+  runId,
+}: {
+  threadId: string | null;
+  runId: string | null;
+}) {
+  const viewportMode = useViewportMode();
+  const [preferences, setPreferences] = React.useState<InspectorPreferences>(() =>
+    readInspectorPreferences(),
+  );
+  const inspector = useInspector({
+    enabled: preferences.open && viewportMode !== "mobile",
+    threadId,
+    runId,
+  });
+
+  const updatePreferences = React.useCallback((next: InspectorPreferences) => {
+    setPreferences(next);
+    writeInspectorPreferences(next);
+  }, []);
+  const setActiveTab = (activeTab: InspectorTab) =>
+    updatePreferences({ ...preferences, activeTab });
+  const setOpen = (open: boolean) => updatePreferences({ ...preferences, open });
+
+  if (viewportMode === "mobile") return null;
+  if (!preferences.open) {
+    return (
+      <button
+        type="button"
+        data-testid="inspector-open"
+        onClick={() => setOpen(true)}
+        className="fixed bottom-5 right-5 z-40 hidden rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-4 py-2 text-xs font-semibold text-[var(--v2-text-strong)] shadow-lg sm:block"
+      >
+        Open Inspector
+      </button>
+    );
+  }
+
+  const snapshot = inspector.snapshot as Record<string, unknown> | null;
+  return (
+    <aside
+      aria-label="Web Debug Inspector"
+      data-testid="inspector-panel"
+      data-layout={viewportMode}
+      className={cn(
+        "flex min-h-0 w-[min(420px,72vw)] flex-col border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface)]",
+        viewportMode === "overlay"
+          ? "fixed inset-y-0 right-0 z-50 shadow-2xl"
+          : "relative shrink-0 shadow-none",
+      )}
+    >
+      <header className="border-b border-[var(--v2-panel-border)] px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+              Web Debug Inspector
+            </h2>
+            <div className="mt-1 flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
+              <span
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  inspector.health === INSPECTOR_HEALTH.CONNECTED
+                    ? "bg-[var(--v2-positive-text)]"
+                    : inspector.health === INSPECTOR_HEALTH.RECONNECTING
+                      ? "bg-[var(--v2-warning-text)]"
+                      : "bg-[var(--v2-text-faint)]",
+                )}
+              />
+              <span data-testid="inspector-health">{HEALTH_LABELS[inspector.health]}</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Close inspector"
+            data-testid="inspector-close"
+            onClick={() => setOpen(false)}
+            className="rounded-lg px-2 py-1 text-lg leading-none text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)]"
+          >
+            ×
+          </button>
+        </div>
+        <p className="mt-2 truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
+          {threadId && runId ? `${threadId} · ${runId}` : "Waiting for an active run"}
+        </p>
+      </header>
+
+      <nav aria-label="Inspector tabs" className="flex border-b border-[var(--v2-panel-border)] px-2">
+        {INSPECTOR_TABS.map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={preferences.activeTab === tab}
+            data-testid={`inspector-tab-${tab}`}
+            onClick={() => setActiveTab(tab)}
+            className={cn(
+              "flex-1 border-b-2 px-2 py-3 text-xs font-medium capitalize",
+              preferences.activeTab === tab
+                ? "border-[var(--v2-accent)] text-[var(--v2-accent-text)]"
+                : "border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
+            )}
+          >
+            {tab}
+          </button>
+        ))}
+      </nav>
+
+      <StatusNotice health={inspector.health} error={inspector.error} />
+      <section role="tabpanel" className="min-h-0 flex-1 overflow-y-auto">
+        {preferences.activeTab === "prompt" && <PromptShell snapshot={snapshot} />}
+        {preferences.activeTab === "activity" && (
+          <ActivityShell snapshot={snapshot} updateCount={inspector.updates.length} />
+        )}
+        {preferences.activeTab === "stats" && <StatsShell snapshot={snapshot} />}
+      </section>
+    </aside>
+  );
+}
+
+class InspectorErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.warn("Inspector disabled after a rendering failure", {
+      category: error instanceof Error ? error.name : "unknown",
+    });
+  }
+
+  render() {
+    return this.state.failed ? null : this.props.children;
+  }
+}
+
+export function InspectorPanel(props: { threadId: string | null; runId: string | null }) {
+  return (
+    <InspectorErrorBoundary>
+      <InspectorPanelCore {...props} />
+    </InspectorErrorBoundary>
+  );
+}

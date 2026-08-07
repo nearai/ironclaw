@@ -50,7 +50,7 @@ SQL exception.
 ## Invariants
 
 - **Hand-written SQL is chartered, not a precedent:**
-  [ADR 0003](../../../docs/adr/0003-triggers-keeps-hand-written-sql.md)
+  [ADR 0003](../../../docs/internal/adr/0003-triggers-keeps-hand-written-sql.md)
   (claim/lease semantics inexpressible on the filesystem fabric; both backends
   ship by profile). `reborn_persistence_driver_boundary.rs` pins this crate as
   the tagged exception; a third SQL crate needs its own ADR.

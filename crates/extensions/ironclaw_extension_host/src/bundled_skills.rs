@@ -267,9 +267,23 @@ pub async fn ensure_bundled_reborn_skills_installed(
 }
 
 pub fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, RebornBuildError> {
+    // Which bundled skills ship a `scripts/` directory, read from the embedded bundles rather than
+    // assumed. `portfolio` ships four Python scripts today, and reporting `has_scripts: false` for it
+    // would tell the Skills page it is a prose-only skill.
+    let skills_with_scripts = embedded_reborn_skill_bundles()?
+        .into_iter()
+        .filter(|bundle| {
+            bundle
+                .files
+                .iter()
+                .any(|file| file.path.starts_with("scripts/") || file.path.contains("/scripts/"))
+        })
+        .map(|bundle| bundle.name)
+        .collect::<HashSet<_>>();
     Ok(embedded_reborn_skill_summaries()?
         .into_iter()
         .map(|skill| SkillSummary {
+            has_scripts: skills_with_scripts.contains(&skill.name),
             name: skill.name,
             version: skill.version,
             description: skill.description,
