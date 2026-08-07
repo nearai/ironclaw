@@ -627,11 +627,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
-        // Raised 18_784 -> 18_792 by #7214: the user-sandbox backend rename
-        // preserves the legacy `tenant_sandbox` wire value and pins canonical
-        // reserialization. The growth is contract vocabulary and its serde
-        // compatibility proof; execution remains in the sandbox runtime lane.
-        ("ironclaw_host_api", 18_792),
+        // Raised 18_784 -> 18_799 by #7214: the user-sandbox backend rename
+        // preserves the legacy `tenant_sandbox` wire value, and the neutral
+        // sandbox transport now exposes graceful lifecycle release. This is
+        // contract vocabulary; execution and provider cleanup remain in the
+        // sandbox runtime lane.
+        ("ironclaw_host_api", 18_799),
         ("ironclaw_loop_contracts", 14_479),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,

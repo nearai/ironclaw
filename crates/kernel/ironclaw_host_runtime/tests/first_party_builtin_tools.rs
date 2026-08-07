@@ -454,6 +454,9 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
         .iter()
         .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("user-sandbox shell descriptor");
+    assert!(shell.description.contains("read-only system filesystem"));
+    assert!(shell.description.contains("/workspace/.venv"));
+    assert!(shell.description.contains("/workspace/.venv/bin/python"));
     for effect in [
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
@@ -467,6 +470,7 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
         .iter()
         .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("user-sandbox shell manifest");
+    assert_eq!(manifest_shell.description, shell.description);
     for effect in [
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
@@ -481,6 +485,15 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     )
     .unwrap();
     assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+
+    let host_package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::LocalHost).unwrap();
+    let host_shell = host_package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("local-host shell descriptor");
+    assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {

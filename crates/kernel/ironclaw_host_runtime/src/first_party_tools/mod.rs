@@ -272,6 +272,7 @@ fn restrict_package_for_process_backend(
         // not host-filesystem or host-network effects, so do not ask the
         // invocation resolver to bind either service. Brokered network effects
         // remain a follow-up once shell traffic can traverse ironclaw_network.
+        append_user_sandbox_shell_guidance(package)?;
         for effect in [
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
@@ -280,6 +281,32 @@ fn restrict_package_for_process_backend(
             remove_builtin_capability_effect(package, SHELL_CAPABILITY_ID, effect)?;
         }
     }
+    Ok(())
+}
+
+fn append_user_sandbox_shell_guidance(
+    package: &mut ExtensionPackage,
+) -> Result<(), ExtensionError> {
+    const GUIDANCE: &str = " Runs inside a per-user sandbox with a writable persistent `/workspace` and a read-only system filesystem. Install Python packages under `/workspace`, preferably with `python3 -m venv /workspace/.venv`, then use `/workspace/.venv/bin/python` and `/workspace/.venv/bin/pip` in later calls because shell process state does not persist between calls.";
+
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
+    let descriptor = package
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party package is missing capability {capability_id}"),
+        })?;
+    let manifest = package
+        .manifest
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party manifest is missing capability {capability_id}"),
+        })?;
+    descriptor.description.push_str(GUIDANCE);
+    manifest.description.push_str(GUIDANCE);
     Ok(())
 }
 

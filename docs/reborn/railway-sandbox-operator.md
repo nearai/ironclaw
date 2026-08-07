@@ -62,8 +62,14 @@ Configure the Railway service with all of the following:
   state. Scale back to one before a preview is considered healthy.
 - The preview transport tracks at most 4,096 user lifecycle entries per
   process. At capacity it evicts the least-recently-used idle entry, never an
-  entry held by an active command; Railway's configured idle timeout reclaims
-  any outer sandbox no longer tracked by the process.
+  entry held by an active command. The default Railway idle timeout is five
+  minutes and may be changed with
+  `IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES`.
+- IronClaw attempts to checkpoint the user workspace after every completed
+  command. On graceful shutdown, it attempts to retry stale checkpoints and
+  destroy the live Railway sandboxes owned by that process. Shutdown time is
+  finite in a hosted deployment, and a crash cannot run cleanup at all, so the
+  configured idle timeout is the hard resource-leak backstop.
 - The usual WebUI and LLM secrets described in
   [the Docker deployment guide](deploy-reborn-cli-docker.md); do not invent or
   bake values into this runbook.
@@ -102,7 +108,10 @@ any worker that requires a deny-by-default guarantee.
 5. Before a sandbox lifecycle operation, confirm the pinned CLI's sandbox help
    and current Railway API behavior. Record the explicit project/environment
    IDs with the operation evidence, then verify the resulting sandbox state.
-6. On failure, stop creating new sandboxes first. Preserve the volume and
+6. After a controlled restart, confirm the previous process-owned sandboxes
+   were destroyed or expire within the configured idle timeout. After a crash,
+   confirm they expire within that timeout.
+7. On failure, stop creating new sandboxes first. Preserve the volume and
    checkpoint evidence, reduce the control service to one replica, and inspect
    the host-side logs without printing tokens.
 

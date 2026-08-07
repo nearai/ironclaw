@@ -608,10 +608,11 @@ cargo run -q -p ironclaw --bin ironclaw -- serve --host 127.0.0.1 --port 3000
 Reports configured Reborn skills from `<reborn-home>/<profile-subdir>/skills`
 and `<reborn-home>/<profile-subdir>/system/skills` through the Reborn
 composition skill listing function, where `<profile-subdir>` is
-`hosted-single-tenant` or `hosted-single-tenant-volume` for those profiles and
-`local-dev` for `local-dev`, `local-dev-yolo`, `production`, and
-`migration-dry-run`. It does not read v1 skill discovery paths, and a missing
-storage root is reported as an empty skill list without creating directories.
+`hosted-single-tenant` for that profile, `hosted-single-tenant-volume` for that
+profile, `hosted-single-tenant-volume-sandboxed` for both sandbox profiles, and
+`local-dev` for `local-dev` and `local-dev-yolo`. It does not read v1 skill
+discovery paths, and a missing storage root is reported as an empty skill list
+without creating directories.
 
 ```bash
 cargo run -q -p ironclaw --bin ironclaw -- skills list
@@ -631,8 +632,9 @@ Expected fields include:
 `owner_id`; text output also includes per-skill `version`, `keywords`, `tags`,
 and `requires_skills` when present. `skills list` currently supports
 `local-dev`, `local-dev-yolo`, `hosted-single-tenant`, and
-`hosted-single-tenant-volume` profiles and rejects `production` /
-`migration-dry-run` until those catalog backends are wired.
+`hosted-single-tenant-volume`, `hosted-single-tenant-volume-sandboxed`, and
+`hosted-single-tenant-volume-sandboxed-railway` profiles. It rejects
+`production` / `migration-dry-run` until those catalog backends are wired.
 
 ## State and config root
 

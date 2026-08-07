@@ -268,6 +268,8 @@ pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<Compos
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    pub(crate) user_sandbox_process_port:
+        Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,

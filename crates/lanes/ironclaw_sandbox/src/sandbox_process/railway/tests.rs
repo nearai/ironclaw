@@ -24,6 +24,7 @@ struct FakeRailwayCli {
     failed_liveness_lists: AtomicUsize,
     failed_bootstrap_execs: AtomicUsize,
     failed_worker_execs: AtomicUsize,
+    malformed_worker_outputs: AtomicUsize,
     failed_checkpoint_creates: AtomicUsize,
     failed_destroys: AtomicUsize,
     malformed_checkpoint_lists: AtomicUsize,
@@ -42,6 +43,7 @@ impl FakeRailwayCli {
             failed_liveness_lists: AtomicUsize::new(0),
             failed_bootstrap_execs: AtomicUsize::new(0),
             failed_worker_execs: AtomicUsize::new(0),
+            malformed_worker_outputs: AtomicUsize::new(0),
             failed_checkpoint_creates: AtomicUsize::new(0),
             failed_destroys: AtomicUsize::new(0),
             malformed_checkpoint_lists: AtomicUsize::new(0),
@@ -71,6 +73,10 @@ impl FakeRailwayCli {
 
     fn fail_next_worker_exec(&self) {
         self.failed_worker_execs.store(1, Ordering::SeqCst);
+    }
+
+    fn malform_next_worker_output(&self) {
+        self.malformed_worker_outputs.store(1, Ordering::SeqCst);
     }
 
     fn fail_next_bootstrap_exec(&self) {
@@ -204,6 +210,12 @@ impl RailwayCli for FakeRailwayCli {
             });
         }
         if invocation.args.iter().any(|arg| arg == OUTER_EXEC_WRAPPER) {
+            if self.malformed_worker_outputs.swap(0, Ordering::SeqCst) > 0 {
+                return Ok(RailwayCliOutput {
+                    stdout: "truncated worker response".to_string(),
+                    stderr: String::new(),
+                });
+            }
             return Ok(RailwayCliOutput {
                 stdout: format!("command output\n{EXIT_SENTINEL}0\n"),
                 stderr: String::new(),
@@ -268,6 +280,11 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
     second.unwrap();
     let invocations = cli.invocations().await;
     assert_eq!(count_creates(&invocations), 1);
+    let create = invocations
+        .iter()
+        .find(|call| call.args.starts_with(&["sandbox".into(), "create".into()]))
+        .expect("sandbox create invocation");
+    assert_pair(&create.args, "--idle-timeout-minutes", "5");
     let model_runs = model_container_runs(&invocations);
     assert_eq!(model_runs.len(), 2);
     for run in model_runs {
@@ -305,6 +322,85 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
                 .any(|pair| { pair[0] == "sh" && pair[1] == "-lc" })
         );
     }
+}
+
+#[tokio::test]
+async fn shutdown_checkpoints_and_destroys_every_process_owned_sandbox() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    transport
+        .run_command(request("tenant", "user-a", "true"))
+        .await
+        .unwrap();
+    transport
+        .run_command(request("tenant", "user-b", "true"))
+        .await
+        .unwrap();
+
+    transport.shutdown().await.unwrap();
+
+    let invocations = cli.invocations().await;
+    assert_eq!(count_destroys(&invocations), 2);
+    assert_eq!(count_checkpoint_creates(&invocations), 2);
+    assert!(cli.live_sandboxes.lock().await.is_empty());
+    let states = transport
+        .users
+        .lock()
+        .await
+        .values()
+        .map(|tracked| tracked.state.clone())
+        .collect::<Vec<_>>();
+    for state in states {
+        assert!(matches!(
+            state.lock().await.lifecycle,
+            UserSandboxLifecycle::Absent
+        ));
+    }
+}
+
+#[tokio::test]
+async fn shutdown_preserves_live_sandbox_when_final_checkpoint_fails() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    transport
+        .run_command(request("tenant", "user", "true"))
+        .await
+        .unwrap();
+    let state = transport
+        .state_for(user_key("tenant", "user"))
+        .await
+        .unwrap();
+    state.lock().await.checkpoint_current = false;
+    cli.fail_next_checkpoint_create();
+
+    assert!(transport.shutdown().await.is_err());
+
+    assert_eq!(count_destroys(&cli.invocations().await), 0);
+    assert_eq!(cli.live_sandboxes.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn malformed_worker_response_forces_shutdown_to_checkpoint_before_destroy() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    transport
+        .run_command(request("tenant", "user", "first command"))
+        .await
+        .unwrap();
+    cli.malform_next_worker_output();
+
+    assert!(
+        transport
+            .run_command(request("tenant", "user", "mutating command"))
+            .await
+            .is_err()
+    );
+
+    transport.shutdown().await.unwrap();
+    let invocations = cli.invocations().await;
+    assert_eq!(count_checkpoint_creates(&invocations), 2);
+    assert_eq!(count_destroys(&invocations), 1);
+    assert!(cli.live_sandboxes.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -933,6 +1029,23 @@ fn count_checkpoint_lists(calls: &[RailwayCliInvocation]) -> usize {
             call.args
                 .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
         })
+        .count()
+}
+
+fn count_checkpoint_creates(calls: &[RailwayCliInvocation]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.args
+                .starts_with(&["sandbox".into(), "checkpoint".into(), "create".into()])
+        })
+        .count()
+}
+
+fn count_destroys(calls: &[RailwayCliInvocation]) -> usize {
+    calls
+        .iter()
+        .filter(|call| call.args.starts_with(&["sandbox".into(), "destroy".into()]))
         .count()
 }
 

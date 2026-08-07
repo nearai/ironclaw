@@ -25,7 +25,7 @@ use crate::sandbox_process::RebornSandboxUserKey;
 
 use super::worker_spec::DOCKER_WORKER_USER as WORKER_USER;
 
-const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 30;
+const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 5;
 // Pin the exact multi-platform manifest exercised by the Railway preview
 // canary. Operators may override this explicitly, but the default must not
 // drift between review and deployment.
@@ -341,19 +341,7 @@ impl RailwayPreviewSandboxTransport {
         output_limit: usize,
         execution_error: &RuntimeProcessError,
     ) -> Result<(), RuntimeProcessError> {
-        let cleanup = self
-            .cli
-            .execute(
-                RailwayCliInvocation::new(
-                    self.config.cli_path.clone(),
-                    RailwayCliOperation::DestroySandbox,
-                    sandbox_destroy_argv(&self.config, sandbox_id),
-                    output_limit,
-                ),
-                REMOTE_CLEANUP_TIMEOUT,
-            )
-            .await;
-        if let Err(cleanup_error) = cleanup {
+        if let Err(cleanup_error) = self.destroy_sandbox(sandbox_id, output_limit).await {
             tracing::error!(
                 ?execution_error,
                 ?cleanup_error,
@@ -365,6 +353,84 @@ impl RailwayPreviewSandboxTransport {
             ));
         }
         Ok(())
+    }
+
+    async fn destroy_sandbox(
+        &self,
+        sandbox_id: &str,
+        output_limit: usize,
+    ) -> Result<(), RuntimeProcessError> {
+        self.cli
+            .execute(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    RailwayCliOperation::DestroySandbox,
+                    sandbox_destroy_argv(&self.config, sandbox_id),
+                    output_limit,
+                ),
+                REMOTE_CLEANUP_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+    }
+
+    async fn shutdown_owned_sandboxes(&self) -> Result<(), RuntimeProcessError> {
+        let users = {
+            let users = self.users.lock().await;
+            users
+                .iter()
+                .map(|(key, tracked)| (key.clone(), tracked.state.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut first_error = None;
+        for (key, state) in users {
+            let mut state = state.lock().await;
+            let sandbox_id = match state.lifecycle.clone() {
+                UserSandboxLifecycle::Absent => continue,
+                UserSandboxLifecycle::Live(sandbox_id) => {
+                    if !state.checkpoint_current {
+                        if let Err(error) = self
+                            .checkpoint(&key, &sandbox_id, DEFAULT_OUTPUT_LIMIT)
+                            .await
+                        {
+                            tracing::error!(
+                                ?error,
+                                sandbox_id,
+                                "Railway sandbox shutdown left a live sandbox because its final checkpoint failed"
+                            );
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                            continue;
+                        }
+                        state.checkpoint_current = true;
+                    }
+                    sandbox_id
+                }
+                UserSandboxLifecycle::CleanupPending(sandbox_id) => sandbox_id,
+            };
+            state.lifecycle = UserSandboxLifecycle::CleanupPending(sandbox_id.clone());
+            match self
+                .destroy_sandbox(&sandbox_id, DEFAULT_OUTPUT_LIMIT)
+                .await
+            {
+                Ok(()) => state.lifecycle = UserSandboxLifecycle::Absent,
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        sandbox_id,
+                        "Railway sandbox shutdown could not confirm remote cleanup"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     async fn execute_cli(
@@ -424,6 +490,11 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
                 ));
             }
         };
+        // The remote command may mutate `/workspace` even when its transport
+        // response is lost or malformed. Mark the prior checkpoint stale
+        // before dispatch so graceful shutdown cannot destroy those writes
+        // without first retrying a checkpoint.
+        state.checkpoint_current = false;
         let output = self
             .execute_cli(
                 RailwayCliInvocation::new(
@@ -464,6 +535,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
             .checkpoint(&key, &sandbox_id, output_limit)
             .await
             .is_err();
+        state.checkpoint_current = !checkpoint_failed;
         let mut raw_output = combine_output(stdout, output.stderr);
         if checkpoint_failed {
             if !raw_output.is_empty() && !raw_output.ends_with('\n') {
@@ -480,6 +552,10 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
             sandboxed: true,
             duration: started.elapsed(),
         })
+    }
+
+    async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
+        self.shutdown_owned_sandboxes().await
     }
 }
 
@@ -519,9 +595,10 @@ struct TrackedUserState {
 #[derive(Debug, Default)]
 struct UserSandboxState {
     lifecycle: UserSandboxLifecycle,
+    checkpoint_current: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 enum UserSandboxLifecycle {
     #[default]
     Absent,

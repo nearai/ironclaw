@@ -83,4 +83,11 @@ pub trait SandboxCommandTransport: Send + Sync {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
+
+    /// Release remote resources owned by this transport after command
+    /// producers have stopped. Local transports may keep the default no-op;
+    /// remote transports override this with idempotent provider cleanup.
+    async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
+        Ok(())
+    }
 }

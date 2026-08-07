@@ -684,6 +684,10 @@ pub(super) async fn build_backend_production(
     } else {
         services
     };
+    let user_sandbox_process_port = match &production_wiring.runtime_process_binding {
+        RebornRuntimeProcessBinding::None => None,
+        RebornRuntimeProcessBinding::UserSandbox { process_port } => Some(Arc::clone(process_port)),
+    };
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
@@ -1220,6 +1224,7 @@ pub(super) async fn build_backend_production(
 
     Ok(RebornRuntimeStores {
         host_runtime,
+        user_sandbox_process_port,
         #[cfg(test)]
         turn_coordinator,
         readiness: readiness_for(profile, true, true, product_auth_ready),

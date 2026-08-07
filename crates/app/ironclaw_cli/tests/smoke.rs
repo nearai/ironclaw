@@ -1595,6 +1595,29 @@ fn skills_list_rejects_unsupported_profiles() {
 }
 
 #[test]
+fn skills_list_accepts_sandbox_profiles() {
+    for profile in [
+        "hosted-single-tenant-volume-sandboxed",
+        "hosted-single-tenant-volume-sandboxed-railway",
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = reborn_command()
+            .arg("skills")
+            .arg("list")
+            .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+            .env("IRONCLAW_REBORN_PROFILE", profile)
+            .output()
+            .expect("ironclaw-reborn skills list should run");
+
+        assert!(
+            output.status.success(),
+            "skills list should accept profile={profile}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn logs_reports_not_implemented() {
     assert_not_implemented(&["logs"], "`logs` is not implemented yet");
     assert_not_implemented(&["logs", "--verbose"], "`logs` is not implemented yet");
