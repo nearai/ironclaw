@@ -38,10 +38,12 @@ function LanguageSwitchingPanel() {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 test("thread scraping loads every page and ignores stale artifact responses", async () => {
@@ -184,6 +186,160 @@ test("switching target users discards the previous user's pending artifact", asy
       requests.fetchThreads.mock.calls.map((call) => call[0]),
       ["user-one", "user-two"],
     );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("switching target users discards late initial list responses and errors", async () => {
+  const lateResponse = deferred<Record<string, unknown>>();
+  const lateError = deferred<Record<string, unknown>>();
+  requests.fetchThreads.mockImplementation((userId) => {
+    if (userId === "user-one") return lateResponse.promise;
+    if (userId === "user-three") return lateError.promise;
+    return Promise.resolve({ threads: [], next_cursor: null });
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-one" />
+        </I18nProvider>,
+      );
+    });
+    const firstSignal = requests.fetchThreads.mock.calls[0]?.[1]?.signal;
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-two" />
+        </I18nProvider>,
+      );
+    });
+    assert.equal(firstSignal?.aborted, true);
+    await act(async () => {
+      lateResponse.resolve({
+        threads: [{ thread_id: "stale-thread", title: "Stale initial response" }],
+        next_cursor: "stale-cursor",
+      });
+    });
+    assert.doesNotMatch(container.textContent ?? "", /Stale initial response/);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-three" />
+        </I18nProvider>,
+      );
+    });
+    const thirdSignal = requests.fetchThreads.mock.calls[2]?.[1]?.signal;
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-four" />
+        </I18nProvider>,
+      );
+    });
+    assert.equal(thirdSignal?.aborted, true);
+    await act(async () => {
+      lateError.reject(new Error("stale initial error"));
+    });
+    assert.doesNotMatch(container.textContent ?? "", /stale initial error/);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("switching target users discards late paginated responses and errors", async () => {
+  const latePage = deferred<Record<string, unknown>>();
+  const latePageError = deferred<Record<string, unknown>>();
+  requests.fetchThreads.mockImplementation((userId, options) => {
+    if (options?.cursor === "cursor-one") return latePage.promise;
+    if (options?.cursor === "cursor-three") return latePageError.promise;
+    if (userId === "user-one") {
+      return Promise.resolve({
+        threads: [{ thread_id: "thread-one", title: "One" }],
+        next_cursor: "cursor-one",
+      });
+    }
+    if (userId === "user-three") {
+      return Promise.resolve({
+        threads: [{ thread_id: "thread-three", title: "Three" }],
+        next_cursor: "cursor-three",
+      });
+    }
+    return Promise.resolve({ threads: [], next_cursor: null });
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-one" />
+        </I18nProvider>,
+      );
+    });
+    const firstLoadMore = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-load-more"]',
+    );
+    assert.ok(firstLoadMore);
+    await act(async () => firstLoadMore.click());
+    const firstPageSignal = requests.fetchThreads.mock.calls[1]?.[1]?.signal;
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-two" />
+        </I18nProvider>,
+      );
+    });
+    assert.equal(firstPageSignal?.aborted, true);
+    await act(async () => {
+      latePage.resolve({
+        threads: [{ thread_id: "stale-page-thread", title: "Stale page response" }],
+        next_cursor: null,
+      });
+    });
+    assert.doesNotMatch(container.textContent ?? "", /Stale page response/);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-three" />
+        </I18nProvider>,
+      );
+    });
+    const thirdLoadMore = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-load-more"]',
+    );
+    assert.ok(thirdLoadMore);
+    await act(async () => thirdLoadMore.click());
+    const thirdPageSignal = requests.fetchThreads.mock.calls[4]?.[1]?.signal;
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-four" />
+        </I18nProvider>,
+      );
+    });
+    assert.equal(thirdPageSignal?.aborted, true);
+    await act(async () => {
+      latePageError.reject(new Error("stale paginated error"));
+    });
+    assert.doesNotMatch(container.textContent ?? "", /stale paginated error/);
   } finally {
     act(() => root.unmount());
     container.remove();

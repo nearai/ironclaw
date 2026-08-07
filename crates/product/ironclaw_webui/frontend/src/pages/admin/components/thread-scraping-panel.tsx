@@ -53,11 +53,12 @@ export function ThreadScrapingPanel({ userId }) {
     setError("");
     fetchThreadScrapeThreads(userId, { limit: 100, signal: controller.signal })
       .then((response) => {
+        if (controller.signal.aborted) return;
         setThreads(Array.isArray(response?.threads) ? response.threads : []);
         setNextCursor(response?.next_cursor ?? null);
       })
       .catch((requestError) => {
-        if (requestError?.name !== "AbortError") {
+        if (!controller.signal.aborted && requestError?.name !== "AbortError") {
           setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
         }
       })
@@ -114,7 +115,7 @@ export function ThreadScrapingPanel({ userId }) {
       });
       setNextCursor(response?.next_cursor ?? null);
     } catch (requestError) {
-      if (requestError?.name !== "AbortError") {
+      if (!controller.signal.aborted && requestError?.name !== "AbortError") {
         setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
       }
     } finally {
