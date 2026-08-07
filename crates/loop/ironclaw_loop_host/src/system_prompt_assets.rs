@@ -46,13 +46,13 @@ pub const SELF_KNOWLEDGE_PROTOCOL_PROMPT: &str = include_str!("../prompts/self_k
 
 /// Persistent-memory protocol, appended to the system prompt unconditionally.
 ///
-/// Like the self-knowledge section, this is ground knowledge about the running
-/// system rather than a user preference: the memory tools and the host's
-/// automatic memory-context lane exist on every deployment, but nothing tells
-/// the model *when* a durable user fact is worth saving or that surfaced
-/// memories came from earlier conversations (#7185). Seeding it into the
-/// user-editable file would only reach fresh installs, so it is appended in
-/// memory on every resolve.
+/// Nothing otherwise tells the model *when* a durable user fact is worth
+/// saving, that surfaced memories came from earlier conversations, or how to
+/// phrase one so it does not read as a standing instruction later (#7185).
+/// That is ground knowledge about the running system rather than a user
+/// preference, so — like the self-knowledge section — seeding it into the
+/// user-editable file would only reach fresh installs; it is appended in memory
+/// on every resolve instead.
 pub const MEMORY_PROTOCOL_PROMPT: &str = include_str!("../prompts/memory_protocol.md");
 
 /// Appended only when benchmarking mode is active.
@@ -132,6 +132,53 @@ mod tests {
                 "memory protocol must mention {expected:?}"
             );
         }
+    }
+
+    /// Field-proven doctrine the protocol has to carry, each pinned because
+    /// dropping it degrades recall quality in a way no compiler catches:
+    ///
+    /// - **Declarative form.** A memory saved as an imperative ("Always respond
+    ///   concisely") is re-read as a standing directive on every later turn —
+    ///   and the always-on lane re-injects it every turn — so it can override
+    ///   what the user is asking for now. The worked example pair is the part
+    ///   models actually copy, so pin both halves.
+    /// - **Staleness skip-list.** Task progress, session outcomes, and
+    ///   short-lived artifacts (PR numbers, commit SHAs) crowd out durable
+    ///   facts and go wrong within days.
+    /// - **Priority framing.** Tells the model which memory is worth the write
+    ///   when it has to choose.
+    #[test]
+    fn memory_protocol_carries_the_write_quality_doctrine() {
+        for (doctrine, expected) in [
+            ("declarative-form rule", "declarative fact"),
+            (
+                "declarative example (good)",
+                "User prefers concise responses",
+            ),
+            ("declarative example (bad)", "Always respond concisely"),
+            ("staleness skip-list", "task progress"),
+            ("staleness skip-list", "commit SHAs"),
+            ("staleness horizon", "stale within a week"),
+            ("priority framing", "repeat or correct themselves"),
+        ] {
+            assert!(
+                MEMORY_PROTOCOL_PROMPT.contains(expected),
+                "memory protocol lost its {doctrine}: expected {expected:?}"
+            );
+        }
+    }
+
+    /// The protocol must stay short enough to be worth appending to every
+    /// prompt on every turn. Guidance that grows unchecked is how a system
+    /// prompt quietly becomes the dominant cost of a cheap turn.
+    #[test]
+    fn memory_protocol_stays_within_its_prompt_budget() {
+        let lines = MEMORY_PROTOCOL_PROMPT.lines().count();
+        assert!(
+            lines <= 18,
+            "memory protocol is appended to every turn's prompt and must stay compact; \
+             {lines} lines"
+        );
     }
 
     /// The four appended protocols are distinct sections — a copy/paste that
