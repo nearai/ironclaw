@@ -56,6 +56,7 @@ use ironclaw_host_api::{
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
+    process::RuntimeProcessError,
     resource::ResourceScope,
     scope::Principal,
 };
@@ -518,7 +519,7 @@ pub enum RebornRuntimeError {
     #[error("skill execution failed: {0}")]
     SkillExecution(String),
     #[error("user sandbox shutdown failed: {0}")]
-    UserSandboxShutdown(String),
+    UserSandboxShutdown(#[source] RuntimeProcessError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -2425,7 +2426,7 @@ impl RebornRuntime {
             process_port
                 .shutdown()
                 .await
-                .map_err(|error| RebornRuntimeError::UserSandboxShutdown(error.to_string()))?;
+                .map_err(RebornRuntimeError::UserSandboxShutdown)?;
         }
         Ok(())
     }

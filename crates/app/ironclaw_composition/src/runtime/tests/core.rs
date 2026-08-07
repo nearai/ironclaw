@@ -3147,6 +3147,21 @@ struct ShellRecordingSandboxTransport {
     shutdown_calls: AtomicUsize,
 }
 
+#[test]
+fn user_sandbox_shutdown_error_preserves_runtime_process_source() {
+    use std::error::Error as _;
+
+    let source = ironclaw_host_api::process::RuntimeProcessError::ExecutionFailed(
+        "sanitized checkpoint failure".to_string(),
+    );
+    let error = super::RebornRuntimeError::UserSandboxShutdown(source.clone());
+
+    assert_eq!(
+        error.source().map(ToString::to_string),
+        Some(source.to_string())
+    );
+}
+
 #[async_trait]
 impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandboxTransport {
     async fn run_command(

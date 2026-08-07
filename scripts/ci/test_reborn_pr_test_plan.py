@@ -546,14 +546,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crate_directory",
             return_value=moved_directory,
         ) as resolver:
-            plan = planner.build_plan(
-                event="pull_request",
-                changed_paths=[f"{moved_directory}/src/sandbox_process/command.rs"],
-                metadata=moved_metadata,
-                canonical_packages=self.canonical,
-            )
+            for relative_path in (
+                "Cargo.toml",
+                "src/lib.rs",
+                "src/sandbox_process/command.rs",
+            ):
+                with self.subTest(relative_path=relative_path):
+                    plan = planner.build_plan(
+                        event="pull_request",
+                        changed_paths=[f"{moved_directory}/{relative_path}"],
+                        metadata=moved_metadata,
+                        canonical_packages=self.canonical,
+                    )
+                    self.assertTrue(plan["run_sandbox_docker"])
         resolver.assert_any_call("ironclaw_sandbox", planner.ROOT)
-        self.assertTrue(plan["run_sandbox_docker"])
 
     def test_sandbox_docker_paths_preserve_regular_test_inventory_selection(
         self,

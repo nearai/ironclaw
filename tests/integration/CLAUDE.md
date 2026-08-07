@@ -79,7 +79,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
    gateway or stub internals.
 4. **Zero setup by default.** Ordinary bins pass offline via a plain
    `cargo test --test reborn_integration_<name>` — no services, API keys, Docker, or special
-   linker. The sole exception is `reborn_sandbox_shell_turn`, a backend/runtime
+   linker. The sole exception is `reborn_integration_sandbox_shell_turn`, a backend/runtime
    integration test selected by a dedicated Docker CI lane; locally it skips
    visibly unless Docker and the worker image are available, and CI sets
    `IRONCLAW_REQUIRE_DOCKER_TESTS=1` so those prerequisites fail closed.

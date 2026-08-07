@@ -12,9 +12,9 @@ use ironclaw_sandbox::{RebornSandboxConfig, RebornScopedSandboxCommandTransport}
 #[path = "support/docker_gate.rs"]
 mod docker_gate;
 
-fn scope(user: &str, project: &str, thread: &str) -> ResourceScope {
+fn scope(tenant: &str, user: &str, project: &str, thread: &str) -> ResourceScope {
     ResourceScope {
-        tenant_id: TenantId::new("docker-live-tenant").expect("tenant id"),
+        tenant_id: TenantId::new(tenant).expect("tenant id"),
         user_id: UserId::new(user).expect("user id"),
         agent_id: Some(AgentId::new("docker-live-agent").expect("agent id")),
         project_id: Some(ProjectId::new(project).expect("project id")),
@@ -62,7 +62,7 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
 
     let first = transport
         .run_command(request(
-            scope("user-a", "project-a", "thread-a"),
+            scope("tenant-a", "user-a", "project-a", "thread-a"),
             format!(
                 "python - <<'PY'\n\
                  import os\n\
@@ -94,7 +94,7 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
 
     let nonzero = transport
         .run_command(request(
-            scope("user-a", "project-a", "thread-a"),
+            scope("tenant-a", "user-a", "project-a", "thread-a"),
             "echo EXPECTED_NONZERO_STDERR >&2; exit 7",
         ))
         .await
@@ -105,7 +105,7 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
 
     let same_user = transport
         .run_command(request(
-            scope("user-a", "project-b", "thread-b"),
+            scope("tenant-a", "user-a", "project-b", "thread-b"),
             "python -c 'from pathlib import Path; print(Path(\"state.txt\").read_text())'",
         ))
         .await
@@ -115,7 +115,7 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
 
     let other_user = transport
         .run_command(request(
-            scope("user-b", "project-a", "thread-a"),
+            scope("tenant-a", "user-b", "project-a", "thread-a"),
             "python -c 'from pathlib import Path; print(Path(\"state.txt\").exists())'",
         ))
         .await
@@ -127,6 +127,21 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     );
     assert!(other_user.output.contains("False"));
     assert!(!other_user.output.contains(&marker));
+
+    let other_tenant = transport
+        .run_command(request(
+            scope("tenant-b", "user-a", "project-a", "thread-a"),
+            "python -c 'from pathlib import Path; print(Path(\"state.txt\").exists())'",
+        ))
+        .await
+        .expect("same user identifier in another tenant receives isolated workspace");
+    assert_eq!(
+        other_tenant.exit_code, 0,
+        "cross-tenant read failed: {}",
+        other_tenant.output
+    );
+    assert!(other_tenant.output.contains("False"));
+    assert!(!other_tenant.output.contains(&marker));
 }
 
 #[tokio::test]
@@ -152,7 +167,12 @@ async fn sandbox_profile_allows_public_https_egress() {
 
     let result = transport
         .run_command(request(
-            scope("egress-user", "egress-project", "egress-thread"),
+            scope(
+                "egress-tenant",
+                "egress-user",
+                "egress-project",
+                "egress-thread",
+            ),
             "python -c \"import os, urllib.request; assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'; response = urllib.request.urlopen('https://example.com', timeout=15); assert response.status == 200; response.close(); print('SANDBOX_PUBLIC_HTTPS_OK')\"",
         ))
         .await

@@ -158,8 +158,6 @@ QA_HARNESS_PREFIXES = (
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 SANDBOX_DOCKER_EXACT_PATHS = {
     "Dockerfile.sandbox-worker",
-    "crates/lanes/ironclaw_sandbox/Cargo.toml",
-    "crates/lanes/ironclaw_sandbox/src/lib.rs",
     "crates/app/ironclaw_cli/src/runtime/mod.rs",
     "crates/app/ironclaw_composition/src/sandbox.rs",
     "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
@@ -676,6 +674,17 @@ def build_plan(
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
     sandbox_docker_prefixes = _sandbox_docker_prefixes()
+    sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
+    if sandbox_docker_prefixes:
+        sandbox_crate_directory = sandbox_docker_prefixes[0].removesuffix(
+            "/src/sandbox_process"
+        )
+        sandbox_docker_exact_paths.update(
+            {
+                f"{sandbox_crate_directory}/Cargo.toml",
+                f"{sandbox_crate_directory}/src/lib.rs",
+            }
+        )
 
     for path in sorted(paths):
         if path == "Cargo.lock":
@@ -716,7 +725,7 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
-        if path in SANDBOX_DOCKER_EXACT_PATHS or path.startswith(
+        if path in sandbox_docker_exact_paths or path.startswith(
             sandbox_docker_prefixes
         ):
             run_sandbox_docker = True
