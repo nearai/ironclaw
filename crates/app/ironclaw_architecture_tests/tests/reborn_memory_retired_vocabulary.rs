@@ -54,6 +54,16 @@ const SANCTIONED_PATHS: &[&str] = &[
     "reborn_memory_retired_vocabulary.rs",
 ];
 
+/// Sanity floor for the scan, mirrored from `reborn_retired_taxonomy.rs` (this
+/// gate's twin — which had the floor from birth while this file did not). An
+/// *unreadable* path already fails the walk outright, so what the floor guards
+/// is the shape no I/O error can reveal: a `crates/` that exists and holds a
+/// fraction of the tree — the partial family move — where "no retired
+/// vocabulary found" is indistinguishable from "almost nothing was looked at"
+/// (CHECKLIST WS0, #6963). Far below the real count (~4000) and never expected
+/// to bind.
+const MIN_SCANNED_FILES: usize = 500;
+
 fn is_sanctioned(path: &str) -> bool {
     SANCTIONED_PATHS
         .iter()
@@ -210,12 +220,50 @@ fn the_sanctioned_path_resolver_refuses_stale_and_ambiguous_entries() {
 
 #[test]
 fn reborn_code_never_references_retired_memory_vocabulary() {
-    let (hits, _) = scan_workspace(&workspace_root());
+    let (hits, scanned) = scan_workspace(&workspace_root());
+    assert!(
+        scanned.len() >= MIN_SCANNED_FILES,
+        "scanned only {} files (floor {MIN_SCANNED_FILES}) — a partial tree must not \
+         read as a clean one",
+        scanned.len()
+    );
     assert!(
         hits.is_empty(),
         "retired memory vocabulary reintroduced (the bound provider's manifest \
          is the single source of truth: `[[tools]]` is the tool surface, \
          `[memory].lifecycle` gates every host-initiated call):\n{}",
         hits.join("\n")
+    );
+}
+
+/// The floor's premise, pinned on a fixture: a readable partial tree scans
+/// clean (empty hit list) with a file count the floor rejects — exactly the
+/// state that must never read as green.
+#[test]
+fn a_partial_tree_scans_clean_and_hits_the_floor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let family = root.join("crates/domains/ironclaw_memory/src");
+    std::fs::create_dir_all(&family).expect("family tree");
+    for index in 0..10 {
+        std::fs::write(family.join(format!("m{index}.rs")), "pub fn f() {}\n").expect("source");
+    }
+
+    let mut hits = Vec::new();
+    let mut scanned = Vec::new();
+    scan_dir(root, &root.join("crates"), &mut hits, &mut scanned)
+        .expect("a readable partial tree scans");
+    assert_eq!(
+        scanned.len(),
+        10,
+        "expected the partial tree, got {scanned:?}"
+    );
+    assert!(
+        hits.is_empty(),
+        "a partial scan also yields an empty hit list — that is the whole problem"
+    );
+    assert!(
+        scanned.len() < MIN_SCANNED_FILES,
+        "the floor must reject this scan"
     );
 }
