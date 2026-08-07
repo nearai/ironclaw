@@ -230,12 +230,22 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
       "Last-Event-ID": `${streamId}:13`,
     });
 
+    await act(async () => stream.hooks.onRequestError?.({}));
+    await act(async () => stream.respond());
+    const retainedLocalIds = latestState?.updates
+      .filter((update) => update.local_id)
+      .map((update) => update.local_id);
+    assert.deepEqual(retainedLocalIds, ["transport-1", "transport-2"]);
+
     await act(async () => {
       stream.message("diagnostic_rebase", `${streamId}:14`, {
         latest_cursor: { stream_id: streamId, sequence: 14 },
       });
     });
-    assert.equal(latestState?.updates.length, 0);
+    assert.deepEqual(
+      latestState?.updates.map((update) => update.local_id),
+      retainedLocalIds,
+    );
     assert.equal(vi.mocked(fetch).mock.calls.length, 3);
     await act(async () => vi.advanceTimersByTimeAsync(50));
     assert.equal(vi.mocked(fetch).mock.calls.length, 4);

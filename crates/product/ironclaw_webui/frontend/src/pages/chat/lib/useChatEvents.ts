@@ -27,11 +27,11 @@ import {
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
 import { publishProductInspectorEnvelope } from "../inspector/product-activity-publisher";
+import { AMBIGUOUS_RUN_ID, mergeRunIdCandidate } from "./run-id-candidate";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
 const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
-const AMBIGUOUS_RUN_ID = Symbol();
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -770,12 +770,6 @@ function fallbackTurnRunIdForActivity({
   if (candidate === AMBIGUOUS_RUN_ID) return null;
   candidate = mergeRunIdCandidate(candidate, batchRunId);
   return candidate === AMBIGUOUS_RUN_ID ? null : candidate;
-}
-
-function mergeRunIdCandidate(current, runId) {
-  if (typeof runId !== "string" || runId.length === 0) return current;
-  if (current === null) return runId;
-  return current === runId ? current : AMBIGUOUS_RUN_ID;
 }
 
 function settleTerminalRunAfterResolvedPrompt({
