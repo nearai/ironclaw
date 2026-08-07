@@ -162,6 +162,11 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Tool schema normalization:** `nearai_chat.rs` uses the provider-safe `FlattenOnly` policy from `tool_schema.rs`: it still flattens top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas that OpenAI-compatible tool APIs reject, but it does not rewrite optional object fields into required-nullable strict mode. `RigAdapter::convert_tools` and `openai_codex_provider.rs` continue to use the stricter OpenAI policy.
 
+**Streaming usage:** NEAR AI streaming chat-completion requests set
+`stream_options.include_usage = true`. The gateway otherwise strips usage from
+stream chunks, which would leave host-side token accounting unavailable even
+though non-streaming responses report it.
+
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
 **HTTP request timeout:** Non-streaming NEAR AI requests have a 60-second total timeout (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). Streaming requests use the same value for time-to-response-headers and each inter-event idle gap, but have no total wall-clock timeout; active long answers must not be cancelled merely because they exceed 60 seconds. The 10 s connect timeout and 30 s TCP keepalive from the shared hardened client also apply (see "Shared client timeout hygiene" below). Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
