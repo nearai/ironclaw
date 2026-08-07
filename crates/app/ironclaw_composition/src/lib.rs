@@ -210,7 +210,7 @@ pub mod ironhub {
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
-/// Kept narrow on purpose — the composition CLAUDE.md says "Expose
+/// Kept narrow on purpose — the composition CONTRACT.md says "Expose
 /// facade-shaped handles only"; these host-api identity types are the
 /// host-identity facade.
 pub mod host_api {
@@ -227,7 +227,7 @@ pub mod host_api {
 /// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
 /// `UserDirectory` adapter) depends on the facade vocabulary, never on
 /// `ironclaw_identity` directly. The concrete filesystem-backed store
-/// stays private to this composition layer (composition CLAUDE.md: "keep
+/// stays private to this composition layer (composition CONTRACT.md: "keep
 /// lower substrate handles private").
 // consumer: `ironclaw_cli` user_directory + webui_auth (no `ironclaw_identity` dep) · pinned by: `composition/tests/production_runtime_identity.rs`
 pub use ironclaw_identity::{
@@ -425,7 +425,7 @@ const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/
 /// isolation is structural rather than a convention. `/tenant-shared`
 /// resolves to `/tenants/<tenant>/shared`; `/system/{settings,
 /// extensions, skills}` route globally as read-only. See
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::resource::ResourceScope::system`]) routes records under

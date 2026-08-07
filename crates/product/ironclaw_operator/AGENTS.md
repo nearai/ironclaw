@@ -1,8 +1,16 @@
 # Agent Map — ironclaw_operator
 
+Working rules for the deployment-operator control plane. Orientation lives in
+`README.md`; family rules in `crates/product/AGENTS.md`.
+
+Both guidance files are new with the WS5 operator row. Before it, this crate
+had **neither guidance nor a boundary rule** — the audit's clearest
+correlation was guidance-presence ↔ discipline, and this crate is the worked
+example: its `ironclaw_assistant` dependency survived every earlier sweep
+because nothing was watching.
+
 ## Start Here
 
-- Read `CLAUDE.md` in this directory for the contract; this file is the map.
 - Read `src/lib.rs` first, then:
   - `llm_admin/llm_config_service.rs` — `RebornLlmConfigService`, the
     `LlmConfigService` implementation the WebChat Inference tab drives.
@@ -15,17 +23,42 @@
   - `llm_admin/nearai_login_serve.rs` — the one Axum route this crate owns
     (the public NEAR AI login callback).
   - `llm_admin/nearai_mcp.rs` — NEAR AI MCP endpoint/bootstrap config.
-  - `llm_admin/mod.rs` — the `llm_admin` re-export surface `lib.rs` lifts to the
-    crate root.
+  - `llm_admin/mod.rs` — the `llm_admin` re-export surface `lib.rs` lifts to
+    the crate root.
   - `operator_logs.rs` — the operator log ring (`OperatorLogBuffer`) and its
     `tracing` layer.
   - `operator_service_lifecycle.rs` — OS-service install/start/stop/status.
-  - Re-derive this list with `rg --files crates/product/ironclaw_operator/src`. Every
-    entry above except the two `operator_*.rs` files lives under `src/llm_admin/`,
-    so a non-recursive `ls` of `src/` cannot reproduce it.
-- Read the contract this crate implements *against*, never the crate beside it:
-  - `crates/contracts/ironclaw_product_contracts/CLAUDE.md` — `operator_llm`,
-    `operator_service`, `operator_tools`, `surface`.
+  - Re-derive this list with `rg --files crates/product/ironclaw_operator/src`.
+    Every entry above except the two `operator_*.rs` files lives under
+    `src/llm_admin/`, so a non-recursive `ls` of `src/` cannot reproduce it.
+- Read the contract this crate implements *against*, never the crate beside
+  it: `crates/contracts/ironclaw_product_contracts/CLAUDE.md` —
+  `operator_llm`, `operator_service`, `operator_tools`, `surface`.
+
+## The one rule
+
+**This crate implements ports; it does not declare them, and it does not
+depend on `ironclaw_assistant`.**
+
+`ironclaw_operator` and `ironclaw_assistant` both sit in the `products`
+layer. They are siblings. The layer matrix permits `products → products`, so
+the dependency was *legal and invisible* — which is why it needed a
+purpose-built gate rather than a matrix entry. Two gates hold it:
+
+- `reborn_operator_port_inversion.rs` — the residue of product-declared
+  traits this crate implements is **frozen at zero and shrink-only**; the
+  manifest is proved clean through `cargo metadata` (not a literal path, so a
+  directory move fails loudly); and each inverted port is pinned as
+  declared-in-contracts / not-re-declared-in-product / implemented-by-its-owner.
+- The `ironclaw_operator` `BoundaryRule` in
+  `reborn_dependency_boundaries.rs`.
+
+**Adding a port.** Declare the trait in `ironclaw_product_contracts`,
+implement it here, and add a row to `INVERTED_PORTS` in the gate. Do not
+declare a product-facing trait in this crate: a product-tier caller would then
+have to name `ironclaw_operator`, which re-inverts the edge in the other
+direction. (The port table itself is in `README.md`; grep `operator_llm` for
+the DTO module — a `llm_config` module does not exist, #7018 consolidated it.)
 
 ## What This Crate Owns
 
@@ -33,7 +66,12 @@
   API keys, the active provider+model selection, the catalog overlay, live
   provider hot-swap, and the NEAR AI / OpenAI Codex logins. This *is* the
   LLM-vendor admin layer, and PROPOSAL §8.2's vendor rule names it as one of
-  the few places a vendor name may appear in code.
+  the few places a vendor name may appear in code — `nearai`, `codex`,
+  `openai`, `anthropic` and friends are this crate's subject matter, not
+  leakage. The corollary: the *ports* live in a contracts crate, and §8.2
+  bounds the vendor vocabulary there to the existing six DTOs / three methods
+  (`reborn_contracts_vendor_census.rs`) — do not add a seventh vendor name; a
+  new vendor login belongs behind a neutral shape.
 - **The operator log ring.** A bounded in-memory buffer fed by a `tracing`
   layer, queried through `OperatorLogsService`.
 - **OS service lifecycle.** Install/start/stop/status for the host process.
@@ -41,18 +79,15 @@
 ## What This Crate Does Not Own
 
 - **Ports.** Every product-facing port this crate satisfies is *declared* in
-  `ironclaw_product_contracts` and implemented here. Do not add a trait here
-  that a product-tier caller must name — that is the inversion the WS5 operator
-  row removed.
-- **`ironclaw_assistant`.** There is no dependency on it, and there must not be:
-  operator is product's sibling, not its consumer. Enforced twice —
-  `reborn_operator_port_inversion.rs` (through `cargo metadata`) and the
-  `ironclaw_operator` `BoundaryRule` in `reborn_dependency_boundaries.rs`.
+  `ironclaw_product_contracts` and implemented here.
 - **Routers.** This crate builds one route and hands it back as an
   `ironclaw_host_ingress::PublicRouteMount` (a router plus its ingress policy
-  descriptors). Composition decides where it mounts. Do not add a `Router` that
-  something outside this crate is expected to nest, and do not declare a local
-  mount type — the host-owned carrier is the vocabulary.
+  descriptors). Composition decides where it mounts. Do not add a `Router`
+  that something outside this crate is expected to nest, and do not declare a
+  local mount type — the deleted `OperatorPublicRouteMount`/
+  `OperatorProtectedRouteMount` duplicates are what once forced a
+  composition-side shim whose entire body was
+  `PublicRouteMount::new(mount.router, mount.descriptors)`.
 - **Assembly.** Composition wires this crate's services together; the crate
   itself constructs nothing it did not get handed.
 
@@ -99,3 +134,20 @@
   replacement mechanism is **package inventory supplied by the binary**: the
   binary provides the endpoint configuration alongside the manifest, retiring
   the fork and the `include_str!` reach-in as one change rather than two.
+- **`ironclaw_config` edge.** The family target says boot values arrive as
+  construction input, not a config dependency; the edge is live in
+  `operator_service_lifecycle.rs` and not forbidden by the BoundaryRule —
+  recorded in `families/product.md` §6.9.2's dated correction.
+
+## Testing
+
+Per-crate: `cargo test -p ironclaw_operator`. The ports' *contract* (argument
+threading, error projection, wire forms, object safety) is tested in
+`ironclaw_product_contracts`; what belongs here is whether **this**
+implementation answers correctly — key masking, catalog overlay precedence,
+config-file writes, the log ring's bounds, and service-lifecycle state
+mapping.
+
+A contracts-tier test can only pin that the port hands an implementation its
+arguments and that the shape admits a per-caller answer. It cannot pin that
+this crate filters by caller. Do not rely on it for that.

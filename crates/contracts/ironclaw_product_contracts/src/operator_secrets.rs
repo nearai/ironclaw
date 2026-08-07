@@ -52,7 +52,7 @@ use thiserror::Error;
 /// `ironclaw_composition::RuntimeOperatorSecretValueStore`, over
 /// `ironclaw_secrets::SecretStorePort` — assembly is the only layer that may
 /// name both sides. `ironclaw_operator::LlmKeyStore` is the sole consumer;
-/// `crates/ironclaw_architecture_tests/tests/reborn_operator_port_inversion.rs` pins
+/// `crates/app/ironclaw_architecture_tests/tests/reborn_operator_port_inversion.rs` pins
 /// both facts.
 #[async_trait]
 pub trait OperatorSecretValueStore: Send + Sync {

@@ -494,6 +494,7 @@ mod tests {
                 subagent_kind,
                 mode: SpawnSubagentMode::Blocking,
                 result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
+                spawn_provider_call_id: None,
                 handoff: None,
                 parent_run_context: context.clone(),
                 gate_ref: TurnGateRef::new("gate:subagent-prompt-test").unwrap(),

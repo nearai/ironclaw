@@ -1416,7 +1416,7 @@ mod learning {
 
         #[test]
         fn rewrite_skill_name_retargets_frontmatter_only() {
-            let content = "---\nname: file-character-count-roundtrip\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [file, count]\n---\n\n# Title\n\nname: not-the-frontmatter\nBody.\n";
+            let content = "---\nname: file-character-count-roundtrip\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [line count, character tally]\n---\n\n# Title\n\nname: not-the-frontmatter\nBody.\n";
             let rewritten = rewrite_skill_name(content, "file-create-read-count-summary");
             let parsed = parse_skill_md(&rewritten).expect("rewritten skill parses");
             assert_eq!(parsed.manifest.name, "file-create-read-count-summary");
@@ -1440,8 +1440,8 @@ mod learning {
             }
         }
 
-        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [file, count]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
-        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [file, count, character]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
+        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [line count, character tally]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
+        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [line count, character tally, whitespace]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
 
         fn refiner(response: &str) -> LlmSkillRefiner {
             LlmSkillRefiner::new(Arc::new(CannedInference {

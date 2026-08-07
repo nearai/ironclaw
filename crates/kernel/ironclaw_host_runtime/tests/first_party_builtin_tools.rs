@@ -18,6 +18,7 @@ use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -50,9 +51,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
@@ -173,6 +174,13 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             .contains("Prefer GitHub extension capabilities"),
         "builtin.http should steer GitHub repository API tasks toward the GitHub extension"
     );
+    assert!(
+        http.description.contains("structured HTTP APIs")
+            && http.description.contains("web_search")
+            && http.description.contains("does not render JavaScript"),
+        "builtin.http should reserve raw HTTP for APIs and downloads while steering public web \
+         content retrieval toward web search"
+    );
     let http_save = package
         .capabilities
         .iter()
@@ -191,6 +199,13 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             .description
             .contains("Prefer GitHub extension capabilities"),
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
+    );
+    assert!(
+        http_save.description.contains("structured HTTP APIs")
+            && http_save.description.contains("web_search")
+            && http_save.description.contains("does not render JavaScript"),
+        "builtin.http.save should reserve raw HTTP for APIs and downloads while steering public \
+         web content retrieval toward web search"
     );
 
     // Memory tools now live in the always-on `ironclaw.memory` package,

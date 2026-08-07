@@ -275,7 +275,9 @@ See [Routines](/capabilities/routines/cron).
 
 Channels are not configured in this file. Slack and Telegram are turned on by installing
 their extension in the web interface and completing setup — there is no `[slack]` or
-`[telegram]` section, and no key that enables a channel. See
+`[telegram]` section, and no key that enables a channel. The retired `[slack]` setup keys
+are rejected outright: a config file that still carries them makes `ironclaw serve`
+refuse to start, with a migration pointer. See
 [Channels](/channels/overview).
 
 `google.*` carries the OAuth client id, redirect URI, and hosted-domain hint. Set it either

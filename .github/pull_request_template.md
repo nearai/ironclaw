@@ -28,7 +28,7 @@
 - [ ] `cargo clippy --all --benches --tests --examples --all-features -- -D warnings`
 - [ ] `cargo build`
 - [ ] Relevant tests pass: <!-- list specific tests -->
-- [ ] `cargo test --features integration` if database-backed or integration behavior changed
+- [ ] `cargo test -p <owning-crate> --features integration` if database-backed or runtime-integration behavior changed (the root `integration` feature is empty — the flag is per-crate)
 - [ ] Manual testing: <!-- describe what you tested -->
 - [ ] If a coding agent was used and supports it, `review-pr` or `pr-shepherd --fix` was run before requesting review
 

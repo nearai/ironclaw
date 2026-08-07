@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -32,9 +33,18 @@ pub(crate) fn compact_trace_queue_for_scope_unlocked(
                 report.malformed_envelopes_quarantined.saturating_add(1);
             continue;
         };
+        // `?`, not `.ok().flatten()`. A hold is a consent/authorization
+        // artifact, and the reader is fail-loud precisely so an unreadable
+        // sidecar cannot be mistaken for "no hold" — which ranked the held
+        // envelope as unheld and let compaction delete it, silently, while
+        // every other IO failure in this function propagates (#7144).
         let hold = read_trace_queue_hold_sidecar_for_envelope(&path)
-            .ok()
-            .flatten()
+            .with_context(|| {
+                format!(
+                    "trace queue compaction could not read the hold sidecar for {}",
+                    path.display()
+                )
+            })?
             .and_then(|sidecar| {
                 trace_queue_submission_id_from_envelope_path(&path)
                     .map(|submission_id| trace_queue_hold_from_sidecar(submission_id, &sidecar))

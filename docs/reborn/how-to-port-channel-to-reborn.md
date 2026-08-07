@@ -91,7 +91,7 @@ Start with the owning crate's guidance and the nearest existing caller test:
 
 ```bash
 bash scripts/codebase-graph.sh status
-rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/product/ironclaw_assistant crates/contracts/ironclaw_host_api crates/product/ironclaw_webui
+rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/product/ironclaw_assistant crates/contracts/ironclaw_product_contracts crates/product/ironclaw_webui
 rg -n "trait ChannelAdapter|impl ChannelAdapter" crates
 cargo test -p ironclaw_assistant
 cargo test -p ironclaw_webui --all-features

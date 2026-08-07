@@ -205,7 +205,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                 // until the value is fixed through the configure surface.
                 Err(error) => {
                     tracing::warn!(
-                        target = "ironclaw::reborn::channel_host",
+                        target: "ironclaw::reborn::channel_host",
                         extension_id = %self.extension_id,
                         handle = %handle,
                         %error,
@@ -235,7 +235,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                 }
                 Err(error) => {
                     tracing::warn!(
-                        target = "ironclaw::reborn::channel_host",
+                        target: "ironclaw::reborn::channel_host",
                         extension_id = %self.extension_id,
                         handle = %handle,
                         %error,

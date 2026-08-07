@@ -21,7 +21,7 @@
 //! which keys on `(tenant, surface_kind, provider_kind, provider_instance,
 //! subject)` and owns `resolve_or_create`. Neither store subsumes the other and
 //! neither is a migration target for the other; see
-//! `crates/ironclaw_identity/CONTRACT.md`, "Two external-identity
+//! `crates/domains/ironclaw_identity/CONTRACT.md`, "Two external-identity
 //! stores", for the full split.
 //!
 //! Two consequences worth knowing before changing this file:

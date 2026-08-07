@@ -384,6 +384,39 @@ fn apply_credential_injection(
         .map_err(|_| RuntimeHttpEgressError::Credential {
             reason: "credential injection target is invalid".to_string(),
         })?;
+    // Every injection kind attaches a secret to the outbound request, so every
+    // one of them needs TLS — this used to be checked for `PathPlaceholder`
+    // alone, leaving `Header`, `QueryParam` and `BodyJsonPointer` free to put a
+    // bearer token on a plaintext `http://` URL (#7144). Transport
+    // confidentiality rested entirely on upstream validators; the manifest
+    // audience gate does reject non-https for WASM/MCP, but
+    // `host_port::stage_credentials` performs no audience match at all, so
+    // nothing guaranteed it here. This is the point that attaches the
+    // credential, so this is where it fails closed.
+    //
+    // One exception, ruled 2026-08-05 (PROPOSAL §12.13 D-R): a **literal
+    // loopback host**, decided by the same `is_loopback_host` predicate that
+    // `validate_trace_commons_ingest_url` and the Trace Commons onboarding
+    // invite already trust for exactly this class of call. Local-first
+    // standalone deployments run credentialed services on `127.0.0.1` (the
+    // Trace Commons agent path mints its login link through this chokepoint),
+    // and traffic that never leaves the host has no interception surface for
+    // TLS to defend against. The carve-out is literal loopback only — the
+    // predicate does no DNS resolution, so a hostname that merely *resolves*
+    // to loopback does not qualify — and the extension's declared egress
+    // allowlist still bounds which hosts a credential can reach at all.
+    {
+        let url = parsed_request_url(&request.url, parsed_url)?;
+        let literal_loopback = url
+            .host_str()
+            .is_some_and(ironclaw_trace_commons::onboarding::invite::is_loopback_host);
+        if url.scheme() != "https" && !literal_loopback {
+            return Err(RuntimeHttpEgressError::Credential {
+                reason: "credential injection requires HTTPS (or a literal loopback host)"
+                    .to_string(),
+            });
+        }
+    }
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
             let injected = match prefix {
@@ -408,11 +441,6 @@ fn apply_credential_injection(
                 });
             }
             let url = parsed_request_url(&request.url, parsed_url)?;
-            if url.scheme() != "https" {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path placeholder requires HTTPS".to_string(),
-                });
-            }
             let Some(_) = url.path_segments() else {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL has no path segments".to_string(),

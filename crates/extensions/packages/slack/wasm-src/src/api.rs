@@ -888,6 +888,7 @@ fn search_match_from_value(value: &serde_json::Value) -> Option<Message> {
 /// number (spec: "search encodes page numbers into next_cursor").
 pub fn search_messages(
     query: &str,
+    sort: Option<SearchMessagesSort>,
     limit: Option<u32>,
     cursor: Option<&str>,
 ) -> Result<SearchMessagesResult, String> {
@@ -917,6 +918,13 @@ pub fn search_messages(
         url_encode(query),
         count
     );
+    match sort {
+        Some(SearchMessagesSort::Relevance) => url.push_str("&sort=score"),
+        Some(SearchMessagesSort::Timestamp) => {
+            url.push_str("&sort=timestamp&sort_dir=desc");
+        }
+        None => {}
+    }
     if let Some(page) = page {
         url.push_str(&format!("&page={page}"));
     }

@@ -30,6 +30,10 @@ use ironclaw_host_api::{
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
 };
+use ironclaw_product_contracts::inspector::{
+    DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticRunRequest, DiagnosticScope,
+    INSPECTOR_SNAPSHOT_VIEW,
+};
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
@@ -415,6 +419,82 @@ async fn runtime_product_surface_wires_lifecycle_owner_identity() {
 
     assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
     assert_eq!(error.status_code, 403);
+}
+
+#[tokio::test]
+async fn runtime_product_surface_reads_the_runtime_owned_diagnostic_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("standalone");
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    std::fs::write(
+        storage_root.join(crate::factory::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        ironclaw_secrets::keychain::generate_master_key_hex(),
+    )
+    .expect("standalone master key");
+    let input = crate::RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input("inspector-owner", storage_root)
+            .with_runtime_policy(
+                crate::standalone_runtime_policy().expect("standalone policy resolves"),
+            ),
+    )
+    .with_identity(crate::RebornRuntimeIdentity {
+        tenant_id: "tenant-alpha".to_string(),
+        agent_id: "agent-alpha".to_string(),
+        source_binding_id: "webui-test-source".to_string(),
+        reply_target_binding_id: "webui-test-reply".to_string(),
+    });
+    let runtime = crate::build_reborn_runtime(input)
+        .await
+        .expect("runtime builds");
+    let run_id = ironclaw_host_api::turn::TurnRunId::new();
+    runtime
+        .diagnostic_store
+        .record_activity(
+            DiagnosticScope::new(
+                TenantId::new("tenant-alpha").expect("tenant"),
+                UserId::new("inspector-owner").expect("user"),
+                ironclaw_host_api::ids::ThreadId::new("thread-a").expect("thread"),
+                run_id,
+            ),
+            DiagnosticActivityEvent::new(
+                Utc::now(),
+                DiagnosticActivityKind::TurnStarted,
+                Some(1),
+                None,
+                None,
+                Some("captured by the runtime-owned store".to_string()),
+            ),
+        )
+        .expect("record diagnostic activity");
+
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface build");
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        bundle,
+        caller("inspector-owner").with_operator_config(true),
+    );
+    let response = INSPECTOR_SNAPSHOT_VIEW
+        .query_on(
+            &surface,
+            DiagnosticRunRequest {
+                thread_id: "thread-a".to_string(),
+                run_id: run_id.to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("inspector snapshot query");
+
+    assert_eq!(
+        response
+            .pointer("/snapshot/activity/0/event/summary/content")
+            .and_then(serde_json::Value::as_str),
+        Some("captured by the runtime-owned store"),
+        "the production product surface must read the runtime-owned diagnostic store"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]

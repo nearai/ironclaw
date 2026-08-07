@@ -24,11 +24,22 @@ function useSSESourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useSSE };`;
 }
 
+function createSessionStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+  };
+}
+
 function createHarness({
   online = true,
   visibilityState = "visible",
   onEvent = () => {},
   activityExpected = false,
+  connectionId = "browser-tab-connection",
+  navigationType = "navigate",
+  sessionStorage = createSessionStorage(),
 } = {}) {
   const statuses = [];
   const streams = [];
@@ -101,13 +112,19 @@ function createHarness({
 
   const context = {
     CONNECTION_STATUS,
-    clientActionId: () => "browser-tab-connection",
+    clientActionId: () => connectionId,
     EventSourcePlus,
-    eventStreamRequest: ({ threadId, connectionId }) => ({
-      url: `http://localhost/events/${threadId}?connection_id=${connectionId}`,
+    eventStreamRequest: ({ threadId }) => ({
+      url: `http://localhost/events/${threadId}`,
       headers: () => ({ Authorization: "Bearer token-1" }),
     }),
-    globalThis: {},
+    globalThis: {
+      performance: {
+        getEntriesByType: (type) =>
+          type === "navigation" ? [{ type: navigationType }] : [],
+      },
+      sessionStorage,
+    },
     Headers,
     JSON,
     Math,
@@ -211,13 +228,17 @@ test("useSSE delegates framing, credentials, and retries to EventSourcePlus", ()
 
   assert.equal(
     stream.url,
-    "http://localhost/events/thread-1?connection_id=browser-tab-connection",
+    "http://localhost/events/thread-1",
   );
   assert.deepEqual(stream.options.headers(), { Authorization: "Bearer token-1" });
   assert.equal(new URL(stream.url).searchParams.has("token"), false);
   assert.equal(stream.options.credentials, "same-origin");
   assert.equal(stream.options.retryStrategy, "always");
   assert.equal(stream.options.maxRetryInterval, 30_000);
+  assert.equal(
+    stream.requestOptions.query.connection_id,
+    "browser-tab-connection",
+  );
   assert.equal(typeof stream.requestOptions.query.connection_generation, "number");
 
   stream.respond();
@@ -324,6 +345,144 @@ test("useSSE lets retryable responses retry and stops on terminal responses", ()
   terminal.cleanup();
 });
 
+test("useSSE does not start a competing watchdog reconnect after a 429", () => {
+  const { streams, timers } = createHarness({ activityExpected: true });
+  const stream = streams[0];
+  stream.respond();
+  const watchdog = timers.find(
+    (timer) => timer.delay === 30_000 && !timer.cleared,
+  );
+  assert.ok(watchdog);
+
+  // EventSourcePlus schedules its own retry when onResponseError returns.
+  // Once the handshake has failed, the activity watchdog must no longer
+  // behave as though an established stream stalled and launch a second retry.
+  stream.request();
+  stream.respond(429, "application/json");
+  assert.equal(watchdog.cleared, true);
+  watchdog.handler();
+
+  assert.equal(
+    stream.controller.reconnectCalls,
+    0,
+    "a rejected handshake must not race EventSourcePlus's automatic retry",
+  );
+});
+
+test("useSSE preserves connection identity and generation across a document reload", () => {
+  const sessionStorage = createSessionStorage();
+  const firstDocument = createHarness({
+    connectionId: "first-document-id",
+    sessionStorage,
+  });
+
+  assert.equal(
+    firstDocument.streams[0].requestOptions.query.connection_id,
+    "first-document-id",
+  );
+  assert.equal(
+    firstDocument.streams[0].requestOptions.query.connection_generation,
+    1,
+  );
+  firstDocument.cleanup();
+
+  const reloadedDocument = createHarness({
+    connectionId: "new-id-must-not-be-used",
+    navigationType: "reload",
+    sessionStorage,
+  });
+
+  assert.equal(
+    reloadedDocument.streams[0].requestOptions.query.connection_id,
+    "first-document-id",
+    "a reload must address the same server slot as the proxy-held predecessor",
+  );
+  assert.equal(
+    reloadedDocument.streams[0].requestOptions.query.connection_generation,
+    2,
+    "a reload must supersede rather than be rejected as a stale generation",
+  );
+  reloadedDocument.cleanup();
+});
+
+test("useSSE gives a duplicated tab a fresh connection identity", () => {
+  const copiedSessionStorage = createSessionStorage({
+    "ironclaw:v2-sse-connection": JSON.stringify({
+      connectionId: "original-tab-id",
+      generation: 7,
+    }),
+  });
+
+  const duplicatedTab = createHarness({
+    connectionId: "duplicated-tab-id",
+    navigationType: "navigate",
+    sessionStorage: copiedSessionStorage,
+  });
+
+  assert.equal(
+    duplicatedTab.streams[0].requestOptions.query.connection_id,
+    "duplicated-tab-id",
+  );
+  assert.equal(
+    duplicatedTab.streams[0].requestOptions.query.connection_generation,
+    1,
+  );
+  duplicatedTab.cleanup();
+});
+
+test("useSSE rejects malformed persisted connection state", () => {
+  const invalidValues = [
+    "{not-json",
+    JSON.stringify({ connectionId: "x".repeat(65), generation: 3 }),
+    JSON.stringify({ connectionId: "invalid/id", generation: 3 }),
+    JSON.stringify({ connectionId: "stored-id", generation: -1 }),
+  ];
+
+  invalidValues.forEach((value, index) => {
+    const harness = createHarness({
+      connectionId: `fallback-id-${index}`,
+      navigationType: "reload",
+      sessionStorage: createSessionStorage({
+        "ironclaw:v2-sse-connection": value,
+      }),
+    });
+    assert.equal(
+      harness.streams[0].requestOptions.query.connection_id,
+      `fallback-id-${index}`,
+    );
+    assert.equal(
+      harness.streams[0].requestOptions.query.connection_generation,
+      1,
+    );
+    harness.cleanup();
+  });
+});
+
+test("useSSE rotates connection identity before generation exceeds the safe integer limit", () => {
+  const harness = createHarness({
+    connectionId: "rotated-id",
+    navigationType: "reload",
+    sessionStorage: createSessionStorage({
+      "ironclaw:v2-sse-connection": JSON.stringify({
+        connectionId: "stored-id",
+        generation: Number.MAX_SAFE_INTEGER - 1,
+      }),
+    }),
+  });
+  const stream = harness.streams[0];
+
+  assert.equal(stream.requestOptions.query.connection_id, "stored-id");
+  assert.equal(
+    stream.requestOptions.query.connection_generation,
+    Number.MAX_SAFE_INTEGER,
+  );
+
+  stream.request();
+  assert.equal(stream.requestOptions.query.connection_id, "rotated-id");
+  assert.equal(stream.requestOptions.query.connection_generation, 1);
+  harness.cleanup();
+});
+
 test("useSSE stops after a non-retryable stream event", () => {
   const events = [];
   const { statuses, streams } = createHarness({
@@ -385,8 +544,8 @@ test("useSSE starts each route from a fresh stream and ignores disposed callback
   assert.equal(second.lastEventId, undefined);
   assert.match(second.url, /thread-2/);
   assert.equal(
-    new URL(first.url).searchParams.get("connection_id"),
-    new URL(second.url).searchParams.get("connection_id"),
+    first.requestOptions.query.connection_id,
+    second.requestOptions.query.connection_id,
   );
   assert.ok(
     second.requestOptions.query.connection_generation >

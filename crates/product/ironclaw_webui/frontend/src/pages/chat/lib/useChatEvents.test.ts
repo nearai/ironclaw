@@ -22,6 +22,10 @@ import {
   upsertToolActivityMessage,
 } from "./tool-activity-state";
 import {
+  createRunTrackingState,
+  resetRunTrackingState,
+} from "./run-tracking-state";
+import {
   isFinalAssistantForRun,
   replaceAssistantReplyForRun,
 } from "./stream-order-memory";
@@ -91,21 +95,63 @@ function createUseChatEventsHarness({
   onStreamError = () => {},
   t: selectedTranslator = t,
 } = {}) {
+  let threadId = "thread-1";
   let messages = [];
   let pendingGate = null;
   let isProcessing = false;
   let activeRun = null;
   const activeRunRef = { current: null };
   const toolActivityStateRef = { current: createToolActivityState() };
+  // Owned by `useChat` in production, and reset by it on a thread switch —
+  // `openThread` below mirrors that.
+  const runTrackingRef = { current: createRunTrackingState() };
   // [{ runId, success }] in fire order; one entry per settled run.
   const settledRuns = [];
+  // Real-React semantics for the two primitives `useChatEvents` uses.
+  // `useRef` must hand back the SAME object on every render (call-order
+  // slots) and `useEffect` must re-run only when its dependency array
+  // changes. The previous stub minted a fresh ref per render, which made a
+  // thread switch look like a clean slate when production keeps the refs
+  // alive for the life of the mounted chat page.
+  const refSlots = [];
+  const effectSlots = [];
+  let refCursor = 0;
+  let effectCursor = 0;
+  function beginRender() {
+    refCursor = 0;
+    effectCursor = 0;
+  }
+  function useRefSlot(value) {
+    const slot = refCursor;
+    refCursor += 1;
+    if (!(slot in refSlots)) refSlots[slot] = { current: value };
+    return refSlots[slot];
+  }
+  function useEffectSlot(fn, deps) {
+    const slot = effectCursor;
+    effectCursor += 1;
+    const previous = effectSlots[slot];
+    const unchanged =
+      previous &&
+      deps !== undefined &&
+      previous.deps !== undefined &&
+      deps.length === previous.deps.length &&
+      deps.every((dep, index) => Object.is(dep, previous.deps[index]));
+    if (unchanged) return;
+    if (typeof previous?.cleanup === "function") previous.cleanup();
+    const cleanup = fn();
+    effectSlots[slot] = {
+      deps,
+      cleanup: typeof cleanup === "function" ? cleanup : null,
+    };
+  }
   const context = {
     Date: DateImpl,
     createErrorChatMessage,
     React: {
       useCallback: (fn) => fn,
-      useEffect: (fn) => fn(),
-      useRef: (value) => ({ current: value }),
+      useEffect: useEffectSlot,
+      useRef: useRefSlot,
     },
     failureMessageForRunStatus,
     failureMessageForStreamError,
@@ -128,8 +174,8 @@ function createUseChatEventsHarness({
 
   vm.runInNewContext(useChatEventsSourceForTest(), context);
 
-  const handleEvent = context.globalThis.__testExports.useChatEvents({
-    threadId: "thread-1",
+  const hookProps = () => ({
+    threadId,
     setMessages: (updater) => {
       messages = typeof updater === "function" ? updater(messages) : updater;
     },
@@ -148,6 +194,7 @@ function createUseChatEventsHarness({
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    runTrackingRef,
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
     onStreamError,
@@ -155,8 +202,32 @@ function createUseChatEventsHarness({
     t: selectedTranslator,
   });
 
+  function buildHandler() {
+    beginRender();
+    return context.globalThis.__testExports.useChatEvents(hookProps());
+  }
+
+  let currentHandler = buildHandler();
+
   return {
-    handleEvent,
+    handleEvent: (envelope) => currentHandler(envelope),
+    // Model exactly what production does on a thread switch: `useChat` clears
+    // every piece of per-thread state it owns (its render-phase reset plus its
+    // `[threadId]` effect) and `useHistory` swaps in the new thread's timeline.
+    // `useChatEvents` itself holds no state, so there is deliberately nothing
+    // to reset on its side — that is the invariant these tests pin.
+    openThread(nextThreadId) {
+      threadId = nextThreadId;
+      messages = [];
+      pendingGate = null;
+      isProcessing = false;
+      activeRun = null;
+      activeRunRef.current = null;
+      toolActivityStateRef.current = createToolActivityState();
+      resetRunTrackingState(runTrackingRef);
+      locallyResolvedGatesRef.current.clear();
+      currentHandler = buildHandler();
+    },
     get messages() {
       return messages;
     },
@@ -2864,4 +2935,239 @@ test("useChatEvents: stream error ids avoid timestamp collisions", () => {
 
   assert.equal(harness.messages.length, 3);
   assert.equal(harness.messages[2].id, `${baseId}-1788259200000-1`);
+});
+
+/* ---------------------------------------------------------------------------
+ * Cross-thread bleed from a stuck run.
+ *
+ * `useChatEvents` owns three refs — `settledRunsRef`, `latestRunIdRef`,
+ * `promptRunIdRef` — and nothing clears them when `threadId` changes.
+ * `useChat` resets everything IT owns on a switch (useChat.ts:265 and
+ * useChat.ts:305); this hook has no equivalent, and no effect at all.
+ *
+ * `latestRunIdRef` is only cleared on a TERMINAL run status, so a run that
+ * gets stuck (blocked forever, connection dropped mid-run, backend wedged)
+ * pins it for the life of the mounted chat page. It then follows the user
+ * into every thread they open afterwards, where it is consumed as:
+ *
+ *   1. the run-id fallback for capability frames that omit `turn_run_id`
+ *      (`fallbackTurnRunIdForActivity`, line 753), and
+ *   2. the seed for `activeRunId` when classifying a terminal run status as
+ *      stale (lines 459 + 474-480) — which silently drops the new thread's
+ *      own terminal frame, so `onRunSettled` never fires and the timeline is
+ *      never refetched to replace live text with the durable reply.
+ * ------------------------------------------------------------------------- */
+
+// A run that starts and never reaches a terminal status. `latestRunIdRef` is
+// left holding `run-stuck` with no code path that clears it.
+function pinStuckRunInFirstThread(harness) {
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        thread_id: "thread-1",
+        items: [{ run_status: { run_id: "run-stuck", status: "running" } }],
+      },
+    },
+  });
+}
+
+// A capability frame that legitimately omits `turn_run_id` — the shape the
+// run-id fallback exists to serve.
+function untaggedActivity(overrides = {}) {
+  return {
+    invocation_id: "invocation-b",
+    thread_id: "thread-2",
+    capability_id: "builtin.http",
+    status: "started",
+    provider: null,
+    runtime: null,
+    process_id: null,
+    output_bytes: null,
+    error_kind: null,
+    updated_at: "2026-08-05T06:53:00Z",
+    ...overrides,
+  };
+}
+
+test("useChatEvents: an untagged capability_activity in a newly opened thread does not inherit the previous thread's stuck run", () => {
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: { activity: untaggedActivity() },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-b");
+  assert.equal(harness.messages[0].turnRunId, null);
+});
+
+test("useChatEvents: an untagged capability_display_preview in a newly opened thread does not inherit the previous thread's stuck run", () => {
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.handleEvent({
+    type: "capability_display_preview",
+    frame: {
+      preview: untaggedActivity({
+        status: "completed",
+        title: "builtin.http",
+      }),
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].turnRunId, null);
+});
+
+test("useChatEvents: an untagged projection capability_activity in a newly opened thread does not inherit the previous thread's stuck run", () => {
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        thread_id: "thread-2",
+        items: [{ capability_activity: untaggedActivity() }],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].turnRunId, null);
+});
+
+test("useChatEvents: a stuck run does not follow the user across two consecutive thread switches", () => {
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.openThread("thread-3");
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: { activity: untaggedActivity({ thread_id: "thread-3" }) },
+  });
+
+  assert.equal(harness.messages[0].turnRunId, null);
+});
+
+test("useChatEvents: an untagged capability_activity still adopts the active run inside the same thread", () => {
+  // Positive control for the fallback itself — clearing on a thread switch
+  // must not disable run-id inference within one thread.
+  const harness = createUseChatEventsHarness();
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        thread_id: "thread-1",
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: { activity: untaggedActivity({ thread_id: "thread-1" }) },
+  });
+
+  assert.equal(harness.messages[0].turnRunId, "run-1");
+});
+
+test("useChatEvents: a completed run in a newly opened thread settles even after a stuck run elsewhere", () => {
+  // Opening an already-finished thread: the first frame the new thread sees
+  // is its own terminal status, which `latestRunIdRef` misclassifies as a
+  // stale status belonging to some other run.
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        thread_id: "thread-2",
+        items: [{ run_status: { run_id: "run-b", status: "completed" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-b", success: true }]);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+});
+
+test("useChatEvents: a failed run in a newly opened thread is not discarded as stale after a stuck run elsewhere", () => {
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        thread_id: "thread-2",
+        items: [{ run_status: { run_id: "run-b", status: "failed" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-b", success: false }]);
+});
+
+test("useChatEvents: leftover streaming assistant text in a newly opened thread still settles its run", () => {
+  // The leftover-assistant-output path. The snapshot for an already-finished
+  // thread carries the run's accumulated text plus its terminal status in one
+  // batch. If the terminal status is dropped, `onRunSettled` never fires, the
+  // durable timeline is never refetched, and this streaming bubble is what the
+  // user keeps looking at instead of the finalized reply.
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.openThread("thread-2");
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        thread_id: "thread-2",
+        items: [
+          { text: { id: "run-b:1", run_id: "run-b", body: "partial answer" } },
+          { run_status: { run_id: "run-b", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  const assistant = harness.messages.find(
+    (message) => message.role === "assistant",
+  );
+  assert.equal(assistant.content, "partial answer");
+  assert.equal(assistant.isStreaming, true);
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-b", success: true }]);
+});
+
+test("useChatEvents: the stuck run still settles when its own thread finally reports terminal", () => {
+  // Regression guard for the fix: clearing on a thread switch must not break
+  // the normal same-thread lifecycle.
+  const harness = createUseChatEventsHarness();
+  pinStuckRunInFirstThread(harness);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        thread_id: "thread-1",
+        items: [{ run_status: { run_id: "run-stuck", status: "completed" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-stuck", success: true },
+  ]);
 });
