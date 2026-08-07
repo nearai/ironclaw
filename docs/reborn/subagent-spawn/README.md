@@ -2,7 +2,7 @@
 
 **Status:** Blocking implementation exists but is temporarily disabled in shipped profiles; background mode deferred
 
-> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_turn_runner`. `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
+> **Current status (2026-08):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_turn_runner`. `builtin.spawn_subagent` is currently removed from all shipped model-facing surfaces by the resolved `CapabilitySurfacePolicy` (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/loop/ironclaw_agent_loop`, `crates/kernel/ironclaw_turns`,
@@ -180,7 +180,7 @@ ironclaw_turns         + CapabilityOutcome::AwaitDependentRun
 
 ironclaw_loop_host  + spawn handling in the capability-port impl
 (host I/O glue)        ~ prompt/context port: direction system msg + user-role goal
-                       + attenuation (CapabilityAllowSet) + hard allow_nesting gate
+                       + attenuation (CapabilitySurfacePolicy) + hard allow_nesting gate
 
 ironclaw_turn_runner        + `subagent` PlannedDriver + run-profile→driver binding
 (loop library)         + built-in subagent flavor table + direction .md files
@@ -202,7 +202,10 @@ ironclaw_composition
                          streak cap in thread-harness-design.md §8.3
                        ~ runtime.rs wiring
 
-ironclaw_host_runtime / ironclaw_host_api   — unchanged
+ironclaw_host_runtime                        — unchanged for subagent execution
+ironclaw_host_api                            + owns `CapabilitySurfacePolicy`; subagent
+                                              attenuation removes `builtin.spawn_subagent`
+                                              from that neutral visible ceiling
 ```
 
 ### 5.4 Considered alternative — why not `Process`
@@ -403,7 +406,7 @@ The four-reviewer pass surfaced subagents as a meaningful attack surface. The
 mitigations below are **load-bearing**, not optional.
 
 1. **No authority inheritance.** A child starts with an empty grant/lease set.
-   `CapabilityAllowSet` filters the *surface* only. A child must re-acquire every
+   `CapabilitySurfacePolicy` filters the *surface* only. A child must re-acquire every
    privileged lease through its own `Approval` gate. A subagent can never exercise
    a lease the parent obtained from a prior user approval.
 2. **Approval ownership.** The child inherits the parent's `owner_user_id` AND
@@ -473,7 +476,7 @@ mitigations below are **load-bearing**, not optional.
 | `ironclaw_loop_host` | host-port adapter glue; no stateful stores | blocking spawn handling in the capability port; concrete stores and projection sinks are injected by composition | ✅ |
 | `ironclaw_turn_runner` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
 | `ironclaw_composition` | concrete product-live assembly; still no root `src/` imports | DB-backed store construction, root-provided `PendingGateProjectionSink`, composite event sink, and runtime assembly | ✅ |
-| `ironclaw_host_runtime` / `ironclaw_host_api` | — | untouched | ✅ |
+| `ironclaw_host_runtime` / `ironclaw_host_api` | host runtime unchanged for subagent execution; Host API owns neutral authority vocabulary | `CapabilitySurfacePolicy` lives in Host API, and subagent attenuation removes `builtin.spawn_subagent` from that visible ceiling | ✅ |
 
 Five wire-stable enums gain `AwaitDependentRun` / `BlockedDependentRun`
 variants, with `SpawnedChildRun` reserved for deferred background support:

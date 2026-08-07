@@ -13,6 +13,7 @@ use chrono::Utc;
 use thiserror::Error;
 use uuid::Uuid;
 
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     capability::{CapabilitySet, EffectKind},
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
@@ -20,20 +21,17 @@ use ironclaw_host_api::{
     runtime::{RuntimeKind, TrustClass},
     scope::ExecutionContext,
 };
-use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
-};
+use ironclaw_host_runtime::{HostRuntime, SurfaceKind, VisibleCapabilityRequest};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InstructionSafetyContext,
     LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
     LoopRunContext, ProviderToolCall,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
-    HostInputQueue, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
-    loop_driver_execution_extension_id,
+    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
+    CapabilityWriteResult, HostIdentityContextSource, HostInputQueue,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, RunCancellationFactory, loop_driver_execution_extension_id,
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
@@ -713,8 +711,8 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
     pub capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     /// Persists capability outputs and returns loop result refs.
     pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    /// Static allow-set exposed by the capability surface resolver.
-    pub capability_allow_set: CapabilityAllowSet,
+    /// Static policy exposed by the capability surface resolver.
+    pub capability_surface_policy: CapabilitySurfacePolicy,
     /// Static model routing config for default and optional mission slots.
     pub model_routes: ProductLiveModelRouteSettings,
     /// Factory used to create cancellation handles for loop runs.
@@ -751,7 +749,7 @@ pub struct ProductLivePlannedRuntimeAdapters {
     pub capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     /// Capability result writer shared with runtime completion observers.
     pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    /// Capability surface resolver exposing the configured allow-set.
+    /// Capability surface resolver exposing the configured policy.
     pub capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     /// Model route resolver generated from product-live route settings.
     pub model_route_resolver: Arc<dyn ModelRouteResolver>,
@@ -810,7 +808,7 @@ impl ProductLivePlannedRuntimeAdapters {
             capability_input_resolver: config.capability_input_resolver,
             capability_result_writer: config.capability_result_writer,
             capability_surface_resolver: Arc::new(StaticCapabilitySurfaceResolver::new(
-                config.capability_allow_set,
+                config.capability_surface_policy,
             )),
             model_route_resolver,
             cancellation_factory: config.cancellation_factory,
@@ -901,12 +899,12 @@ fn adapter_error(error: ProductLivePlannedRuntimeAdapterError) -> AgentLoopHostE
 }
 
 struct StaticCapabilitySurfaceResolver {
-    allow_set: CapabilityAllowSet,
+    policy: CapabilitySurfacePolicy,
 }
 
 impl StaticCapabilitySurfaceResolver {
-    fn new(allow_set: CapabilityAllowSet) -> Self {
-        Self { allow_set }
+    fn new(policy: CapabilitySurfacePolicy) -> Self {
+        Self { policy }
     }
 }
 
@@ -915,14 +913,16 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(self.allow_set.clone())
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(self.policy.clone())
     }
 }
 
-/// Convenience constructor for a capability allow-set.
-pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> CapabilityAllowSet {
-    CapabilityAllowSet::allowlist(ids)
+/// Convenience constructor for a capability policy restricted to these ids.
+pub fn capability_allowlist(
+    ids: impl IntoIterator<Item = CapabilityId>,
+) -> CapabilitySurfacePolicy {
+    CapabilitySurfacePolicy::allow_only(ids)
 }
 
 #[cfg(test)]

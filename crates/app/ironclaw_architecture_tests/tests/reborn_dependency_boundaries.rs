@@ -624,7 +624,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // constants, and the test-support conformance module. Declarations
         // only; executable validation stays in ironclaw_host_runtime. Rationale
         // reviewed in the PR body's architecture-audit section.
-        ("ironclaw_host_api", 18_570),
+        // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
+        // CapabilitySurfacePolicy and capability-id scope algebra are neutral
+        // host declarations; enforcement remains in host_runtime/loop_host.
+        ("ironclaw_host_api", 18_784),
         ("ironclaw_loop_contracts", 14_479),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
