@@ -332,7 +332,22 @@ impl ResolvedExtensionManifest {
             descriptor_trust_default: requested_trust_to_descriptor_trust(self.requested_trust),
             runtime: self.runtime.clone(),
             host_apis,
-            capabilities: self.tools.clone(),
+            // Records persisted before #7320 may carry tools whose
+            // `origin_gate_matrix` is `None` (the key was optional at parse
+            // time); re-apply the safe default so an already-installed
+            // extension keeps gating instead of failing closed on upgrade.
+            capabilities: self
+                .tools
+                .iter()
+                .map(|tool| CapabilityDeclV2 {
+                    origin_gate_matrix: Some(
+                        tool.origin_gate_matrix
+                            .clone()
+                            .unwrap_or_else(crate::v2::default_extension_origin_gate_matrix),
+                    ),
+                    ..tool.clone()
+                })
+                .collect(),
             host_api_surfaces,
             hooks: self.hooks.clone(),
         })

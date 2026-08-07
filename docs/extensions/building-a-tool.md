@@ -232,6 +232,7 @@ description = "Search Example records."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/example/search.input.v1.json"
 output_schema_ref = "schemas/example/search.output.v1.json"
 prompt_doc_ref = "prompts/example/search.md"
@@ -257,6 +258,15 @@ Required per model-visible capability:
 - `default_permission`: use `ask` for writes and high-risk reads; use `allow`
   only for low-risk read capabilities that policy deliberately permits.
 - `visibility`: usually `model`.
+- `origin_gate_matrix`: per-origin invocation gating (§5.2.1). The standard
+  interactive posture is
+  `{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }`
+  — the `LoopRun` origin gates behind the ordinary approval flow, and
+  `Product`/`Automation` origins are deny-by-default until you deliberately
+  open them. A manifest that omits the key is compatibility-normalized to
+  exactly this posture at parse time, so a tool never fails closed to
+  `PolicyDenied` for every origin; declaring it explicitly is still
+  recommended because it makes the tool's gating auditable.
 - `input_schema_ref`: relative path to JSON schema.
 - `output_schema_ref`: relative path to JSON schema.
 - `prompt_doc_ref`: relative path to concise operation guidance.

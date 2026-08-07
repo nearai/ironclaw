@@ -645,6 +645,24 @@ fn mcp_manifest_parses_and_synthesizes_a_host_internal_template() {
     assert_eq!(mcp.max_tools, 64);
 }
 
+/// An `[mcp]` declaration omitting `origin_gate_matrix` must not fail every
+/// discovered tool closed (#7320): the host-internal connection template
+/// normalizes to the safe interactive default, and tools discovered later
+/// inherit the template's matrix (`hosted_mcp_discovery`).
+#[test]
+fn mcp_template_omitting_origin_gate_matrix_defaults_to_interactive_gating() {
+    let record = parse_v3(&mcp_manifest()).expect("mcp manifest without origin_gate_matrix parses");
+    let template = &record.manifest().capabilities[0];
+    assert_eq!(template.id.as_str(), "zeta.mcp_server");
+    let matrix = template
+        .origin_gate_matrix
+        .as_ref()
+        .expect("omitted origin_gate_matrix normalizes to Some");
+    assert_eq!(matrix.loop_run, OriginGatePolicy::GatedUnlessGranted);
+    assert_eq!(matrix.product, OriginGatePolicy::Forbidden);
+    assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+}
+
 #[test]
 fn mcp_is_mutually_exclusive_with_runtime_and_channel() {
     let with_runtime = mcp_manifest().replace(
@@ -1198,6 +1216,45 @@ fn allowlisted_memory_read_tool_keeps_ungated_loop_run() {
     assert_eq!(matrix.loop_run, OriginGatePolicy::Ungated);
 }
 
+/// A v3 `[[tools]]` declaration omitting `origin_gate_matrix` must not fail
+/// the capability closed for every origin (#7320): parsing normalizes the
+/// omission to the safe interactive default — `LoopRun` gates behind the
+/// ordinary approval flow (`GatedUnlessGranted`) instead of denying outright,
+/// while `Product`/`Automation` stay deny-by-default.
+#[test]
+fn v3_tool_omitting_origin_gate_matrix_defaults_to_interactive_gating() {
+    let toml = format!(
+        r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "iota"
+name = "Iota"
+version = "0.1.0"
+description = "Omission fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/iota.wasm"
+
+[[tools]]
+id = "iota.echo"
+description = "Echo records."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/iota/echo.input.v1.json"
+"#
+    );
+    let record = parse_v3(&toml).expect("v3 manifest without origin_gate_matrix parses");
+    let matrix = record.manifest().capabilities[0]
+        .origin_gate_matrix
+        .as_ref()
+        .expect("omitted origin_gate_matrix normalizes to Some");
+    assert_eq!(matrix.loop_run, OriginGatePolicy::GatedUnlessGranted);
+    assert_eq!(matrix.product, OriginGatePolicy::Forbidden);
+    assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+}
+
 // ---------------------------------------------------------------------------
 // standard_op binding (standardized messaging framework, task 2)
 // ---------------------------------------------------------------------------
@@ -1670,4 +1727,58 @@ fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
         .expect("a descriptor without a standard_op key must still deserialize");
     assert_eq!(rehydrated_descriptor.standard_op, None);
     assert_eq!(rehydrated_descriptor.id, descriptor.id);
+}
+
+/// Remove the `origin_gate_matrix` key from every tool object in a serialized
+/// [`ironclaw_extension_registry::ResolvedExtensionManifest`], simulating a
+/// record persisted before #7320 made the key meaningful (when an omitted
+/// declaration parsed to `None`). Operates on the live serialized shape of a
+/// *current* record, so the fixture cannot silently drift out of sync as the
+/// struct evolves.
+fn strip_origin_gate_matrix_from_tools(resolved_json: &mut serde_json::Value) {
+    let tools = resolved_json
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("resolved manifest JSON carries a tools array");
+    assert!(!tools.is_empty(), "fixture must declare at least one tool");
+    for tool in tools {
+        let removed = tool
+            .as_object_mut()
+            .expect("each tool serializes as a JSON object")
+            .remove("origin_gate_matrix");
+        assert!(
+            removed.is_some(),
+            "tool must currently serialize an origin_gate_matrix key for this pin to be meaningful"
+        );
+    }
+}
+
+/// Records persisted before #7320 may carry tools whose `origin_gate_matrix`
+/// is absent (the key was optional at parse time). Rehydration through
+/// `ResolvedExtensionManifest::to_internal` must re-apply the safe interactive
+/// default, so an already-installed extension keeps gating instead of failing
+/// closed to `PolicyDenied` for every `LoopRun` invocation after upgrade.
+#[test]
+fn legacy_resolved_record_without_origin_gate_matrix_rehydrates_to_default_gating() {
+    let record = parse_v3(&zeta_standard_op_manifest()).expect("zeta fixture parses");
+    let mut legacy_manifest =
+        serde_json::to_value(record.resolved()).expect("serialize current resolved manifest");
+    strip_origin_gate_matrix_from_tools(&mut legacy_manifest);
+    let rehydrated: ironclaw_extension_registry::ResolvedExtensionManifest =
+        serde_json::from_value(legacy_manifest)
+            .expect("a resolved manifest without origin_gate_matrix keys must still deserialize");
+
+    let internal = rehydrated
+        .to_internal(ManifestSource::UserRegistered)
+        .expect("legacy record rehydrates to an internal manifest");
+    assert_eq!(internal.capabilities.len(), rehydrated.tools.len());
+    for tool in &internal.capabilities {
+        let matrix = tool
+            .origin_gate_matrix
+            .as_ref()
+            .expect("rehydrated tools carry a normalized matrix");
+        assert_eq!(matrix.loop_run, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(matrix.product, OriginGatePolicy::Forbidden);
+        assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+    }
 }

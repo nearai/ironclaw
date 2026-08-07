@@ -102,9 +102,17 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     assert_eq!(cap.visibility, CapabilityVisibility::Model);
     assert_eq!(cap.default_permission, PermissionMode::Allow);
     assert!(cap.prompt_doc_ref.is_none());
-    // A manifest that omits the §5.2.1 origin→gate key parses to `None`
-    // (undeclared), preserving compatibility with existing manifests.
-    assert!(cap.origin_gate_matrix.is_none());
+    // A manifest that omits the §5.2.1 origin→gate key is compatibility-
+    // normalized to the safe default (#7320): `LoopRun` gates behind the
+    // ordinary approval flow (`GatedUnlessGranted`) instead of failing closed
+    // to `Forbidden`, while `Product`/`Automation` stay deny-by-default.
+    let matrix = cap
+        .origin_gate_matrix
+        .as_ref()
+        .expect("omitted origin_gate_matrix normalizes to Some");
+    assert_eq!(matrix.loop_run, OriginGatePolicy::GatedUnlessGranted);
+    assert_eq!(matrix.product, OriginGatePolicy::Forbidden);
+    assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
 }
 
 /// The `standard:` schema-ref namespace is reserved to host-synthesized

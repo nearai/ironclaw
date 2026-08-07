@@ -43,8 +43,9 @@ use std::sync::Arc;
 use ironclaw_host_api::{
     action::{NetworkScheme, NetworkTargetPattern},
     capability::{
-        EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+        EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode,
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
     },
     capability_profile::CapabilityProfileSchemaRef,
     error::HostApiError,
@@ -576,8 +577,13 @@ pub struct CapabilityDeclV2 {
     #[serde(default)]
     pub max_egress_bytes: Option<u64>,
     pub resource_profile: Option<ResourceProfile>,
-    /// Declared per-origin gate matrix (§5.2.1). `None` = undeclared; a later
-    /// slice populates real matrices and threads this into authorization.
+    /// Declared per-origin gate matrix (§5.2.1). Manifest parsing normalizes
+    /// an omitted declaration to [`default_extension_origin_gate_matrix`]
+    /// (#7320), so a model-visible capability whose manifest omits the key
+    /// gates (`GatedUnlessGranted` for `LoopRun`) instead of failing closed to
+    /// `Forbidden` for every origin. `None` survives only in resolved records
+    /// persisted by an older binary; rehydration re-applies the default
+    /// (`crate::resolved::ResolvedExtensionManifest::to_internal`).
     pub origin_gate_matrix: Option<OriginGateMatrix>,
 }
 
@@ -1170,6 +1176,27 @@ fn validate_hook_entries(
     Ok(entries)
 }
 
+/// The safe default gate matrix for a third-party extension capability whose
+/// manifest omits `origin_gate_matrix` (§5.2.1, #7320).
+///
+/// An omitted declaration must not fail the capability closed for every
+/// origin: extension authors following the guides (which historically did not
+/// mention the key) got an immediate `PolicyDenied` on the first `LoopRun`
+/// invocation in v1.1.0. The default mirrors the host's synthesized manifest
+/// posture for third-party tools (`loop_run = "gated_unless_granted"`, the
+/// same conservative cell `builtin_loop_run_seed` assigns to every
+/// non-allowlisted builtin): the `LoopRun` origin gates behind the ordinary
+/// approval flow instead of denying outright, while `Product`/`Automation`
+/// stay deny-by-default — no reviewed producer exists for them, and a
+/// declaration is required to open them.
+pub(crate) fn default_extension_origin_gate_matrix() -> OriginGateMatrix {
+    OriginGateMatrix {
+        loop_run: OriginGatePolicy::GatedUnlessGranted,
+        product: OriginGatePolicy::Forbidden,
+        automation: OriginGatePolicy::Forbidden,
+    }
+}
+
 impl CapabilityDeclV2 {
     pub(crate) fn from_raw(
         raw: RawCapabilityV2,
@@ -1397,7 +1424,10 @@ impl CapabilityDeclV2 {
             network_targets,
             max_egress_bytes: raw.max_egress_bytes,
             resource_profile: raw.resource_profile,
-            origin_gate_matrix: raw.origin_gate_matrix,
+            origin_gate_matrix: Some(
+                raw.origin_gate_matrix
+                    .unwrap_or_else(default_extension_origin_gate_matrix),
+            ),
         })
     }
 }
@@ -1950,9 +1980,11 @@ pub(crate) struct RawCapabilityV2 {
     #[serde(default)]
     pub(crate) resource_profile: Option<ResourceProfile>,
     /// Per-origin gate matrix (§5.2.1). `#[serde(default)]` so existing
-    /// manifests without the key parse to `None`. `OriginGateMatrix`
-    /// deserializes directly from TOML (snake_case fields, each defaulting to
-    /// `Forbidden` when omitted), so no raw mirror is needed.
+    /// manifests without the key parse to `None`, which [`CapabilityDeclV2::from_raw`]
+    /// normalizes to [`default_extension_origin_gate_matrix`] (#7320).
+    /// `OriginGateMatrix` deserializes directly from TOML (snake_case fields,
+    /// each defaulting to `Forbidden` when omitted), so no raw mirror is
+    /// needed.
     #[serde(default)]
     pub(crate) origin_gate_matrix: Option<OriginGateMatrix>,
 }
