@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_loop_contracts::{AgentLoopHostError, LoopCapabilityPort, LoopRunContext};
 use ironclaw_loop_host::LoopCapabilityPortFactory;
 
@@ -26,6 +27,22 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
                 run_context,
                 &self.milestone_sink,
                 self.trajectory_observer.clone(),
+                CapabilitySurfacePolicy::allow_all(),
+            )
+            .await
+    }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        self.harness
+            .create_recording_capability_port(
+                run_context,
+                &self.milestone_sink,
+                self.trajectory_observer.clone(),
+                surface_policy.as_ref().clone(),
             )
             .await
     }

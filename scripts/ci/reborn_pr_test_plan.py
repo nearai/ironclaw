@@ -270,6 +270,16 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/check_no_panics.py",
     #   * `dev_metrics.py` is a reporting tool; nothing gates on it.
     "scripts/dev_metrics.py",
+    #   * `check-type-duplicates.py` is a local dev analysis tool (type-dedup
+    #     backlog reporting); no workflow or hook invokes it, so no lane can
+    #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
+    #     path sweep touched its docstring.
+    "scripts/check-type-duplicates.py",
+    #   * `render-architecture-video.sh` is a local one-command Remotion
+    #     render for docs/internal/architecture-video; referenced only by the
+    #     `architecture-video` Claude skill, never by a workflow. Same PR,
+    #     same reason: the sweep rewrote its VIDEO_DIR path.
+    "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,

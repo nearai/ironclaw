@@ -165,8 +165,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
     tool_disclosure: ToolDisclosureMode,
     /// #5647 RED-pin seam: pass-through to
-    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
-    narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_surface_policy_for_bridged_test`.
+    /// `None` (default) preserves today's forced `CapabilitySurfacePolicy::allow_all()` behavior.
+    narrowed_bridged_policy_ids: Option<Vec<CapabilityId>>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -472,14 +473,14 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// #5647 RED-pin seam: pass-through to
-    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`.
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_surface_policy_for_bridged_test`.
     /// Only takes effect when paired with `.with_tool_disclosure_bridged()` —
     /// see that method's docs for the fail-fast guard on misuse.
-    pub fn with_narrowed_capability_allow_set_for_bridged_test(
+    pub fn with_narrowed_capability_surface_policy_for_bridged_test(
         mut self,
         ids: impl IntoIterator<Item = &'static str>,
     ) -> Self {
-        self.narrowed_bridged_allow_set = Some(
+        self.narrowed_bridged_policy_ids = Some(
             ids.into_iter()
                 .map(|id| CapabilityId::new(id).expect("test capability id must be valid"))
                 .collect(),
@@ -709,8 +710,9 @@ impl RebornIntegrationHarnessBuilder {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
         }
-        if let Some(ids) = self.narrowed_bridged_allow_set {
-            group_builder = group_builder.with_narrowed_capability_allow_set_for_bridged_test(ids);
+        if let Some(ids) = self.narrowed_bridged_policy_ids {
+            group_builder =
+                group_builder.with_narrowed_capability_surface_policy_for_bridged_test(ids);
         }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
@@ -852,7 +854,7 @@ impl RebornIntegrationHarness {
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
             tool_disclosure: ToolDisclosureMode::Off,
-            narrowed_bridged_allow_set: None,
+            narrowed_bridged_policy_ids: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,

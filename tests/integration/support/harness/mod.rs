@@ -40,6 +40,7 @@ use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     capability::{CapabilityGrant, EffectKind, GrantConstraints},
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgressRequest,
     ids::{
         AgentId, ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId,
@@ -57,8 +58,8 @@ use ironclaw_loop_contracts::{
     LoopRequest, LoopRunContext,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    CapabilityResolveError, CapabilitySurfaceProfileResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_contracts::binding::ResolvedBinding;
@@ -152,7 +153,7 @@ impl HarnessCapabilityMode {
                         port: Arc::clone(&port),
                     }),
                     Arc::new(StaticCapabilitySurfaceProfileResolver {
-                        allow_set: CapabilityAllowSet::allowlist(port.capability_allowlist()),
+                        policy: CapabilitySurfacePolicy::allow_only(port.capability_allowlist()),
                     }),
                     capability_io.clone(),
                     capability_io,
@@ -1695,6 +1696,7 @@ impl HostRuntimeCapabilityHarness {
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
+        surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
         // the harness opts in, else the fixed harness user — see
@@ -1902,6 +1904,7 @@ impl HostRuntimeCapabilityHarness {
         let parts = ironclaw_composition::test_support::RefreshingCapabilityPortTestParts {
             runtime: self.runtime.lock().unwrap().clone(),
             run_context: run_context.clone(),
+            surface_policy,
             fallback_user_id: dispatch_user,
             // All four mount views = this harness's single `mounts` view.
             // Production splits skill/memory/system-extensions mounts off
@@ -2153,8 +2156,8 @@ impl CapabilitySurfaceProfileResolver for HostRuntimeHarnessSurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 
