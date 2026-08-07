@@ -1999,22 +1999,38 @@ mod tests {
 
         // Attribute the advertised cost so drift points at its cause instead of
         // just moving a number.
-        let (bridge_definitions, core_definitions): (Vec<_>, Vec<_>) = disclosed
-            .definitions
-            .iter()
-            .partition(|definition| is_bridge_name(definition.name.as_str()));
-        let bridge_tokens = bridge_definitions.iter().fold(0_u32, |total, definition| {
-            total.saturating_add(estimate_definition_tokens(definition))
-        });
-        let core_tokens = core_definitions.iter().fold(0_u32, |total, definition| {
-            total.saturating_add(estimate_definition_tokens(definition))
-        });
+        // Classify by the catalog's own `ToolTier`, never by "not a bridge
+        // name": a promoted Discoverable definition also reaches the advertised
+        // surface, and charging it to Core would misdiagnose the drift it
+        // caused.
+        let mut bridge = (0_usize, 0_u32);
+        let mut core = (0_usize, 0_u32);
+        let mut discoverable = (0_usize, 0_u32);
+        for definition in &disclosed.definitions {
+            let tokens = estimate_definition_tokens(definition);
+            let bucket = if is_bridge_name(definition.name.as_str()) {
+                &mut bridge
+            } else {
+                match catalog
+                    .entry_by_name(definition.name.as_str())
+                    .map(|entry| entry.tier)
+                {
+                    Some(ToolTier::Core) => &mut core,
+                    Some(ToolTier::Discoverable) => &mut discoverable,
+                    None => panic!(
+                        "advertised definition {} is neither a bridge tool nor a catalog entry",
+                        definition.name
+                    ),
+                }
+            };
+            bucket.0 = bucket.0.saturating_add(1);
+            bucket.1 = bucket.1.saturating_add(tokens);
+        }
         let breakdown = format!(
             "measured={reduction_pct:.1}% (full={full_count} tools/{full_tokens} tokens, \
              advertised={disclosed_count} tools/{disclosed_tokens} tokens; \
-             bridge={} tools/{bridge_tokens} tokens, core={} tools/{core_tokens} tokens)",
-            bridge_definitions.len(),
-            core_definitions.len(),
+             bridge={}/{} tokens, core={}/{} tokens, promoted_discoverable={}/{} tokens)",
+            bridge.0, bridge.1, core.0, core.1, discoverable.0, discoverable.1,
         );
 
         println!(
@@ -2023,6 +2039,11 @@ mod tests {
 
         assert_eq!(full_count, 91);
         assert!(disclosed.deferred);
+        assert_eq!(
+            discoverable.0, 0,
+            "the benchmark promotes nothing, so a Discoverable tool on the advertised \
+             surface means the selection path changed: {breakdown}"
+        );
         assert!(
             reduction_pct >= REPRESENTATIVE_REDUCTION_FLOOR_PCT,
             "wide-catalog schema-token reduction fell below the {REPRESENTATIVE_REDUCTION_FLOOR_PCT}% floor (#6810): {breakdown}"
