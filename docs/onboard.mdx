@@ -176,9 +176,11 @@ Two things trip people up here:
   Using **Configure** from Registry on Telegram opens the pairing panel, which can only
   report *"An administrator must configure the Telegram bot first."* That is not a
   permissions problem — you're on the wrong tab.
-- **Asking the agent to connect a channel doesn't work.** Connecting a channel is an
-  operator action, kept out of the tools the agent can drive. It may tell you it can't
-  help; do it yourself in the web interface.
+- **Asking the agent to connect a channel covers only the personal half.** The operator
+  step — registering the app or bot credentials for the instance — stays in the web
+  interface. Once that's done, asking the agent ("connect Slack") works: it installs and
+  activates the extension, an in-chat connection panel opens if your account still needs
+  OAuth, and if your account is already connected the agent says so and continues.
 
 See [Channels](/channels/overview) for the full walkthrough.
 
