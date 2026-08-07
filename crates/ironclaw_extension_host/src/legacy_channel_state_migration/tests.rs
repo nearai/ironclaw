@@ -202,6 +202,11 @@ fn identity_prefix_rewrite_is_exact_and_requires_the_target_installation() {
 
 #[tokio::test]
 async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
+    assert_eq!(
+        rc1_slack_path_segment("slack-rc1-install"),
+        "c2xhY2stcmMxLWluc3RhbGw"
+    );
+    assert_eq!(rc1_slack_path_segment("operator-a"), "b3BlcmF0b3ItYQ");
     let backend = Arc::new(InMemoryBackend::new());
     let filesystem: Arc<dyn RootFilesystem> = backend.clone();
     let secret_store = Arc::new(SecretStore::ephemeral_over(Arc::clone(&backend)));
@@ -345,7 +350,7 @@ async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
             }),
         ),
         (
-            "/tenants/tenant-a/shared/slack-personal-binding/connections/slack-rc1-install/operator-a.json",
+            "/tenants/tenant-a/shared/slack-personal-binding/connections/c2xhY2stcmMxLWluc3RhbGw/b3BlcmF0b3ItYQ.json",
             serde_json::json!({
                 "tenant_id": "tenant-a",
                 "user_id": "operator-a",
@@ -861,7 +866,9 @@ async fn slack_connection_disposition_pages_and_second_run_is_unchanged() {
     for index in 0..total {
         let user = format!("user-{index:04}");
         let path = VirtualPath::new(format!(
-            "{shared}/slack-personal-binding/connections/slack-install/{user}.json"
+            "{shared}/slack-personal-binding/connections/{}/{}.json",
+            rc1_slack_path_segment("slack-install"),
+            rc1_slack_path_segment(&user)
         ))
         .expect("connection path");
         let state = if index + 1 == total {
@@ -923,7 +930,9 @@ async fn interrupted_rc1_slack_disconnect_fails_closed() {
     };
     let shared = "/tenants/tenant-a/shared";
     let path = VirtualPath::new(format!(
-        "{shared}/slack-personal-binding/connections/slack-install/user-a.json"
+        "{shared}/slack-personal-binding/connections/{}/{}.json",
+        rc1_slack_path_segment("slack-install"),
+        rc1_slack_path_segment("user-a")
     ))
     .expect("connection path");
     let connection = serde_json::json!({

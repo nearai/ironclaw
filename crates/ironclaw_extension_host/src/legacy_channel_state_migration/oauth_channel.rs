@@ -1,4 +1,5 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub(super) const SLACK: &str = "slack";
 pub(super) const SLACK_GROUP: &str = "extension.slack";
@@ -6,6 +7,10 @@ const MANAGED_SLACK_SUBJECT_PREFIX: &str = "user:slack-channel:";
 
 pub(super) fn provider_key() -> &'static str {
     SLACK
+}
+
+pub(super) fn rc1_slack_path_segment(value: &str) -> String {
+    URL_SAFE_NO_PAD.encode(value.as_bytes())
 }
 
 pub(super) fn root_migration_spec() -> Rc1ChannelRootMigrationSpec {
@@ -322,7 +327,11 @@ pub(super) async fn inspect_slack_connection_disposition(
         }
         let user = UserId::new(&connection.user_id).map_err(log_malformed)?;
         AdapterInstallationId::new(&connection.installation_id).map_err(log_malformed)?;
-        let expected_suffix = format!("/{}/{}.json", connection.installation_id, user.as_str());
+        let expected_suffix = format!(
+            "/{}/{}.json",
+            rc1_slack_path_segment(&connection.installation_id),
+            rc1_slack_path_segment(user.as_str())
+        );
         if !row.path.as_str().ends_with(&expected_suffix) {
             return Err(Rc1ChannelStateMigrationError::Malformed);
         }
