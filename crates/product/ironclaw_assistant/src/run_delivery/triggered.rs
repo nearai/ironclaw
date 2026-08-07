@@ -89,8 +89,9 @@ enum TriggeredNotificationFailure {
     /// binding resolved to a non-personal-DM target. Handled by cancelling
     /// the run and posting the auth-unavailable notice.
     OAuthTargetNotDm,
-    /// An authoritative delivery row exists, but it does not prove vendor
-    /// delivery and therefore cannot authorize success-side cleanup.
+    /// No durable `Delivered` row confirms this delivery, so it cannot
+    /// authorize success-side cleanup — whether the send never happened on
+    /// this call (claim loss) or happened but was not durably recorded.
     DeliveryUnconfirmed {
         status: ironclaw_outbound::OutboundDeliveryStatus,
         failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
@@ -119,7 +120,7 @@ impl std::fmt::Display for TriggeredNotificationFailure {
                 failure_kind,
             } => write!(
                 f,
-                "existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}"
+                "delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}"
             ),
             Self::Rejected { failure_kind } => {
                 write!(f, "delivery rejected: failure_kind={failure_kind:?}")
@@ -854,7 +855,7 @@ fn classify_triggered_delivery_outcome(
         // The vendor refs are dropped here: no triggered consumer acts on
         // refs from an unconfirmed send. `Sending` is the last durably
         // committed state.
-        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => {
+        CoordinatedDeliveryOutcome::DeliveredUnrecorded { .. } => {
             Err(TriggeredNotificationFailure::DeliveryUnconfirmed {
                 status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
                 failure_kind: None,
@@ -1134,22 +1135,22 @@ mod outcome_classification_tests {
         // Sent but not durably confirmed: not success, so no gate routes or
         // terminal cleanup are authorized — but it is also not a resend
         // trigger, since the parts did reach the vendor.
-        let delivered_unconfirmed =
-            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+        let delivered_unrecorded =
+            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnrecorded {
                 attempt: attempt(None),
                 conversation: conversation(),
                 vendor_message_refs: vec!["triggered-unconfirmed-ref".to_string()],
             })
             .expect_err("an unconfirmed send is not success");
         assert!(matches!(
-            &delivered_unconfirmed,
+            &delivered_unrecorded,
             TriggeredNotificationFailure::DeliveryUnconfirmed {
                 status: OutboundDeliveryStatus::Sending,
                 failure_kind: None
             }
         ));
         assert_eq!(
-            triggered_outcome_for_failure(&delivered_unconfirmed),
+            triggered_outcome_for_failure(&delivered_unrecorded),
             TriggeredRunDeliveryOutcomeKind::Failed
         );
 

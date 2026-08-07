@@ -191,7 +191,7 @@ pub enum RunDeliveryError {
     DeliveryRejected {
         failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
     },
-    #[error("existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}")]
+    #[error("delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}")]
     DeliveryUnconfirmed {
         status: ironclaw_outbound::OutboundDeliveryStatus,
         failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
