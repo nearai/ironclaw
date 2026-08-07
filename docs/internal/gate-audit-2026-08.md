@@ -446,6 +446,13 @@ this report):** the nine §5 fixes, the charter-count prose fix in
 the proposed-but-unwired `scripts/preflight-gates.sh` (validated end-to-end:
 exit 0 on this branch).
 
+A twelfth commit landed because a gate caught this audit's own PR: the
+affected-area planner's fail-closed arm refused
+`unmapped test or CI path: scripts/check-boundaries.sh` — precisely the
+forced-decision behavior its `PR_STATIC_CONTROL_PATHS` comment block
+documents, working as designed against the auditor. Both audit-touched
+script paths are now classified per that list's membership rule.
+
 **Recommended, not changed (owner decisions):** `--no-fail-fast` +
 fast-checks aggregation in CI (R1); cfg-test-aware LOC counting + mid-window
 pins + append-only rationales (R2); arch bucket on any `crates/` change (R3);
