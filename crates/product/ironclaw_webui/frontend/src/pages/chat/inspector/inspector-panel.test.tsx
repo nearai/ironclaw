@@ -5,6 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, test, vi } from "vitest";
 
+import { INSPECTOR_RUN_HISTORY_KEY } from "./inspector-activity";
 import { INSPECTOR_HEALTH } from "./inspector-state";
 import { InspectorPanel } from "./inspector-panel";
 
@@ -239,6 +240,39 @@ test("tool activity loads bounded verbose details from the dedicated endpoint", 
   assert.match(detail.textContent || "", /filesystem\.read/);
   assert.match(detail.textContent || "", /truncated from 75,000 bytes/);
   assert.match(detail.textContent || "", /bounded output/);
+});
+
+test("activity navigation advances when a pinned run leaves the history window", async () => {
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-0" />));
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-1" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.click(),
+  );
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-0");
+
+  sessionStorage.setItem(
+    INSPECTOR_RUN_HISTORY_KEY,
+    JSON.stringify({
+      "thread-a": Array.from({ length: 32 }, (_, index) => `run-${index + 1}`),
+    }),
+  );
+  await act(async () =>
+    root?.render(<InspectorPanel threadId="thread-a" runId="run-32" />),
+  );
+
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-1");
+  assert.match(document.body.textContent || "", /Turn 1 of 32/);
+  assert.equal(
+    document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.disabled,
+    true,
+  );
+  assert.equal(
+    document.querySelector<HTMLButtonElement>("[aria-label='Next turn']")?.disabled,
+    false,
+  );
 });
 
 afterEach(async () => {

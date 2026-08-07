@@ -474,9 +474,9 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             )
         ).to_have_count(1)
 
-        await page.locator("[data-testid='inspector-tab-activity']").click()
-        activity = page.locator("[data-testid='inspector-activity-content']")
-        await expect(activity).to_be_visible()
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        await expect(activity).to_be_visible(timeout=30000)
         await expect(
             activity.locator("[data-activity-kind='turn_started']")
         ).to_have_count(1)

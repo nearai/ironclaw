@@ -291,7 +291,9 @@ export function useInspector({
           const cursor = message.id || null;
           if (message.event === "diagnostic_rebase") {
             if (cursor) lastCursorRef.current = cursor;
-            setUpdates([]);
+            setUpdates((current) => current.filter(
+              (update) => typeof update.local_id === "string",
+            ));
             scheduleSnapshotRefresh();
             return;
           }

@@ -233,8 +233,12 @@ function ActivityShell({
   onSelectRun: (runId: string) => void;
   threadId: string | null;
 }) {
-  const activity = reduceInspectorActivity(snapshot, updates);
-  const selectedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
+  const activity = React.useMemo(
+    () => reduceInspectorActivity(snapshot, updates),
+    [snapshot, updates],
+  );
+  const requestedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
+  const selectedIndex = requestedIndex >= 0 ? requestedIndex : runHistory.length > 0 ? 0 : -1;
   const previousRun = selectedIndex > 0 ? runHistory[selectedIndex - 1] : null;
   const nextRun = selectedIndex >= 0 && selectedIndex < runHistory.length - 1
     ? runHistory[selectedIndex + 1]
@@ -603,15 +607,26 @@ function InspectorPanelCore({
   const [preferences, setPreferences] = React.useState<InspectorPreferences>(() =>
     readInspectorPreferences(),
   );
-  const [runHistory, setRunHistory] = React.useState<string[]>(() =>
-    rememberInspectorRun(threadId, runId),
-  );
-  const [selectedRunId, setSelectedRunId] = React.useState<string | null>(runId);
+  const [runHistory, setRunHistory] = React.useState<string[]>([]);
+  const [selectedRunId, setSelectedRunId] = React.useState<string | null>(null);
+  const selectedThreadRef = React.useRef(threadId);
+  const selectionPinnedRef = React.useRef(false);
   React.useEffect(() => {
     const history = rememberInspectorRun(threadId, runId);
+    const threadChanged = selectedThreadRef.current !== threadId;
+    selectedThreadRef.current = threadId;
+    if (threadChanged) selectionPinnedRef.current = false;
     setRunHistory(history);
-    setSelectedRunId(runId || history.at(-1) || null);
+    setSelectedRunId((current) => {
+      if (!selectionPinnedRef.current) return runId || history.at(-1) || null;
+      if (current && history.includes(current)) return current;
+      return history[0] || runId || null;
+    });
   }, [threadId, runId]);
+  const selectRun = React.useCallback((nextRunId: string) => {
+    selectionPinnedRef.current = true;
+    setSelectedRunId(nextRunId);
+  }, []);
   const inspector = useInspector({
     enabled: preferences.open && viewportMode !== "mobile",
     threadId,
@@ -722,7 +737,7 @@ function InspectorPanelCore({
             updates={inspector.updates}
             runHistory={runHistory}
             selectedRunId={selectedRunId}
-            onSelectRun={setSelectedRunId}
+            onSelectRun={selectRun}
             threadId={threadId}
           />
         )}
