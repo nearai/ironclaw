@@ -29,6 +29,7 @@ use super::reborn_support::reply::RebornScriptedReply;
 struct RecordingLifecycleMemoryService {
     long_term_reads: AtomicUsize,
     short_term_reads: AtomicUsize,
+    curated_reads: AtomicUsize,
     interaction_records: AtomicUsize,
     profile_reads: AtomicUsize,
 }
@@ -50,6 +51,15 @@ impl MemoryService for RecordingLifecycleMemoryService {
         _request: MemoryServiceContextRequest,
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
         self.short_term_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn read_curated(
+        &self,
+        _invocation: MemoryInvocation,
+        _request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        self.curated_reads.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
 
@@ -106,6 +116,7 @@ pub async fn run() -> HarnessResult<()> {
     while waited < Duration::from_secs(1) {
         let fired = silent.long_term_reads.load(Ordering::SeqCst)
             + silent.short_term_reads.load(Ordering::SeqCst)
+            + silent.curated_reads.load(Ordering::SeqCst)
             + silent.interaction_records.load(Ordering::SeqCst)
             + silent.profile_reads.load(Ordering::SeqCst);
         if fired > 0 {
@@ -122,6 +133,11 @@ pub async fn run() -> HarnessResult<()> {
     expect_count(
         "empty lifecycle / read_short_term",
         silent.short_term_reads.load(Ordering::SeqCst),
+        true,
+    )?;
+    expect_count(
+        "empty lifecycle / read_curated",
+        silent.curated_reads.load(Ordering::SeqCst),
         true,
     )?;
     expect_count(
@@ -173,6 +189,11 @@ pub async fn run() -> HarnessResult<()> {
     expect_count(
         "full lifecycle / read_short_term",
         observed.short_term_reads.load(Ordering::SeqCst),
+        false,
+    )?;
+    expect_count(
+        "full lifecycle / read_curated",
+        observed.curated_reads.load(Ordering::SeqCst),
         false,
     )?;
     expect_count(

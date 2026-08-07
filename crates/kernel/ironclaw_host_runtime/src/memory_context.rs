@@ -197,15 +197,12 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         let mut admitted = Vec::new();
         let mut total_bytes = 0usize;
         let mut curated_bytes = 0usize;
-        let lanes = curated
-            .into_iter()
-            .map(|snippet| (true, snippet))
-            .chain(
-                short_term
-                    .into_iter()
-                    .chain(long_term)
-                    .map(|snippet| (false, snippet)),
-            );
+        let lanes = curated.into_iter().map(|snippet| (true, snippet)).chain(
+            short_term
+                .into_iter()
+                .chain(long_term)
+                .map(|snippet| (false, snippet)),
+        );
         for (is_curated, snippet) in lanes {
             if admitted.len() >= request.max_snippets {
                 break;
@@ -646,14 +643,17 @@ mod tests {
     /// Blank lines carry no fact and must not consume chunk budget.
     #[test]
     fn split_curated_drops_blank_lines() {
-        let chunks = split_curated_text("likes tea\n\n   \nworks in Berlin", CURATED_CHUNK_RAW_BYTES);
+        let chunks =
+            split_curated_text("likes tea\n\n   \nworks in Berlin", CURATED_CHUNK_RAW_BYTES);
         assert_eq!(chunks, vec!["likes tea; works in Berlin".to_string()]);
     }
 
     /// A document longer than one chunk is cut BETWEEN lines, never mid-fact.
     #[test]
     fn split_curated_cuts_on_line_boundaries() {
-        let lines: Vec<String> = (0..10).map(|index| format!("fact number {index}")).collect();
+        let lines: Vec<String> = (0..10)
+            .map(|index| format!("fact number {index}"))
+            .collect();
         let chunks = split_curated_text(&lines.join("\n"), 40);
         assert!(chunks.len() > 1, "document must span several chunks");
         for chunk in &chunks {

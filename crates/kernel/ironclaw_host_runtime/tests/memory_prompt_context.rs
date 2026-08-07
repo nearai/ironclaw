@@ -24,9 +24,9 @@ use ironclaw_memory::{
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 
 /// Per-lane behavior for the mock. `load_memory_snippets` queries the
-/// provider's two lane METHODS (`read_short_term` / `read_long_term`) with the
-/// same invocation; the mock returns lane-specific snippets (or errors) so
-/// each lane can be driven independently.
+/// provider's lane METHODS (`read_short_term` / `read_long_term` /
+/// `read_curated`) with the same invocation; the mock returns lane-specific
+/// snippets (or errors) so each lane can be driven independently.
 #[derive(Clone)]
 enum LaneBehavior {
     Snippets(Vec<MemoryServiceContextSnippet>),
@@ -90,7 +90,11 @@ impl MockMemoryService {
     }
 
     fn with_error() -> Self {
-        Self::with_curated(LaneBehavior::Error, LaneBehavior::Error, LaneBehavior::Error)
+        Self::with_curated(
+            LaneBehavior::Error,
+            LaneBehavior::Error,
+            LaneBehavior::Error,
+        )
     }
 
     /// Two-lane tests: drive the short-term and long-term lanes with distinct
@@ -356,7 +360,11 @@ async fn host_derived_scope_is_passed_to_every_lane() {
         .unwrap();
 
     let captured = memory_service.captured();
-    assert_eq!(captured.len(), 3, "every declared lane method must be queried");
+    assert_eq!(
+        captured.len(),
+        3,
+        "every declared lane method must be queried"
+    );
     for (_, invocation, request) in &captured {
         assert_eq!(invocation.scope.tenant_id.as_str(), "tenant-a");
         assert_eq!(invocation.scope.user_id.as_str(), "user-x");
@@ -770,8 +778,7 @@ async fn curated_lane_is_injected_without_any_search_match() {
     assert_eq!(snippets.len(), 1, "curated document must be admitted");
     assert_eq!(snippets[0].snippet_ref, expected_ref("MEMORY.md"));
     assert_eq!(
-        snippets[0].model_content,
-        "Untrusted memory content: the user prefers metric units",
+        snippets[0].model_content, "Untrusted memory content: the user prefers metric units",
         "the curated document gets the same untrusted-envelope treatment as a search hit"
     );
 }
