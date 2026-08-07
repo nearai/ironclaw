@@ -116,7 +116,13 @@ repeat its external side effect. In save mode the sanitized body is written to t
 mount before the failure verdict is produced, and the diagnostic carries only
 `saved_body` path metadata (`path`, `bytes_written`) — a retry decision must
 inspect `saved_body` first, because treating the verdict as "nothing happened"
-duplicates the write. The host never retries failed HTTP calls automatically;
+duplicates the write. When the error body trips the loop-host injection scan, the
+seam wraps the diagnostic in the external-content security fence before the
+observation budget is applied; the verdict itself never depends on the diagnostic
+JSON surviving that wrap — the `OperationFailed` classification and the
+`HTTP request returned status N` safe summary always reach the model, and the
+fenced diagnostic may be truncated at the observation boundary without affecting
+verdict semantics. The host never retries failed HTTP calls automatically;
 for rate-limited or overloaded responses (429/503) the model should apply
 backoff rather than immediately re-invoking. For 401/403/407 the diagnostic
 retains the extension-install hint; extension install remains approval-gated and

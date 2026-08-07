@@ -362,6 +362,12 @@ fn enforce_final_model_visible_output_budget(
 /// serializations stay bounded by the number of trim passes rather than one
 /// per trimmed key. Used by the success-path final budget and by the failure
 /// diagnostic budget trim, which differ only in the target size.
+///
+/// Convergence: the first pass trims the body by the full excess, leaving at
+/// most the truncation-marker overhead (~a few hundred serialized bytes); the
+/// second pass absorbs that remainder, so the loop completes in at most two
+/// or three passes for any body size (it exits early once the output fits,
+/// and an empty body falls through to the base64/headers branches).
 fn fit_output_to_budget(output: &mut Map<String, Value>, final_budget: usize) -> FinalBudgetTrim {
     let mut trim = FinalBudgetTrim::default();
     let mut current_len = serialized_output_len(output);
