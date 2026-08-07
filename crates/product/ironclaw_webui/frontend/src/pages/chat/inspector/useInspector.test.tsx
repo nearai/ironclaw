@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, test, vi } from "vitest";
 
 import { INSPECTOR_HEALTH } from "./inspector-state";
+import { resetInspectorSessionStats } from "./inspector-session-stats";
 import { useInspector } from "./useInspector";
 
 const eventStreams = vi.hoisted(() => [] as any[]);
@@ -60,6 +61,7 @@ function Probe({ enabled = true }: { enabled?: boolean }) {
 }
 
 beforeEach(() => {
+  resetInspectorSessionStats();
   eventStreams.length = 0;
   latestState = null;
   sessionStorage.clear();
@@ -78,6 +80,44 @@ beforeEach(() => {
     value: "visible",
   });
   root = createRoot(document.body.appendChild(document.createElement("div")));
+});
+
+test("records authoritative run snapshots in page-session statistics", async () => {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify({
+        snapshot: {
+          stats: {
+            total_model_calls: 2,
+            total_tool_calls: 1,
+            successful_tool_calls: 1,
+            failed_tool_calls: 0,
+            calls_per_model: [{
+              model: { content: "model-a", original_bytes: 7, truncated: false },
+              calls: 2,
+            }],
+            calls_per_model_truncated: false,
+            input_tokens: { known_total: 20, unavailable_samples: 0 },
+            output_tokens: { known_total: 5, unavailable_samples: 0 },
+            cache_read_input_tokens: { known_total: 0, unavailable_samples: 2 },
+            cache_creation_input_tokens: { known_total: 0, unavailable_samples: 2 },
+            total_latency_ms: { known_total: 200, unavailable_samples: 0 },
+          },
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    ),
+  );
+
+  await act(async () => root?.render(<Probe />));
+
+  assert.equal(latestState?.sessionStats?.total_model_calls, 2);
+  assert.equal(latestState?.sessionStats?.total_tool_calls, 1);
+  assert.equal(latestState?.sessionStats?.input_tokens.known_total, 20);
 });
 
 afterEach(async () => {

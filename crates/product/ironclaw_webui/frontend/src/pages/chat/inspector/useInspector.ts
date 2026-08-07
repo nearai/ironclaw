@@ -18,6 +18,11 @@ import {
   recordInspectorReconnect,
   rememberInspectorStreamCursor,
 } from "./inspector-stream-session";
+import {
+  readInspectorSessionStats,
+  recordInspectorSessionStats,
+  type SessionDiagnosticStats,
+} from "./inspector-session-stats";
 
 const MAX_RETRY_INTERVAL_MS = 30_000;
 const MAX_RETAINED_UPDATES = 1_024;
@@ -102,6 +107,7 @@ interface InspectorSnapshotResponse {
 
 interface InspectorState {
   snapshot: InspectorSnapshotResponse["snapshot"];
+  sessionStats: SessionDiagnosticStats | null;
   updates: DiagnosticUpdate[];
   health: InspectorHealth;
   error: string | null;
@@ -135,6 +141,7 @@ export function useInspector({
   runId: string | null;
 }): InspectorState {
   const [snapshot, setSnapshot] = React.useState<InspectorState["snapshot"]>(null);
+  const [, refreshSessionStats] = React.useReducer((revision) => revision + 1, 0);
   const [updates, setUpdates] = React.useState<DiagnosticUpdate[]>([]);
   const [health, setHealth] = React.useState<InspectorHealth>(INSPECTOR_HEALTH.IDLE);
   const [error, setError] = React.useState<string | null>(null);
@@ -190,7 +197,13 @@ export function useInspector({
       fetchInspectorSnapshot({ threadId, runId, signal: controller.signal })
         .then((response) => {
           if (controller.signal.aborted) return;
-          setSnapshot((response as InspectorSnapshotResponse)?.snapshot ?? null);
+          const nextSnapshot = (response as InspectorSnapshotResponse)?.snapshot ?? null;
+          setSnapshot(nextSnapshot);
+          const stats = nextSnapshot?.stats as unknown as SessionDiagnosticStats | undefined;
+          if (stats) {
+            recordInspectorSessionStats(`${threadId}/${runId}`, stats);
+            refreshSessionStats();
+          }
           setError(null);
           setHealth((current) =>
             current === INSPECTOR_HEALTH.LOADING ? INSPECTOR_HEALTH.CONNECTING : current,
@@ -399,6 +412,7 @@ export function useInspector({
 
   return {
     snapshot,
+    sessionStats: readInspectorSessionStats(),
     updates,
     health,
     error,

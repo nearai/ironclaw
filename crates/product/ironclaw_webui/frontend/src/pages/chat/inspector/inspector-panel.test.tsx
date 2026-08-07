@@ -10,6 +10,7 @@ import "../../../i18n/zh-CN";
 import { I18nProvider } from "../../../lib/i18n";
 import { INSPECTOR_HEALTH } from "./inspector-state";
 import { InspectorPanel } from "./inspector-panel";
+import { resetInspectorSessionStats } from "./inspector-session-stats";
 
 const inspectorCalls = vi.hoisted(() => [] as any[]);
 const fetchInspectorTool = vi.hoisted(() => vi.fn());
@@ -27,7 +28,10 @@ const inspectorState = vi.hoisted(() => ({
 vi.mock("./useInspector", () => ({
   useInspector: (input: unknown) => {
     inspectorCalls.push(input);
-    return inspectorState;
+    return {
+      ...inspectorState,
+      sessionStats: inspectorState.snapshot?.stats ?? null,
+    };
   },
 }));
 
@@ -44,6 +48,7 @@ function setViewport(width: number) {
 }
 
 beforeEach(() => {
+  resetInspectorSessionStats();
   fetchInspectorTool.mockReset();
   inspectorCalls.length = 0;
   inspectorState.snapshot = null;

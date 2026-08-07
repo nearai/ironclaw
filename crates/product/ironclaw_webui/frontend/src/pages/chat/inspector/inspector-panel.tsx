@@ -18,6 +18,10 @@ import {
   type InspectorPreferences,
   type InspectorTab,
 } from "./inspector-state";
+import {
+  type DiagnosticMetricTotal,
+  type SessionDiagnosticStats,
+} from "./inspector-session-stats";
 import { useInspector } from "./useInspector";
 import "./inspector-translations";
 
@@ -514,25 +518,6 @@ function ActivityEntry({
   );
 }
 
-interface DiagnosticMetricTotal {
-  known_total: number;
-  unavailable_samples: number;
-}
-
-interface SessionDiagnosticStats {
-  total_model_calls: number;
-  total_tool_calls?: number;
-  successful_tool_calls?: number;
-  failed_tool_calls?: number;
-  calls_per_model: Array<{ model: BoundedDiagnosticText; calls: number }>;
-  calls_per_model_truncated: boolean;
-  input_tokens: DiagnosticMetricTotal;
-  output_tokens: DiagnosticMetricTotal;
-  cache_read_input_tokens: DiagnosticMetricTotal;
-  cache_creation_input_tokens: DiagnosticMetricTotal;
-  total_latency_ms: DiagnosticMetricTotal;
-}
-
 function metricValue(
   metric: DiagnosticMetricTotal,
   sampleCount: number,
@@ -586,20 +571,19 @@ function StreamHealth({
 }
 
 function StatsShell({
-  snapshot,
+  stats,
   health,
   reconnectCount,
   receivedUpdateCount,
   lastUpdateAt,
 }: {
-  snapshot: Record<string, unknown> | null;
+  stats: SessionDiagnosticStats | null;
   health: keyof typeof HEALTH_LABEL_KEYS;
   reconnectCount: number;
   receivedUpdateCount: number;
   lastUpdateAt: string | null;
 }) {
   const t = useT();
-  const stats = snapshot?.stats as SessionDiagnosticStats | undefined;
   if (!stats) {
     return (
       <div className="space-y-4 p-4" data-testid="inspector-stats-content">
@@ -816,7 +800,7 @@ function InspectorPanelCore({
         )}
         {preferences.activeTab === "stats" && (
           <StatsShell
-            snapshot={snapshot}
+            stats={inspector.sessionStats}
             health={inspector.health}
             reconnectCount={inspector.reconnectCount}
             receivedUpdateCount={inspector.receivedUpdateCount}

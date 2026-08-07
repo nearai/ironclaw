@@ -25,8 +25,10 @@ import {
   recordInspectorReconnect,
 } from "./inspector-stream-session";
 import {
+  INSPECTOR_DEBUG_ENABLED_KEY,
   inspectorDebugEnabled,
   latestInspectorRunId,
+  persistInspectorDebugPreference,
 } from "./inspector-shell";
 
 function storage(initial: Record<string, string> = {}) {
@@ -38,12 +40,22 @@ function storage(initial: Record<string, string> = {}) {
   };
 }
 
-test("debug activation accepts only the explicit true query value", () => {
-  assert.equal(inspectorDebugEnabled("?debug=true"), true);
-  assert.equal(inspectorDebugEnabled("?foo=1&debug=true"), true);
-  assert.equal(inspectorDebugEnabled("?debug=false"), false);
-  assert.equal(inspectorDebugEnabled("?debug=1"), false);
-  assert.equal(inspectorDebugEnabled(""), false);
+test("debug activation follows explicit query values and persists across routes", () => {
+  const memory = storage();
+  assert.equal(inspectorDebugEnabled("", memory), false);
+
+  assert.equal(inspectorDebugEnabled("?debug=true", memory), true);
+  persistInspectorDebugPreference("?debug=true", memory);
+  assert.equal(memory.dump()[INSPECTOR_DEBUG_ENABLED_KEY], "true");
+  assert.equal(inspectorDebugEnabled("", memory), true);
+
+  assert.equal(inspectorDebugEnabled("?debug=false", memory), false);
+  persistInspectorDebugPreference("?debug=false", memory);
+  assert.equal(memory.dump()[INSPECTOR_DEBUG_ENABLED_KEY], "false");
+  assert.equal(inspectorDebugEnabled("", memory), false);
+
+  assert.equal(inspectorDebugEnabled("?debug=1", memory), false);
+  assert.equal(inspectorDebugEnabled("?foo=1&debug=true", memory), true);
 });
 
 test("debug activation fails closed when query parsing throws", () => {
