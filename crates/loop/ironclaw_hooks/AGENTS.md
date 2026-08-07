@@ -215,7 +215,7 @@ isolation.
 Cross-run isolation is pinned by
 **`poisoned_hook_slot_does_not_leak_into_the_next_run`** in
 `tests/integration/hooks.rs` ([#6945](https://github.com/nearai/ironclaw/issues/6945),
-landed 2026-08-04 with [ADR 0004](../../../docs/adr/0004-hooks-keeps-its-predicate-state-backends.md)).
+landed 2026-08-04 with [ADR 0004](../../../docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md)).
 It drives two turns on one harness — two `build_text_only_host*` calls, so two
 dispatcher mints — with a hook that commits a gate-sink protocol violation.
 Run 1 fails closed and poisons its slot; run 2 must get a clean slot, fire the

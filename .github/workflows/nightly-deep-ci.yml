@@ -3,7 +3,7 @@ name: Nightly Deep CI
 # The v1 legacy monolith (src/) and its deep suites (the former
 # .github/workflows/test.yml and .github/workflows/e2e.yml) were deleted
 # under Tier B ("Clean up old architecture" roadmap;
-# docs/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
+# docs/internal/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
 # Reborn suites remain, reused below.
 #
 # Cross-cutting platform and compatibility coverage is reused from

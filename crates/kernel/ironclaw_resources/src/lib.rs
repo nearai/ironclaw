@@ -10,7 +10,7 @@
 //! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
 //! local-disk) is made at the filesystem layer — the consumer-store level no
 //! longer carries per-backend impls. See
-//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//! `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 //!
 //! Persistent governors fail closed when snapshot reads, writes, locks, or
 //! schema validation fail. Callers must handle [`ResourceError::Storage`] the
