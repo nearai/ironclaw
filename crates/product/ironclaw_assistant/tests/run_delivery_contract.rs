@@ -108,6 +108,11 @@ struct ScriptedTurnCoordinator {
     clamp_at_last: bool,
     calls: Mutex<usize>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
+    /// Optional late transition: from call `flip_after` on, `flip_to` is
+    /// returned instead of the scripted sequence — used to race a terminal
+    /// state in after the wait backstop has already fired.
+    flip_after: Option<usize>,
+    flip_to: Option<ScriptedRunState>,
 }
 
 impl ScriptedTurnCoordinator {
@@ -118,6 +123,25 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            flip_after: None,
+            flip_to: None,
+        }
+    }
+
+    /// `initial` until call `flip_after` (exclusive), then `terminal` — for
+    /// racing a terminal state in after the wait backstop.
+    fn with_late_terminal(
+        initial: ScriptedRunState,
+        terminal: ScriptedRunState,
+        flip_after: usize,
+    ) -> Self {
+        Self {
+            states: vec![initial],
+            clamp_at_last: true,
+            calls: Mutex::new(0),
+            cancel_calls: Mutex::new(Vec::new()),
+            flip_after: Some(flip_after),
+            flip_to: Some(terminal),
         }
     }
 
@@ -158,13 +182,22 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         let mut calls = self.calls.lock().expect("calls");
-        let idx = if self.clamp_at_last {
-            (*calls).min(self.states.len() - 1)
-        } else {
-            *calls % self.states.len()
-        };
+        let call = *calls;
         *calls += 1;
-        let scripted = self.states[idx].clone();
+        let scripted = match self.flip_after {
+            Some(flip) if call >= flip => self
+                .flip_to
+                .clone()
+                .expect("late-terminal flip target present"),
+            _ => {
+                let idx = if self.clamp_at_last {
+                    call.min(self.states.len() - 1)
+                } else {
+                    call % self.states.len()
+                };
+                self.states[idx].clone()
+            }
+        };
         Ok(TurnRunState {
             scope: request.scope.clone(),
             actor: None,
@@ -1875,13 +1908,24 @@ fn build_triggered_harness(
     auth_url: Option<&str>,
     personal_dm_target: bool,
 ) -> TriggeredHarness {
+    build_triggered_harness_with_turns(
+        Arc::new(ScriptedTurnCoordinator::with_states(states)),
+        auth_url,
+        personal_dm_target,
+    )
+}
+
+fn build_triggered_harness_with_turns(
+    turns: Arc<ScriptedTurnCoordinator>,
+    auth_url: Option<&str>,
+    personal_dm_target: bool,
+) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let delivery_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
@@ -2282,7 +2326,10 @@ async fn triggered_cancelled_run_delivers_cancellation_notice() {
 }
 
 #[tokio::test]
-async fn triggered_cancelled_run_with_failure_category_delivers_category_summary() {
+async fn triggered_cancelled_run_with_failure_category_still_delivers_cancellation_notice() {
+    // Cancelled runs never carry a failure category in the real system, and
+    // a failure summary would mislabel a host/operator cancel as a failed
+    // run — the fixed cancellation notice always wins for `Cancelled`.
     let harness = build_triggered_harness(
         vec![scripted_failed_state(TurnStatus::Cancelled, "model_error")],
         None,
@@ -2302,14 +2349,22 @@ async fn triggered_cancelled_run_with_failure_category_delivers_category_summary
     );
     let texts = harness.adapter.texts();
     assert_eq!(texts.len(), 1);
-    assert!(texts[0].contains("The run failed while calling the model"));
-    assert!(!texts[0].contains("canceled before it could finish"));
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice wins over the failure category: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("The run failed while calling the model"),
+        "no failure summary for a cancelled run: {}",
+        texts[0]
+    );
     assert!(texts[0].contains("From a triggered event:"));
     let envelopes = harness.adapter.envelopes();
     assert_eq!(
         envelopes[0].target.conversation.conversation_id(),
         "dm-creator",
-        "categorized cancellation routed to the decoded preference target"
+        "cancellation notice routed to the decoded preference target"
     );
 }
 
@@ -2361,5 +2416,81 @@ async fn triggered_timeout_notice_without_preference_records_no_default_configur
     assert!(
         harness.adapter.texts().is_empty(),
         "timeout notice cannot be delivered without a target"
+    );
+}
+
+#[tokio::test]
+async fn triggered_timeout_notice_delivery_failure_records_failed() {
+    // The timeout arm maps a transport-level delivery failure to `Failed`:
+    // the notice was attempted but the channel rejected it, so the run is
+    // recorded as failed rather than silently delivered.
+    let harness =
+        build_triggered_harness(vec![scripted_state(TurnStatus::Running, None)], None, true);
+    seed_preference(&harness.store).await;
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted failure".to_string(),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "timeout notice attempted once");
+    assert!(
+        texts[0].contains("taking longer than expected"),
+        "timeout notice text present: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellation_notice() {
+    // Regression guard: a run still in flight at the wait backstop but which
+    // crosses into a terminal state during the bounded race-grace window
+    // must receive the correct terminal notice — the timeout arm used to
+    // exit the watcher and lose the terminal copy.
+    let harness = build_triggered_harness_with_turns(
+        Arc::new(ScriptedTurnCoordinator::with_late_terminal(
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Cancelled, None),
+            30,
+        )),
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one terminal notice delivered");
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice wins over the timeout copy: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("taking longer than expected"),
+        "no timeout copy for a run that reached terminal: {}",
+        texts[0]
     );
 }

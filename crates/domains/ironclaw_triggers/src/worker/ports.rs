@@ -141,6 +141,13 @@ pub struct TriggerFailedFireSettlement {
 
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
+    /// The worker invokes these hooks **inline** while processing poller
+    /// work: `on_accepted_fire_settled` from the per-fire submit path and
+    /// `on_failed_fire_settled` from the active-cleanup sweep. Implementors
+    /// MUST be cheap and non-blocking; any heavy work (delivery, telemetry
+    /// egress) must be detached internally (for example a bounded spawn, as
+    /// the composition `PostSubmitHookObserver` does for accepted-fire
+    /// delivery) rather than awaited through this call.
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
 
     /// A previously-accepted fire settled into a terminal failure state.
@@ -148,6 +155,8 @@ pub trait TriggerFireSettlementObserver: Send + Sync {
     /// Implementors must handle this explicitly so production composition
     /// cannot silently discard the automation-health signal. The callback is
     /// strictly observational — it must not mint runs or mutate trigger state.
+    /// Invoked inline from the active-cleanup sweep; see the trait contract
+    /// above: keep this implementation cheap and non-blocking.
     async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement);
 }
 

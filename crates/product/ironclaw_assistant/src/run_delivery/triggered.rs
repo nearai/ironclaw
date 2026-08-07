@@ -21,7 +21,10 @@ use ironclaw_outbound::{
     ValidatedReplyTargetBinding,
 };
 use ironclaw_threads::{AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadScope};
-use ironclaw_turns::{TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus};
+use ironclaw_turns::{
+    GetRunStateRequest, TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+};
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use super::observer::AllowNoProjectionAccess;
@@ -50,6 +53,14 @@ use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 // declared where its vocabulary already lives. Every field is either outbound's
 // own triggered-delivery vocabulary or `ironclaw_host_api` turn vocabulary, so
 // the move cost no type weakening.
+
+/// Bounded grace period after the actionable-state wait backstop: the run
+/// may have crossed into a terminal state during the final wait (cancellation
+/// in flight, failure landing just after the last poll). Within this window
+/// the timeout arm keeps polling and delivers the correct terminal notice
+/// instead of the timeout copy. Capped by `max_wait` so short-wait
+/// configurations (and tests) stay fast.
+const TERMINAL_RACE_GRACE: Duration = Duration::from_secs(5);
 
 /// Notification content for one actionable triggered-run state.
 struct TriggeredNotification {
@@ -278,8 +289,11 @@ impl TriggeredRunDelivery for TriggeredRunDeliveryDriver {
 /// common case, not a failure. If the re-wait hits the `max_wait` backstop,
 /// the run is parked awaiting the user: that is a successful,
 /// terminal-for-delivery outcome (`Delivered`) — never record `Failed` for
-/// it. The backstop is the failure signal ONLY for runs that never reached
-/// an actionable state at all, distinguished by `delivered_blocked_marker`.
+/// it. For runs that never reached an actionable state at all (no
+/// `delivered_blocked_marker`), the backstop now delivers a terminal
+/// timeout notice and records the delivery outcome (`Delivered` /
+/// `NoDefaultConfigured` / `Denied`); `Failed` is reserved for notice
+/// delivery failure.
 async fn deliver_triggered_run(
     services: &RunDeliveryServices,
     settings: &RunDeliverySettings,
@@ -372,34 +386,67 @@ async fn deliver_triggered_run(
                     delivery_target: delivery_target.as_ref(),
                     authority: &authority,
                 };
-                let notice = TriggeredNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    intent: DeliveryIntent::TriggeredDelivery,
-                    text: format!(
-                        "{}{}",
-                        prompts::DELIVERY_TIMEOUT_MESSAGE,
-                        prompts::triggered_update_footer(&trigger_label)
-                    ),
-                    attachments: Vec::new(),
-                    gate_ref_for_routing: None,
-                    require_direct_message_target: false,
-                };
-                let outcome =
-                    match deliver_triggered_notification(services, &notification_context, notice)
+                // Race guard: the run may have crossed into a terminal state
+                // during the final wait (a cancellation in flight, or a
+                // failure landing just after the last poll). Give it a short
+                // bounded grace period; if it reaches a terminal state now,
+                // deliver the correct terminal notice instead of the timeout
+                // copy so a just-cancelled/failed run is not mislabeled as
+                // hung. Bounded by `max_wait` so tests and short-wait
+                // configurations stay fast.
+                let grace_deadline =
+                    tokio::time::Instant::now() + settings.max_wait.min(TERMINAL_RACE_GRACE);
+                loop {
+                    let fresh = services
+                        .turn_coordinator
+                        .get_run_state(GetRunStateRequest {
+                            scope: scope.clone(),
+                            run_id,
+                        })
                         .await
-                    {
-                        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                        Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                        .ok();
+                    match fresh {
+                        Some(state) if state.status.is_terminal() => {
+                            if let Ok(Some(notification)) = triggered_notification_for_state(
+                                services,
+                                &scope,
+                                &thread_scope,
+                                &actor,
+                                &state,
+                                run_id,
+                                &trigger_label,
+                            )
+                            .await
+                            {
+                                let outcome = deliver_terminal_notice(
+                                    services,
+                                    &notification_context,
+                                    notification,
+                                )
+                                .await;
+                                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                                return outcome;
+                            }
+                            // Terminal state produced no deliverable notice
+                            // (e.g. completed with no assistant message);
+                            // fall through to the timeout copy.
+                            break;
                         }
-                        Err(TriggeredNotificationFailure::Denied) => {
-                            TriggeredRunDeliveryOutcomeKind::Denied
+                        Some(_) if tokio::time::Instant::now() >= grace_deadline => break,
+                        Some(_) => {
+                            tokio::time::sleep(settings.poll_interval).await;
                         }
-                        Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                        | Err(TriggeredNotificationFailure::Other(_)) => {
-                            TriggeredRunDeliveryOutcomeKind::Failed
-                        }
-                    };
+                        // State read failed; do not invent a terminal outcome.
+                        None => break,
+                    }
+                }
+                let notice = terminal_final_reply_notice(
+                    prompts::DELIVERY_TIMEOUT_MESSAGE.to_string(),
+                    &trigger_label,
+                    DeliveryIntent::TriggeredDelivery,
+                );
+                let outcome =
+                    deliver_terminal_notice(services, &notification_context, notice).await;
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -539,34 +586,13 @@ async fn deliver_triggered_run(
                 }
                 // Post the auth-unavailable notice as a terminal FinalReply.
                 // No DM restriction applies: plain text, no OAuth URL.
-                let notice = TriggeredNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    intent: DeliveryIntent::FinalReply,
-                    text: format!(
-                        "{}{}",
-                        prompts::AUTH_UNAVAILABLE_MESSAGE,
-                        prompts::triggered_update_footer(&trigger_label)
-                    ),
-                    attachments: Vec::new(),
-                    gate_ref_for_routing: None,
-                    require_direct_message_target: false,
-                };
+                let notice = terminal_final_reply_notice(
+                    prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
+                    &trigger_label,
+                    DeliveryIntent::FinalReply,
+                );
                 let outcome =
-                    match deliver_triggered_notification(services, &notification_context, notice)
-                        .await
-                    {
-                        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                        Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                        }
-                        Err(TriggeredNotificationFailure::Denied) => {
-                            TriggeredRunDeliveryOutcomeKind::Denied
-                        }
-                        Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                        | Err(TriggeredNotificationFailure::Other(_)) => {
-                            TriggeredRunDeliveryOutcomeKind::Failed
-                        }
-                    };
+                    deliver_terminal_notice(services, &notification_context, notice).await;
                 // Only after a successful cancel and the replacement notice:
                 // remove the now-stale OAuth prompts.
                 for message in messages_to_delete_after_final.drain(..) {
@@ -584,17 +610,13 @@ async fn deliver_triggered_run(
                     reason = %failure,
                     "triggered run delivery failed"
                 );
+                // OAuthTargetNotDm is handled by the dedicated arm above;
+                // reaching it here is an invariant violation.
                 let outcome = match failure {
-                    TriggeredNotificationFailure::NoDefaultConfigured => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
                     TriggeredNotificationFailure::OAuthTargetNotDm => {
                         unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
                     }
-                    TriggeredNotificationFailure::Other(_) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
+                    _ => outcome_for_delivery_failure(&failure),
                 };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
@@ -608,8 +630,8 @@ async fn deliver_triggered_run(
 /// ## Triggered channel surface contract
 ///
 /// A triggered run is **output-only over the channel, plus gate-resolution
-/// input** — it is NOT a conversational surface. Only three outputs are
-/// minted here:
+/// input** — it is NOT a conversational surface. Five outputs are minted
+/// here:
 ///
 /// - `BlockedApproval` → gate prompt (approve/deny)
 /// - `BlockedAuth`     → auth prompt (OAuth link) or, for non-OAuth, a
@@ -777,59 +799,38 @@ async fn triggered_notification_for_state(
                 }
             }
         }
-        TurnStatus::Failed | TurnStatus::RecoveryRequired => {
-            // Terminal failure: deliver the per-category failure summary so
-            // the creator sees *why* the scheduled run died, not silence.
-            // The category comes from the sanitized failure on the run
-            // state; a missing category falls back to the generic summary.
-            let category = state.failure.as_ref().map(|failure| failure.category());
-            let summary = reborn_failure_summary_for_category(category);
-            Ok(Some(TriggeredNotification {
-                event_kind: RunNotificationEventKind::FinalReplyReady,
-                intent: DeliveryIntent::TriggeredDelivery,
-                text: format!(
-                    "{}{}",
-                    summary,
-                    prompts::triggered_update_footer(trigger_label)
-                ),
-                attachments: Vec::new(),
-                gate_ref_for_routing: None,
-                require_direct_message_target: false,
-            }))
-        }
-        TurnStatus::Cancelled => {
-            // A scheduled run the host cancelled (auth-auto-deny, policy,
-            // supersession, or an operator action). If the run carries a
-            // sanitized failure category, surface that summary instead of
-            // the generic cancellation notice — a categorized cancel (e.g.
-            // an interrupted run reported as a failure category) should not
-            // be hidden behind generic copy. Falls back to the fixed
-            // cancellation notice when no category is present.
-            let category = state.failure.as_ref().map(|failure| failure.category());
-            let text = match category {
-                Some(category) => reborn_failure_summary_for_category(Some(category)),
-                None => prompts::TRIGGERED_RUN_CANCELED_MESSAGE,
+        TurnStatus::Failed | TurnStatus::RecoveryRequired | TurnStatus::Cancelled => {
+            // Terminal outcome: deliver the final word instead of silence
+            // (#6896). A cancelled run always gets the fixed cancellation
+            // notice — cancelled runs never carry a failure category in the
+            // real system, and a failure summary would mislabel a host or
+            // operator cancel as a failed run. Failed/RecoveryRequired runs
+            // surface the per-category sanitized summary so the creator sees
+            // *why* the scheduled run died; a missing category falls back to
+            // the generic summary.
+            let text = match state.status {
+                TurnStatus::Cancelled => prompts::TRIGGERED_RUN_CANCELED_MESSAGE.to_string(),
+                _ => state
+                    .failure
+                    .as_ref()
+                    .map(|failure| reborn_failure_summary_for_category(Some(failure.category())))
+                    .unwrap_or_else(|| reborn_failure_summary_for_category(None))
+                    .to_string(),
             };
-            Ok(Some(TriggeredNotification {
-                event_kind: RunNotificationEventKind::FinalReplyReady,
-                intent: DeliveryIntent::TriggeredDelivery,
-                text: format!(
-                    "{}{}",
-                    text,
-                    prompts::triggered_update_footer(trigger_label)
-                ),
-                attachments: Vec::new(),
-                gate_ref_for_routing: None,
-                require_direct_message_target: false,
-            }))
+            Ok(Some(terminal_final_reply_notice(
+                text,
+                trigger_label,
+                DeliveryIntent::TriggeredDelivery,
+            )))
         }
-        // Non-actionable in-channel: still in flight, or parked on a gate
-        // this surface does not drive (resource / dependent-run / external
-        // tool). The triggered surface is output-only plus approval/auth
-        // gate-resolution; other blocked states stay silent here and are
-        // surfaced through the WebUI. Returning `None` records `Skipped`,
-        // which is correct for these non-terminal states — the run has not
-        // reached a terminal outcome to deliver.
+        // Non-actionable in-channel states (still in flight, or parked on a
+        // gate this surface does not drive: resource / dependent-run /
+        // external tool) are never returned by `wait_for_actionable_state`:
+        // the triggered loop only reaches this function with terminal or
+        // newly blocked-actionable states, and the timeout arm handles runs
+        // that never got there. These arms exist for exhaustiveness only;
+        // `Ok(None)` here records `Skipped` only for a completed run with no
+        // assistant message.
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::CancelRequested
@@ -905,6 +906,55 @@ async fn deliver_triggered_notification(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
         outcome => Ok(delivered_messages_from_outcome(&outcome)),
+    }
+}
+
+/// The shared terminal final-reply notice shape for triggered runs: a plain
+/// `FinalReplyReady` with the update footer, no gate routing, and no DM
+/// restriction. Every terminal arm mints through here so the notice shape
+/// cannot drift between the timeout, failure, cancellation, and backstop
+/// paths.
+fn terminal_final_reply_notice(
+    text: String,
+    trigger_label: &str,
+    intent: DeliveryIntent,
+) -> TriggeredNotification {
+    TriggeredNotification {
+        event_kind: RunNotificationEventKind::FinalReplyReady,
+        intent,
+        text: format!("{text}{}", prompts::triggered_update_footer(trigger_label)),
+        attachments: Vec::new(),
+        gate_ref_for_routing: None,
+        require_direct_message_target: false,
+    }
+}
+
+/// Map a terminal-notice delivery failure to the recorded outcome kind.
+/// Shared by every arm that delivers a terminal notice so the outcome
+/// taxonomy cannot drift.
+fn outcome_for_delivery_failure(
+    failure: &TriggeredNotificationFailure,
+) -> TriggeredRunDeliveryOutcomeKind {
+    match failure {
+        TriggeredNotificationFailure::NoDefaultConfigured => {
+            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+        }
+        TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
+        TriggeredNotificationFailure::OAuthTargetNotDm => TriggeredRunDeliveryOutcomeKind::Failed,
+        TriggeredNotificationFailure::Other(_) => TriggeredRunDeliveryOutcomeKind::Failed,
+    }
+}
+
+/// Deliver a terminal notice and reduce the result to its recorded outcome
+/// kind in one place.
+async fn deliver_terminal_notice(
+    services: &RunDeliveryServices,
+    context: &TriggeredNotificationContext<'_>,
+    notice: TriggeredNotification,
+) -> TriggeredRunDeliveryOutcomeKind {
+    match deliver_triggered_notification(services, context, notice).await {
+        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+        Err(failure) => outcome_for_delivery_failure(&failure),
     }
 }
 

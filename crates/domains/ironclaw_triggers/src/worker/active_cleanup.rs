@@ -165,7 +165,10 @@ impl TriggerPollerWorker {
                     // post-accept failures (#6896). `Ok`/`Running` and
                     // already-cleared fires do not fire the hook — the former
                     // are not failures, and the latter already did (or never
-                    // reached terminal here).
+                    // reached terminal here). The observer is invoked inline
+                    // per the `TriggerFireSettlementObserver` contract: it
+                    // must be cheap and non-blocking, detaching any heavy
+                    // work internally.
                     if cleared && status == TriggerRunHistoryStatus::Error {
                         self.deps
                             .fire_settlement_observer
