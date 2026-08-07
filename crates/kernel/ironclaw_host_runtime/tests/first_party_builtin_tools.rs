@@ -4439,12 +4439,17 @@ async fn builtin_http_surfaces_http_error_status_as_failed_outcome() {
         403,
         br#"{"message":"authentication required"}"#.to_vec(),
     ));
-    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
 
     let failure = invoke_failure_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
-        json!({"url": "https://api.example.test/private"}),
+        json!({
+            "method": "post",
+            "url": "https://api.example.test/private",
+            "body": "paid"
+        }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await;
@@ -4467,6 +4472,16 @@ async fn builtin_http_surfaces_http_error_status_as_failed_outcome() {
         hint.contains("authentication/authorization") && hint.contains("extension")
     }));
     assert_eq!(egress.requests().len(), 1);
+    // The failure carries usage like the sibling dispatch paths: egress bytes
+    // from the request body flow into the governor even for failed calls.
+    // (wall_clock_ms is pinned at the classify_status unit seam; the governor
+    // only reconciles egress/process fields for failed invocations.)
+    let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
+    let usage = governor.usage_for(&tenant_account);
+    assert_eq!(
+        usage.network_egress_bytes, 4,
+        "failed calls must still account egress bytes"
+    );
 }
 
 #[tokio::test]

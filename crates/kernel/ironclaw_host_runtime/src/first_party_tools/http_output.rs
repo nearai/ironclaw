@@ -78,6 +78,14 @@ pub(super) fn shape_response(
     }
 }
 
+/// HTTP statuses that classify as capability failures. Drawn deliberately at
+/// 400 so rate-limit and overload responses (429/503) are never reported as
+/// success; 1xx/2xx/3xx stay inspectable successful results. Single source of
+/// truth shared by the dispatch shape-limit selection and the classifier.
+pub(super) fn is_error_status(status: u16) -> bool {
+    (400..=599).contains(&status)
+}
+
 /// Transport completion is not capability success: HTTP 4xx/5xx responses are
 /// model-visible, recoverable `OperationFailed` outcomes carrying the bounded,
 /// sanitized response as diagnostic context. Informational, successful, and
@@ -89,7 +97,7 @@ pub(super) fn classify_status(
     status: u16,
     wall_clock_ms: u64,
 ) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
-    if !(400..=599).contains(&status) {
+    if !is_error_status(status) {
         return Ok(shaped);
     }
     tracing::debug!(
@@ -643,6 +651,43 @@ mod tests {
             trimmed_base64.len() % 4,
             0,
             "trimmed base64 must stay multiple-of-4 aligned"
+        );
+    }
+
+    #[test]
+    fn failure_diagnostic_falls_back_on_unserializable_output() {
+        // Non-object output funnels to the fixed verdict payload; the
+        // fallback shape is part of the contract. (The serde-failure branch in
+        // serialize_diagnostic is unreachable in practice: body_text always
+        // originates from String::from_utf8 and body_base64 from ASCII
+        // base64, so the diagnostic Value never carries lone surrogates.)
+        let diagnostic = bounded_failure_diagnostic(Value::Null, 403);
+        assert_eq!(
+            diagnostic,
+            "{\"status\":403,\"error\":\"diagnostic unavailable\"}"
+        );
+    }
+
+    #[test]
+    fn classify_status_failure_carries_egress_and_wall_clock_usage() {
+        // The OperationFailed outcome must carry the same usage accounting as
+        // the sibling first-party dispatch paths: egress bytes and wall time.
+        let shaped = shape_response(response_with_status(403), 48 * 1024);
+        let error = match classify_status(shaped, 403, 1_234) {
+            Err(error) => error,
+            Ok(_) => panic!("4xx must classify as a capability failure"),
+        };
+        let usage = error.usage().expect("failure must carry usage");
+        assert_eq!(usage.wall_clock_ms, 1_234);
+        assert_eq!(
+            usage.network_egress_bytes, 0,
+            "empty GET request carries no egress bytes"
+        );
+
+        let shaped = shape_response(response_with_status(200), 48 * 1024);
+        assert!(
+            classify_status(shaped, 200, 1_234).is_ok(),
+            "2xx must remain a successful result"
         );
     }
 

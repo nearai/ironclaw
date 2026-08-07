@@ -27,7 +27,7 @@ use crate::{
 
 use super::{
     first_party_capability_manifest,
-    http_output::{HttpDispatchOutput, classify_status, shape_response},
+    http_output::{HttpDispatchOutput, classify_status, is_error_status, shape_response},
     input_error,
 };
 
@@ -254,7 +254,7 @@ pub(super) async fn dispatch(
     // Error responses are consumed by the failure diagnostic (a few KiB of
     // budget), so shape them at the diagnostic budget instead of the success
     // inline limit: the success-budget trim would be discarded wholesale.
-    let shape_limit = if (400..=599).contains(&status) {
+    let shape_limit = if is_error_status(status) {
         u64::try_from(MODEL_DIAGNOSTIC_MAX_BYTES).unwrap_or(response_body_limit)
     } else {
         response_body_limit
