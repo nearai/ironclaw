@@ -77,7 +77,7 @@ language or inject product-specific behavior into the contract.
 > work (Tasks 9-13): trigger-specific origin variants, a precedence chain over
 > four per-purpose preference fields, and a "P0 rule order" search. The text
 > below describes the landed model. See
-> `crates/ironclaw_outbound/src/delivery_resolution.rs` and
+> `crates/domains/ironclaw_outbound/src/delivery_resolution.rs` and
 > `resolution_engine.rs` for the live shape.
 
 The outbound service uses one typed resolution envelope so callers cannot smuggle
