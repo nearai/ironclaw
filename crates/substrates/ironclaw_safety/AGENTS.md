@@ -2,11 +2,12 @@
 
 ## Start Here
 
-- No crate-local `CLAUDE.md` exists yet; use this map plus the security rules below.
+- This is the crate's canonical working-rules file (there is no crate-local
+  `CLAUDE.md`); orientation lives in [`README.md`](./README.md), the family
+  boundary in [`../AGENTS.md`](../AGENTS.md).
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these sources of truth before changing safety behavior:
 - `.claude/rules/safety-and-sandbox.md`
-- `src/NETWORK_SECURITY.md`
 - `crates/substrates/ironclaw_safety/fuzz/README.md`
 
 ## What This Crate Owns

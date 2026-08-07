@@ -1679,7 +1679,7 @@ async fn assert_malformed_row_error(
 /// claim that ADR rests on went unproven while CI reported success.
 ///
 /// `IRONCLAW_REQUIRE_POSTGRES=1` therefore turns every skip into a HARD
-/// failure. This mirrors `crates/ironclaw_hooks/tests/parity_matrix.rs`, which
+/// failure. This mirrors `crates/loop/ironclaw_hooks/tests/parity_matrix.rs`, which
 /// already carries the same switch for the same reason.
 fn skip_postgres_or_fail<T>(reason: &str) -> Option<T> {
     assert!(

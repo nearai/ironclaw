@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::instruction_bundle::InstructionBundleFingerprint;
 use crate::refs::ModelProfileId;
+use crate::skill_context::SkillName;
 use ironclaw_host_api::turn::{CapabilityActivityId, LoopMessageRef, TurnRunId};
 
 use super::capability::ProviderToolCallReplay;
@@ -132,6 +133,14 @@ pub struct LoopPromptBundleGrant {
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+    pub diagnostic_metadata: LoopPromptDiagnosticMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoopPromptDiagnosticMetadata {
+    pub identity_message_count: u32,
+    pub instruction_snippet_count: u32,
+    pub active_skills: Vec<SkillName>,
 }
 
 #[derive(Clone, Default)]
@@ -155,6 +164,15 @@ impl LoopPromptBundleAuthority {
         context: &LoopRunContext,
         bundle: &LoopPromptBundle,
     ) -> Result<(), AgentLoopHostError> {
+        self.issue_bundle_with_diagnostic_metadata(context, bundle, None)
+    }
+
+    pub fn issue_bundle_with_diagnostic_metadata(
+        &self,
+        context: &LoopRunContext,
+        bundle: &LoopPromptBundle,
+        diagnostic_metadata: Option<LoopPromptDiagnosticMetadata>,
+    ) -> Result<(), AgentLoopHostError> {
         if !bundle.bundle_ref.is_for_run(context) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::ScopeMismatch,
@@ -162,13 +180,24 @@ impl LoopPromptBundleAuthority {
             ));
         }
 
-        self.lock_state()?.latest_by_run.insert(
+        let mut state = self.lock_state()?;
+        let diagnostic_metadata = diagnostic_metadata
+            .or_else(|| {
+                state
+                    .latest_by_run
+                    .get(&context.run_id)
+                    .filter(|grant| grant.bundle_ref == bundle.bundle_ref)
+                    .map(|grant| grant.diagnostic_metadata.clone())
+            })
+            .unwrap_or_default();
+        state.latest_by_run.insert(
             context.run_id,
             LoopPromptBundleGrant {
                 bundle_ref: bundle.bundle_ref.clone(),
                 messages: bundle.messages.clone(),
                 surface_version: bundle.surface_version.clone(),
                 instruction_fingerprint: bundle.instruction_fingerprint.clone(),
+                diagnostic_metadata,
             },
         );
         Ok(())

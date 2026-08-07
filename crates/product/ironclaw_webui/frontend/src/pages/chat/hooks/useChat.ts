@@ -33,6 +33,10 @@ import {
   resetToolActivityState,
 } from "../lib/tool-activity-state";
 import {
+  createRunTrackingState,
+  resetRunTrackingState,
+} from "../lib/run-tracking-state";
+import {
   rewriteConnectionLostRunFailures,
   upsertConnectionLostRunFailure,
 } from "../lib/failureMessages";
@@ -224,6 +228,9 @@ export function useChat(threadId) {
   const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
+  // Owned here rather than inside `useChatEvents` so every piece of
+  // per-thread state is cleared from one place — the effect below.
+  const runTrackingRef = React.useRef(createRunTrackingState());
   const locallyResolvedGatesRef = React.useRef(new Map());
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
@@ -304,6 +311,10 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
+    // Run bookkeeping is per-thread. `latestRunId` is otherwise cleared only
+    // on a TERMINAL run status, so a stuck run would pin it for the life of
+    // the mounted page and bleed into every thread opened afterwards.
+    resetRunTrackingState(runTrackingRef);
     locallyResolvedGatesRef.current.clear();
     connectionInterruptedRunIdsRef.current.clear();
     connectionInterruptedUnknownRef.current = false;
@@ -414,6 +425,7 @@ export function useChat(threadId) {
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    runTrackingRef,
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
     onStreamError: handleStreamError,

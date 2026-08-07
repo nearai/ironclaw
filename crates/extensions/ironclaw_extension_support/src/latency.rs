@@ -15,14 +15,32 @@ use serde_json::Value;
 /// `Value::to_string().len()` in `ironclaw_loop_host` — because each producer
 /// measures what *it* produced. (PROPOSAL §6.2.5, §12.12 D-K.)
 ///
+/// Cheap per byte but *not* free: it walks the whole value, and a `read_file`
+/// output can be large. Callers measuring **for the latency trace** must
+/// therefore establish that latency tracing is live before calling (#7103) —
+/// the counter below is how tests prove they do, since "no work happened" has
+/// no other observable signature. Resource-accounting callers measure
+/// unconditionally by design.
+///
 /// Returns 0 if the value cannot be serialized, which `serde_json::Value`
 /// cannot do in practice — a trace/accounting field never fails a caller.
 #[inline]
 pub(crate) fn json_bytes(value: &Value) -> u64 {
+    #[cfg(test)]
+    JSON_BYTES_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut counter = JsonByteCounter::default();
     serde_json::to_writer(&mut counter, value)
         .map(|()| counter.bytes)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Thread-local on purpose: `#[tokio::test]` runs on a current-thread
+    /// runtime, so a task's measurements stay on its own thread and a sibling
+    /// test running in parallel cannot pollute the count.
+    pub(crate) static JSON_BYTES_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[derive(Default)]

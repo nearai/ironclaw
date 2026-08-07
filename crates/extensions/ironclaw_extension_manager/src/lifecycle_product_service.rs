@@ -1142,6 +1142,9 @@ mod tests {
             tags: Vec::new(),
             requires_skills: Vec::new(),
             auto_activate: false,
+            // This case asserts the source projection only; a scripted bundle projects
+            // identically.
+            has_scripts: false,
         })
         .expect("valid skill summary");
 

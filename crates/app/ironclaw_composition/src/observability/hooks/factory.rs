@@ -366,7 +366,7 @@ where
         // the identical call was proven to succeed against a scratch builder in
         // the composition-time validation block above (fail-closed via `?`). A
         // per-run replay therefore cannot fail in practice — the `?` propagates
-        // any future regression as a build error rather than a panic (CLAUDE.md:
+        // any future regression as a build error rather than a panic (root AGENTS.md:
         // no `.expect()` in production code).
         builder = install_first_party(builder).map_err(|error| {
             reborn_replay_error(format!(

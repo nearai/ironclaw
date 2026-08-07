@@ -185,7 +185,7 @@ pub async fn run_wrong_scope_resume_rejected(g: &RebornIntegrationGroup) -> Harn
         .err()
         .ok_or("expected mis-scoped resume to be rejected with ScopeNotFound, but it queued")?;
     // Pin the EXACT `TurnError::ScopeNotFound` Display string
-    // (`crates/ironclaw_turns/src/status.rs:403-404`), not just `.is_err()` —
+    // (`crates/kernel/ironclaw_turns/src/status.rs:403-404`), not just `.is_err()` —
     // a discriminating negative assertion.
     if err.to_string() != "turn run not found" {
         return Err(format!(

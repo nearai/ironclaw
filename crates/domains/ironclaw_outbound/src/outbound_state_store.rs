@@ -116,7 +116,7 @@ const COMMUNICATION_PREFERENCES_ROOT: &str = "/outbound/communication-preference
 
 /// Indexed projection key for the tenant id, written alongside every
 /// outbound write as a defense-in-depth measure beyond path-prefix
-/// scoping. See `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
+/// scoping. See `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
 /// — path-prefix scoping is the primary isolation boundary; this
 /// projection lets admin-tier queries filter explicitly by tenant and
 /// turns a path-rewriting bug into a query-time mismatch.
@@ -2063,7 +2063,7 @@ where
                     Ok(p) => p,
                     Err(_) => {
                         tracing::debug!(
-                            target = "ironclaw::outbound::outbound_state_store",
+                            target: "ironclaw::outbound::outbound_state_store",
                             name = %entry.name,
                             "delivered gate route sweep: skipping entry with invalid scoped path"
                         );
@@ -2076,7 +2076,7 @@ where
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::debug!(
-                        target = "ironclaw::outbound::outbound_state_store",
+                        target: "ironclaw::outbound::outbound_state_store",
                         name = %entry.name,
                         error = %e,
                         "delivered gate route sweep: skipping unreadable file"
@@ -2090,7 +2090,7 @@ where
                     Ok(r) => r,
                     Err(e) => {
                         tracing::debug!(
-                            target = "ironclaw::outbound::outbound_state_store",
+                            target: "ironclaw::outbound::outbound_state_store",
                             name = %entry.name,
                             error = %e,
                             "delivered gate route sweep: skipping undeserializable file"
@@ -2109,7 +2109,7 @@ where
                 // silent-ok: stale index entries are filtered by the membership
                 // check and re-swept next pass.
                 tracing::debug!(
-                    target = "ironclaw::outbound::outbound_state_store",
+                    target: "ironclaw::outbound::outbound_state_store",
                     name = %entry.name,
                     error = %e,
                     "delivered gate route sweep: failed to delete conversation indexes (best-effort)"
@@ -2126,7 +2126,7 @@ where
                     // silent-ok: the record will be re-visited on the next sweep
                     // and filtered out at lookup time (is_expired check).
                     tracing::debug!(
-                        target = "ironclaw::outbound::outbound_state_store",
+                        target: "ironclaw::outbound::outbound_state_store",
                         name = %entry.name,
                         error = %e,
                         "delivered gate route sweep: failed to delete expired file (best-effort)"

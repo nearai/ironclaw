@@ -1284,9 +1284,11 @@ pub trait TriggerRepository: Send + Sync {
     }
 }
 
-/// Feature-gated durable libSQL repository type for composition/test wiring.
+/// Durable libSQL repository type for composition/test wiring. (Both SQL
+/// backends compile unconditionally — the crate's only cargo feature is
+/// `test-support`; backend *selection* happens in composition. ADR 0003.)
 pub use libsql::LibSqlTriggerRepository;
-/// Feature-gated durable PostgreSQL repository type for composition/test wiring.
+/// Durable PostgreSQL repository type for composition/test wiring.
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
     ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
