@@ -342,109 +342,6 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
     }
 }
 
-/// Per-trigger delivery targets validate against the SAME registry the
-/// outbound target surface publishes from: an id a provider resolves for
-/// the caller is accepted; an unknown id (or an empty registry) fails
-/// closed as `DeliveryTargetInvalid`.
-#[tokio::test]
-async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
-    use crate::outbound::{
-        DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
-        OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
-    };
-    use ironclaw_outbound::OutboundError;
-
-    struct OneTargetProvider {
-        entry: OutboundDeliveryTargetEntry,
-    }
-
-    #[async_trait::async_trait]
-    impl OutboundDeliveryTargetProvider for OneTargetProvider {
-        async fn list_outbound_delivery_targets(
-            &self,
-            caller: &OutboundDeliveryTargetScope,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
-            // Fixture available to whichever caller asks: claim the querying
-            // caller as owner so it survives the registry caller-scoping filter.
-            Ok(vec![OutboundDeliveryTargetEntry {
-                summary: self.entry.summary.clone(),
-                capabilities: self.entry.capabilities.clone(),
-                destination: self.entry.destination.clone(),
-                owner: OutboundDeliveryTargetOwner::for_scope(caller),
-            }])
-        }
-    }
-
-    let scope = ironclaw_host_api::resource::ResourceScope {
-        tenant_id: TenantId::new("registry-validation-tenant").expect("tenant"),
-        user_id: UserId::new("registry-validation-user").expect("user"),
-        agent_id: None,
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-    };
-    let target = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:me")
-        .expect("target id");
-
-    let registry = MutableOutboundDeliveryTargetRegistry::default();
-    // Empty registry → fail closed.
-    let rejected = validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
-        .await
-        .expect_err("empty registry must reject");
-    assert!(matches!(
-        rejected,
-        TriggerError::InvalidRecord {
-            kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-            ..
-        }
-    ));
-
-    // Registered provider that resolves the id for the caller → accept.
-    let entry = OutboundDeliveryTargetEntry {
-        summary: OutboundDeliveryTargetSummary::new(
-            OutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
-            "slack",
-            "Slack DM".to_string(),
-            None,
-        )
-        .expect("summary"),
-        capabilities: DeliveryTargetCapabilities {
-            final_replies: true,
-            progress: false,
-            gate_prompts: true,
-            auth_prompts: true,
-            modalities: Vec::new(),
-        },
-        destination: ironclaw_outbound::RunFinalReplyDestination::External {
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                "reply:registry-validation",
-            )
-            .expect("binding ref"),
-        },
-        // Overwritten with the querying caller by `OneTargetProvider::list`;
-        // set to the scope identity here for clarity.
-        owner: OutboundDeliveryTargetOwner::new(
-            TenantId::new("registry-validation-tenant").expect("tenant"),
-            UserId::new("registry-validation-user").expect("user"),
-        ),
-    };
-    registry
-        .register_provider("test", Arc::new(OneTargetProvider { entry }))
-        .expect("register");
-    validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
-        .await
-        .expect("registered target must validate");
-
-    // A different id still fails closed.
-    let other = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:other")
-        .expect("target id");
-    validate_trigger_delivery_target_against_registry(&registry, &scope, &other)
-        .await
-        .expect_err("unknown target must reject");
-}
-
 fn trigger_record_for_pairing_test() -> TriggerRecord {
     TriggerRecord {
         trigger_id: ironclaw_triggers::TriggerId::new(),
@@ -539,18 +436,13 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
     let standalone_root = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+    let _services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
         "pairing-owner",
         standalone_root.path().join("standalone"),
     ))
     .await
     .expect("standalone services build");
-    let turn_state = Arc::new(services.processes.agent_turn_runtime());
     let hook = TriggerCreatorPairingHook {
-        outbound_delivery_targets: Arc::clone(&services.outbound_delivery_targets),
-        source_reply_target: Arc::new(std::sync::RwLock::new(Arc::new(
-            TurnStateTriggerSourceReplyTarget::new(turn_state),
-        ))),
         scoped_filesystem: failing_trigger_conversation_filesystem(),
         conversations: tokio::sync::OnceCell::new(),
     };

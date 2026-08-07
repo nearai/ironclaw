@@ -27,6 +27,16 @@ pub(crate) const PAIRING_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web ap
 /// Posted when an OAuth challenge reaches a non-private target: the setup link
 /// is single-use and must not be echoed into a shared thread.
 pub(crate) const OAUTH_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to complete this private authorization step, then ask me again here.";
+/// Posted to a background run's notification channels when it fails. The
+/// failure detail itself stays in the run history — a notification channel is
+/// a shared surface and carries no diagnostics.
+pub(crate) const BACKGROUND_RUN_FAILED_MESSAGE: &str =
+    "A routine run failed — open the Ironclaw web app for details.";
+/// Redacted stand-in for an OAuth auth prompt on a notification channel that
+/// is NOT a personal DM: the authorization URL is a bearer-grade secret and
+/// must never land in a shared conversation.
+pub(crate) const BACKGROUND_RUN_REAUTH_MESSAGE: &str =
+    "A routine needs re-authorization — open the Ironclaw web app to continue.";
 pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
@@ -39,9 +49,16 @@ pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending
 pub(crate) const BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 /// Stable per-(run, kind) projection id for run-notification deliveries.
+///
+/// `discriminator` separates notices that share an event kind within one run.
+/// The delivery id hashes this ref, so two notices that collapse to the same
+/// string share a durable delivery identity: the second is reported
+/// `AlreadyDelivered` and never actually sent. `None` preserves the historical
+/// id shape for kinds that can only occur once per run.
 pub(crate) fn run_notification_projection_id(
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
+    discriminator: Option<&str>,
 ) -> String {
     let suffix = match event_kind {
         RunNotificationEventKind::FinalReplyReady => "final",
@@ -50,8 +67,12 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::AuthRequired => "auth",
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
+        RunNotificationEventKind::ModelDelivery => "model-delivery",
     };
-    format!("run-notification:{suffix}:{run_id}")
+    match discriminator {
+        Some(discriminator) => format!("run-notification:{suffix}:{discriminator}:{run_id}"),
+        None => format!("run-notification:{suffix}:{run_id}"),
+    }
 }
 
 /// Build the approval-gate prompt view. The body carries only the semantic
@@ -228,6 +249,54 @@ mod tests {
     use super::*;
     use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
     use ironclaw_host_api::turn::TurnRunId;
+
+    /// The delivery id is derived from this ref, so two notices that share a
+    /// string share a durable delivery identity — the second comes back
+    /// `AlreadyDelivered` and is silently never sent while still recorded as
+    /// delivered. One run legitimately emits several `RunBlocked` notices, so
+    /// they must not collapse.
+    #[test]
+    fn run_blocked_notices_in_one_run_do_not_share_a_projection_id() {
+        let run_id = TurnRunId::new();
+        let discriminated: Vec<String> = ["reauth", "auth-unavailable", "failed"]
+            .into_iter()
+            .map(|discriminator| {
+                run_notification_projection_id(
+                    run_id,
+                    RunNotificationEventKind::RunBlocked,
+                    Some(discriminator),
+                )
+            })
+            .collect();
+
+        let unique: std::collections::HashSet<&String> = discriminated.iter().collect();
+        assert_eq!(
+            unique.len(),
+            discriminated.len(),
+            "each RunBlocked notice needs its own delivery identity: {discriminated:?}"
+        );
+        for id in &discriminated {
+            assert!(
+                id.contains(&run_id.to_string()),
+                "{id} must stay run-scoped"
+            );
+        }
+    }
+
+    /// Kinds that occur at most once per run keep the historical id shape, so
+    /// this change does not re-identify existing deliveries.
+    #[test]
+    fn undiscriminated_projection_ids_keep_their_historical_shape() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::ApprovalNeeded, None),
+            format!("run-notification:approval:{run_id}")
+        );
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
+            format!("run-notification:auth:{run_id}")
+        );
+    }
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
         AuthPromptView {
