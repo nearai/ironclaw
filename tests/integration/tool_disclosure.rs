@@ -240,10 +240,10 @@ async fn bridged_disclosure_never_advertises_globally_disabled_spawn_subagent() 
         .expect("the run continues after the recoverable unknown-tool results");
 }
 
-/// Negative control: the SAME wide catalog without
-/// `.with_tool_disclosure_bridged()` surfaces the flat 48-tool list (today's
-/// default, `ToolDisclosureMode::Off`) — proves the bridged assertion above
-/// discriminates on the disclosure mode, not on the backend.
+/// Negative control: the SAME wide catalog under explicit
+/// `ToolDisclosureMode::Off` surfaces the flat 48-tool list — proves the
+/// bridged assertion above discriminates on the disclosure mode, not on the
+/// backend.
 ///
 /// Pins Off-mode explicitly via `.with_tool_disclosure_off()` rather than
 /// leaving this on the `from_env()` default-resolution path: without an
@@ -277,6 +277,35 @@ async fn explicit_off_surfaces_the_flat_wide_tool_list() {
                 panic!("explicit Off must exclude discovery bridge {bridge:?}: {error}")
             });
     }
+}
+
+/// The production default enables progressive disclosure for a wide catalog.
+/// The `ironclaw_loop_host` unit contract separately proves that an unset or
+/// empty environment value resolves to this default.
+#[tokio::test]
+async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_production_default()
+        .with_github_issue_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("production-default disclosure harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_contains(bridge)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("production default must advertise bridge {bridge:?}: {error}")
+            });
+    }
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("production default defers the flat wide catalog");
 }
 
 /// General harnesses pin Off rather than inheriting the production environment,

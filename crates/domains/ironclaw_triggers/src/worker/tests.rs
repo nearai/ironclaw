@@ -356,6 +356,51 @@ async fn tick_notifies_settlement_observer_after_accepted_fire_persists() {
 }
 
 #[tokio::test]
+async fn tick_notifies_settlement_observer_after_permanent_pre_submit_failure_persists() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZV").expect("ulid");
+    let tenant_id = tenant("tenant-failed-settlement-observer");
+    let fire_slot = ts(1_704_067_200);
+    let mut record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    repo.upsert_trigger(record.clone()).await.expect("insert");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = TriggerPollerWorker::new(
+        TriggerPollerWorkerConfig::default(),
+        TriggerPollerWorkerDeps {
+            repository: repo.clone(),
+            source_provider: Arc::new(NullSourceProvider),
+            materializer: Arc::new(RecordingMaterializer::success("content:unused")),
+            trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            fire_settlement_observer: observer.clone(),
+        },
+    )
+    .expect("valid worker");
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(matches!(
+        report.results.last().map(|result| &result.outcome),
+        Some(TriggerPollerFireOutcome::OncePermanentFailed {
+            reason: TriggerPollerFailureReason::SourceNoFire,
+        })
+    ));
+    let persisted = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("load")
+        .expect("record");
+    assert_eq!(persisted.state, TriggerState::Completed);
+    let failed = observer.failed_events();
+    assert_eq!(failed.len(), 1, "one durable permanent failure settlement");
+    assert_eq!(failed[0].fire.identity.trigger_id, trigger_id);
+    assert_eq!(failed[0].fire.identity.fire_slot, fire_slot);
+    assert_eq!(failed[0].fire.creator_user_id, record.creator_user_id);
+    assert_eq!(failed[0].reason, TriggerPollerFailureReason::SourceNoFire);
+}
+
+#[tokio::test]
 async fn tick_persists_replayed_submit_with_original_run_ref() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
@@ -2932,6 +2977,7 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 #[derive(Default)]
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
+    failed_events: Mutex<Vec<TriggerFailedFireSettlement>>,
     visibility_assertion: Option<SettlementVisibilityAssertion>,
 }
 
@@ -2955,6 +3001,7 @@ impl RecordingSettlementObserver {
     ) -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            failed_events: Mutex::new(Vec::new()),
             visibility_assertion: Some(SettlementVisibilityAssertion {
                 repository,
                 tenant_id,
@@ -2968,6 +3015,13 @@ impl RecordingSettlementObserver {
 
     fn events(&self) -> Vec<TriggerAcceptedFireSettlement> {
         self.events.lock().expect("events lock").clone()
+    }
+
+    fn failed_events(&self) -> Vec<TriggerFailedFireSettlement> {
+        self.failed_events
+            .lock()
+            .expect("failed events lock")
+            .clone()
     }
 }
 
@@ -2998,6 +3052,13 @@ impl TriggerFireSettlementObserver for RecordingSettlementObserver {
             );
         }
         self.events.lock().expect("events lock").push(event);
+    }
+
+    async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement) {
+        self.failed_events
+            .lock()
+            .expect("failed events lock")
+            .push(event);
     }
 }
 

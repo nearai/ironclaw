@@ -135,8 +135,8 @@ pub use resolver::{
 };
 pub use runtime_context::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-    Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
+    ConnectedChannelSummary, ConnectedChannelsState, Locale, LocaleError, LoopRuntimeContext,
+    NotificationChannelsState, UserProfileContext,
 };
 pub use skill_context::SkillName;
 pub use skill_context::{

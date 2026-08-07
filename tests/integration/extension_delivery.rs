@@ -350,7 +350,7 @@ fn delivery_run_services(
     services: &RebornRuntime,
     extension_id: &str,
 ) -> RunDeliveryServices {
-    let (outbound_store, route_store, communication_preferences, _) = services
+    let (outbound_store, route_store, communication_preferences, _, delivery_targets) = services
         .outbound_delivery_stores_for_test()
         .expect("composed runtime exposes the coordinator's outbound stores");
     let coordinator = services
@@ -376,6 +376,7 @@ fn delivery_run_services(
         route_store,
         communication_preferences,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        delivery_targets,
         coordinator,
         extension_id: extension_id.to_string(),
         fallback_notice_scope,
@@ -600,7 +601,7 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
 /// terminal `Delivered`, and none is stranded mid-lifecycle
 /// (`Prepared`/`Sending` — persist-before-egress must settle terminally).
 async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
-    let (outbound_store, _, _, _) = services
+    let (outbound_store, _, _, _, _) = services
         .outbound_delivery_stores_for_test()
         .expect("outbound stores");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -2645,7 +2646,11 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
 
     // 6. Mint through the web-side pairing service and consume through the
     // real verified webhook again. No direct store/service mutation repairs
-    // the actor binding in this journey.
+    // the actor binding in this journey. This leg pairs via the plain
+    // `/pair CODE` alias (the manifest's second declared prefix — kept for
+    // muscle-memory compatibility while all suggested wording stays
+    // `/start`), so both declared prefixes and the untargeted command shape
+    // stay pinned through the real bundled manifest.
     let repaired_code = services
         .pairing_mint_for_test("telegram", &paired_user)
         .await
@@ -2653,7 +2658,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &targeted_start_body(606, 515151, &repaired_code),
+            &dm_body(606, 515151, &format!("/pair {repaired_code}")),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),

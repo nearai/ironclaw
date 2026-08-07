@@ -287,6 +287,61 @@ async fn assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(
     assert_eq!(fetched, record);
 }
 
+async fn assert_legacy_delivery_migration_is_compare_and_clear(repo: &impl TriggerRepository) {
+    let mut original = sample_record(
+        TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+        tenant("tenant-a"),
+        ts(1_704_067_260),
+    );
+    original.delivery_target = Some(
+        TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
+    );
+    repo.upsert_trigger(original.clone())
+        .await
+        .expect("insert legacy trigger");
+
+    let mut concurrently_edited = original.clone();
+    concurrently_edited.prompt = "use the newly edited prompt".to_string();
+    repo.upsert_trigger(concurrently_edited.clone())
+        .await
+        .expect("concurrent prompt edit");
+
+    assert!(
+        !repo
+            .migrate_legacy_delivery_target(&original, "stale migration".to_string())
+            .await
+            .expect("stale migration compare"),
+        "a stale migration must not overwrite a concurrent edit"
+    );
+    let after_stale = repo
+        .get_trigger(original.tenant_id.clone(), original.trigger_id)
+        .await
+        .expect("read after stale migration")
+        .expect("trigger remains");
+    assert_eq!(after_stale.prompt, concurrently_edited.prompt);
+    assert_eq!(after_stale.delivery_target, original.delivery_target);
+
+    assert!(
+        repo.migrate_legacy_delivery_target(
+            &after_stale,
+            "use the newly edited prompt\n\nDeliver the result to Slack.".to_string(),
+        )
+        .await
+        .expect("fresh migration compare"),
+        "a current migration must update exactly once"
+    );
+    let migrated = repo
+        .get_trigger(original.tenant_id, original.trigger_id)
+        .await
+        .expect("read migrated trigger")
+        .expect("migrated trigger remains");
+    assert_eq!(
+        migrated.prompt,
+        "use the newly edited prompt\n\nDeliver the result to Slack."
+    );
+    assert_eq!(migrated.delivery_target, None);
+}
+
 async fn assert_round_trip_preserves_null_optional_scope_fields(repo: &impl TriggerRepository) {
     let mut record = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
@@ -1005,6 +1060,7 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
         "paused trigger must not be fire-eligible"
     );
 
+    let resume_started_at = Utc::now();
     let resumed = repo
         .set_scoped_trigger_state(
             tenant_id.clone(),
@@ -1018,17 +1074,65 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
         .expect("matching-scope resume")
         .expect("resumed record");
     assert_eq!(resumed.state, TriggerState::Scheduled);
+    assert!(
+        resumed.next_run_at > resume_started_at,
+        "resuming a recurring trigger must skip schedule slots missed while paused"
+    );
     let due_records = repo
-        .list_due_triggers(ts(1_704_067_200), 10)
+        .list_due_triggers(resume_started_at, 10)
         .await
         .expect("list due after resume");
+    assert!(
+        !due_records
+            .iter()
+            .any(|record| { record.tenant_id == tenant_id && record.trigger_id == trigger_id }),
+        "resumed recurring trigger must not replay a slot missed while paused"
+    );
+    let due_records = repo
+        .list_due_triggers(resumed.next_run_at, 10)
+        .await
+        .expect("list due at rebased resume slot");
     assert!(
         due_records.iter().any(|record| {
             record.tenant_id == tenant_id
                 && record.trigger_id == trigger_id
                 && record.state == TriggerState::Scheduled
         }),
-        "resumed trigger must become fire-eligible again"
+        "resumed trigger must become fire-eligible at its first future slot"
+    );
+
+    let once_trigger_id =
+        TriggerId::parse("01J00000000000000000000023").expect("once trigger ulid");
+    let once_slot = ts(1_704_067_200);
+    let mut once_record = sample_record(once_trigger_id, tenant_id.clone(), once_slot);
+    once_record.state = TriggerState::Paused;
+    once_record.schedule = TriggerSchedule::once(once_slot, "UTC").expect("valid once schedule");
+    repo.upsert_trigger(once_record.clone())
+        .await
+        .expect("insert paused one-shot");
+    let resumed_once = repo
+        .set_scoped_trigger_state(
+            tenant_id.clone(),
+            once_record.creator_user_id,
+            once_record.agent_id,
+            once_record.project_id,
+            once_trigger_id,
+            TriggerState::Scheduled,
+        )
+        .await
+        .expect("resume paused one-shot")
+        .expect("one-shot should resume");
+    assert_eq!(
+        resumed_once.next_run_at, once_slot,
+        "resuming a paused one-shot must preserve its original single fire slot"
+    );
+    assert!(
+        repo.list_due_triggers(Utc::now(), 10)
+            .await
+            .expect("list due after one-shot resume")
+            .iter()
+            .any(|record| record.trigger_id == once_trigger_id),
+        "an overdue one-shot must remain eligible to fire once after resume"
     );
 
     assert!(matches!(
@@ -1226,6 +1330,9 @@ async fn libsql_repository_contract_parity() {
     assert_round_trip_and_scoped_isolation(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
+    assert_legacy_delivery_migration_is_compare_and_clear(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
     assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
@@ -1360,6 +1467,9 @@ async fn postgres_repository_contract_parity() {
     let repo = PostgresTriggerRepository::new(pool.clone());
     repo.run_migrations().await.expect("run migrations");
     assert_round_trip_and_scoped_isolation(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_legacy_delivery_migration_is_compare_and_clear(&repo).await;
 
     clear_postgres_triggers(&pool).await;
     assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(&repo).await;
