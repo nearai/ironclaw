@@ -44,9 +44,54 @@ def _webui_frontend_prefix() -> str:
     return f"{directory}/frontend/"
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
+# Doc-fact contract tests (#7378) read `docs/` pages from inside owning
+# crates, so a published-page edit can fail a cargo test and `docs/` is no
+# longer a pure-prose class. The registry's schema-version sweep walks every
+# published page; two pages are additionally pinned one-to-one by the crate
+# owning their truth. Routing selects exactly those test binaries as direct
+# test targets — no reverse-dependency widening, because prose cannot change
+# crate behavior, only the doc-fact assertions that read it. Without this
+# arm the doc-fact gates only ran on full-scope events: the docs-only PRs
+# most likely to break them merged green and the failure landed on whichever
+# unrelated change ran the full plan next.
+DOC_FACT_PAGE_TESTS = {
+    "docs/using/cli.mdx": ("ironclaw", "docs_cli_reference"),
+    "docs/api/responses.mdx": ("ironclaw_openai_compat", "docs_responses_contract"),
+}
+DOC_FACT_PUBLISHED_SWEEP = (
+    "ironclaw_extension_registry",
+    "docs_manifest_schema_version",
+)
+DOCS_PREFIX = "docs/"
+# Mirror of the fence in `docs_manifest_schema_version.rs` (itself mirroring
+# the frozen `docs/.mintignore`): fenced trees are unpublished, so no cargo
+# test reads them and they keep the prose classification below.
+DOCS_FENCED_PREFIXES = ("docs/internal/", "docs/reborn/", "docs/drafts/")
+DOCS_FENCED_SUFFIX = ".draft.mdx"
+
+
+def _doc_fact_selections(path: str) -> list[tuple[str, str]]:
+    """(package, test target) pairs whose doc-fact tests read this path."""
+    if not path.startswith(DOCS_PREFIX):
+        return []
+    selections = []
+    page = DOC_FACT_PAGE_TESTS.get(path)
+    if page is not None:
+        selections.append(page)
+    if (
+        Path(path).suffix in {".md", ".mdx"}
+        and not path.startswith(DOCS_FENCED_PREFIXES)
+        and not path.endswith(DOCS_FENCED_SUFFIX)
+    ):
+        selections.append(DOC_FACT_PUBLISHED_SWEEP)
+    return selections
+
+
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
 # `.claude/` is agent guidance (skills, commands, rules) — prose in the same
-# class as `docs/`. It was unclassified until 2026-08-03, which meant the
+# class as `docs/` (whose published Markdown is escalated by the doc-fact arm
+# above before this class applies; only fenced trees and non-page files reach
+# it). It was unclassified until 2026-08-03, which meant the
 # planner's fail-closed arm rejected every PR that touched agent guidance:
 # the only satisfiable behaviour for that class was "never edit it", which is
 # not a policy anyone chose. Classifying it is the fix; loosening the
@@ -679,6 +724,13 @@ def build_plan(
             continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
+            continue
+        doc_fact = _doc_fact_selections(path)
+        if doc_fact:
+            for package, target in doc_fact:
+                direct_test_packages.add(package)
+                exact_test_targets[package].add(("test", target))
+            reasons.append(f"doc-fact contract tests read: {path}")
             continue
         if (
             path in IGNORED_GUIDANCE_PATHS
