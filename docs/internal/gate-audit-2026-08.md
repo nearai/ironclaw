@@ -85,6 +85,13 @@ named three handlers the PR deleted. The branch also paid composition-budget
 bookkeeping on two *further* commits (`c9fad3be0d`, `d39e18766e`) — three
 budget touches on one PR.
 
+Post-audit coda: after this audit's cutoff the branch folded main again and
+the size ceiling fired **again** — main's #7361/#7363 added 66 lines to
+`loop_contracts`' `instruction_bundle.rs`, blowing the 13,115 recapture;
+re-captured to 13,181 at `5dde7c3370`. Nothing the branch wrote tripped it.
+This recurrence is the §3.2 exhibit: the upward check carries no tolerance,
+so main-side growth reds every open branch at its next fold, by construction.
+
 Why the failures surfaced one at a time rather than together is §4.1.
 
 ---
@@ -102,7 +109,7 @@ gate file below was read end-to-end by the audit.
 | Gate | Protects (one line) | Verdict | Key evidence |
 |---|---|---|---|
 | `reborn_dependency_boundaries.rs` (5,963 ln, 41 tests) | Layer matrix, 36 per-crate `BoundaryRule`s, CLI exact-dep pin, host_api zero-deps, trusted-trigger seals | **KEEP** (workhorse) with 4 sub-findings below | 140 commits/3mo — highest churn in repo; ~730 forbidden entries incl. ~60 deliberate reintroduction pins |
-| — `reborn_contracts_crates_carry_a_checked_size_ceiling` | Logic accreting in the contracts tier (§11.2.3), two-sided (growth + banked slack) | **KEEP-FIX** | ⚡ both jaws armed: +1 line in host_api → red; −1 line in common → red. **5 of 6 crates within single-digit lines of a jaw today** (host_api slack 0; extension_contracts 6; product_contracts 5; common and prompt_envelope at exactly the 400 banked-slack edge). Counter includes inline `#[cfg(test)]` mass — 26–41% of each crate's counted lines (~17.1k relocatable lines across the six, measured with the panic gate's own lexer). 4 ceiling raises in the gate's first 3 days; #7235's raise **overwrote** #7230's rationale comment |
+| — `reborn_contracts_crates_carry_a_checked_size_ceiling` | Logic accreting in the contracts tier (§11.2.3), two-sided (growth + banked slack) | **KEEP-FIX** | ⚡ both jaws armed: +1 line in host_api → red; −1 line in common → red. **The tolerance is asymmetric in code**: `TOLERANCE = 400` binds only the banked-slack direction; the growth check is a bare `lines > ceiling`, so "set to current, not padded" makes every ceiling a hard cap at observed — main-side growth reds every open branch at its next fold (#7157 re-captured loop_contracts **four times, ~once per fold**; see §3.2). **5 of 6 crates within single-digit lines of a jaw today** (host_api slack 0; extension_contracts 6; product_contracts 5; common and prompt_envelope at exactly the 400 banked-slack edge). Counter includes inline `#[cfg(test)]` mass — 26–41% of each crate's counted lines (~17.1k relocatable lines across the six, measured with the panic gate's own lexer). 4 ceiling raises in the gate's first 3 days; #7235's raise **overwrote** #7230's rationale comment |
 | — boundary-rule workspace-membership check | A rule whose crate leaves the workspace failing open (PR #3212 class) | **KEEP-FIX** | Directory-basename inventory matching skips `ironclaw_slack_extension`/`ironclaw_telegram_extension` (packages live at `packages/slack|telegram/`) — the #3212 fail-open is still open for exactly those two crates (`assert_no_normal_workspace_deps` returns silently on a metadata-absent crate) |
 | — `reborn_product_api_crates_do_not_bind_http_ingress` | Product crates binding TCP/serving HTTP | **KEEP-FIX** | Documented-but-standing gap: webui deliberately uncovered (its `lib.rs:226/244` carry `TcpListener::bind`/`axum::serve`); a dangling comment describes a rule entry that was never added; contradicts the webui BoundaryRule's charter text. Needs the owner ruling the gate itself asks for |
 | — `hosted_mcp_discovery_...` | Ambient startup reconciliation of hosted MCP | **DEMOTE or harden** | Two exact fn-name strings checked in two files; a rename evades; no vacuity probe |
@@ -216,12 +223,33 @@ them** (`trace_commons/src/contribution/mod.rs`, `capabilities/src/host/mod.rs`)
      kills the relocation-minting class outright, closes the `*_tests.rs`
      basename fail-open (⚡ §6.2), and makes a trip mean what the gate claims:
      behavior accreted.
-   - **Pin mid-window, not at the jaws.** The contracts gate's own doc says
-     ceilings sit "a bounded TOLERANCE above the measured count"; practice
-     pinned host_api at measured+0 and common at measured+400 (both edges).
-     Re-pin at measured + TOLERANCE/2 (200-line working slack each way) at
-     every recapture, and make rationale comments append-only (#7235
-     overwrote #7230's +1,214 rationale — the audit trail is already lossy).
+   - **Give the upward check the tolerance the downward check already has.**
+     The asymmetry is in the code, not just the pins: `TOLERANCE = 400` is
+     consulted in exactly one direction — the banked-slack check
+     (`ceiling.saturating_sub(lines) > TOLERANCE`) — while the growth check
+     is a bare `lines > *ceiling`. Combined with the in-file instruction
+     "set to current, not padded," every ceiling is a hard cap at the exact
+     observed count: one line added *anywhere on main* to a contracts crate
+     reds **every open branch** at its next fold until someone re-captures.
+     Measured on #7157, this is not hypothetical — the branch re-captured
+     `loop_contracts` **four times, roughly once per fold onto main**
+     (14,479 → 13,850 → 13,949 → 13,115 → 13,181; the last, at
+     `5dde7c3370`, was tripped by main's #7361/#7363 landing 66 lines in
+     `instruction_bundle.rs`, nothing the branch wrote). The gate has been
+     generating its own busywork. Two repair shapes, either fine:
+     (a) the one-line fix — `lines > ceiling + TOLERANCE` (or a separate,
+     possibly smaller `UPWARD_TOLERANCE`; composition's precedent is 150) —
+     which is self-enforcing and keeps "pin at current" natural, at the cost
+     of letting up to that much growth accumulate unreviewed before the
+     forcing function; or (b) pin at measured + TOLERANCE/2 with the code
+     unchanged — no new slack semantics, but it relies on pin discipline
+     that practice has already shown drifting (host_api pinned at
+     measured+0, common at measured+400: both edges). Either way, make
+     rationale comments append-only (#7235 overwrote #7230's +1,214
+     rationale — the audit trail is already lossy). All five #7157
+     recaptures were ≤105 lines; either repair would have absorbed every
+     one with zero red builds while still catching the runaway growth the
+     gate exists for.
 3. **Arch gates are merge-queue-only for most PRs.** The architecture bucket
    runs on a PR only when the PR touches the arch crate or `ironclaw_host_api`
    — a PR touching only `loop_contracts` (i.e., #7157) meets the size ceiling
