@@ -157,7 +157,9 @@ def metadata() -> dict:
 
 
 def real_owner_metadata() -> dict:
-    """A workspace named after the crates `EMBEDDED_ASSET_OWNERS` routes to.
+    """A workspace named after the crates real routing tables point at:
+    `EMBEDDED_ASSET_OWNERS` and the doc-fact tables
+    (`DOC_FACT_PAGE_TESTS` / `DOC_FACT_PUBLISHED_SWEEP`).
 
     The rest of this file uses `metadata()`'s `alpha`/`beta`/`gamma`, which
     cannot carry the real table: the planner rejects a changed package outside
@@ -195,6 +197,15 @@ def real_owner_metadata() -> dict:
         package(
             "ironclaw_slack_extension",
             "crates/extensions/packages/slack/Cargo.toml",
+        ),
+        package("ironclaw", "crates/app/ironclaw_cli/Cargo.toml"),
+        package(
+            "ironclaw_extension_registry",
+            "crates/extensions/ironclaw_extension_registry/Cargo.toml",
+        ),
+        package(
+            "ironclaw_openai_compat",
+            "crates/product/ironclaw_openai_compat/Cargo.toml",
         ),
     ]
     return {
@@ -1367,6 +1378,95 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "selected")
         self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_published_docs_page_runs_the_registry_docs_sweep(self) -> None:
+        """A published `docs/` page selects the doc-fact sweep, not prose.
+
+        Regression fixture for the #7378 reachability gap: `docs/` sat in
+        `IGNORED_PREFIXES` while three cargo tests read its pages, so the
+        docs-only PRs most likely to break the doc-fact gates planned
+        `mode=none`, merged green, and left the failure to land on whichever
+        unrelated change ran the full plan next.
+        """
+        plan = self.plan_real_owners(["docs/extensions/building-a-tool.md"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(plan["affected_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["ironclaw_extension_registry"],
+                    "exact_targets": [
+                        {
+                            "package": "ironclaw_extension_registry",
+                            "kind": "test",
+                            "name": "docs_manifest_schema_version",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    def test_doc_fact_pinned_pages_add_their_owning_crate(self) -> None:
+        """The two one-to-one pinned pages also select their owning crate,
+        as direct test targets with no reverse-dependency widening."""
+        cli = self.plan_real_owners(["docs/using/cli.mdx"])
+        self.assertEqual(
+            cli["changed_packages"], ["ironclaw", "ironclaw_extension_registry"]
+        )
+        self.assertEqual(
+            cli["affected_packages"], ["ironclaw", "ironclaw_extension_registry"]
+        )
+        self.assertEqual(
+            cli["crate_buckets"][0]["exact_targets"],
+            [
+                {"package": "ironclaw", "kind": "test", "name": "docs_cli_reference"},
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                },
+            ],
+        )
+        responses = self.plan_real_owners(["docs/api/responses.mdx"])
+        self.assertEqual(
+            responses["changed_packages"],
+            ["ironclaw_extension_registry", "ironclaw_openai_compat"],
+        )
+        self.assertEqual(
+            responses["crate_buckets"][0]["exact_targets"],
+            [
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                },
+                {
+                    "package": "ironclaw_openai_compat",
+                    "kind": "test",
+                    "name": "docs_responses_contract",
+                },
+            ],
+        )
+
+    def test_fenced_and_non_page_docs_stay_prose(self) -> None:
+        """Fenced trees (unpublished, read by no cargo test) and non-Markdown
+        docs files keep the prose classification."""
+        for path in (
+            "docs/internal/plans/2026-08-07-doc-truth-pipeline.md",
+            "docs/reborn/README.md",
+            "docs/reborn/contracts/extensions.md",
+            "docs/drafts/upcoming.mdx",
+            "docs/using/preview.draft.mdx",
+            "docs/docs.json",
+            "docs/images/logo.png",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
 
     def test_agent_guidance_paths_are_prose_and_select_nothing(self) -> None:
         """`.claude/**` is guidance, like `docs/**`.

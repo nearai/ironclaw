@@ -186,6 +186,22 @@ wiring instead rejects non-empty `tools` and any `tool_choice` with `400`
 naming the field.
 </Note>
 
+{/* doc-fact:responses-request-policy
+    Machine-checked contract for the table and rejection list above — parsed
+    and verified against the real router by
+    crates/product/ironclaw_openai_compat/tests/docs_responses_contract.rs.
+    The rejected_without_external_tools set describes the router without
+    external-tool wiring (the custom-composition case in the Note above);
+    standard serve deployments always wire it.
+    Edit these values only together with the prose they pin.
+request_fields = model,input,stream,temperature,instructions,previous_response_id,metadata,tools,tool_choice,x_context
+rejected_without_external_tools = tools,tool_choice
+ignored_unknown_fields = true
+temperature_min = 0.0
+temperature_max = 2.0
+model_max_bytes = 256
+*/}
+
 ---
 
 ## Session continuity
