@@ -196,12 +196,18 @@ Rules:
 
 ## 4. Manifest schema
 
-Production manifests use `schema_version = "reborn.extension_manifest.v2"`.
-The older top-level `parameters_schema` manifest shape is no longer parsed on
-production discovery paths.
+Production manifests author `schema_version = "reborn.extension_manifest.v3"`
+(`crates/extensions/ironclaw_extension_registry/src/v3.rs`), which lowers into
+the v2 resolved model this contract describes. Already-installed v2 manifests
+still parse as the legacy compatibility format; the older top-level
+`parameters_schema` manifest shape is no longer parsed on production discovery
+paths. The v3 authoring surface (`[[tools]]`, `[channel]`, `[auth.<vendor>]`,
+`[mcp]`, `origin_gate_matrix`) is specified in
+`docs/reborn/extension-runtime/overview.md` §3.
 
-Every manifest — host-bundled exactly as installed — declares its sections
-through `[[host_api]]` contracts; tools live under
+In the legacy v2 authoring format shown in the examples below, every
+manifest — host-bundled exactly as installed — declares its sections through
+`[[host_api]]` contracts; tools live under
 `[[host_api]] id = "ironclaw.capability_provider/v1"`. Top-level
 `[[capabilities]]` is rejected for every manifest source.
 

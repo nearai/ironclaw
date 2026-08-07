@@ -1,10 +1,17 @@
 # How to port a v1 tool to Reborn
 
+> **Superseded (2026-08-07).** The current manifest authoring format is
+> `reborn.extension_manifest.v3` (`[[tools]]`, `[auth.<vendor>]`, `[mcp]`,
+> `origin_gate_matrix`) — see `docs/extensions/building-a-tool.md` and
+> `docs/reborn/extension-runtime/overview.md` §3. The manifest examples below
+> show historical v2-era shapes (some, like top-level `[[capabilities]]` and
+> `RuntimeKind::Script`, were retired before or during the v3 cutover) and
+> must not be used as an authoring reference. The *decision tree* for
+> classifying v1 tools remains useful.
+
 This guide helps maintainers decide how an IronClaw v1 tool should move onto the Reborn capability path.
 
-The important distinction is that v1 used one `Tool` abstraction plus sidecar `*.capabilities.json` files for several different things. Reborn should keep those categories separate and describe them through Extension Manifest v2.
-
-> Status note: this guide targets the manifest-v2 direction from issue #3537. If the target branch has not completed the v2 hard cutover yet, use the shapes here as the porting target, not as proof that every parser/runtime field is already implemented.
+The important distinction is that v1 used one `Tool` abstraction plus sidecar `*.capabilities.json` files for several different things. Reborn keeps those categories separate and describes them through the extension manifest.
 
 ## Quick decision tree
 
