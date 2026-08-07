@@ -937,6 +937,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1033,6 +1034,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             unrelated_fallback,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1113,6 +1115,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             runtime_owner_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1173,6 +1176,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1226,6 +1230,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1306,6 +1311,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1408,6 +1414,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1503,6 +1510,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -1703,6 +1711,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1850,6 +1859,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -2092,61 +2102,28 @@ mod tests {
         assert!(store.total_bytes <= CAPABILITY_IO_MAX_STAGED_BYTES);
     }
 
-    #[test]
-    fn tool_diagnostic_result_capture_bounds_work_and_preserves_redaction_context() {
-        let secret = format!("Bearer {}", "s".repeat(80));
-        let retained_prefix = "x".repeat(TOOL_RESULT_MAX_BYTES - 32);
-        let payload = format!(
-            "{retained_prefix}{secret}{}",
-            "y".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES)
-        );
-
-        let captured = bounded_tool_diagnostic_result(payload.as_bytes())
-            .expect("serialized JSON diagnostic text is valid UTF-8");
-        assert_eq!(captured.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
-        assert!(captured.len() < payload.len());
-        assert!(captured.contains(&secret));
-
-        let (redacted, changed) =
-            ironclaw_safety::LeakDetector::new().redact_all_secrets(&captured);
-        assert!(changed, "boundary-crossing secret must remain detectable");
-        let retained =
-            ironclaw_product_contracts::inspector::BoundedDiagnosticText::retained_tool_result(
-                redacted,
-                u64::try_from(payload.len()).expect("test payload length fits u64"),
-            )
-            .expect("bounded diagnostic text accepts the original byte count");
-        assert!(retained.content().len() <= TOOL_RESULT_MAX_BYTES);
-        assert!(!retained.content().contains(&secret));
-        assert!(retained.truncated());
-    }
-
-    #[test]
-    fn tool_diagnostic_result_capture_drops_a_split_utf8_suffix() {
-        let mut payload = "a".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
-        payload.push('€');
-        payload.push_str("tail");
-
-        let captured = bounded_tool_diagnostic_result(payload.as_bytes())
-            .expect("valid prefix is retained when the cap splits a code point");
-        assert_eq!(captured.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
-        assert!(captured.is_char_boundary(captured.len()));
-    }
-
     #[tokio::test]
     async fn capability_io_sends_only_bounded_output_to_the_diagnostic_sink() {
         let sink = Arc::new(RecordingToolDiagnosticSink::default());
-        let capability_io = StagedCapabilityIo::default().with_tool_diagnostic_sink(Some(
-            Arc::clone(&sink) as Arc<dyn HostManagedPromptDiagnosticSink>,
-        ));
+        let capability_io = StagedCapabilityIo {
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::new(Some(
+                Arc::clone(&sink) as Arc<dyn HostManagedPromptDiagnosticSink>
+            )),
+            ..StagedCapabilityIo::default()
+        };
         let run_context = run_context("bounded-tool-diagnostic").await;
         let input_ref = CapabilityInputRef::new(format!(
             "input:{}:bounded-tool-diagnostic",
             run_context.run_id
         ))
         .expect("input ref");
-        let output =
-            serde_json::Value::String("x".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2));
+        let secret = format!("Bearer {}", "s".repeat(80));
+        let retained_prefix =
+            "x".repeat(ironclaw_product_contracts::inspector::TOOL_RESULT_MAX_BYTES - secret.len());
+        let output = serde_json::Value::String(format!(
+            "{retained_prefix}{secret}{}",
+            "y".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2)
+        ));
         let serialized_bytes = serialized_result_output(&output)
             .expect("result serializes")
             .len();
@@ -2174,6 +2151,13 @@ mod tests {
             .result
             .expect("successful result has diagnostic text");
         assert_eq!(retained.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert!(retained.contains(&secret));
+        assert!(
+            ironclaw_safety::LeakDetector::new()
+                .redact_all_secrets(&retained)
+                .1,
+            "boundary-crossing secret must remain detectable"
+        );
         assert_eq!(
             capture.result_original_bytes,
             Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))
@@ -3088,6 +3072,7 @@ mod tests {
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -3856,6 +3841,7 @@ mod tests {
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();

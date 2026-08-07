@@ -58,6 +58,7 @@ pub mod system_prompt_assets;
 mod thread_resolving_model_gateway;
 mod thread_scope;
 mod token_estimator;
+mod tool_diagnostics;
 mod tool_disclosure;
 mod tool_disclosure_mode;
 mod tool_disclosure_port;
@@ -178,6 +179,7 @@ pub use thread_resolving_model_gateway::{
     ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
 };
 pub use thread_scope::ThreadScopeResolver;
+pub use tool_diagnostics::{HostManagedToolDiagnosticEmitter, PreparedToolDiagnosticResult};
 pub use tool_disclosure::bridge_capability_ids;
 pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
 pub use tool_disclosure_port::ToolDisclosureCapabilityDecorator;

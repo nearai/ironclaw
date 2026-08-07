@@ -23,16 +23,14 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     HostRuntime, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedToolResultDiagnosticCapture;
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolFailureCategory,
-    HostManagedToolInputDiagnosticCapture, HostManagedToolResultDiagnosticCapture,
-    HostManagedToolResultDiagnosticStatus, HostManagedToolStartedDiagnosticCapture,
+    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolDiagnosticEmitter,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ThreadScopeResolver, loop_driver_execution_extension_id,
 };
-#[cfg(test)]
-use ironclaw_product_contracts::inspector::TOOL_RESULT_MAX_BYTES;
 use ironclaw_product_contracts::{
     inspector::TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, project_service::ProjectService,
 };
@@ -162,9 +160,9 @@ pub(super) fn capability_wiring(
             Arc::clone(&display_previews),
             Arc::clone(&thread_service),
             fallback_user_id.clone(),
+            tool_diagnostic_sink,
         )
-        .with_observer(capability_observer)
-        .with_tool_diagnostic_sink(tool_diagnostic_sink),
+        .with_observer(capability_observer),
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -344,7 +342,7 @@ struct StagedCapabilityIo {
     /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
     /// (the input resolver bypasses this IO for provider tool-call inputs).
     observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
-    tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    tool_diagnostics: HostManagedToolDiagnosticEmitter,
 }
 
 #[derive(Clone)]
@@ -371,7 +369,7 @@ impl StagedCapabilityIo {
             display_previews,
             durable_previews: None,
             observer: None,
-            tool_diagnostic_sink: None,
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::default(),
         }
     }
 
@@ -379,6 +377,7 @@ impl StagedCapabilityIo {
         display_previews: Arc<CapabilityDisplayPreviewStore>,
         thread_service: Arc<dyn SessionThreadService>,
         fallback_user_id: UserId,
+        tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     ) -> Self {
         Self {
             inputs: StdMutex::new(StagedValueStore::default()),
@@ -389,7 +388,7 @@ impl StagedCapabilityIo {
                 fallback_user_id,
             }),
             observer: None,
-            tool_diagnostic_sink: None,
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::new(tool_diagnostic_sink),
         }
     }
 
@@ -397,32 +396,6 @@ impl StagedCapabilityIo {
     fn with_observer(mut self, observer: Option<Arc<dyn CapabilityTrajectoryObserver>>) -> Self {
         self.observer = observer;
         self
-    }
-
-    fn with_tool_diagnostic_sink(
-        mut self,
-        sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
-    ) -> Self {
-        self.tool_diagnostic_sink = sink;
-        self
-    }
-
-    fn record_tool_input_diagnostic(
-        &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        capability_name: &str,
-        arguments: &serde_json::Value,
-    ) {
-        let Some(sink) = self.tool_diagnostic_sink.as_ref() else {
-            return;
-        };
-        sink.record_tool_input(HostManagedToolInputDiagnosticCapture {
-            context: run_context.clone(),
-            input_ref: input_ref.as_str().to_string(),
-            capability_name: capability_name.to_string(),
-            arguments: arguments.clone(),
-        });
     }
 
     #[cfg(test)]
@@ -636,6 +609,7 @@ pub(super) fn staged_capability_io_for_test(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service,
         fallback_user_id,
+        None,
     ));
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
@@ -656,6 +630,7 @@ pub(super) fn staged_capability_io_with_observer_for_test(
             Arc::new(CapabilityDisplayPreviewStore::default()),
             thread_service,
             fallback_user_id,
+            None,
         )
         .with_observer(
             observer.map(crate::observability::trajectory_observer::as_capability_observer),
@@ -813,7 +788,7 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
             tool_call.name.as_str(),
             &tool_call.arguments,
         );
-        self.record_tool_input_diagnostic(
+        self.tool_diagnostics.record_input(
             run_context,
             &input_ref,
             tool_call.name.as_str(),
@@ -840,7 +815,7 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
             capability_id.as_str(),
             &tool_call.arguments,
         );
-        self.record_tool_input_diagnostic(
+        self.tool_diagnostics.record_input(
             run_context,
             input_ref,
             capability_id.as_str(),
@@ -881,11 +856,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         // so its offsets line up exactly with what `result_read` returns.
         let preview = first_look_result_preview(&output_content);
         let diagnostic_result = self
-            .tool_diagnostic_sink
-            .as_ref()
-            .and_then(|_| bounded_tool_diagnostic_result(&output_content));
-        let diagnostic_result_original_bytes =
-            self.tool_diagnostic_sink.as_ref().map(|_| output_bytes);
+            .tool_diagnostics
+            .prepare_result(&output_content, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
         // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
@@ -930,18 +902,13 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
-        if let Some(sink) = self.tool_diagnostic_sink.as_ref() {
-            sink.record_tool_result(HostManagedToolResultDiagnosticCapture {
-                context: run_context.clone(),
-                activity_id: invocation_id.as_uuid(),
-                capability_name: capability_id.as_str().to_string(),
-                result: diagnostic_result,
-                result_original_bytes: diagnostic_result_original_bytes,
-                status: HostManagedToolResultDiagnosticStatus::Succeeded,
-                failure_category: None,
-                failure_summary: None,
-            });
-        }
+        self.tool_diagnostics.record_succeeded(
+            run_context,
+            invocation_id,
+            capability_id,
+            diagnostic_result,
+            output_bytes,
+        );
         let mut write_result =
             CapabilityWriteResult::from_output(result_ref, output_bytes, &output);
         write_result.model_observation = Some(result_reference_observation(
@@ -961,13 +928,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
-        if let Some(sink) = self.tool_diagnostic_sink.as_ref() {
-            sink.record_tool_started(HostManagedToolStartedDiagnosticCapture {
-                context: run_context.clone(),
-                activity_id: invocation_id.as_uuid(),
-                input_ref: input_ref.as_str().to_string(),
-            });
-        }
+        self.tool_diagnostics
+            .record_started(run_context, invocation_id, input_ref);
     }
 
     async fn stage_capability_failure_preview(
@@ -983,18 +945,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             capability_id,
             summary,
         );
-        if let Some(sink) = self.tool_diagnostic_sink.as_ref() {
-            sink.record_tool_result(HostManagedToolResultDiagnosticCapture {
-                context: run_context.clone(),
-                activity_id: invocation_id.as_uuid(),
-                capability_name: capability_id.as_str().to_string(),
-                result: None,
-                result_original_bytes: None,
-                status: HostManagedToolResultDiagnosticStatus::Failed,
-                failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
-                failure_summary: Some(summary.to_string()),
-            });
-        }
+        self.tool_diagnostics
+            .record_failed(run_context, invocation_id, capability_id, summary);
         // Persist the failure preview to the durable timeline (status Failed)
         // so the detail survives refresh/replay, mirroring the success path in
         // `write_capability_result`.
@@ -1058,23 +1010,6 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
         ));
     }
     Ok(content)
-}
-
-/// Copies only the retained Inspector result plus bounded leak-redaction
-/// lookahead. `serialized_result_output` produces valid UTF-8, so an invalid
-/// suffix here can only be a code point split by the byte cap.
-fn bounded_tool_diagnostic_result(serialized: &[u8]) -> Option<String> {
-    let candidate = &serialized[..serialized
-        .len()
-        .min(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES)];
-    match std::str::from_utf8(candidate) {
-        Ok(text) => Some(text.to_owned()),
-        Err(error) if error.error_len().is_none() => {
-            let valid_prefix = &candidate[..error.valid_up_to()];
-            std::str::from_utf8(valid_prefix).ok().map(str::to_owned)
-        }
-        Err(_) => None,
-    }
 }
 
 /// A bounded, UTF-8-safe first-look slice of a serialized result payload,
