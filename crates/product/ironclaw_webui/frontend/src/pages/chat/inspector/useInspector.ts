@@ -122,6 +122,7 @@ export function useInspector({
 
     let disposed = false;
     let connectedOnce = false;
+    let terminalState = false;
     let controller: ReturnType<EventSourcePlus["listen"]> | null = null;
     const request = inspectorEventStreamRequest({ threadId, runId });
     const stream = new EventSourcePlus(request.url, {
@@ -132,6 +133,7 @@ export function useInspector({
     });
 
     function terminal(healthState: InspectorHealth, message: string): void {
+      terminalState = true;
       setHealth(healthState);
       setError(message);
       controller?.abort("terminal inspector response");
@@ -201,13 +203,17 @@ export function useInspector({
     }
 
     function onVisibilityChange(): void {
-      if (disposed) return;
+      if (disposed || terminalState) return;
       if (document.visibilityState === "hidden") {
         controller?.abort("inspector hidden");
         setHealth(INSPECTOR_HEALTH.IDLE);
       } else {
-        setHealth(INSPECTOR_HEALTH.RECONNECTING);
-        controller?.reconnect();
+        if (controller) {
+          setHealth(INSPECTOR_HEALTH.RECONNECTING);
+          controller.reconnect();
+        } else {
+          connect();
+        }
       }
     }
 
