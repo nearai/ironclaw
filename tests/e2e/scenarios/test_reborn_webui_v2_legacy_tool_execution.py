@@ -415,8 +415,10 @@ async def test_reborn_legacy_truncated_tool_call_recovers_without_activity_card(
             )
             async with session.get(
                 events_url,
-                params={"token": REBORN_V2_AUTH_TOKEN},
-                headers={"Accept": "text/event-stream"},
+                headers={
+                    **reborn_bearer_headers(),
+                    "Accept": "text/event-stream",
+                },
             ) as response:
                 assert response.status == 200, await response.text()
                 await send_message(

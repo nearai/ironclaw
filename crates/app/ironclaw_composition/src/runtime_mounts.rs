@@ -244,11 +244,32 @@ pub(crate) fn read_write_workspace_filesystem(
     extension_filesystem: &Arc<CompositeRootFilesystem>,
     policy: &WorkspaceMountPolicy,
 ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-    let permissions = MountPermissions::read_write_list_delete();
+    workspace_filesystem(
+        extension_filesystem,
+        policy,
+        MountPermissions::read_write_list_delete(),
+    )
+}
+
+/// The read-only workspace handle used to read landed attachment bytes back
+/// into model requests. It follows the same deployment scoping policy as the
+/// write lanes without granting the reader write, list, or delete authority.
+pub(crate) fn read_only_workspace_filesystem(
+    extension_filesystem: &Arc<CompositeRootFilesystem>,
+    policy: &WorkspaceMountPolicy,
+) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
+    workspace_filesystem(extension_filesystem, policy, MountPermissions::read_only())
+}
+
+fn workspace_filesystem(
+    extension_filesystem: &Arc<CompositeRootFilesystem>,
+    policy: &WorkspaceMountPolicy,
+    permissions: MountPermissions,
+) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
     match policy {
         // Per-caller: the resolver runs on every call, so each authenticated
         // caller keys its own `tenants/{tenant}/users/{user}` subtree and the
-        // shared `/projects/workspace` root is never exposed for writes.
+        // shared `/projects/workspace` root is never exposed.
         WorkspaceMountPolicy::PerCaller => Some(Arc::new(ScopedFilesystem::new(
             Arc::clone(extension_filesystem),
             move |scope| scoped_workspace_mount_view(scope, permissions.clone()),
@@ -343,8 +364,8 @@ mod tests {
     /// production channel-inbound lander in `channel_host_source`, and the
     /// C-ATTACH test seam. Pin that its two branches address different roots,
     /// so no lane can be wired to a shared root while its sibling is scoped.
-    #[test]
-    fn read_write_workspace_handle_follows_the_deployment_policy() {
+    #[tokio::test]
+    async fn workspace_handles_follow_the_deployment_policy_and_reader_is_read_only() {
         use ironclaw_host_api::{
             ids::{InvocationId, TenantId, UserId},
             path::ScopedPath,
@@ -365,6 +386,9 @@ mod tests {
         let per_caller =
             read_write_workspace_filesystem(&backend, &WorkspaceMountPolicy::PerCaller)
                 .expect("per-caller handle builds");
+        let per_caller_reader =
+            read_only_workspace_filesystem(&backend, &WorkspaceMountPolicy::PerCaller)
+                .expect("per-caller reader builds");
         let shared = read_write_workspace_filesystem(
             &backend,
             &WorkspaceMountPolicy::Shared(
@@ -382,11 +406,30 @@ mod tests {
             "/projects/workspace/tenants/acme/users/alice/landed.txt"
         );
         assert_eq!(
+            per_caller_reader
+                .resolve(&scope, &path)
+                .expect("per-caller reader resolve")
+                .as_str(),
+            "/projects/workspace/tenants/acme/users/alice/landed.txt"
+        );
+        assert_eq!(
             shared
                 .resolve(&scope, &path)
                 .expect("shared resolve")
                 .as_str(),
             "/projects/workspace/landed.txt"
+        );
+
+        let error = per_caller_reader
+            .write_bytes(&scope, &path, b"forbidden".to_vec())
+            .await
+            .expect_err("attachment reader must not have write authority");
+        assert!(
+            matches!(
+                error,
+                ironclaw_filesystem::FilesystemError::PermissionDenied { .. }
+            ),
+            "unexpected read-only write error: {error}"
         );
     }
 

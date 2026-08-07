@@ -3653,15 +3653,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
         //
-        // Lander and reader share ONE handle so an inbound attachment is read
-        // back from the subtree it landed in. Under a per-caller workspace
-        // policy (`serve` sets it unconditionally) the lander writes to
-        // `/projects/workspace/tenants/{tenant}/users/{user}`, and the shared
-        // read-only `workspace_filesystem` would address the root instead —
-        // the exact regression that dropped every image from the model payload
-        // after #7062 scoped the write lanes. Mirrors the channel-host wiring
-        // in `channel_host_source`.
-        attachment_read_port: crate::runtime_mounts::read_write_workspace_filesystem(
+        // Follow the lander's mount policy so reads address the caller subtree
+        // selected by `serve`, but give the reader independent read-only authority.
+        attachment_read_port: crate::runtime_mounts::read_only_workspace_filesystem(
             &services.extension_filesystem,
             &services.workspace_mounts,
         )

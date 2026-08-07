@@ -470,5 +470,21 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
         await page.wait_for_function("() => window.__v2SseHasHeldConnection?.() === false")
         await page.wait_for_timeout(300)
         assert await page.evaluate("() => window.__v2SseUrls.length") == 2
+
+        # Showing the tab must reopen a real stream. This pins that aborting the
+        # held retry also clears the fake's one-shot hold state.
+        await page.evaluate(
+            """
+            () => {
+              Object.defineProperty(document, 'visibilityState', {
+                configurable: true,
+                get: () => 'visible',
+              });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }
+            """
+        )
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
+        assert await page.evaluate("() => window.__v2SseUrls.length") == 3
     finally:
         await context.close()

@@ -996,7 +996,7 @@ def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
 async def install_fake_v2_event_stream(
     page,
     *,
-    expected_authorization: str | None = None,
+    expected_authorizations: tuple[str, ...] | None = None,
     record_request_headers: bool = True,
 ) -> None:
     """Install the fetch-based fake WebChat v2 SSE transport on ``page``.
@@ -1027,15 +1027,17 @@ async def install_fake_v2_event_stream(
     The fake enforces the current wire contract: a ``token`` query parameter
     on the stream URL is rejected with 400 (the bearer travels in the
     ``Authorization`` header), and a missing/mismatched ``Authorization``
-    header is rejected with 401.
+    header is rejected with 401. ``expected_authorizations`` supports strict
+    multi-identity scenarios; the ordinary single-token contract remains the
+    default.
     """
-    if expected_authorization is None:
-        expected_authorization = f"Bearer {REBORN_V2_AUTH_TOKEN}"
+    if expected_authorizations is None:
+        expected_authorizations = (f"Bearer {REBORN_V2_AUTH_TOKEN}",)
     script = f"""
         (() => {{
           const nativeFetch = window.fetch.bind(window);
           const encoder = new TextEncoder();
-          const expectedAuthorization = {json.dumps(expected_authorization)};
+          const expectedAuthorizations = new Set({json.dumps(expected_authorizations)});
           const recordHeaders = {json.dumps(record_request_headers)};
           let activeStream = null;
           let holdNextConnection = false;
@@ -1109,7 +1111,7 @@ async def install_fake_v2_event_stream(
             if (url.searchParams.has("token")) {{
               return new Response("", {{ status: 400 }});
             }}
-            if (request.headers.get("Authorization") !== expectedAuthorization) {{
+            if (!expectedAuthorizations.has(request.headers.get("Authorization"))) {{
               return new Response("", {{ status: 401 }});
             }}
             if (!holdNextConnection) {{
@@ -1134,6 +1136,7 @@ async def install_fake_v2_event_stream(
                 () => {{
                   if (stream.closed) return;
                   stream.closed = true;
+                  holdNextConnection = false;
                   if (activeStream === stream) activeStream = null;
                   reject(new DOMException("Aborted", "AbortError"));
                 }},

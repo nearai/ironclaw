@@ -76,7 +76,13 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
     page = await context.new_page()
     session_requests: list[str] = []
 
-    await install_fake_v2_event_stream(page)
+    await install_fake_v2_event_stream(
+        page,
+        expected_authorizations=(
+            "Bearer token-user-a",
+            "Bearer token-user-b",
+        ),
+    )
 
     async def fulfill_json(route, body, status=200):
         await route.fulfill(
