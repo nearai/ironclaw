@@ -59,7 +59,7 @@ export function ThreadScrapingPanel({ userId }) {
       })
       .catch((requestError) => {
         if (!controller.signal.aborted && requestError?.name !== "AbortError") {
-          setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
+          setError(t("admin.threadScraping.loadFailed"));
         }
       })
       .finally(() => {
@@ -85,9 +85,9 @@ export function ThreadScrapingPanel({ userId }) {
     try {
       const response = await fetchThreadScrapeArtifact(userId, threadId);
       if (artifactRequestRef.current === requestId) setArtifact(response);
-    } catch (requestError) {
+    } catch {
       if (artifactRequestRef.current === requestId) {
-        setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
+        setError(t("admin.threadScraping.loadFailed"));
       }
     } finally {
       if (artifactRequestRef.current === requestId) setIsLoadingArtifact(false);
@@ -116,7 +116,7 @@ export function ThreadScrapingPanel({ userId }) {
       setNextCursor(response?.next_cursor ?? null);
     } catch (requestError) {
       if (!controller.signal.aborted && requestError?.name !== "AbortError") {
-        setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
+        setError(t("admin.threadScraping.loadFailed"));
       }
     } finally {
       if (loadMoreAbortRef.current === controller) {
@@ -133,8 +133,8 @@ export function ThreadScrapingPanel({ userId }) {
     try {
       const runArtifact = await fetchThreadScrapeRunArtifact(userId, selectedThreadId, runId);
       saveArtifact(runArtifact, artifactFilename("run", runId));
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.downloadFailed"));
+    } catch {
+      setError(t("admin.threadScraping.downloadFailed"));
     } finally {
       setDownloadingRunId("");
     }

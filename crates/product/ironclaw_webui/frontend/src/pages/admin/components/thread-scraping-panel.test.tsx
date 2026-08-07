@@ -251,7 +251,7 @@ test("switching target users discards late initial list responses and errors", a
     await act(async () => {
       lateError.reject(new Error("stale initial error"));
     });
-    assert.doesNotMatch(container.textContent ?? "", /stale initial error/);
+    assert.equal(container.querySelector('[role="alert"]'), null);
   } finally {
     act(() => root.unmount());
     container.remove();
@@ -339,7 +339,88 @@ test("switching target users discards late paginated responses and errors", asyn
     await act(async () => {
       latePageError.reject(new Error("stale paginated error"));
     });
-    assert.doesNotMatch(container.textContent ?? "", /stale paginated error/);
+    assert.equal(container.querySelector('[role="alert"]'), null);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("thread scraping never renders raw request errors", async () => {
+  requests.fetchThreads
+    .mockRejectedValueOnce(new Error("sensitive initial details"))
+    .mockResolvedValueOnce({
+      threads: [{ thread_id: "thread-one", title: "One" }],
+      next_cursor: "cursor-one",
+    })
+    .mockRejectedValueOnce(new Error("sensitive page details"));
+  requests.fetchArtifact
+    .mockRejectedValueOnce(new Error("sensitive artifact details"))
+    .mockResolvedValueOnce({
+      thread_id: "thread-one",
+      messages: [
+        {
+          message_id: "message-one",
+          run_id: "run-one",
+          kind: "assistant",
+          content: "safe transcript",
+        },
+      ],
+    });
+  requests.fetchRunArtifact.mockRejectedValueOnce(new Error("sensitive download details"));
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-one" />
+        </I18nProvider>,
+      );
+    });
+    let alert = container.querySelector('[role="alert"]');
+    assert.equal(alert?.textContent, "Thread scraping failed.");
+    assert.doesNotMatch(container.textContent ?? "", /sensitive initial details/);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-two" />
+        </I18nProvider>,
+      );
+    });
+    const loadMore = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-load-more"]',
+    );
+    assert.ok(loadMore);
+    await act(async () => loadMore.click());
+    alert = container.querySelector('[role="alert"]');
+    assert.equal(alert?.textContent, "Thread scraping failed.");
+    assert.doesNotMatch(container.textContent ?? "", /sensitive page details/);
+
+    const threadButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-thread"]',
+    );
+    assert.ok(threadButton);
+    await act(async () => threadButton.click());
+    alert = container.querySelector('[role="alert"]');
+    assert.equal(alert?.textContent, "Thread scraping failed.");
+    assert.doesNotMatch(container.textContent ?? "", /sensitive artifact details/);
+
+    await act(async () => threadButton.click());
+    const downloadRun = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("Download run run-one"),
+    );
+    assert.ok(downloadRun);
+    await act(async () => downloadRun.click());
+    alert = container.querySelector('[role="alert"]');
+    assert.equal(alert?.textContent, "Artifact download failed.");
+    assert.doesNotMatch(container.textContent ?? "", /sensitive download details/);
   } finally {
     act(() => root.unmount());
     container.remove();
