@@ -919,3 +919,65 @@ pub(crate) fn ack_sequence(token: &LoopInputAckToken) -> Result<u64, HostInputQu
             reason: "input ack token is malformed".to_string(),
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::ids::{AgentId, TenantId};
+    use ironclaw_turns::LoopMessageRef;
+
+    #[test]
+    fn recently_consumed_dedup_window_stays_bounded() {
+        let mut model = RunQueueModel::default();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new("tenant-iq").unwrap(),
+            agent_id: AgentId::new("agent-iq").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_id = ThreadId::new("thread-iq").unwrap();
+        let mut oldest_message_id = None;
+
+        for index in 0..=RECENTLY_CONSUMED_DEDUP_LIMIT {
+            let message_id = ThreadMessageId::new();
+            if index == 0 {
+                oldest_message_id = Some(message_id);
+            }
+            let message_ref = format!("msg:{message_id}");
+            let disposition = model
+                .enqueue_dedup(
+                    LoopInput::Steering {
+                        message_ref: LoopMessageRef::new(&message_ref).unwrap(),
+                    },
+                    QueuedMessageStatusUpdate {
+                        turn_id: TurnId::new(),
+                        scope: scope.clone(),
+                        thread_id: thread_id.clone(),
+                        message_id,
+                    },
+                )
+                .expect("enqueue distinct input");
+            let EnqueueDisposition::Inserted { sequence } = disposition else {
+                panic!("distinct input must insert");
+            };
+            model
+                .validate_and_ack(&[ack_token(sequence).unwrap()])
+                .expect("ack inserted input");
+            model.confirm_submit_flips(&[sequence]);
+        }
+
+        assert_eq!(
+            model.recently_consumed.len(),
+            RECENTLY_CONSUMED_DEDUP_LIMIT,
+            "consumed replay identities must not grow durable state without bound"
+        );
+        assert!(
+            !model
+                .recently_consumed
+                .iter()
+                .any(|consumed| Some(consumed.message_id) == oldest_message_id),
+            "the oldest consumed identity must be evicted when the window is full"
+        );
+    }
+}
