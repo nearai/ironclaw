@@ -24,8 +24,9 @@ Working rules for the host-port adapter crate. Orientation lives in
   instruction/context builders (safe summaries and refs; full prompt
   materialization is owned by the prompt port contract).
 - `capability_port.rs`, `capability_surface_filter.rs`, and
-  `capability_allow_set.rs` capability-surface adapters and profile-scoped
-  narrowing.
+  `capability_surface_policy.rs` capability-surface adapters, filtering, and
+  profile-to-policy resolution. The neutral policy vocabulary belongs to
+  `ironclaw_host_api`.
 - `input_queue.rs` / `input_port.rs` steering and followup queues;
   `cancellation_port.rs` cancellation observation.
 - `model_gateway.rs` / `model_routes.rs` / `thread_resolving_model_gateway.rs`
@@ -88,9 +89,10 @@ Working rules for the host-port adapter crate. Orientation lives in
 - Add one file per host adapter or context source.
 - Add decorators (e.g. profile filters) as named types with a single policy
   responsibility.
-- Put capability-surface filtering policy in `capability_surface_filter.rs`;
-  put profile-to-allow-set construction and validation in
-  `capability_allow_set.rs`.
+- Put capability-surface filtering behavior in
+  `capability_surface_filter.rs`; put profile-to-policy resolution in
+  `capability_surface_policy.rs`. Neutral policy vocabulary belongs to
+  `ironclaw_host_api`.
 - Add traits here only for host-owned inputs to existing loop ports.
 - Do not fold unrelated ports into `lib.rs`.
 

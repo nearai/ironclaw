@@ -11,6 +11,7 @@ use uuid::Uuid;
 use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
     capability::EffectKind,
+    capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
     mount::MountView,
     resolution::Resolution,
@@ -20,8 +21,7 @@ use ironclaw_host_api::{
     scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    HostRuntime, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
@@ -254,6 +254,18 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        self.create_capability_port_with_surface_policy(
+            run_context,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        )
+        .await
+    }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
         let skill_mounts = scoped_skill_management_mount_view(&resource_scope)
             .map_err(host_api_agent_loop_error)?;
@@ -266,6 +278,7 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
+            surface_policy,
             fallback_user_id: self.fallback_user_id.clone(),
             policy: Arc::clone(&self.policy),
             workspace_mounts,
@@ -1131,6 +1144,7 @@ struct VisibleCapabilityInputs<'a> {
     memory_mounts: &'a MountView,
     system_extensions_lifecycle_mounts: &'a MountView,
     policy: &'a BuiltinCapabilityPolicy,
+    surface_policy: &'a CapabilitySurfacePolicy,
     extension_surface: &'a ExtensionCapabilitySurface,
 }
 
@@ -1222,7 +1236,7 @@ fn visible_capability_request(
         context,
         SurfaceKind::new("agent_loop").map_err(host_api_agent_loop_error)?,
     )
-    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_policy(inputs.surface_policy.clone())
     .with_provider_trust(provider_trust))
 }
 

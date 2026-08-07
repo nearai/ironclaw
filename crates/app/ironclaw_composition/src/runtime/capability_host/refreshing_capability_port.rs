@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, UserId},
     mount::MountView,
     resolution::{Resolution, ResolutionBatch},
@@ -44,6 +45,7 @@ use super::{
 pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
     pub(super) run_context: LoopRunContext,
+    pub(super) surface_policy: Arc<CapabilitySurfacePolicy>,
     pub(super) fallback_user_id: UserId,
     pub(super) policy: Arc<BuiltinCapabilityPolicy>,
     pub(super) workspace_mounts: MountView,
@@ -101,6 +103,7 @@ pub(crate) async fn create_refreshing_capability_port(
     let port = Arc::new(RefreshingCapabilityPort {
         runtime: config.runtime,
         run_context: config.run_context,
+        surface_policy: config.surface_policy,
         fallback_user_id: config.fallback_user_id,
         policy: config.policy,
         workspace_mounts: config.workspace_mounts,
@@ -141,6 +144,7 @@ pub(crate) async fn create_refreshing_capability_port(
 struct RefreshingCapabilityPort {
     runtime: Arc<dyn HostRuntime>,
     run_context: LoopRunContext,
+    surface_policy: Arc<CapabilitySurfacePolicy>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
     workspace_mounts: MountView,
@@ -187,6 +191,7 @@ impl RefreshingCapabilityPort {
                 memory_mounts: &self.memory_mounts,
                 system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
                 policy: &self.policy,
+                surface_policy: &self.surface_policy,
                 extension_surface: &extension_surface,
             },
         )?;
@@ -479,6 +484,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     let crate::test_support::RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
+        surface_policy,
         fallback_user_id,
         workspace_mounts,
         skill_mounts,
@@ -526,6 +532,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     create_refreshing_capability_port(RefreshingCapabilityPortConfig {
         runtime,
         run_context,
+        surface_policy: Arc::new(surface_policy),
         fallback_user_id,
         policy,
         workspace_mounts,

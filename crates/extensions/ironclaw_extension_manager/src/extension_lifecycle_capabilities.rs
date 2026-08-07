@@ -884,6 +884,7 @@ mod tests {
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
+    use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
     use ironclaw_host_api::{
         action::{NetworkPolicy, NetworkTargetPattern},
         capability::{
@@ -898,8 +899,7 @@ mod tests {
         scope::{ExecutionContext, Principal},
     };
     use ironclaw_host_runtime::{
-        CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest, VisibleCapabilitySurface,
     };
     use ironclaw_trust::{
         AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustPolicy, TrustProvenance,

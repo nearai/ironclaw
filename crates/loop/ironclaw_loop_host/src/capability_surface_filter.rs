@@ -1,33 +1,29 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     ids::CapabilityId,
     resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-    CapabilityDeniedReasonKind, CapabilitySurfaceProfileId, LoopCapabilityPort, LoopRequest,
-    LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, resolution,
+    CapabilityDeniedReasonKind, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    resolution,
 };
 use ironclaw_turns::CapabilityActivityId;
 
-use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
+use crate::capability_info;
 
 #[derive(Clone)]
-pub struct CapabilitySurfaceProfileFilter {
+pub struct CapabilitySurfacePolicyFilter {
     inner: Arc<dyn LoopCapabilityPort>,
-    allow_set: Arc<CapabilityAllowSet>,
-    /// Host-synthesized capability ids that bypass `allow_set` narrowing
-    /// (e.g. tool-disclosure bridge meta-tools), mirroring `capability_info`'s
-    /// implicit pass-through. Empty via `new()`; composition root supplies
-    /// them via `with_host_exempt_capability_ids` (#5647).
-    host_exempt_capability_ids: Arc<BTreeSet<CapabilityId>>,
+    policy: Arc<CapabilitySurfacePolicy>,
     staged_invocations: Arc<Mutex<HashMap<StagedInvocationKey, Vec<CapabilityId>>>>,
 }
 
@@ -46,27 +42,17 @@ struct StagedInvocationKey {
     input_ref: String,
 }
 
-impl CapabilitySurfaceProfileFilter {
-    pub fn new(inner: Arc<dyn LoopCapabilityPort>, allow_set: Arc<CapabilityAllowSet>) -> Self {
+impl CapabilitySurfacePolicyFilter {
+    pub fn new(inner: Arc<dyn LoopCapabilityPort>, policy: Arc<CapabilitySurfacePolicy>) -> Self {
         Self {
             inner,
-            allow_set,
-            host_exempt_capability_ids: Arc::new(BTreeSet::new()),
+            policy,
             staged_invocations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn with_host_exempt_capability_ids(
-        mut self,
-        ids: impl IntoIterator<Item = CapabilityId>,
-    ) -> Self {
-        self.host_exempt_capability_ids = Arc::new(ids.into_iter().collect());
-        self
-    }
-
     fn permits(&self, capability_id: &CapabilityId) -> bool {
-        self.allow_set.permits(capability_id)
-            || self.host_exempt_capability_ids.contains(capability_id)
+        self.policy.permits_capability_id(capability_id)
     }
 }
 
@@ -148,7 +134,7 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
-        apply_visible_filter_to_surface(&mut surface, &self.visible_capability_ids);
+        apply_policy_filter_to_surface(&mut surface, |capability_id| self.permits(capability_id));
         Ok(surface)
     }
 
@@ -184,40 +170,8 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
     }
 }
 
-/// Removes a fixed set of capability ids from the model-facing surface and
-/// rejects any attempt to invoke them.
-///
-/// Unlike [`CapabilitySurfaceProfileFilter`] (which narrows to a profile
-/// allow-set and is a no-op for [`CapabilityAllowSet::All`]), this is an
-/// explicit deny list that takes effect regardless of the resolved allow-set.
-/// It is the canonical way to disable an individual capability as an explicit
-/// composition decision rather than a profile-scoped narrowing.
-#[derive(Clone)]
-pub struct CapabilitySurfaceDenyFilter {
-    inner: Arc<dyn LoopCapabilityPort>,
-    denied_capability_ids: Arc<HashSet<CapabilityId>>,
-    staged_invocations: Arc<Mutex<HashMap<StagedInvocationKey, Vec<CapabilityId>>>>,
-}
-
-impl CapabilitySurfaceDenyFilter {
-    pub fn new(
-        inner: Arc<dyn LoopCapabilityPort>,
-        denied_capability_ids: impl IntoIterator<Item = CapabilityId>,
-    ) -> Self {
-        Self {
-            inner,
-            denied_capability_ids: Arc::new(denied_capability_ids.into_iter().collect()),
-            staged_invocations: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn permits(&self, capability_id: &CapabilityId) -> bool {
-        !self.denied_capability_ids.contains(capability_id)
-    }
-}
-
 #[async_trait]
-impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
+impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         definitions.retain(|definition| {
@@ -236,7 +190,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
             &self.inner,
             tool_call,
             |capability_id| self.permits(capability_id),
-            "provider tool call targets a disabled capability",
+            "provider tool call is outside the resolved capability surface",
         )
     }
 
@@ -247,7 +201,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
         validate_provider_tool_call_capability_scope(
             self.inner.provider_tool_call_capability_ids(tool_call)?,
             |capability_id| self.permits(capability_id),
-            "provider tool call targets a disabled capability",
+            "provider tool call is outside the resolved capability surface",
         )?;
         self.inner.validate_provider_tool_call(tool_call)
     }
@@ -260,13 +214,13 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
             self.inner
                 .provider_tool_call_capability_ids(&request.tool_call)?,
             |capability_id| self.permits(capability_id),
-            "provider tool call targets a disabled capability",
+            "provider tool call is outside the resolved capability surface",
         )?;
         let candidate = self.inner.register_provider_tool_call(request).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.permits(capability_id),
-            "provider tool call targets a disabled capability",
+            "provider tool call is outside the resolved capability surface",
         )?;
         record_staged_invocation(&self.staged_invocations, &candidate)?;
         Ok(candidate)
@@ -277,167 +231,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
-        surface.descriptors.retain(|descriptor| {
-            provider_capability_permitted(&descriptor.capability_id, |capability_id| {
-                self.permits(capability_id)
-            })
-        });
-        Ok(surface)
-    }
-
-    async fn invoke_capability(
-        &self,
-        request: LoopRequest,
-    ) -> Result<Resolution, AgentLoopHostError> {
-        if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
-            self.permits(capability_id)
-        })? {
-            return Ok(model_view_denied_outcome());
-        }
-        self.inner.invoke_capability(request).await
-    }
-
-    async fn invoke_capability_batch(
-        &self,
-        request: LoopRequestBatch,
-    ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        invoke_filtered_batch(
-            &*self.inner,
-            request,
-            |invocation| {
-                invocation_capability_permitted(
-                    &self.staged_invocations,
-                    invocation,
-                    |capability_id| self.permits(capability_id),
-                )
-            },
-            model_view_denied_outcome,
-        )
-        .await
-    }
-}
-
-/// Applies a global deny list to every resolved profile, plus additional
-/// deny lists scoped to specific [`CapabilitySurfaceProfileId`]s. Reusable,
-/// composition-agnostic: callers supply which capability ids are denied for
-/// which profile; this type has no knowledge of what those profiles or
-/// capabilities mean. See [`CapabilitySurfaceDenyFilter`] for the underlying
-/// deny mechanism this composes.
-pub struct PerSurfaceCapabilityDenyDecorator {
-    global_denied: Vec<CapabilityId>,
-    per_surface_denied: Vec<(CapabilitySurfaceProfileId, Vec<CapabilityId>)>,
-}
-
-impl PerSurfaceCapabilityDenyDecorator {
-    pub fn new(
-        global_denied: Vec<CapabilityId>,
-        per_surface_denied: Vec<(CapabilitySurfaceProfileId, Vec<CapabilityId>)>,
-    ) -> Self {
-        Self {
-            global_denied,
-            per_surface_denied,
-        }
-    }
-}
-
-impl LoopCapabilityPortDecorator for PerSurfaceCapabilityDenyDecorator {
-    fn decorate(
-        &self,
-        run_context: &LoopRunContext,
-        inner: Arc<dyn LoopCapabilityPort>,
-    ) -> Arc<dyn LoopCapabilityPort> {
-        let mut denied = self.global_denied.clone();
-        let profile_id = &run_context
-            .resolved_run_profile
-            .capability_surface_profile_id;
-        for (id, ids) in &self.per_surface_denied {
-            if id == profile_id {
-                denied.extend(ids.iter().cloned());
-            }
-        }
-        if denied.is_empty() {
-            inner
-        } else {
-            Arc::new(CapabilitySurfaceDenyFilter::new(inner, denied))
-        }
-    }
-}
-
-#[async_trait]
-impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
-    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        if matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            return self.inner.tool_definitions();
-        }
-        let mut definitions = self.inner.tool_definitions()?;
-        definitions.retain(|definition| {
-            provider_capability_permitted(&definition.capability_id, |capability_id| {
-                self.permits(capability_id)
-            })
-        });
-        Ok(definitions)
-    }
-
-    fn provider_tool_call_capability_ids(
-        &self,
-        tool_call: &ProviderToolCall,
-    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        delegate_and_scope_tool_call_capability_ids(
-            &self.inner,
-            tool_call,
-            |capability_id| self.permits(capability_id),
-            "provider tool call is outside the run-profile surface",
-        )
-    }
-
-    fn validate_provider_tool_call(
-        &self,
-        tool_call: &ProviderToolCall,
-    ) -> Result<(), AgentLoopHostError> {
-        if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            validate_provider_tool_call_capability_scope(
-                self.inner.provider_tool_call_capability_ids(tool_call)?,
-                |capability_id| self.permits(capability_id),
-                "provider tool call is outside the run-profile surface",
-            )?;
-        }
-        self.inner.validate_provider_tool_call(tool_call)
-    }
-
-    async fn register_provider_tool_call(
-        &self,
-        request: RegisterProviderToolCallRequest,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            validate_provider_tool_call_capability_scope(
-                self.inner
-                    .provider_tool_call_capability_ids(&request.tool_call)?,
-                |capability_id| self.permits(capability_id),
-                "provider tool call is outside the run-profile surface",
-            )?;
-        }
-        let candidate = self.inner.register_provider_tool_call(request).await?;
-        validate_provider_tool_call_capability_scope(
-            candidate_capability_ids(&candidate),
-            |capability_id| self.permits(capability_id),
-            "provider tool call is outside the run-profile surface",
-        )?;
-        record_staged_invocation(&self.staged_invocations, &candidate)?;
-        Ok(candidate)
-    }
-
-    async fn visible_capabilities(
-        &self,
-        request: VisibleCapabilityRequest,
-    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
-        if matches!(self.allow_set.as_ref(), CapabilityAllowSet::Allowlist(_)) {
-            surface.descriptors.retain(|descriptor| {
-                provider_capability_permitted(&descriptor.capability_id, |capability_id| {
-                    self.permits(capability_id)
-                })
-            });
-        }
+        apply_policy_filter_to_surface(&mut surface, |capability_id| self.permits(capability_id));
         Ok(surface)
     }
 
@@ -457,10 +251,6 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        if matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            return self.inner.invoke_capability_batch(request).await;
-        }
-
         invoke_filtered_batch(
             &*self.inner,
             request,
@@ -486,6 +276,7 @@ async fn invoke_filtered_batch(
     let mut slots: Vec<Option<Resolution>> = Vec::with_capacity(request.invocations.len());
     let mut allowed = Vec::new();
     let mut allowed_idx = Vec::new();
+    let stop_on_first_suspension = request.stop_on_first_suspension;
 
     for (index, invocation) in request.invocations.iter().enumerate() {
         if permits(invocation)? {
@@ -513,6 +304,20 @@ async fn invoke_filtered_batch(
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "capability surface filter received too many inner outcomes",
+        ));
+    }
+    if stopped_on_suspension
+        && (!stop_on_first_suspension || !inner_outcomes.last().is_some_and(Resolution::parks))
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "capability surface filter received invalid inner suspension state",
+        ));
+    }
+    if !stopped_on_suspension && inner_outcomes.len() < allowed_idx.len() {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "capability surface filter received too few inner outcomes without suspension",
         ));
     }
 
@@ -552,15 +357,17 @@ async fn invoke_filtered_batch(
     })
 }
 
-fn apply_visible_filter_to_surface(
+fn apply_policy_filter_to_surface(
     surface: &mut VisibleCapabilitySurface,
-    visible_capability_ids: &HashSet<CapabilityId>,
+    permits: impl Fn(&CapabilityId) -> bool,
 ) {
-    surface.descriptors.retain(|descriptor| {
-        provider_capability_permitted(&descriptor.capability_id, |capability_id| {
-            visible_capability_ids.contains(capability_id)
-        })
-    });
+    surface
+        .descriptors
+        .retain(|descriptor| provider_capability_permitted(&descriptor.capability_id, &permits));
+    if let Some(callable_capability_ids) = surface.callable_capability_ids.as_mut() {
+        callable_capability_ids
+            .retain(|capability_id| provider_capability_permitted(capability_id, &permits));
+    }
 }
 
 /// Resolve `provider_tool_call_capability_ids` through the inner port, then
@@ -571,8 +378,8 @@ fn apply_visible_filter_to_surface(
 /// `self.tool_definitions()` — the decorator's *already-narrowed* advertised
 /// surface — and so rejects deferred/disclosed tools before the inner
 /// tool-disclosure forgiving path can resolve them. This helper is the one copy
-/// of that "delegate down, then apply my scope" skeleton shared by the visible,
-/// deny, and profile filters.
+/// of that "delegate down, then apply my scope" skeleton shared by the
+/// per-model visible snapshot and resolved-policy filters.
 fn delegate_and_scope_tool_call_capability_ids(
     inner: &Arc<dyn LoopCapabilityPort>,
     tool_call: &ProviderToolCall,
@@ -737,21 +544,15 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_host_api::{
-        ids::{CapabilityId, ProviderToolName, TenantId, ThreadId},
+        ids::{CapabilityId, ProviderToolName},
         resolution::Blocked,
         runtime::RuntimeKind,
     };
-    use ironclaw_loop_contracts::{AgentLoopDriverDescriptor, RunClassId, RunProfileFingerprint};
     use ironclaw_loop_contracts::{
-        CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
-        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
-        LoopDriverId, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RuntimeProfileConstraints,
-        SchedulingClass, SteeringPolicy, resolution,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
+        resolution,
     };
-    use ironclaw_turns::{
-        LoopGateRef, LoopResultRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
-    };
+    use ironclaw_turns::{LoopGateRef, LoopResultRef};
 
     use super::*;
 
@@ -1007,10 +808,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visible_capabilities_filters_descriptors() {
+    async fn visible_capabilities_filters_descriptors_and_callable_ids() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            callable_capability_ids: None,
+            callable_capability_ids: Some(vec![
+                capability_id("demo.a"),
+                capability_id("demo.b"),
+                capability_id("demo.d"),
+            ]),
             version: surface_version(),
             descriptors: vec![
                 descriptor("demo.a"),
@@ -1020,9 +825,9 @@ mod tests {
                 descriptor("demo.e"),
             ],
         });
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner,
-            Arc::new(CapabilityAllowSet::allowlist([
+            Arc::new(CapabilitySurfacePolicy::allow_only([
                 capability_id("demo.b"),
                 capability_id("demo.d"),
             ])),
@@ -1042,6 +847,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["demo.b", "demo.d"]
         );
+        assert_eq!(
+            surface.callable_capability_ids,
+            Some(vec![capability_id("demo.b"), capability_id("demo.d")])
+        );
     }
 
     #[test]
@@ -1055,9 +864,9 @@ mod tests {
             provider_definition("demo.denied", "demo__denied"),
             provider_definition("demo.other_allowed", "demo__other_allowed"),
         ];
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner,
-            Arc::new(CapabilityAllowSet::allowlist([
+            Arc::new(CapabilitySurfacePolicy::allow_only([
                 capability_id("demo.allowed"),
                 capability_id("demo.other_allowed"),
             ])),
@@ -1088,9 +897,9 @@ mod tests {
             provider_definition("demo.allowed", "demo__allowed"),
             provider_definition("demo.denied", "demo__denied"),
         ];
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner,
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1109,49 +918,6 @@ mod tests {
         );
     }
 
-    /// #5647: host-exempt ids (bridge meta-tools) bypass the allowlist for
-    /// definitions AND invocation, without admitting any non-exempt id.
-    #[tokio::test]
-    async fn host_exempt_ids_bypass_allowlist_without_widening_it() {
-        let inner = Arc::new(SpyPort::default());
-        *inner
-            .tool_definitions
-            .lock()
-            .expect("tool definitions lock") = vec![
-            provider_definition("ironclaw.tool_search", "tool_search"),
-            provider_definition("demo.allowed", "demo__allowed"),
-            provider_definition("demo.denied", "demo__denied"),
-        ];
-        let filter = CapabilitySurfaceProfileFilter::new(
-            inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
-                "demo.allowed",
-            )])),
-        )
-        .with_host_exempt_capability_ids([capability_id("ironclaw.tool_search")]);
-
-        let definitions = filter.tool_definitions().expect("tool definitions");
-        assert_eq!(
-            definitions
-                .iter()
-                .map(|definition| definition.capability_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ironclaw.tool_search", "demo.allowed"]
-        );
-
-        let outcome = filter
-            .invoke_capability(invocation("ironclaw.tool_search", "input:bridge"))
-            .await
-            .expect("outcome");
-        assert!(matches!(outcome, Resolution::Done(_)));
-
-        let outcome = filter
-            .invoke_capability(invocation("demo.denied", "input:denied"))
-            .await
-            .expect("outcome");
-        assert_eq!(denied_reason(&outcome), Some("surface_profile_denied"));
-    }
-
     #[tokio::test]
     async fn visible_capabilities_preserve_capability_info_for_filtered_surface() {
         let inner = Arc::new(SpyPort::default());
@@ -1164,9 +930,9 @@ mod tests {
                 descriptor("demo.denied"),
             ],
         });
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner,
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1189,9 +955,9 @@ mod tests {
     #[tokio::test]
     async fn invoke_denied_when_not_in_allowlist() {
         let inner = Arc::new(SpyPort::default());
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1221,9 +987,9 @@ mod tests {
             provider_definition("demo.allowed", "demo__allowed"),
             provider_definition("demo.denied", "demo__denied"),
         ];
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1264,9 +1030,9 @@ mod tests {
                 provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1315,9 +1081,9 @@ mod tests {
                 capability_info::CAPABILITY_ID,
                 "demo.denied",
             ]));
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1343,9 +1109,9 @@ mod tests {
     #[tokio::test]
     async fn capability_info_invocation_requires_staged_effective_target() {
         let inner = Arc::new(SpyPort::default());
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1391,9 +1157,9 @@ mod tests {
                 capability_info::CAPABILITY_ID,
                 "demo.allowed",
             ]));
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1445,9 +1211,9 @@ mod tests {
                 capability_info::CAPABILITY_ID,
                 "demo.allowed",
             ]));
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1557,9 +1323,9 @@ mod tests {
                 provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1661,9 +1427,9 @@ mod tests {
                 resolutions: vec![completed("result:first"), completed("result:second")],
                 stopped_on_suspension: false,
             });
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([
+            Arc::new(CapabilitySurfacePolicy::allow_only([
                 capability_id("demo.first"),
                 capability_id("demo.second"),
             ])),
@@ -1682,10 +1448,20 @@ mod tests {
             .expect("batch outcome");
 
         assert_eq!(outcome.resolutions.len(), 3);
+        assert!(matches!(
+            &outcome.resolutions[0],
+            Resolution::Done(outcome)
+                if outcome.refs.origin.as_ref().is_some_and(|origin| origin.as_str() == "result:first")
+        ));
         assert_eq!(
             denied_reason(&outcome.resolutions[1]),
             Some("surface_profile_denied")
         );
+        assert!(matches!(
+            &outcome.resolutions[2],
+            Resolution::Done(outcome)
+                if outcome.refs.origin.as_ref().is_some_and(|origin| origin.as_str() == "result:second")
+        ));
         let batches = inner.batches.lock().expect("batch lock");
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].invocations.len(), 2);
@@ -1700,16 +1476,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn short_inner_outcomes_without_suspension_are_rejected() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
+                resolutions: vec![completed("result:first")],
+                stopped_on_suspension: false,
+            });
+        let filter = CapabilitySurfacePolicyFilter::new(
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_only([
+                capability_id("demo.first"),
+                capability_id("demo.second"),
+            ])),
+        );
+
+        let error = filter
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![
+                    invocation("demo.first", "input:first"),
+                    invocation("demo.second", "input:second"),
+                ],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect_err("short non-suspended outcomes violate the inner port contract");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface filter received too few inner outcomes without suspension"
+        );
+    }
+
+    #[tokio::test]
     async fn partial_inner_outcomes_truncate_correctly() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
             Some(ironclaw_host_api::resolution::ResolutionBatch {
-                resolutions: vec![completed("result:first"), completed("result:second")],
+                resolutions: vec![completed("result:first"), approval_required("gate:second")],
                 stopped_on_suspension: true,
             });
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner,
-            Arc::new(CapabilityAllowSet::allowlist([
+            Arc::new(CapabilitySurfacePolicy::allow_only([
                 capability_id("demo.first"),
                 capability_id("demo.second"),
                 capability_id("demo.third"),
@@ -1738,6 +1548,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inner_suspension_without_requested_early_stop_is_rejected() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
+                resolutions: vec![approval_required("gate:first")],
+                stopped_on_suspension: true,
+            });
+        let filter = CapabilitySurfacePolicyFilter::new(
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_only([
+                capability_id("demo.first"),
+                capability_id("demo.second"),
+            ])),
+        );
+
+        let error = filter
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![
+                    invocation("demo.first", "input:first"),
+                    invocation("demo.second", "input:second"),
+                ],
+                stop_on_first_suspension: false,
+            })
+            .await
+            .expect_err("inner suspension requires a caller-requested early stop");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface filter received invalid inner suspension state"
+        );
+    }
+
+    #[tokio::test]
+    async fn inner_suspension_requires_a_final_parking_resolution() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
+                resolutions: vec![completed("result:first")],
+                stopped_on_suspension: true,
+            });
+        let filter = CapabilitySurfacePolicyFilter::new(
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_only([
+                capability_id("demo.first"),
+                capability_id("demo.second"),
+            ])),
+        );
+
+        let error = filter
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![
+                    invocation("demo.first", "input:first"),
+                    invocation("demo.second", "input:second"),
+                ],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect_err("inner suspension must end with a parking resolution");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface filter received invalid inner suspension state"
+        );
+    }
+
+    #[tokio::test]
     async fn stopped_inner_batch_truncates_denials_after_last_allowed_outcome() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
@@ -1745,9 +1623,11 @@ mod tests {
                 resolutions: vec![approval_required("gate:first")],
                 stopped_on_suspension: true,
             });
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([capability_id("demo.first")])),
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
+                "demo.first",
+            )])),
         );
 
         let outcome = filter
@@ -1781,9 +1661,9 @@ mod tests {
             version: surface_version(),
             descriptors: vec![descriptor("demo.allowed"), descriptor("demo.denied")],
         });
-        let filter = CapabilitySurfaceProfileFilter::new(
+        let filter = CapabilitySurfacePolicyFilter::new(
             inner,
-            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+            Arc::new(CapabilitySurfacePolicy::allow_only([capability_id(
                 "demo.allowed",
             )])),
         );
@@ -1856,373 +1736,6 @@ mod tests {
             .provider_tool_call_capability_ids(&provider_call("demo__hidden"))
             .expect_err("non-visible tool is rejected");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    // ── CapabilitySurfaceDenyFilter tests ────────────────────────────────────
-
-    #[test]
-    fn deny_filter_delegates_provider_tool_call_resolution_to_inner() {
-        // Regression (merge of tool-disclosure + spawn-disable deny filter): the
-        // gateway pre-check calls `provider_tool_call_capability_ids` on whatever
-        // port it holds. If the deny filter fell back to the LoopCapabilityPort
-        // default (which only searches its OWN deny-filtered `tool_definitions`),
-        // every deferred/disclosed tool would be rejected before the inner
-        // forgiving port could resolve it — re-introducing "outside the visible
-        // capability surface". The deny filter must delegate to inner, then apply
-        // only the deny-scope check.
-        let inner = Arc::new(SpyPort::default());
-        // A deferred tool the inner port can RESOLVE but that is NOT advertised.
-        inner
-            .provider_call_capability_ids
-            .lock()
-            .expect("provider call capability ids lock")
-            .insert(
-                provider_name("demo__deferred"),
-                provider_call_capability_ids(&["demo.deferred"]),
-            );
-        let filter = CapabilitySurfaceDenyFilter::new(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            [capability_id("builtin.spawn_subagent")],
-        );
-
-        // A non-denied deferred tool resolves through the inner forgiving path.
-        let resolved = filter
-            .provider_tool_call_capability_ids(&provider_call("demo__deferred"))
-            .expect("non-denied deferred tool resolves through the inner forgiving path");
-        assert_eq!(
-            resolved.provider_capability_id,
-            capability_id("demo.deferred")
-        );
-
-        // A call resolving to a DENIED capability is still rejected.
-        inner
-            .provider_call_capability_ids
-            .lock()
-            .expect("provider call capability ids lock")
-            .insert(
-                provider_name("builtin__spawn_subagent"),
-                provider_call_capability_ids(&["builtin.spawn_subagent"]),
-            );
-        let error = filter
-            .provider_tool_call_capability_ids(&provider_call("builtin__spawn_subagent"))
-            .expect_err("a call targeting a disabled capability is rejected");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
-    fn deny_filter_strips_denied_tool_definitions() {
-        let inner = Arc::new(SpyPort::default());
-        *inner
-            .tool_definitions
-            .lock()
-            .expect("tool definitions lock") = vec![
-            provider_definition("builtin.spawn_subagent", "builtin__spawn_subagent"),
-            provider_definition("builtin.echo", "builtin__echo"),
-        ];
-        let filter =
-            CapabilitySurfaceDenyFilter::new(inner, [capability_id("builtin.spawn_subagent")]);
-
-        let definitions = filter.tool_definitions().expect("tool definitions");
-
-        assert_eq!(
-            definitions
-                .iter()
-                .map(|definition| (definition.capability_id.as_str(), definition.name.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("builtin.echo", "builtin__echo")]
-        );
-    }
-
-    #[tokio::test]
-    async fn deny_filter_strips_denied_visible_descriptors() {
-        let inner = Arc::new(SpyPort::default());
-        *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            callable_capability_ids: None,
-            version: surface_version(),
-            descriptors: vec![
-                descriptor("builtin.spawn_subagent"),
-                descriptor("builtin.echo"),
-            ],
-        });
-        let filter =
-            CapabilitySurfaceDenyFilter::new(inner, [capability_id("builtin.spawn_subagent")]);
-
-        let surface = filter
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("surface");
-
-        assert_eq!(surface.version, surface_version());
-        assert_eq!(
-            surface
-                .descriptors
-                .iter()
-                .map(|descriptor| descriptor.capability_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["builtin.echo"]
-        );
-    }
-
-    #[tokio::test]
-    async fn deny_filter_rejects_provider_tool_call_for_denied_capability() {
-        let inner = Arc::new(SpyPort::default());
-        *inner
-            .tool_definitions
-            .lock()
-            .expect("tool definitions lock") = vec![
-            provider_definition("builtin.spawn_subagent", "builtin__spawn_subagent"),
-            provider_definition("builtin.echo", "builtin__echo"),
-        ];
-        let filter = CapabilitySurfaceDenyFilter::new(
-            inner.clone(),
-            [capability_id("builtin.spawn_subagent")],
-        );
-
-        let error = filter
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                "builtin__spawn_subagent",
-            )))
-            .await
-            .expect_err("denied provider call should fail before staging");
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-        assert!(
-            inner
-                .provider_calls
-                .lock()
-                .expect("provider calls lock")
-                .is_empty()
-        );
-
-        // Allowed call succeeds and reaches the inner port.
-        filter
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                "builtin__echo",
-            )))
-            .await
-            .expect("allowed provider call should succeed");
-        assert_eq!(
-            inner
-                .provider_calls
-                .lock()
-                .expect("provider calls lock")
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn deny_filter_denies_invoke_of_denied_capability() {
-        let inner = Arc::new(SpyPort::default());
-        let filter = CapabilitySurfaceDenyFilter::new(
-            inner.clone(),
-            [capability_id("builtin.spawn_subagent")],
-        );
-
-        let outcome = filter
-            .invoke_capability(invocation("builtin.spawn_subagent", "input:denied"))
-            .await
-            .expect("outcome");
-
-        assert_eq!(denied_reason(&outcome), Some("model_view_denied"));
-        assert!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocation lock")
-                .is_empty()
-        );
-
-        // Allowed id passes through to inner.
-        let allowed_outcome = filter
-            .invoke_capability(invocation("builtin.echo", "input:allowed"))
-            .await
-            .expect("outcome");
-
-        assert!(
-            matches!(allowed_outcome, Resolution::Done(_)),
-            "allowed capability should complete"
-        );
-        assert_eq!(inner.invocations.lock().expect("invocation lock").len(), 1);
-    }
-
-    // ── PerSurfaceCapabilityDenyDecorator ─────────────────────────────────────
-
-    fn run_context_with_capability_surface_profile_id(profile_id: &str) -> LoopRunContext {
-        let scope = TurnScope::new(
-            TenantId::new("tenant-per-surface").unwrap(),
-            None,
-            None,
-            ThreadId::new("thread-per-surface").unwrap(),
-        );
-        let descriptor = AgentLoopDriverDescriptor {
-            id: LoopDriverId::new("per_surface_test").unwrap(),
-            version: RunProfileVersion::new(1),
-            checkpoint_schema_id: Some(CheckpointSchemaId::new("per_surface_chk").unwrap()),
-            checkpoint_schema_version: Some(RunProfileVersion::new(1)),
-        };
-        let profile = ResolvedRunProfile {
-            run_class_id: RunClassId::new("per_surface").unwrap(),
-            profile_id: RunProfileId::default_profile(),
-            profile_version: RunProfileVersion::new(1),
-            loop_driver: descriptor.clone(),
-            checkpoint_schema_id: descriptor.checkpoint_schema_id.unwrap(),
-            checkpoint_schema_version: descriptor.checkpoint_schema_version.unwrap(),
-            model_profile_id: ModelProfileId::new("per_surface_model").unwrap(),
-            capability_surface_profile_id: CapabilitySurfaceProfileId::new(profile_id).unwrap(),
-            context_profile_id: ContextProfileId::new("per_surface_ctx").unwrap(),
-            steering_policy: SteeringPolicy {
-                allow_steering: false,
-                allow_interrupt: true,
-                allow_driver_specific_nudges: false,
-            },
-            cancellation_policy: CancellationPolicy {
-                allow_cancel: true,
-                require_checkpoint_before_cancel: false,
-            },
-            checkpoint_policy: CheckpointPolicy {
-                require_before_model: false,
-                require_before_side_effect: false,
-                require_before_block: true,
-                max_checkpoint_bytes: 64 * 1024,
-                require_final_checkpoint: false,
-                allow_no_reply_completion: false,
-            },
-            resource_budget_policy: ResourceBudgetPolicy {
-                tier: ResourceBudgetTier::new("per_surface_tier").unwrap(),
-                max_model_calls: 32,
-                max_capability_invocations: 64,
-            },
-            personal_context_policy: PersonalContextPolicy::Excluded,
-            runtime_constraints: RuntimeProfileConstraints {
-                allow_raw_runtime_backend_selection: false,
-                allow_broad_capability_surface: false,
-            },
-            runner_pool_id: None,
-            scheduling_class: SchedulingClass::new("interactive").unwrap(),
-            concurrency_class: ConcurrencyClass::new("thread_serial").unwrap(),
-            resolution_fingerprint: RunProfileFingerprint::new("per-surface-fp").unwrap(),
-            provenance: RedactedRunProfileProvenance {
-                sources: vec![],
-                effective_privileges: vec![],
-            },
-        };
-        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile)
-    }
-
-    fn spy_port_with_surface(descriptors: Vec<&str>) -> Arc<SpyPort> {
-        let port = Arc::new(SpyPort::default());
-        *port.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            version: surface_version(),
-            descriptors: descriptors.into_iter().map(descriptor).collect(),
-            callable_capability_ids: None,
-        });
-        port
-    }
-
-    async fn visible_ids(port: &Arc<dyn LoopCapabilityPort>) -> Vec<String> {
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible capabilities")
-            .descriptors
-            .into_iter()
-            .map(|descriptor| descriptor.capability_id.as_str().to_string())
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn per_surface_deny_decorator_applies_global_deny_regardless_of_profile() {
-        let inner: Arc<dyn LoopCapabilityPort> =
-            spy_port_with_surface(vec!["demo.a", "demo.b", "demo.c"]);
-        let decorator =
-            PerSurfaceCapabilityDenyDecorator::new(vec![capability_id("demo.b")], Vec::new());
-
-        let decorated = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("any_surface"),
-            Arc::clone(&inner),
-        );
-
-        let ids = visible_ids(&decorated).await;
-        assert_eq!(ids, vec!["demo.a", "demo.c"]);
-    }
-
-    #[tokio::test]
-    async fn per_surface_deny_decorator_applies_scoped_deny_only_for_matching_profile() {
-        let inner: Arc<dyn LoopCapabilityPort> = spy_port_with_surface(vec!["demo.a", "demo.b"]);
-        let decorator = PerSurfaceCapabilityDenyDecorator::new(
-            Vec::new(),
-            vec![(
-                CapabilitySurfaceProfileId::new("surface_a").unwrap(),
-                vec![capability_id("demo.b")],
-            )],
-        );
-
-        let matching = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_a"),
-            Arc::clone(&inner),
-        );
-        assert_eq!(visible_ids(&matching).await, vec!["demo.a"]);
-
-        let non_matching = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_b"),
-            Arc::clone(&inner),
-        );
-        assert_eq!(visible_ids(&non_matching).await, vec!["demo.a", "demo.b"]);
-    }
-
-    #[tokio::test]
-    async fn per_surface_deny_decorator_returns_inner_unchanged_when_nothing_denied() {
-        let inner: Arc<dyn LoopCapabilityPort> = spy_port_with_surface(vec!["demo.a"]);
-        let decorator = PerSurfaceCapabilityDenyDecorator::new(
-            Vec::new(),
-            vec![(
-                CapabilitySurfaceProfileId::new("surface_a").unwrap(),
-                vec![capability_id("demo.a")],
-            )],
-        );
-
-        // Non-matching profile and empty global deny list: no filtering
-        // applies, so decorate() must return the exact same Arc instance
-        // (no CapabilitySurfaceDenyFilter wrapper allocated).
-        let decorated = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_b"),
-            Arc::clone(&inner),
-        );
-        assert!(
-            Arc::ptr_eq(&inner, &decorated),
-            "expected the exact inner Arc to be returned unchanged"
-        );
-    }
-
-    #[tokio::test]
-    async fn per_surface_deny_decorator_only_matching_entry_among_several_applies() {
-        let inner: Arc<dyn LoopCapabilityPort> =
-            spy_port_with_surface(vec!["demo.a", "demo.b", "demo.c"]);
-        let decorator = PerSurfaceCapabilityDenyDecorator::new(
-            Vec::new(),
-            vec![
-                (
-                    CapabilitySurfaceProfileId::new("surface_a").unwrap(),
-                    vec![capability_id("demo.a")],
-                ),
-                (
-                    CapabilitySurfaceProfileId::new("surface_b").unwrap(),
-                    vec![capability_id("demo.b")],
-                ),
-                (
-                    CapabilitySurfaceProfileId::new("surface_c").unwrap(),
-                    vec![capability_id("demo.c")],
-                ),
-            ],
-        );
-
-        let decorated = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_b"),
-            Arc::clone(&inner),
-        );
-
-        let ids = visible_ids(&decorated).await;
-        assert_eq!(ids, vec!["demo.a", "demo.c"]);
     }
 }
 // arch-exempt: large_file, capability surface migration remains centralized, plan #6175

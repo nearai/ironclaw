@@ -4,15 +4,16 @@ use ironclaw_assistant::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
     LoopRunContext, PromptMode,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
+    CapabilityWriteResult, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter,
 };
 
 #[derive(Default)]
@@ -84,7 +85,7 @@ impl CapabilitySurfaceProfileResolver for EmptyCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
         static WARNED_EMPTY_PRODUCTION_CAPABILITY_SURFACE: OnceLock<()> = OnceLock::new();
         WARNED_EMPTY_PRODUCTION_CAPABILITY_SURFACE.get_or_init(|| {
             tracing::warn!(
@@ -94,7 +95,7 @@ impl CapabilitySurfaceProfileResolver for EmptyCapabilitySurfaceResolver {
         tracing::debug!(
             "production capability surface resolver returned fail-closed empty allowlist"
         );
-        Ok(CapabilityAllowSet::allowlist(Vec::new()))
+        Ok(CapabilitySurfacePolicy::allow_only(Vec::new()))
     }
 }
 

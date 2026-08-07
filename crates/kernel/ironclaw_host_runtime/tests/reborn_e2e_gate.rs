@@ -23,6 +23,7 @@ use ironclaw_extension_registry::{
     ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
@@ -47,8 +48,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,
+    BuiltinObligationServices, CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices,
+    RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
