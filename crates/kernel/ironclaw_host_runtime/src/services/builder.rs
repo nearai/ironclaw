@@ -235,7 +235,7 @@ where
     /// [`FilesystemResourceGovernor`] over the supplied [`ScopedFilesystem`].
     /// Backend choice (libSQL, Postgres, in-memory, local disk) is a property
     /// of the underlying [`RootFilesystem`](ironclaw_filesystem::RootFilesystem);
-    /// see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// see `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,

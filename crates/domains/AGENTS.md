@@ -58,7 +58,7 @@ Two boundary facts that have been gotten wrong before, stated precisely:
   or local-disk — composition chooses backends and mounts
   (`.claude/rules/database.md`; `ScopedFilesystem` is the floor). A
   hand-written SQL backend requires its own ADR; `ironclaw_triggers` under
-  [ADR 0003](../../docs/adr/0003-triggers-keeps-hand-written-sql.md) is the
+  [ADR 0003](../../docs/internal/adr/0003-triggers-keeps-hand-written-sql.md) is the
   family's only such exception, and it still takes admission from
   `ironclaw_libsql_runtime` rather than owning connections.
 - **Authority decisions.** Authorization, approvals, trust ceilings, resource

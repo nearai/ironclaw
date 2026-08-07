@@ -60,7 +60,7 @@ composition holding them is the target state, not debt).
 - **Service-shaped public API** and a reviewed `pub use` wall:
   `composition_public_api_is_service_shaped`,
   `composition_public_pub_use_surface_matches_snapshot` (snapshot:
-  `docs/plans/composition-pubuse.snapshot`),
+  `docs/internal/plans/composition-pubuse.snapshot`),
   `composition_public_pub_use_entries_name_their_consumer` — all in
   `reborn_composition_boundaries.rs`.
 - **No prompt content**: `composition_root_embeds_no_prompt_content` — prompt

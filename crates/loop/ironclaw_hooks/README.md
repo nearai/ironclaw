@@ -38,7 +38,7 @@ composition and `ironclaw_loop_host`'s kernel-facing base.
   `ironclaw_loop_contracts`, `ironclaw_prompt_envelope`,
   `ironclaw_wasm_limiter`. Plus direct `libsql` / `tokio-postgres` drivers for
   the predicate backends — the documented second exception to the filesystem
-  persistence idiom (`docs/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
+  persistence idiom (`docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
 - **Consumed by (2):** `ironclaw_turn_runner` (installs the middleware into
   each claimed run's host) and `ironclaw_composition` (loads/wires).
 - **Never depends on:** `ironclaw_turns` — the dependency direction is the

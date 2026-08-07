@@ -116,7 +116,7 @@ boundary. The current rule is codified in
    `CasExpectation::Any` overwrite; all production store mounts resolve to
    CAS-capable db/in-memory backends (`DiskFilesystem` is byte-only and is
    structurally unreachable from those mounts), so fail-closed is correct.
-   See `docs/plans/2026-06-25-cas-migration.md`.
+   See `docs/internal/plans/2026-06-25-cas-migration.md`.
 
    **Pre-existing lock-free CAS retry loops (illustrative, not exhaustive):**
    several stores predate the `cas_update` helper and still drive their own
@@ -144,7 +144,7 @@ boundary. The current rule is codified in
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.
 
-   See `docs/plans/2026-06-25-cas-migration.md` for the migration tracker.
+   See `docs/internal/plans/2026-06-25-cas-migration.md` for the migration tracker.
 3. **Capabilities are declared, not discovered.** A backend that cannot
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.
