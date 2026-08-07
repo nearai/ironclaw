@@ -2290,7 +2290,7 @@ pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> Submit
 // (enforcement backstop).
 //
 // arch-exempt: large_file, credential preflight contract coverage,
-// plan docs/plans/2026-06-12-approval-invocation-identity.md
+// plan docs/internal/plans/2026-06-12-approval-invocation-identity.md
 
 /// Manifest for a script capability that declares a required runtime credential.
 /// The `required = true` field (default) tells both the pre-flight check and

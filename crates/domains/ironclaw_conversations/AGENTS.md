@@ -1,74 +1,148 @@
-# Agent Map — ironclaw_conversations
+# ironclaw_conversations — working rules
 
-## Start Here
+Orientation (what this crate is, surface, deps, tests) lives in
+[`README.md`](./README.md); the family boundary in
+[`../AGENTS.md`](../AGENTS.md). This file is the canonical crate-local rules —
+consolidated 2026-08-05 from the former `CLAUDE.md` guardrails (now a pointer)
+per `docs/reborn/guidance-conventions.md` rule 1. One correction was made in
+the consolidation: the transcript-boundary rule below used to name
+`InboundConversationService` as the transcript storage boundary, which
+inverted the WS5 rename — the transcript service is `ironclaw_threads`'
+`SessionThreadService`; `InboundConversationService` is *this* crate's
+binding/acceptance service.
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
-- Read `Cargo.toml` for actual dependencies and backend feature shape.
-- Use these neighboring contracts before changing behavior:
-  - `crates/kernel/ironclaw_turns/AGENTS.md` — background only; since 2026-08-04 this
-    crate has **no normal dependency** on it. The seam is the port in
-    `src/turn_submission.rs`, implemented by
-    `crates/app/ironclaw_composition/src/automation/conversation_turn_submitter.rs`.
-  - `crates/domains/ironclaw_threads/CLAUDE.md`
-  - `crates/contracts/ironclaw_extension_contracts/CLAUDE.md` — it declares the external
-    actor/conversation ref pair this crate binds on (added 2026-08-02; the dep
-    arrived with the WS5 unification and this list did not).
-  - `crates/product/ironclaw_assistant/CLAUDE.md`
-  - `docs/reborn/contracts/events-projections.md`
+## Ownership boundary
 
-## What This Crate Owns
+- Own adapter-safe conversation binding and inbound-turn service contracts
+  only: source/reply binding refs, participant checks, message acceptance
+  refs, idempotency semantics, and the durable grammar for external refs
+  (`stored_refs`).
+- Do not parse concrete Slack/Telegram/Web/CLI payloads here. Product/channel
+  adapters normalize protocol payloads before calling these services.
+- Do not persist raw user or assistant message content in turn-facing
+  records. Use content/message refs; durable transcript content belongs to
+  `ironclaw_threads` (`SessionThreadService` / the transcript storage
+  boundary), never to this crate's stores.
+- The external ref pair (`ExternalActorRef` / `ExternalConversationRef`) is
+  declared only in `ironclaw_extension_contracts::external` — declaring either
+  here again fails `reborn_conversations_threads_attachments.rs`, and so does
+  any new type name shared with `ironclaw_threads`.
+- Keep turn-submission inputs canonical: `TurnScope`, `TurnActor`,
+  `AcceptedMessageRef`, `SourceBindingRef`, `ReplyTargetBindingRef` — imported
+  from `ironclaw_host_api::turn`, never through a turn-kernel re-export.
 
-- Adapter-safe conversation binding and inbound-turn service contracts.
-- Source/reply binding refs, participant checks, message acceptance refs, and
-  idempotency semantics — plus the **durable grammar** for external refs
-  (`stored_refs`): write the released spelling
-  `{space_id, conversation_id, thread_id, message_id}`, read either, so the
-  WS5 rename is invisible to storage in both directions and a rollback stays
-  safe.
-  > Corrected 2026-08-02 (Wave 2 docs-truth audit): this read "External
-  > actor/conversation refs, source/reply binding refs, …". The ref **types**
-  > are no longer owned here — WS5 unified them onto
-  > `ironclaw_extension_contracts::external` after finding the two copies were
-  > field-divergent *and* compared differently (this crate's derived `PartialEq`
-  > included the per-event message id; the canonical type excludes the
-  > reply-target hint by hand), so two refs for one route could be equal or
-  > unequal depending on which copy the caller held. Declaring them again here
-  > fails `reborn_conversations_threads_attachments.rs`. What this crate owns is
-  > the record grammar, above.
-- Binding/state-store persistence for conversation binding, accepted-message idempotency, and turn-submission state.
-- Canonical turn-submission inputs: `TurnScope`, `TurnActor`, `AcceptedMessageRef`, `SourceBindingRef`, and `ReplyTargetBindingRef` — all `ironclaw_host_api::turn`'s.
-- The **turn-submission port** (`src/turn_submission.rs`): the one-method
-  `ConversationTurnSubmitter`, its `ConversationTurnSubmission` request, the
-  `ConversationInboundClassification` trust value, and the
-  `TurnSubmissionError` cone. Declared here, implemented by
-  `ironclaw_composition` (WS5 port inversion, 2026-08-04).
+## Binding and route identity
 
-## Do Not Move In Here
+- Binding resolution must fail closed for unpaired actors,
+  unknown/inaccessible threads, invalid refs, participant-policy denials,
+  tenant/adapter-installation mismatches, and delimiter-like external IDs that
+  could collide if flattened into strings.
+- Conversation binding identity excludes per-message external IDs; bind on
+  stable `(space_id, conversation_id, topic_id)` route identity so adapters
+  that include message IDs do not fork canonical threads. `topic_id` is the
+  *channel's* sub-conversation (Slack thread, Telegram topic) and is never an
+  `ironclaw_host_api::ids::ThreadId` — that collision is the naming trap WS5
+  removed. `thread_id` in this crate means the canonical thread, with one
+  deliberate exception: the durable record grammar still spells the route's
+  topic `thread_id` so a rollback can read it (see `stored_refs`, which
+  writes the released spelling and reads either).
+- Source binding refs and reply target binding refs are distinct. Egress
+  paths must validate reply targets against the current external actor/thread
+  before sending, preserving adapter kind, adapter installation, and full
+  external route fields. Reply routes are owner-scoped to the exact external
+  actor pairing key unless the adapter explicitly marks the route
+  shared/group; shared markers may widen existing routes only from direct to
+  shared.
+- Accepted inbound messages must snapshot message-scoped reply targets and
+  route access policy; stable conversation bindings ignore and strip
+  per-message IDs, but egress routing for accepted messages must preserve
+  them. New ingress writes use the canonical binding-level reply ref, not an
+  older message-scoped reply snapshot.
+- Accepted inbound message writes must reject mixed source/reply binding refs
+  that do not belong to the same tenant/thread binding, and reject external
+  route snapshots whose stable identity differs from the binding.
+- Serde deserialization for external ref types must delegate to the same
+  validation rules as constructors.
+- Future durable binding repositories must avoid raw wide composite unique
+  indexes for external route fields; use typed rows plus a collision-resistant
+  digest/indirection key derived from length-prefixed components.
+- Automatic first-contact binding must not trust raw adapter-supplied
+  agent/project scope hints; only host-owned trusted scope passed through
+  `resolve_or_create_binding_with_trusted_scope` may be persisted on automatic
+  bind.
+- Lookup-only binding resolution must not create threads, bindings,
+  route-access widening, external-event route reservations, or
+  accepted-message state.
+- Explicit links are idempotent only for the same target thread; never
+  silently retarget an already-bound external conversation to another thread.
 
-- Concrete Slack/Telegram/Web/CLI payload parsing; product adapters normalize protocol payloads first.
-- Raw user/assistant message content in turn-facing records; transcript content belongs to thread/transcript storage.
-- Capability runtime internals, runtime dispatch, model/provider behavior, or UI transport.
-- Silent retargeting of explicit links or route drift during adapter retries.
-- Trusted-trigger prompt safety scanning, and with it any `ironclaw_safety`
-  dependency. The scan is `ironclaw_triggers`' — it runs at the mint of the
-  sealed `TrustedTriggerSubmitRequest`, so it covers every
-  `TrustedTriggerFireSubmitter` rather than only the one wired here (moved
-  2026-08-04, PROPOSAL §6.4.2; the absent dependency is pinned by
-  `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`).
+## Idempotency and turn submission
+
+- Accepted-message idempotency and turn-submission idempotency are separate:
+  adapter retries must reuse the accepted message ref, canonical actor,
+  original received timestamp, and original run-profile request until the
+  message is marked submitted, even if live pairing state changes after
+  acceptance; duplicate deliveries after submission replay the stored
+  submission outcome. Reserve installation-wide external event IDs during
+  resolution and reject route drift before creating a second thread. For
+  transient turn-submission failures, rotate the submit idempotency key on
+  each retry so turn-store replay cannot strand the message. Thread-busy
+  admission of a user message is a terminal `RejectedBusy` (permanent) —
+  adapters do NOT retry-until-submitted; a duplicate delivery after
+  `RejectedBusy` replays the terminal outcome without resubmitting, keeping
+  the original submit idempotency key for all permanent rejections.
+- Preserve the typed `TurnSubmissionError` the `ConversationTurnSubmitter`
+  port returns instead of flattening turn failures to strings. Branch on its
+  `retry()` class (`RetryableAfterKeyRotation` / `RetryableWithSameKey` /
+  `Permanent`) and project its `category()` / `adapter_status_code()`; never
+  re-derive either from the rendered message. *(Amended 2026-08-04, WS5 port
+  inversion: this crate no longer depends on `ironclaw_turns`, so the
+  invariant that named `ironclaw_turns::TurnError` now names the port error.
+  The host adapter —
+  `ironclaw_composition::automation::conversation_turn_submitter` — owns the
+  total `TurnError` → port-error mapping and carries the coordinator's
+  rendered cause verbatim.)*
+- Do not take a `TurnCoordinator` or any other turn-kernel handle in this
+  crate. The inbound orchestration reaches turn submission through the
+  one-method `ConversationTurnSubmitter` port declared in
+  `src/turn_submission.rs`; composition implements it. Adding an
+  `ironclaw_turns` normal dependency re-opens the layer-matrix exception this
+  crate closed — it remains a **dev**-dependency only, so test fakes can
+  stand in for the adapter on the real `SubmitTurnRequest` shape.
+- Do **not** scan trusted-trigger prompts here, and do not re-add
+  `ironclaw_safety` to this crate's dependencies. Until 2026-08-04 the
+  conversations-owned `TrustedTriggerFireSubmitter` re-ran the injection scan
+  itself; because it lived in one *implementation* of the seam, swapping or
+  adding a submitter silently dropped the guard. PROPOSAL §6.4.2 moved the
+  scan behind the seam: `ironclaw_triggers` runs it while minting the sealed
+  `TrustedTriggerSubmitRequest`, so a request that reaches this crate has
+  already passed. The missing dependency is pinned by this crate's
+  `BoundaryRule` in `reborn_dependency_boundaries.rs`.
+
+## Durable adapters
+
+- Durable persistence in this crate is limited to conversation binding,
+  accepted-message idempotency, and turn-submission state-store records over
+  `ScopedFilesystem`; transcript content and thread storage stay behind their
+  owning storage boundaries.
+- Any future durable adapter expansion must name the scoped storage boundary
+  first, keep raw message content out of turn-facing rows, and add backend
+  parity tests with migration coverage.
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_conversations`
-- Backend parity check when durable adapters change: run crate tests with all relevant features and DB harness settings.
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
+- Contract suites: `conversation_state_store_contract`, `inbound_contract`
+- Boundary check after dependency/API changes:
+  `cargo test -p ironclaw_architecture_tests`
 
-## Agent Notes
+## Neighbors to read before changing behavior
 
-- Binding resolution must fail closed for unknown threads, invalid refs, tenant/installation mismatches, participant-policy denial, or delimiter-like external IDs.
-- Source binding refs and reply target binding refs are distinct; egress must revalidate current reply targets.
-- Preserve the typed `TurnSubmissionError` the `ConversationTurnSubmitter` port returns; do not flatten turn failures to strings. Branch on `retry()`, project `category()`/`adapter_status_code()`, never parse the message. *(Amended 2026-08-04, WS5 port inversion — this invariant used to name `ironclaw_turns::TurnError`, which this crate no longer depends on. The `TurnError` → port-error mapping lives in the host adapter, `ironclaw_composition::automation::conversation_turn_submitter`, and preserves the class partition plus both accessors.)*
-- Do not reintroduce a `TurnCoordinator` handle or an `ironclaw_turns` normal
-  dependency here; that is the layer-matrix exception this crate closed. The
-  port is declared in `src/turn_submission.rs` and implemented by composition.
-  `ironclaw_turns` remains a **dev**-dependency only, so the test fakes can
-  stand in for that adapter on the real `SubmitTurnRequest` shape.
+- `crates/domains/ironclaw_threads/AGENTS.md` — the transcript owner.
+- `crates/contracts/ironclaw_extension_contracts/CLAUDE.md` — declares the
+  external actor/conversation ref pair this crate binds on.
+- `crates/app/ironclaw_composition/src/automation/conversation_turn_submitter.rs`
+  — the production implementation of the submission port.
+- `crates/kernel/ironclaw_turns/AGENTS.md` — background only; no normal
+  dependency exists.
+- `docs/reborn/contracts/events-projections.md`

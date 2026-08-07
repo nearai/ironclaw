@@ -5,7 +5,7 @@ description: Generate or update the IronClaw architecture overview video using R
 
 # Architecture Video Generator
 
-Generates and maintains the animated architecture overview video in `docs/architecture-video/` using Remotion (React-based video framework).
+Generates and maintains the animated architecture overview video in `docs/internal/architecture-video/` using Remotion (React-based video framework).
 
 ## When to use
 
@@ -30,7 +30,7 @@ Read these files to understand the current system architecture:
 
 ### 2. Read current video scenes
 
-Read `docs/architecture-video/src/IronClawArchitecture.tsx` to understand current scene order, durations, and transitions. Then read individual scenes in `docs/architecture-video/src/scenes/` to see what's already covered.
+Read `docs/internal/architecture-video/src/IronClawArchitecture.tsx` to understand current scene order, durations, and transitions. Then read individual scenes in `docs/internal/architecture-video/src/scenes/` to see what's already covered.
 
 ### 3. Identify gaps
 
@@ -43,7 +43,7 @@ Compare the architecture documentation with what the video covers. Look for:
 ## Video project structure
 
 ```
-docs/architecture-video/
+docs/internal/architecture-video/
 ├── package.json              # Remotion deps
 ├── remotion.config.ts        # Build config
 ├── src/
@@ -226,12 +226,12 @@ export const MyNewScene: React.FC = () => {
 
 After making changes:
 
-1. **Type check:** `cd docs/architecture-video && npx tsc --noEmit`
+1. **Type check:** `cd docs/internal/architecture-video && npx tsc --noEmit`
 2. **Spot check frames:** `npx remotion still IronClawArchitecture --scale=0.25 --frame=<N>`
    - At 30fps, frame N corresponds to time N/30 seconds
    - Check at least one frame per modified scene
 3. **Full render:** `./scripts/render-architecture-video.sh [output-path]`
-4. **Preview in browser:** `cd docs/architecture-video && npm run dev`
+4. **Preview in browser:** `cd docs/internal/architecture-video && npm run dev`
 
 ## Design guidelines
 

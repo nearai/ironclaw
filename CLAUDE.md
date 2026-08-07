@@ -4,7 +4,7 @@
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains. A WebUI feature normally crosses `webui → ProductSurface → product → composition → runtime`, with the frontend inside `ironclaw_webui`.
+This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory-mcp` MCP server) over `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains. A WebUI feature normally crosses `webui → ProductSurface → product → composition → runtime`, with the frontend inside `ironclaw_webui`.
 
 **Where it lives:** `.codebase-memory/graph.db.zst` is a committed, compressed bootstrap snapshot shared by the team. The MCP imports it and incrementally catches up to the current checkout; local databases and `.codebase-memory/artifact.json` remain git-ignored per-environment state. Refresh the shared snapshot from a clean `main` checkout with `index_repository(repo_path=".", persistence=true)`.
 
@@ -43,10 +43,15 @@ own.
 ```bash
 cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
-cargo test                                                   # unit tests
-cargo test --features integration                            # + PostgreSQL tests
+cargo test                                                   # unit + integration suites (Postgres legs self-provision testcontainers; skipped when Docker is unavailable)
 RUST_LOG=ironclaw=debug cargo run -p ironclaw -- serve       # run the Reborn serve binary with logging
 ```
+
+The workspace-root `integration` feature is empty with zero consumers — a bare
+root `cargo test --features integration` adds nothing. Backend-heavy
+feature-gated suites are crate-level, e.g.
+`cargo test -p ironclaw_hooks --features integration,test-support` for the
+Postgres/libSQL hooks parity matrix (see the owning crate's guide).
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
 
@@ -98,9 +103,9 @@ Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/loop/ironclaw_loop_host`, `crates/kernel/ironclaw_turns`, `crates/domains/ironclaw_skills` (`ls -d crates/*/prompts` lists every crate that owns prompt files). Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/loop/ironclaw_loop_host`, `crates/loop/ironclaw_agent_loop`, `crates/domains/ironclaw_skills` (`ls -d crates/*/*/prompts crates/extensions/packages/*/prompts` lists every crate that owns prompt files). Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
-- **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
+- **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`tests/integration/`, or the owning crate's feature-gated suite) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
 ## Architecture
 
@@ -111,9 +116,10 @@ Prefer generic/extensible architectures over hardcoding specific integrations. A
 **Reborn (`crates/`): the unified extension model.** The top-level product
 object is always an *extension*; a channel is one capability surface an
 extension's manifest declares (`tool` / `channel` / `auth` —
-`ironclaw_host_api::surface::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
+`ironclaw_extension_contracts::surface::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
 `first_party`) is implementation only, never taxonomy. `ExtensionId` is the
-product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
+product identity (`slack`, `github`, `gmail`); `VendorId` (manifest field
+`vendor`; renamed from `ProviderId`) is the credential
 authority namespace and may be shared across extensions (`google` backs
 gmail + drive + calendar + …). There is no separate channel registry, no
 `slack_bot`/`slack_personal` split, and no extension `kind` wire string —
@@ -153,7 +159,7 @@ identity/product-auth model lives in the Reborn crates
 also owns the OAuth transport) and its WebUI onboarding in
 `crates/product/ironclaw_webui/frontend`.
 
-Key traits for extensibility: `ChannelAdapter`, `ToolAdapter`, `Extension`, `ProductSurface`, `CapabilityDispatcher` (all `ironclaw_host_api`), `RootFilesystem` (`ironclaw_filesystem`), `LlmProvider` (`ironclaw_llm`), `NetworkHttpEgress` (`ironclaw_network`), and the `ironclaw_hooks` sink/hook family. Re-derive with `rg -n "^pub trait " crates/<crate>/src` before relying on any name here.
+Key traits for extensibility: `ChannelAdapter`, `ToolAdapter`, `Extension` (all `ironclaw_extension_contracts`), `ProductSurface` (`ironclaw_product_contracts`), `CapabilityDispatcher` (`ironclaw_host_api`), `RootFilesystem` (`ironclaw_filesystem`), `LlmProvider` (`ironclaw_llm`), `NetworkHttpEgress` (`ironclaw_network`), and the `ironclaw_hooks` sink/hook family. Re-derive with `rg -n "^pub trait " crates/<family>/<crate>/src` before relying on any name here.
 
 All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurrent access.
 
@@ -173,16 +179,22 @@ graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
 `ironclaw` in `crates/app/ironclaw_cli`).
 
+`docs/` is the public Mintlify site; new internal engineering docs go only
+under `docs/internal/` (the `docs/.mintignore` fence is frozen — enforced by
+`scripts/ci/docs_publication_boundary.py` in the Code Style workflow).
+
 ```
-crates/                     # all production code (see crates/AGENTS.md for the full map)
-├── ironclaw_cli/    # binary entry point (binary name `ironclaw`)
-├── ironclaw_composition/  # wires storage/runtime services by profile
-├── ironclaw_assistant/             # product-facing orchestration and surface
-├── ironclaw_turn_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
-├── ironclaw_webui/         # WebChat v2 routes, SPA (frontend/) + serve wiring
-├── ironclaw_filesystem/    # RootFilesystem mount catalog (persistence plane)
-├── ironclaw_llm/ ironclaw_safety/ ironclaw_skills/  # extracted subsystems
-└── ...                     # domain crates (threads, secrets, auth, triggers, …)
+crates/                     # all production code, grouped by family (see crates/AGENTS.md for the full map)
+├── app/                    # ironclaw_cli (binary `ironclaw`), ironclaw_composition, ironclaw_config, ironclaw_architecture_tests
+├── contracts/              # ironclaw_host_api, ironclaw_common, ironclaw_extension_contracts, ironclaw_product_contracts, …
+├── domains/                # ironclaw_llm, ironclaw_skills, ironclaw_threads, ironclaw_auth, ironclaw_memory, ironclaw_triggers, …
+├── events/                 # ironclaw_event_log / _projections / _store / _streams
+├── extensions/             # ironclaw_extension_host/_manager/_registry/_support + packages/ (slack, telegram, gmail, …)
+├── kernel/                 # ironclaw_turns, ironclaw_capabilities, ironclaw_approvals, ironclaw_host_runtime, …
+├── lanes/                  # ironclaw_wasm, ironclaw_sandbox, ironclaw_mcp
+├── loop/                   # ironclaw_agent_loop, ironclaw_turn_runner, ironclaw_loop_host, ironclaw_hooks
+├── product/                # ironclaw_webui (WebChat v2 routes, SPA in frontend/), ironclaw_assistant, …
+└── substrates/             # ironclaw_filesystem (RootFilesystem), ironclaw_safety, ironclaw_network, ironclaw_secrets, …
 
 tests/
 ├── integration/            # Reborn in-process integration tests (see tests/integration/CLAUDE.md)
@@ -218,34 +230,26 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
-## Job State Machine
-
-```
-Pending -> InProgress -> Completed -> Submitted -> Accepted
-    \                \-> Failed
-     \-> Failed       \-> Stuck -> InProgress (recovery)
-                              \-> Failed
-```
-
 ## Skills System
 
 SKILL.md files extend the agent's prompt with domain-specific instructions. See `.claude/rules/skills.md` for full details.
 
 - **Trust model**: Trusted (user-placed in `~/.ironclaw/skills/` or workspace `skills/`, full tool access) vs Installed (registry, read-only tools)
-- **Selection pipeline**: gating (check bin/env/config requirements) -> scoring (keywords/patterns/tags) -> budget (fit within `SKILLS_MAX_TOKENS`) -> attenuation (trust-based tool ceiling)
-- **Skill tools**: `skill_list`, `skill_search`, `skill_install`, `skill_remove`
+- **Selection pipeline**: gating (check bin/env/config requirements) -> scoring (keywords/patterns/tags) -> budget (prompt token budget, `DEFAULT_MAX_SKILL_CONTEXT_TOKENS`) -> attenuation (trust-based tool ceiling)
+- **Skill tools**: `skill_list`, `skill_search`, `skill_install`, `skill_install_url`, `skill_remove`
 
 ## Configuration
 
-See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `crates/domains/ironclaw_llm/CLAUDE.md`.
+See `.env.example` for all environment variables. LLM backends (first-class backend strings `nearai` / `bedrock` / `gemini_oauth` / `openai_codex`, plus registry-defined providers resolved through `registry.rs` — `LlmBackendKind` in `crates/domains/ironclaw_llm/src/config.rs` is the source of truth) are documented in `crates/domains/ironclaw_llm/CLAUDE.md`.
 
 ## Adding a New Channel
 
 A Reborn channel is one capability surface of an **extension** (unified model):
 the manifest (`reborn.extension_manifest.v3`) declares `[channel]` (ingress
-verification recipe, `[channel.config]`, egress allowlist, presentation) beside
-the extension's tools and auth recipes, and the extension's `ChannelAdapter`
-(`crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`) implements inbound normalize / deliver /
+verification recipe, `[channel.connection]`, egress allowlist, presentation —
+operator setup fields live in the top-level `[admin_configuration]` section)
+beside the extension's tools and auth recipes, and the extension's `ChannelAdapter`
+(`crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
 `RebornHostBindings::with_channel_extension_bindings`
 (`crates/app/ironclaw_composition/src/input.rs`); composition wires the

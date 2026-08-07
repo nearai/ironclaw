@@ -346,12 +346,16 @@ class WorkflowContractSabotageTests(unittest.TestCase):
 
 
 class CrateScopeFilterSabotageTests(unittest.TestCase):
-    """#6963: the three remaining crate-keyed workflow scope filters.
+    """#6963: the crate-keyed workflow scope filters, plus has_docs.
 
-    Each one goes silently green under family nesting — the dist-build lane
-    skips, every WASM ABI check skips, the stress workflow stops triggering —
-    and none of them can assert anything about itself. These are the sabotage
-    cases that prove the pin binds.
+    The three crate-keyed filters go silently green under family nesting —
+    the dist-build lane skips, every WASM ABI check skips, the stress
+    workflow stops triggering. The fourth pin, `has_docs`, is deliberately
+    not crate-keyed: docs/ sits outside the has_code scope, so its grep is
+    the only trigger for the docs publication-boundary gate and narrowing it
+    skips that gate with nothing red anywhere. None of these filters can
+    assert anything about itself. These are the sabotage cases that prove
+    each pin binds.
     """
 
     def setUp(self) -> None:
@@ -366,6 +370,95 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
 
     def test_checked_in_scope_filters_pass(self) -> None:
         self.assertEqual(validate_crate_scope_filters(self.workflows, ROOT), [])
+
+    def test_has_docs_trigger_is_pinned(self) -> None:
+        """The docs publication gate rides its own trigger: docs-only PRs have
+        has_code=false, so nothing else would run the boundary job. An
+        unpinned grep here is the same silent-skip class as the crate
+        filters."""
+        self.assertIn("has_docs", {scope.name for scope in CRATE_SCOPE_FILTERS})
+
+    def test_narrowing_the_has_docs_trigger_fails_loudly(self) -> None:
+        sabotaged = self.sabotage(CODE_STYLE_WORKFLOW, "'^(docs/|", "'^(")
+        errors = validate_crate_scope_filters(sabotaged, ROOT)
+        self.assertTrue(
+            any("has_docs" in error for error in errors),
+            errors,
+        )
+
+    def test_code_style_docs_gate_markers_are_pinned(self) -> None:
+        """Losing the boundary job, either of its two script steps, or the
+        roll-up guard silently unhooks the gate for docs-only PRs. (Guard
+        ORDERING relative to the has_code early exit is a separate pin —
+        presence markers cannot see order.)"""
+        markers = REQUIRED_MARKERS.get(CODE_STYLE_WORKFLOW, ())
+        for marker in (
+            "docs-publication-boundary:",
+            "python3 scripts/ci/test_docs_publication_boundary.py",
+            "python3 scripts/ci/docs_publication_boundary.py",
+            '"${{ needs.docs-publication-boundary.result }}" != "success"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, markers)
+
+    def test_moving_the_docs_guard_below_the_early_exit_fails_loudly(self) -> None:
+        """Marker presence cannot see order: relocating the docs-gate guard
+        to after the has_code `exit 0` keeps every REQUIRED_MARKERS string in
+        the file while docs-only PRs (has_code=false) exit before the guard
+        ever runs — a clean pass on a fully broken gate. The ordering pin
+        must catch exactly this move."""
+        text = self.workflows[CODE_STYLE_WORKFLOW]
+        guard = ws12_workflow_contracts.CODE_STYLE_DOCS_GUARD_MARKER
+        early_exit = ws12_workflow_contracts.CODE_STYLE_HAS_CODE_EXIT_MARKER
+        self.assertIn(guard, text)
+        self.assertIn(early_exit, text)
+
+        # Relocate the guard's marker line to just after the early-exit line.
+        guard_line = next(
+            line for line in text.splitlines() if guard in line
+        )
+        exit_line = next(line for line in text.splitlines() if early_exit in line)
+        sabotaged = copy.deepcopy(self.workflows)
+        sabotaged[CODE_STYLE_WORKFLOW] = text.replace(
+            guard_line + "\n", ""
+        ).replace(exit_line, exit_line + "\n" + guard_line)
+        self.assertIn(guard, sabotaged[CODE_STYLE_WORKFLOW])
+
+        errors = validate_workflow_texts(sabotaged, ROOT)
+        self.assertTrue(
+            any("docs" in error and "early exit" in error for error in errors),
+            errors,
+        )
+
+    def test_a_commented_decoy_guard_does_not_satisfy_the_order_pin(self) -> None:
+        """A raw substring search accepts inert text: commenting out the old
+        guard block above the early exit while the executable guard sits
+        below it (a realistic refactor leftover) must still fail — only
+        executable occurrences count."""
+        text = self.workflows[CODE_STYLE_WORKFLOW]
+        guard = ws12_workflow_contracts.CODE_STYLE_DOCS_GUARD_MARKER
+        early_exit = ws12_workflow_contracts.CODE_STYLE_HAS_CODE_EXIT_MARKER
+        guard_line = next(line for line in text.splitlines() if guard in line)
+        exit_line = next(line for line in text.splitlines() if early_exit in line)
+        decoy = "          # old guard: " + guard_line.strip()
+        sabotaged = copy.deepcopy(self.workflows)
+        sabotaged[CODE_STYLE_WORKFLOW] = (
+            text.replace(guard_line + "\n", "")
+            .replace(exit_line, decoy + "\n" + exit_line + "\n" + guard_line)
+        )
+        errors = validate_workflow_texts(sabotaged, ROOT)
+        self.assertTrue(
+            any("docs" in error and "early exit" in error for error in errors),
+            errors,
+        )
+
+    def test_checked_in_docs_guard_order_passes(self) -> None:
+        self.assertEqual(
+            ws12_workflow_contracts.validate_code_style_docs_guard_order(
+                self.workflows[CODE_STYLE_WORKFLOW]
+            ),
+            [],
+        )
 
     def test_every_filter_declares_probes(self) -> None:
         """A pin with no probes asserts nothing — the defect being fixed."""

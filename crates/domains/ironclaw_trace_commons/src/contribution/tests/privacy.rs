@@ -64,9 +64,9 @@ fn trace_policy_preflight_gates_queue_and_submit_intents() {
 /// gitlab — so it cannot be sourced from the inventory without weakening
 /// redaction. This locks the mapping so a future "de-hardcode the vendor
 /// names" cleanup cannot silently drop a keyword and stop redacting a
-/// tool's sensitive payload. The `contribution.rs` PATH_TERM_COLLISIONS
-/// carve-out in
-/// `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`
+/// tool's sensitive payload. The `contribution/tool_payloads.rs`
+/// PATH_TERM_COLLISIONS carve-out in
+/// `crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`
 /// documents why the names stay here.
 #[test]
 fn tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing() {

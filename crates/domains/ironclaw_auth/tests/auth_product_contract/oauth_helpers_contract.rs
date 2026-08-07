@@ -2,7 +2,7 @@
 //! engine: hash helpers, PKCE challenge construction, validated OAuth value
 //! newtypes, callback-state encode/decode, and the redacted token-response
 //! projection. Authorization-URL construction is engine behavior, pinned by
-//! `crates/ironclaw_auth/tests/auth_engine_contract.rs`.
+//! `crates/domains/ironclaw_auth/tests/auth_engine_contract.rs`.
 
 use super::common::*;
 use ironclaw_auth::{
