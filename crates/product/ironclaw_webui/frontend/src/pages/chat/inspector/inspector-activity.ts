@@ -41,6 +41,12 @@ interface InspectorActivityUpdate {
   update?: unknown;
 }
 
+interface InspectorActivitySortKey {
+  sequenceAnchor: number | null;
+  local: boolean;
+  arrival: number;
+}
+
 function browserSessionStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
@@ -127,7 +133,6 @@ function stableLifecycleKey(event: InspectorActivityEvent): string | null {
   if (event.activity_id) return `${event.kind}:tool:${event.activity_id}`;
   if (
     event.kind === ActivityKind.TurnStarted
-    || event.kind === ActivityKind.PromptPrepared
     || event.kind === ActivityKind.FinalResponseCompleted
   ) {
     return event.kind;
@@ -144,7 +149,10 @@ export function reduceInspectorActivity(
     : null;
   const snapshotStream = typeof value?.stream_id === "string" ? value.stream_id : "snapshot";
   const rows = new Map<string, InspectorActivityRow>();
+  const sortKeys = new Map<string, InspectorActivitySortKey>();
   const lifecycleRows = new Map<string, string>();
+  let lastSeenSequence: number | null = null;
+  let arrival = 0;
   const add = (key: string, sequence: number | null, rawEvent: unknown) => {
     const event = asActivityEvent(rawEvent);
     if (!event || rows.has(key)) return;
@@ -153,9 +161,22 @@ export function reduceInspectorActivity(
     if (existingKey) {
       if (!existingKey.startsWith("local:") || key.startsWith("local:")) return;
       rows.delete(existingKey);
+      sortKeys.delete(existingKey);
     }
+    arrival += 1;
     rows.set(key, { ...event, key, sequence, pending: false });
+    sortKeys.set(key, {
+      sequenceAnchor: sequence ?? lastSeenSequence,
+      local: sequence === null,
+      arrival,
+    });
     if (lifecycleKey) lifecycleRows.set(lifecycleKey, key);
+  };
+
+  const observeSequence = (sequence: number) => {
+    if (lastSeenSequence === null || sequence > lastSeenSequence) {
+      lastSeenSequence = sequence;
+    }
   };
 
   if (Array.isArray(value?.activity)) {
@@ -163,6 +184,7 @@ export function reduceInspectorActivity(
       const entry = rawEntry as InspectorActivityEntry;
       if (!Number.isSafeInteger(entry?.sequence)) continue;
       const sequence = entry.sequence as number;
+      observeSequence(sequence);
       add(`${snapshotStream}:${sequence}`, sequence, entry.event);
     }
   }
@@ -173,13 +195,24 @@ export function reduceInspectorActivity(
     const sequence = Number.isSafeInteger(envelope.sequence) ? envelope.sequence as number : null;
     const localId = typeof envelope.local_id === "string" ? envelope.local_id : null;
     if (sequence === null && !localId) continue;
+    if (sequence !== null) observeSequence(sequence);
     add(localId ? `local:${localId}` : `${streamId}:${sequence}`, sequence, update.data);
   }
 
   const ordered = [...rows.values()].sort((left, right) => {
-    if (left.sequence !== null && right.sequence !== null) return left.sequence - right.sequence;
-    const time = Date.parse(left.occurred_at) - Date.parse(right.occurred_at);
-    return Number.isNaN(time) ? left.key.localeCompare(right.key) : time;
+    const leftOrder = sortKeys.get(left.key);
+    const rightOrder = sortKeys.get(right.key);
+    if (!leftOrder || !rightOrder) return left.key.localeCompare(right.key);
+    if (leftOrder.sequenceAnchor !== rightOrder.sequenceAnchor) {
+      if (leftOrder.sequenceAnchor === null) return -1;
+      if (rightOrder.sequenceAnchor === null) return 1;
+      return leftOrder.sequenceAnchor < rightOrder.sequenceAnchor ? -1 : 1;
+    }
+    if (leftOrder.local !== rightOrder.local) return leftOrder.local ? 1 : -1;
+    if (leftOrder.arrival !== rightOrder.arrival) {
+      return leftOrder.arrival < rightOrder.arrival ? -1 : 1;
+    }
+    return left.key.localeCompare(right.key);
   }).slice(-MAX_INSPECTOR_ACTIVITY_ENTRIES);
   const completed = new Set<string>();
   for (const row of ordered) {

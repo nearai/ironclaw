@@ -314,13 +314,54 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
     assert_eq!(started.call_id, completed.call_id);
     assert_eq!(completed.iteration, 7);
     assert_eq!(completed.requested_model, "interactive_model");
-    assert_eq!(completed.effective_model, "provider-model-from-response");
+    assert_eq!(
+        completed.effective_model.as_deref(),
+        Some("provider-model-from-response")
+    );
     let Some(HostManagedModelCallDiagnosticOutcome::Succeeded { usage }) =
         model_call_outcome(&model_calls[1])
     else {
         panic!("completed model call should succeed");
     };
     assert_eq!(usage.as_ref().map(|usage| usage.input_tokens), Some(21));
+}
+
+#[tokio::test]
+async fn model_port_keeps_effective_model_unavailable_without_provider_evidence() {
+    let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
+    let gateway = Arc::new(MissingDiagnosticModelGateway);
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 2,
+        iteration: 7,
+        capability_view: None,
+    })
+    .await
+    .expect("model response");
+
+    let model_calls = sink.model_calls.lock().expect("model calls");
+    assert_eq!(model_calls.len(), 2);
+    let started = model_call_diagnostic(&model_calls[0]);
+    let completed = model_call_diagnostic(&model_calls[1]);
+    assert_eq!(started.call_id, completed.call_id);
+    assert_eq!(completed.requested_model, "interactive_model");
+    assert_eq!(started.effective_model, None);
+    assert_eq!(completed.effective_model, None);
 }
 
 #[tokio::test]
@@ -375,7 +416,10 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
         panic!("completed model call should fail");
     };
     assert_eq!(*completed_usage, Some(usage));
-    assert_eq!(completed.effective_model, "provider-model-from-error");
+    assert_eq!(
+        completed.effective_model.as_deref(),
+        Some("provider-model-from-error")
+    );
     assert_eq!(failure_summary, "model provider unavailable");
 }
 
@@ -460,6 +504,59 @@ async fn model_port_records_full_capability_surface_when_request_has_no_view() {
         gateway.tool_definition_calls()[0][0].name.as_str(),
         "demo__full_surface"
     );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn model_port_continues_when_diagnostic_capability_lookup_fails() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+    let capability_id = CapabilityId::new("demo.transient_surface").expect("capability");
+    let capabilities = Arc::new(StaticToolDefinitionPort::failing_first_lookup(vec![
+        provider_tool_definition(capability_id, "demo__transient_surface"),
+    ]));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+
+    let response = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_capability_port(capabilities.clone())
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        iteration: 0,
+        capability_view: None,
+    })
+    .await
+    .expect("diagnostic failure must not fail the model request");
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(AssistantReply { ref content })
+            if content == "model says hi"
+    ));
+    assert_eq!(capabilities.tool_definition_calls(), 2);
+    assert!(
+        sink.captures
+            .lock()
+            .expect("captures")
+            .first()
+            .is_some_and(|capture| capture.capability_ids.is_empty())
+    );
+    assert_eq!(gateway.tool_definition_calls().len(), 1);
+    assert!(logs_contain(
+        "prompt diagnostics could not capture capability ids"
+    ));
 }
 
 #[tokio::test]
@@ -6110,6 +6207,21 @@ struct RecordingGateway {
     response: Result<HostManagedModelResponse, HostManagedModelError>,
 }
 
+struct MissingDiagnosticModelGateway;
+
+#[async_trait]
+impl HostManagedModelGateway for MissingDiagnosticModelGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(
+            HostManagedModelResponse::assistant_reply("model says hi".to_string())
+                .with_effective_fallback_index(request.fallback_index),
+        )
+    }
+}
+
 #[derive(Default)]
 struct RecordingPromptDiagnosticSink {
     captures: Mutex<Vec<HostManagedPromptDiagnosticCapture>>,
@@ -6301,17 +6413,42 @@ impl HostManagedModelGateway for RecordingGateway {
 
 struct StaticToolDefinitionPort {
     definitions: Vec<ProviderToolDefinition>,
+    tool_definition_calls: AtomicUsize,
+    fail_first_lookup: bool,
 }
 
 impl StaticToolDefinitionPort {
     fn new(definitions: Vec<ProviderToolDefinition>) -> Self {
-        Self { definitions }
+        Self {
+            definitions,
+            tool_definition_calls: AtomicUsize::new(0),
+            fail_first_lookup: false,
+        }
+    }
+
+    fn failing_first_lookup(definitions: Vec<ProviderToolDefinition>) -> Self {
+        Self {
+            definitions,
+            tool_definition_calls: AtomicUsize::new(0),
+            fail_first_lookup: true,
+        }
+    }
+
+    fn tool_definition_calls(&self) -> usize {
+        self.tool_definition_calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl LoopCapabilityPort for StaticToolDefinitionPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let call_index = self.tool_definition_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_first_lookup && call_index == 0 {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "transient capability surface failure",
+            ));
+        }
         Ok(self.definitions.clone())
     }
 

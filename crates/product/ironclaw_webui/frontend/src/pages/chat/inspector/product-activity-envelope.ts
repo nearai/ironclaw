@@ -1,5 +1,10 @@
 import { ActivityKind } from "./activity-kind";
 import { publishProductInspectorActivity } from "./product-activity";
+import {
+  AMBIGUOUS_RUN_ID,
+  mergeRunIdCandidate,
+  type RunIdCandidate,
+} from "../lib/run-id-candidate";
 
 interface CapabilityActivityFrame {
   turn_run_id?: unknown;
@@ -30,13 +35,14 @@ interface InspectorEnvelope {
   };
 }
 
-const AMBIGUOUS_RUN_ID = Symbol();
-
-function mergeRunIdCandidate(current: unknown, runId: unknown): unknown {
-  if (typeof runId !== "string" || runId.length === 0) return current;
-  if (current === null) return runId;
-  return current === runId ? current : AMBIGUOUS_RUN_ID;
-}
+const ACTIVE_CAPABILITY_STATUSES = new Set(["started", "running"]);
+const SUCCESS_CAPABILITY_STATUSES = new Set(["completed", "succeeded"]);
+const FAILED_RUN_STATUSES = new Set([
+  "failed",
+  "cancelled",
+  "recovery_required",
+  "timed_out",
+]);
 
 function publishCapabilityActivity(
   threadId: unknown,
@@ -47,11 +53,11 @@ function publishCapabilityActivity(
   const activityId = activity?.invocation_id || activity?.activity_id;
   if (!runId || !activityId) return;
   const status = String(activity.status || "started").toLowerCase();
-  const kind = status === "completed" || status === "succeeded"
+  const kind = SUCCESS_CAPABILITY_STATUSES.has(status)
     ? ActivityKind.ToolCompleted
-    : status === "failed" || status === "killed"
-      ? ActivityKind.ToolFailed
-      : ActivityKind.ToolStarted;
+    : ACTIVE_CAPABILITY_STATUSES.has(status)
+      ? ActivityKind.ToolStarted
+      : ActivityKind.ToolFailed;
   publishProductInspectorActivity({
     threadId,
     runId,
@@ -85,6 +91,21 @@ function publishRunStatusActivity(threadId: unknown, runStatus: RunStatusFrame):
       kind: ActivityKind.FinalResponseCompleted,
       summary: "Final response completed",
       dedupeKey: "run:completed",
+    });
+  } else if (FAILED_RUN_STATUSES.has(status)) {
+    const summary = status === "cancelled"
+      ? "Run cancelled"
+      : status === "timed_out"
+        ? "Run timed out"
+        : status === "recovery_required"
+          ? "Run requires recovery"
+          : "Run failed";
+    publishProductInspectorActivity({
+      threadId,
+      runId,
+      kind: ActivityKind.FinalResponseCompleted,
+      summary,
+      dedupeKey: "run:terminal-failure",
     });
   } else if (status.startsWith("blocked_") || status === "awaiting_gate") {
     publishProductInspectorActivity({
@@ -155,7 +176,7 @@ export function publishProductInspectorEnvelope(
   }
   if (type === "projection_snapshot" || type === "projection_update") {
     const items = frame.state?.items || [];
-    let batchRunId: unknown = null;
+    let batchRunId: RunIdCandidate = null;
     for (const item of items) {
       batchRunId = mergeRunIdCandidate(batchRunId, item.run_status?.run_id);
     }

@@ -15,7 +15,11 @@
 
 - Host-side composition shared across Reborn runtime lanes and the kernel-facing services/adapters, currently:
 - The production host runtime `DefaultHostRuntime` (`production`) and runtime-service composition/readiness: `HostRuntimeServices`, `ProductionWiring*` (component/config/issue/report), `RegisteredRuntimeHealth` (`services`).
-- Capability surface: the capability-surface policy `CapabilitySurfacePolicy`/`VisibleCapability`/`VisibleCapabilityAccess` (`surface`); the hot capability catalog `HotCapabilityCatalog`/`HotCapabilityRecord`/`publish_hot_capability_catalog` (`capability_catalog`).
+- Capability surface: application of the host-API-owned
+  `CapabilitySurfacePolicy`, plus `VisibleCapability`/`VisibleCapabilityAccess`
+  (`surface`); the hot capability catalog
+  `HotCapabilityCatalog`/`HotCapabilityRecord`/`publish_hot_capability_catalog`
+  (`capability_catalog`).
 - First-party capabilities: the `FirstPartyCapabilityRegistry`/handler/request/result (`first_party`) and the builtin tool set `BuiltinFirstPartyTools` with capability IDs (echo/time/json/http/shell/read_file/write_file/list_dir/glob/grep/apply_patch) and `builtin_first_party_handlers`/`_package` (`first_party_tools`). Several builtins keep only their manifest, registry wiring, and handler adapter here — their executor lives in `ironclaw_extension_support` (the coding tools, and since WS3 the skill-install source fetcher). See "Agent-loop touch points" below for which half goes where.
 - Host-owned extension contract *discovery*: `discover_extensions_with_default_host_api_contracts*`, `discover_extensions_tolerant_bounded*` (`extension_contracts`) — the `RootFilesystem` binding, which is this crate's job. The two **default sets** those functions apply are **not** owned here (WS3 row 3, PROPOSAL §6.5.9): `ironclaw_host_api::host_port::default_host_port_catalog` and `ironclaw_extension_registry::default_host_api_contract_registry` each live with the vocabulary they enumerate. Do not re-add either one — or a `pub use` shim for them — to this crate. Product-specific manifest contracts are still added by the owning composition/product layer.
 - Obligation handling (`obligations`), split along its **three chartered owners** so no single file fuses them again (PROPOSAL §6.5.9, CHECKLIST WS3). Put new obligation code in the owner it belongs to, never in `mod.rs`:

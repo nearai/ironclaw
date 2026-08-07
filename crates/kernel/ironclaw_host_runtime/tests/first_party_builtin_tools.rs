@@ -18,6 +18,7 @@ use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -50,9 +51,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
@@ -5372,13 +5373,14 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     );
 }
 
+/// An agent must not be able to forge install provenance: `source`/`source_url` are set by the
+/// URL-fetch path, so accepting them inline would let an agent label its own output as fetched.
+///
+/// A `content` + `files` case was removed from here deliberately, not by accident -- rejecting it
+/// was the bug this PR fixes.
 #[tokio::test]
-async fn builtin_skill_install_rejects_hidden_url_install_fields() {
+async fn builtin_skill_install_rejects_forged_provenance_fields() {
     let cases = [
-        json!({
-            "content": "---\nname: hidden-files\n---\nPrompt.\n",
-            "files": [{"path": "references/injected.md", "bytes_base64": "IyBJbmplY3RlZAo="}]
-        }),
         json!({
             "content": "---\nname: hidden-source\n---\nPrompt.\n",
             "source": "installed_url"
@@ -5410,6 +5412,176 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
         assert_eq!(error, FailureKind::InputEncode);
         assert!(temp.path().read_dir().unwrap().next().is_none());
     }
+}
+
+// The direct-install input contract, asserted at the capability boundary rather than against
+// whichever helper currently normalizes the input -- the normalizer has already moved crates once,
+// and these were written to pass on both sides of that move. The dividing line is provenance, not
+// shape: `files` is caller content, `source`/`source_url` are not.
+
+/// A direct install may carry the rest of the bundle, not just prose.
+///
+/// Refused before nearai/ironclaw#6745, and it failed the ENTIRE install rather than dropping the
+/// file: on the 31-task SkillsBench subset (nearai/benchmarks#287) 18 correctly-shaped entries
+/// across 9 calls were all refused. A skill that cannot carry a script is a prose description.
+#[tokio::test]
+async fn builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: egfr-calc\ndescription: CKD-EPI eGFR\n---\nRun scripts/egfr.py.\n",
+            "files": [
+                { "path": "scripts/egfr.py", "text": "print('eGFR')\n" },
+                { "path": "references/units.md", "text": "mg/dL -> mmol/L: x 0.0555\n" }
+            ]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("egfr-calc"));
+    // `source` stays `user`: authoring a bundle locally is not a URL install, and the
+    // normalizer must not infer provenance from the presence of `files`.
+    assert_eq!(installed["source"], json!("user"));
+    assert_eq!(installed["files_installed"], json!(2));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("egfr-calc/scripts/egfr.py")).unwrap(),
+        "print('eGFR')\n",
+        "the script the agent authored must be on disk verbatim, or the skill it belongs to \
+         cannot run it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("egfr-calc/references/units.md")).unwrap(),
+        "mg/dL -> mmol/L: x 0.0555\n"
+    );
+
+    let listed = invoke_with_context(
+        &runtime,
+        SKILL_LIST_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_mounts([SKILL_LIST_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["count"], json!(1));
+    assert_eq!(listed["skills"][0]["name"], json!("egfr-calc"));
+    assert_eq!(listed["skills"][0]["source"], json!("user"));
+}
+
+/// `bytes_base64` is the shape the URL-fetch path constructs, so the direct arm must accept it too;
+/// both arms converge on one install request.
+#[tokio::test]
+async fn builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: binary-helper\ndescription: has a binary asset\n---\nPrompt.\n",
+            "files": [{ "path": "assets/blob.bin", "bytes_base64": "aGVsbG8=" }]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["files_installed"], json!(1));
+    assert_eq!(
+        std::fs::read(temp.path().join("binary-helper/assets/blob.bin")).unwrap(),
+        b"hello"
+    );
+}
+
+/// Carrying `files` does not buy the right to forge provenance. Sends both, and the install must be
+/// refused whole rather than accepted with the provenance ignored.
+#[tokio::test]
+async fn builtin_skill_install_rejects_a_bundle_that_also_forges_provenance() {
+    let cases = [
+        json!({
+            "content": "---\nname: forged-with-files\n---\nPrompt.\n",
+            "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+            "source": "installed_url"
+        }),
+        json!({
+            "content": "---\nname: forged-url-with-files\n---\nPrompt.\n",
+            "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+            "source_url": "https://api.example.test/skills/forged/SKILL.md"
+        }),
+    ];
+
+    for input in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let runtime = runtime_with_filesystem(filesystem);
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_CAPABILITY_ID,
+            input,
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, FailureKind::InputEncode);
+        assert!(
+            temp.path().read_dir().unwrap().next().is_none(),
+            "a refused install must leave the skill root untouched"
+        );
+    }
+}
+
+/// A bundle-relative path may not climb out of its own skill directory. Accepting caller `files`
+/// means each path is caller-controlled, so this is what makes that safe.
+#[tokio::test]
+async fn builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: escaper\ndescription: tries to climb out\n---\nPrompt.\n",
+            "files": [{ "path": "../../escaped.py", "text": "print('escaped')\n" }]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, FailureKind::InputEncode);
+    assert!(
+        !temp.path().join("escaped.py").exists(),
+        "a traversing bundle path must not write outside the skill directory"
+    );
 }
 
 // URL-install coverage stays in this integration file because these cases assert

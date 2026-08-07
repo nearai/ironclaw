@@ -38,7 +38,7 @@ the point of the crate.
 the kernel spawn path, the process-executor routing check, the saved-output
 scope digest) but there is **no production execution backend** today —
 `with_script_runtime` and `RebornScopedSandboxCommandTransport::new` have zero
-production callers. Read `CLAUDE.md`'s "Wiring status" before deleting
+production callers. Read `AGENTS.md`'s "Wiring status" before deleting
 anything as dead code.
 
 ## Depends on / consumed by
@@ -72,7 +72,7 @@ anything as dead code.
 - **Known debt, not invariant yet:** `script.rs` still shells out directly
   (`Command::new("docker")`) instead of routing through
   `SandboxCommandTransport`, and the `IRONCLAW_REQUIRE_DOCKER_TESTS` fail-closed
-  switch is armed by nothing (#7081) — both carried in `CLAUDE.md`.
+  switch is armed by nothing (#7081) — both carried in `AGENTS.md`.
 
 ## Tests
 
@@ -83,7 +83,7 @@ cargo test -p ironclaw_architecture_tests   # egress scan + layer matrix
 
 ## See also
 
-Working rules, wiring status, and known debt: [`CLAUDE.md`](./CLAUDE.md)
+Working rules, wiring status, and known debt: [`AGENTS.md`](./AGENTS.md)
 (canonical). Family boundary: [`crates/lanes/AGENTS.md`](../AGENTS.md).
 Contracts: `docs/reborn/contracts/scripts.md`,
 `docs/reborn/contracts/processes.md`,
