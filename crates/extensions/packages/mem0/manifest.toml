@@ -40,7 +40,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
+description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. Use this to save a durable user preference, fact, decision, or correction so it stays available in future conversations (target \"memory\", append mode). For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"

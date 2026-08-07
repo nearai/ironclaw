@@ -15,8 +15,8 @@ use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
-    IdentityApplicability, IdentityFileName, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
-    TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
+    IdentityApplicability, IdentityFileName, MEMORY_PROTOCOL_PROMPT,
+    SELF_KNOWLEDGE_PROTOCOL_PROMPT, TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
 };
 use ironclaw_turns::LoopMessageRef;
 
@@ -80,6 +80,7 @@ impl DefaultSystemPromptIdentitySource {
         // — and so existing installs get them, not just freshly seeded ones.
         let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
         append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
+        append_section(&mut content, MEMORY_PROTOCOL_PROMPT);
         if self.disclosure_protocol_active {
             append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
         }
@@ -396,6 +397,18 @@ mod tests {
                 .contains("docs.ironclaw.com"),
             "docs grounding must not be seeded into the user-editable prompt file"
         );
+        // Same for the persistent-memory protocol (#7185): appended in memory so
+        // existing installs get it, never written into the user's file.
+        assert!(
+            !std::fs::read_to_string(&prompt_path)
+                .expect("seeded prompt reads")
+                .contains("## Persistent Memory"),
+            "memory protocol must not be seeded into the user-editable prompt file"
+        );
+        assert!(
+            content.content.contains("## Persistent Memory"),
+            "resolved prompt must carry the persistent-memory protocol"
+        );
         assert!(
             content
                 .content
@@ -576,6 +589,18 @@ mod tests {
         assert!(
             content.content.contains("## Self-Knowledge"),
             "self-knowledge guidance must be appended even when SYSTEM.md omits it"
+        );
+        // Same reasoning for the persistent-memory protocol (#7185): without it
+        // the model is never told to save durable user facts, so nothing ever
+        // reaches the next conversation. It must survive a SYSTEM.md that
+        // predates the guidance, and must not be baked into the user's file.
+        assert!(
+            content.content.contains("## Persistent Memory"),
+            "memory protocol must be appended even when SYSTEM.md omits it"
+        );
+        assert!(
+            content.content.contains("ironclaw.memory.write"),
+            "memory protocol must name the tool that saves a durable fact"
         );
         assert!(
             content
