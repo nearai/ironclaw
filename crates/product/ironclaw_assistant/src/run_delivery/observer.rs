@@ -807,8 +807,16 @@ impl RunDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id =
-            prompts::run_notification_projection_id(run_id, notification.event_kind, None);
+        // Key gate prompts by their gate ref: one run can park on several
+        // gates in sequence, and each is its own durable delivery fact (a
+        // repeat announcement of the SAME gate still dedupes to
+        // `AlreadyDelivered`). Kinds that carry no gate ref keep the
+        // historical undiscriminated id shape.
+        let projection_id = prompts::run_notification_projection_id(
+            run_id,
+            notification.event_kind,
+            notification.gate_ref_for_routing.as_deref(),
+        );
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {

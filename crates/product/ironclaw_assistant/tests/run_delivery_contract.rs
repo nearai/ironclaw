@@ -1517,6 +1517,68 @@ async fn observer_records_gate_route_after_approval_prompt() {
     );
 }
 
+/// One run can park on several approval gates in sequence — the blocked-state
+/// loop re-announces whenever the (status, gate) marker changes. Each gate's
+/// prompt is a distinct durable delivery fact: the projection id must be keyed
+/// by the gate ref, or the second prompt collapses into the first prompt's
+/// delivery identity, comes back `AlreadyDelivered` from the coordinator, and
+/// is silently never sent — the user is never told about the gate their run is
+/// parked on, and its reply route is never recorded, so a bare `approve`
+/// cannot resolve it either.
+#[tokio::test]
+async fn observer_delivers_a_prompt_for_each_distinct_approval_gate() {
+    const FIRST_GATE: &str = "gate:approval-00000000000000000000000000000001";
+    const SECOND_GATE: &str = "gate:approval-00000000000000000000000000000002";
+    let harness = build_harness(
+        vec![
+            // The observer issues one pre-loop `get_run_state` (the foreign-run
+            // guard) before the announce loop starts polling, so the first gate
+            // appears twice: once for that probe, once for the announce poll.
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(SECOND_GATE)),
+        ],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-two-gates"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    let prompts: Vec<&String> = texts
+        .iter()
+        .filter(|text| text.contains("Approval needed"))
+        .collect();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "each distinct approval gate must deliver its own prompt: {texts:?}"
+    );
+    // Both announced gates must also be reply-routable: the recorded route is
+    // what lets a bare `approve` in the conversation resolve the right gate.
+    for gate_ref in [FIRST_GATE, SECOND_GATE] {
+        let route = harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), gate_ref)
+            .await
+            .expect("route lookup")
+            .unwrap_or_else(|| panic!("announced gate {gate_ref} must record a reply route"));
+        assert_eq!(route.run_id, run_id);
+        assert!(
+            !route.delivered_conversation_fingerprints.is_empty(),
+            "gate {gate_ref} route must carry delivered-conversation fingerprints"
+        );
+    }
+}
+
 #[tokio::test]
 async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
     // `vendor_message_ref` is an unvalidated vendor string, so a channel can
