@@ -3365,6 +3365,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 reason: format!("capability policy is invalid: {error}"),
             }
         })?);
+        let tool_diagnostic_sink = Arc::new(
+            ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+                diagnostic_store_impl.clone()
+                    as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+                ironclaw_loop_host::DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY,
+            )
+            .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+        )
+            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3375,10 +3384,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
-            Some(Arc::clone(&diagnostic_store_impl)
-                as Arc<
-                    dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink,
-                >),
+            Some(tool_diagnostic_sink),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (

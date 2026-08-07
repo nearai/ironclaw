@@ -30,6 +30,12 @@ pub const PROMPT_COMPONENT_TOTAL_MAX_BYTES: usize = 256 * 1024;
 pub const RECONSTRUCTED_PROMPT_MAX_BYTES: usize = 256 * 1024;
 pub const TOOL_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
 pub const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
+/// Bounded lookahead retained while scanning a tool-result prefix for secrets.
+/// This covers the leak detector's largest structurally validated candidate so
+/// a value crossing the visible retention boundary remains detectable.
+pub const TOOL_RESULT_REDACTION_CONTEXT_BYTES: usize = 64 * 1024;
+pub const TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES: usize =
+    TOOL_RESULT_MAX_BYTES + TOOL_RESULT_REDACTION_CONTEXT_BYTES;
 pub const DIAGNOSTIC_LABEL_MAX_BYTES: usize = 256;
 pub const DIAGNOSTIC_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const MAX_PROMPT_COMPONENTS: usize = 128;
@@ -1507,6 +1513,10 @@ mod tests {
     #[test]
     fn tool_result_uses_its_original_length_over_caller_supplied_output_bytes() {
         assert_eq!(TOOL_RESULT_MAX_BYTES, 50 * 1024);
+        assert_eq!(
+            TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES,
+            TOOL_RESULT_MAX_BYTES + TOOL_RESULT_REDACTION_CONTEXT_BYTES
+        );
         let tool = ToolExecutionDiagnostic::new(
             CapabilityActivityId::new(),
             None,

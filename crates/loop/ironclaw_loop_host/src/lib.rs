@@ -2082,18 +2082,24 @@ impl fmt::Display for ProviderModelId {
 
 /// Bounded, non-blocking decorator for best-effort prompt diagnostics.
 ///
-/// Prompt and model-call captures share one ordered queue. Captures are dropped
-/// when the worker cannot keep up so diagnostic work never adds backpressure to
-/// the provider request path.
+/// Prompt, model-call, and tool captures share one ordered queue per decorator.
+/// Captures are dropped when the worker cannot keep up so diagnostic work never
+/// adds backpressure to provider or capability hot paths.
 pub struct BufferedPromptDiagnosticSink {
     sender: tokio::sync::mpsc::Sender<BufferedDiagnosticCapture>,
 }
 
 pub const DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY: usize = 8;
+/// Separate capacity used by capability-host tool diagnostics so bursts of
+/// input/start/result events cannot crowd prompt captures out of their queue.
+pub const DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY: usize = 64;
 
 enum BufferedDiagnosticCapture {
     Prompt(HostManagedPromptDiagnosticCapture),
     ModelCall(HostManagedModelCallDiagnosticCapture),
+    ToolInput(HostManagedToolInputDiagnosticCapture),
+    ToolStarted(HostManagedToolStartedDiagnosticCapture),
+    ToolResult(HostManagedToolResultDiagnosticCapture),
 }
 
 impl BufferedPromptDiagnosticSink {
@@ -2102,7 +2108,7 @@ impl BufferedPromptDiagnosticSink {
         capacity: usize,
     ) -> Result<Self, String> {
         if capacity == 0 {
-            return Err("prompt diagnostic queue capacity must be nonzero".to_string());
+            return Err("diagnostic queue capacity must be nonzero".to_string());
         }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| "prompt diagnostic worker requires a Tokio runtime".to_string())?;
@@ -2114,6 +2120,15 @@ impl BufferedPromptDiagnosticSink {
                     BufferedDiagnosticCapture::Prompt(capture) => sink.record_prompt(capture),
                     BufferedDiagnosticCapture::ModelCall(capture) => {
                         sink.record_model_call(capture);
+                    }
+                    BufferedDiagnosticCapture::ToolInput(capture) => {
+                        sink.record_tool_input(capture);
+                    }
+                    BufferedDiagnosticCapture::ToolStarted(capture) => {
+                        sink.record_tool_started(capture);
+                    }
+                    BufferedDiagnosticCapture::ToolResult(capture) => {
+                        sink.record_tool_result(capture);
                     }
                 })
                 .await
@@ -2149,6 +2164,21 @@ impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
     fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
         let run_id = capture.diagnostic().context.run_id;
         self.enqueue(run_id, BufferedDiagnosticCapture::ModelCall(capture));
+    }
+
+    fn record_tool_input(&self, capture: HostManagedToolInputDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ToolInput(capture));
+    }
+
+    fn record_tool_started(&self, capture: HostManagedToolStartedDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ToolStarted(capture));
+    }
+
+    fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ToolResult(capture));
     }
 }
 
@@ -2217,7 +2247,19 @@ pub struct HostManagedToolInputDiagnosticCapture {
     pub context: LoopRunContext,
     pub input_ref: String,
     pub capability_name: String,
-    pub arguments: String,
+    pub arguments: serde_json::Value,
+}
+
+impl fmt::Debug for HostManagedToolInputDiagnosticCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostManagedToolInputDiagnosticCapture")
+            .field("run_id", &self.context.run_id)
+            .field("input_ref", &self.input_ref)
+            .field("capability_name", &self.capability_name)
+            .field("arguments", &"[diagnostic arguments redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2233,6 +2275,19 @@ pub enum HostManagedToolResultDiagnosticStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostManagedToolFailureCategory {
+    CapabilityFailed,
+}
+
+impl HostManagedToolFailureCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilityFailed => "capability_failed",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HostManagedToolResultDiagnosticCapture {
     pub context: LoopRunContext,
@@ -2241,8 +2296,27 @@ pub struct HostManagedToolResultDiagnosticCapture {
     pub result: Option<String>,
     pub result_original_bytes: Option<u64>,
     pub status: HostManagedToolResultDiagnosticStatus,
-    pub failure_category: Option<String>,
+    pub failure_category: Option<HostManagedToolFailureCategory>,
     pub failure_summary: Option<String>,
+}
+
+impl fmt::Debug for HostManagedToolResultDiagnosticCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostManagedToolResultDiagnosticCapture")
+            .field("run_id", &self.context.run_id)
+            .field("activity_id", &self.activity_id)
+            .field("capability_name", &self.capability_name)
+            .field("result", &self.result.as_ref().map(|value| value.len()))
+            .field("result_original_bytes", &self.result_original_bytes)
+            .field("status", &self.status)
+            .field("failure_category", &self.failure_category)
+            .field(
+                "failure_summary",
+                &self.failure_summary.as_ref().map(|value| value.len()),
+            )
+            .finish()
+    }
 }
 
 fn diagnostic_usage(usage: Option<LoopModelUsage>) -> Option<LoopModelUsage> {
@@ -3100,6 +3174,7 @@ mod tests {
     struct BlockingPromptDiagnosticSink {
         calls: std::sync::atomic::AtomicUsize,
         model_calls: std::sync::atomic::AtomicUsize,
+        tool_captures: std::sync::Mutex<Vec<&'static str>>,
         first_started: tokio::sync::Notify,
         release_first: (std::sync::Mutex<bool>, std::sync::Condvar),
     }
@@ -3109,6 +3184,7 @@ mod tests {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 model_calls: std::sync::atomic::AtomicUsize::new(0),
+                tool_captures: std::sync::Mutex::new(Vec::new()),
                 first_started: tokio::sync::Notify::new(),
                 release_first: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
             }
@@ -3136,6 +3212,27 @@ mod tests {
 
         fn record_model_call(&self, _capture: HostManagedModelCallDiagnosticCapture) {
             self.model_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn record_tool_input(&self, _capture: HostManagedToolInputDiagnosticCapture) {
+            self.tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .push("input");
+        }
+
+        fn record_tool_started(&self, _capture: HostManagedToolStartedDiagnosticCapture) {
+            self.tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .push("started");
+        }
+
+        fn record_tool_result(&self, _capture: HostManagedToolResultDiagnosticCapture) {
+            self.tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .push("result");
         }
     }
 
@@ -3237,6 +3334,84 @@ mod tests {
         })
         .await
         .expect("model-call capture drains");
+    }
+
+    #[tokio::test]
+    async fn buffered_diagnostics_forward_tool_captures_in_order() {
+        let inner = Arc::new(BlockingPromptDiagnosticSink::new());
+        let buffered = BufferedPromptDiagnosticSink::new(
+            inner.clone() as Arc<dyn HostManagedPromptDiagnosticSink>,
+            3,
+        )
+        .expect("buffered sink");
+        let context = prompt_diagnostic_capture_for_test().context;
+        let activity_id = Uuid::new_v4();
+
+        buffered.record_tool_input(HostManagedToolInputDiagnosticCapture {
+            context: context.clone(),
+            input_ref: "input:tool".to_string(),
+            capability_name: "builtin.echo".to_string(),
+            arguments: serde_json::json!({"message": "hello"}),
+        });
+        buffered.record_tool_started(HostManagedToolStartedDiagnosticCapture {
+            context: context.clone(),
+            activity_id,
+            input_ref: "input:tool".to_string(),
+        });
+        buffered.record_tool_result(HostManagedToolResultDiagnosticCapture {
+            context,
+            activity_id,
+            capability_name: "builtin.echo".to_string(),
+            result: Some("ok".to_string()),
+            result_original_bytes: Some(2),
+            status: HostManagedToolResultDiagnosticStatus::Succeeded,
+            failure_category: None,
+            failure_summary: None,
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if inner.tool_captures.lock().expect("tool capture lock").len() == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool captures drain");
+        assert_eq!(
+            inner
+                .tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .as_slice(),
+            ["input", "started", "result"]
+        );
+    }
+
+    #[test]
+    fn tool_diagnostic_capture_debug_hides_arguments_results_and_failures() {
+        let context = prompt_diagnostic_capture_for_test().context;
+        let secret = "Bearer abcdefghijklmnopqrstuvwxyz";
+        let input = HostManagedToolInputDiagnosticCapture {
+            context: context.clone(),
+            input_ref: "input:tool".to_string(),
+            capability_name: "builtin.echo".to_string(),
+            arguments: serde_json::json!({"token": secret}),
+        };
+        let result = HostManagedToolResultDiagnosticCapture {
+            context,
+            activity_id: Uuid::new_v4(),
+            capability_name: "builtin.echo".to_string(),
+            result: Some(secret.to_string()),
+            result_original_bytes: Some(secret.len() as u64),
+            status: HostManagedToolResultDiagnosticStatus::Failed,
+            failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
+            failure_summary: Some(secret.to_string()),
+        };
+
+        assert!(!format!("{input:?}").contains(secret));
+        assert!(!format!("{result:?}").contains(secret));
     }
 
     #[test]

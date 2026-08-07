@@ -25,14 +25,16 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, HostManagedPromptDiagnosticSink,
+    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolFailureCategory,
     HostManagedToolInputDiagnosticCapture, HostManagedToolResultDiagnosticCapture,
     HostManagedToolResultDiagnosticStatus, HostManagedToolStartedDiagnosticCapture,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ThreadScopeResolver, loop_driver_execution_extension_id,
 };
+#[cfg(test)]
+use ironclaw_product_contracts::inspector::TOOL_RESULT_MAX_BYTES;
 use ironclaw_product_contracts::{
-    inspector::TOOL_RESULT_MAX_BYTES, project_service::ProjectService,
+    inspector::TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, project_service::ProjectService,
 };
 
 use ironclaw_loop_contracts::{
@@ -313,13 +315,6 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
 const CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
 const DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// Additional bounded lookahead retained only while the Inspector leak detector
-/// scans a result. This matches the detector's largest structurally validated
-/// candidate and lets a secret beginning just before the retained-result limit
-/// be consumed and redacted instead of being split at that boundary.
-const TOOL_DIAGNOSTIC_REDACTION_CONTEXT_BYTES: usize = 64 * 1024;
-const TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES: usize =
-    TOOL_RESULT_MAX_BYTES + TOOL_DIAGNOSTIC_REDACTION_CONTEXT_BYTES;
 /// First-look preview bound on the initial result-reference observation.
 /// Matches `result_read`'s max chunk size so the preview is exactly the
 /// first chunk `result_read` would itself return at `offset: 0` — a model
@@ -409,15 +404,11 @@ impl StagedCapabilityIo {
         let Some(sink) = self.tool_diagnostic_sink.as_ref() else {
             return;
         };
-        let Ok(arguments) = serde_json::to_string(arguments) else {
-            tracing::debug!("tool arguments could not be serialized for diagnostics");
-            return;
-        };
         sink.record_tool_input(HostManagedToolInputDiagnosticCapture {
             context: run_context.clone(),
             input_ref: input_ref.as_str().to_string(),
             capability_name: capability_name.to_string(),
-            arguments,
+            arguments: arguments.clone(),
         });
     }
 
@@ -987,7 +978,7 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
                 result: None,
                 result_original_bytes: None,
                 status: HostManagedToolResultDiagnosticStatus::Failed,
-                failure_category: Some("capability_failed".to_string()),
+                failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
                 failure_summary: Some(summary.to_string()),
             });
         }
@@ -1060,7 +1051,9 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
 /// lookahead. `serialized_result_output` produces valid UTF-8, so an invalid
 /// suffix here can only be a code point split by the byte cap.
 fn bounded_tool_diagnostic_result(serialized: &[u8]) -> Option<String> {
-    let candidate = &serialized[..serialized.len().min(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES)];
+    let candidate = &serialized[..serialized
+        .len()
+        .min(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES)];
     match std::str::from_utf8(candidate) {
         Ok(text) => Some(text.to_owned()),
         Err(error) if error.error_len().is_none() => {

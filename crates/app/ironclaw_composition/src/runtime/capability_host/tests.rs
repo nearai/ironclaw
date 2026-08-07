@@ -2097,12 +2097,12 @@ mod tests {
         let retained_prefix = "x".repeat(TOOL_RESULT_MAX_BYTES - 32);
         let payload = format!(
             "{retained_prefix}{secret}{}",
-            "y".repeat(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES)
+            "y".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES)
         );
 
         let captured = bounded_tool_diagnostic_result(payload.as_bytes())
             .expect("serialized JSON diagnostic text is valid UTF-8");
-        assert_eq!(captured.len(), TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert_eq!(captured.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
         assert!(captured.len() < payload.len());
         assert!(captured.contains(&secret));
 
@@ -2122,13 +2122,13 @@ mod tests {
 
     #[test]
     fn tool_diagnostic_result_capture_drops_a_split_utf8_suffix() {
-        let mut payload = "a".repeat(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
+        let mut payload = "a".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
         payload.push('€');
         payload.push_str("tail");
 
         let captured = bounded_tool_diagnostic_result(payload.as_bytes())
             .expect("valid prefix is retained when the cap splits a code point");
-        assert_eq!(captured.len(), TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
+        assert_eq!(captured.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
         assert!(captured.is_char_boundary(captured.len()));
     }
 
@@ -2144,7 +2144,8 @@ mod tests {
             run_context.run_id
         ))
         .expect("input ref");
-        let output = serde_json::Value::String("x".repeat(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2));
+        let output =
+            serde_json::Value::String("x".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2));
         let serialized_bytes = serialized_result_output(&output)
             .expect("result serializes")
             .len();
@@ -2171,7 +2172,7 @@ mod tests {
         let retained = capture
             .result
             .expect("successful result has diagnostic text");
-        assert_eq!(retained.len(), TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert_eq!(retained.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
         assert_eq!(
             capture.result_original_bytes,
             Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))

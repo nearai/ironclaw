@@ -14,6 +14,8 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::LoopRunContext;
 #[cfg(test)]
 use ironclaw_loop_host::HostManagedModelCallDiagnostic;
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedToolFailureCategory;
 use ironclaw_loop_host::{
     HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticOutcome,
     HostManagedModelMessageRole, HostManagedPromptDiagnosticCapture,
@@ -32,7 +34,7 @@ use ironclaw_product_contracts::inspector::{
     DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope, DiagnosticUpdateKind,
     InspectorModelCallStatus, MAX_MODELS_IN_STATS, ModelCallDiagnostic, ModelTokenUsage,
     PromptComponentDiagnostic, PromptComponentKind, PromptDiagnostic, SessionDiagnosticStats,
-    ToolExecutionDiagnostic, ToolExecutionStatus,
+    TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, ToolExecutionDiagnostic, ToolExecutionStatus,
 };
 use ironclaw_safety::LeakDetector;
 use thiserror::Error;
@@ -840,6 +842,17 @@ fn diagnostic_prompt_text(detector: &LeakDetector, value: &str) -> String {
     detector.redact_all_secrets(&validated).0
 }
 
+fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end] // safety: `end` is a verified UTF-8 boundary.
+}
+
 fn diagnostic_scope_for_context(context: &LoopRunContext) -> Option<DiagnosticScope> {
     let user_id = context
         .actor
@@ -1093,16 +1106,16 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             cache_read_input_tokens: Some(u64::from(usage.cache_read_input_tokens)),
             cache_creation_input_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
         });
-        let detector = LeakDetector::new();
+        let detector = prompt_leak_detector();
         let failure_summary =
-            failure_summary.map(|summary| diagnostic_prompt_text(&detector, &summary));
+            failure_summary.map(|summary| diagnostic_prompt_text(detector, &summary));
         let call_id = DiagnosticModelCallId::from_uuid(diagnostic.call_id);
         let model_call = ModelCallDiagnostic::new(
             call_id,
             diagnostic.iteration,
-            diagnostic_prompt_text(&detector, &diagnostic.requested_model),
+            diagnostic_prompt_text(detector, &diagnostic.requested_model),
             Some(diagnostic_prompt_text(
-                &detector,
+                detector,
                 &diagnostic.effective_model,
             )),
             diagnostic.started_at,
@@ -1141,15 +1154,21 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             );
             return;
         };
-        let detector = LeakDetector::new();
+        let arguments = match serde_json::to_string(&capture.arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                tracing::debug!(%error, "tool input diagnostics could not serialize arguments");
+                return;
+            }
+        };
+        let detector = prompt_leak_detector();
         let input = PendingToolInput {
             capability_name: BoundedDiagnosticText::label(diagnostic_prompt_text(
-                &detector,
+                detector,
                 &capture.capability_name,
             )),
             arguments: BoundedDiagnosticText::tool_arguments(diagnostic_prompt_text(
-                &detector,
-                &capture.arguments,
+                detector, &arguments,
             )),
         };
         if let Err(error) = self.record_pending_tool_input(scope, capture.input_ref, input) {
@@ -1221,15 +1240,18 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
                 return;
             }
         };
-        let detector = LeakDetector::new();
+        let detector = prompt_leak_detector();
         let result = match capture.result {
             Some(result) => {
-                let safe_result = diagnostic_prompt_text(&detector, &result);
-                let retained_bytes = u64::try_from(safe_result.len()).unwrap_or(u64::MAX);
-                let original_bytes = capture
-                    .result_original_bytes
-                    .unwrap_or(retained_bytes)
-                    .max(retained_bytes);
+                let Some(original_bytes) = capture.result_original_bytes else {
+                    tracing::debug!(
+                        "tool result diagnostics omitted the required original byte count"
+                    );
+                    return;
+                };
+                let bounded_result =
+                    bounded_utf8_prefix(&result, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+                let safe_result = diagnostic_prompt_text(detector, bounded_result);
                 match BoundedDiagnosticText::retained_tool_result(safe_result, original_bytes) {
                     Ok(result) => Some(result),
                     Err(error) => {
@@ -1241,10 +1263,10 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             None => None,
         };
         let failure_category = capture.failure_category.map(|category| {
-            BoundedDiagnosticText::label(diagnostic_prompt_text(&detector, &category))
+            BoundedDiagnosticText::label(diagnostic_prompt_text(detector, category.as_str()))
         });
         let failure_summary = capture.failure_summary.map(|summary| {
-            BoundedDiagnosticText::summary(diagnostic_prompt_text(&detector, &summary))
+            BoundedDiagnosticText::summary(diagnostic_prompt_text(detector, &summary))
         });
         let status = match capture.status {
             HostManagedToolResultDiagnosticStatus::Succeeded => ToolExecutionStatus::Succeeded,
@@ -1258,7 +1280,7 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
                 .map(|tool| tool.capability_name.clone())
                 .unwrap_or_else(|| {
                     BoundedDiagnosticText::label(diagnostic_prompt_text(
-                        &detector,
+                        detector,
                         &capture.capability_name,
                     ))
                 }),
@@ -2108,7 +2130,7 @@ mod tests {
                     context: context.clone(),
                     input_ref: input_ref.to_string(),
                     capability_name: "filesystem.read".to_string(),
-                    arguments: format!(r#"{{"path":"{secret}"}}"#),
+                    arguments: serde_json::json!({"path": secret}),
                 },
             );
             HostManagedPromptDiagnosticSink::record_tool_started(
@@ -2139,14 +2161,27 @@ mod tests {
         HostManagedPromptDiagnosticSink::record_tool_result(
             &store,
             HostManagedToolResultDiagnosticCapture {
-                context,
+                context: context.clone(),
                 activity_id: second_tool_id,
                 capability_name: "filesystem.read".to_string(),
                 result: None,
                 result_original_bytes: None,
                 status: HostManagedToolResultDiagnosticStatus::Failed,
-                failure_category: Some("invalid_input".to_string()),
+                failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
                 failure_summary: Some(format!("could not read {secret}")),
+            },
+        );
+        HostManagedPromptDiagnosticSink::record_tool_result(
+            &store,
+            HostManagedToolResultDiagnosticCapture {
+                context,
+                activity_id: uuid::Uuid::new_v4(),
+                capability_name: "filesystem.read".to_string(),
+                result: Some("untrusted size".to_string()),
+                result_original_bytes: None,
+                status: HostManagedToolResultDiagnosticStatus::Succeeded,
+                failure_category: None,
+                failure_summary: None,
             },
         );
 
@@ -2195,7 +2230,11 @@ mod tests {
         assert_eq!(snapshot.model_calls[0].iteration, 4);
         assert_eq!(snapshot.stats.total_model_calls, 1);
         assert_eq!(snapshot.stats.input_tokens.known_total, 12);
-        assert_eq!(snapshot.tool_executions.len(), 2);
+        assert_eq!(
+            snapshot.tool_executions.len(),
+            2,
+            "a successful capture without its original byte count must be dropped"
+        );
         assert_eq!(
             snapshot.tool_executions[0].activity_id.as_uuid(),
             first_tool_id
