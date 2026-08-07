@@ -40,11 +40,13 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   read by boot-time restore and the registration pipeline, which is why it
   lives here and not in the manager.
 - **Hosted-MCP registration pipeline** — `hosted_mcp_admission.rs`,
-  `hosted_mcp_manifest.rs`, `hosted_mcp_preparation.rs`,
+  `hosted_mcp_auth_admission.rs`, `hosted_mcp_manifest.rs`,
+  `hosted_mcp_registration.rs`, `hosted_mcp_preparation.rs`,
   `hosted_mcp_discovery_authority.rs`, `mcp_catalog_safety.rs`: endpoint
-  admission, manifest synthesis for user-registered servers, the
-  preparation/discovery lifecycle, and remote-catalog safety screening.
-  Deliberately separate from the shared install→activate→remove path.
+  admission, lifecycle-neutral auth metadata admission, definition-only
+  registration, installed-extension preparation/discovery, and remote-catalog
+  safety screening. Registration deliberately owns no installation transition,
+  operation lock, or active-capability publication.
 
 ## Depends on / consumed by
 

@@ -44,9 +44,11 @@ structural rather than effort:
 
 - **`ExtensionLifecycleManager` (`product_lifecycle.rs`)** is the lifecycle
   *workflow* — it holds the operation lock, drives activation transactions, and
-  is what §6.8.3 means by "calls `extension_host`". It is also mutually
-  recursive with the hosted-MCP registration pipeline (§6.8.2's amendment), so
-  it cannot cross a crate boundary in either direction without an inversion.
+  is what §6.8.3 means by "calls `extension_host`". Hosted-MCP registration does
+  not call this workflow: registration admits a caller-scoped package definition
+  to the catalog, while a later explicit install is the only operation allowed
+  to create installation membership or enter setup and activation. Keep those
+  paths separate when moving either responsibility across crate boundaries.
 - **The available-extension catalog** (`available_extensions.rs`,
   `available_extension_import.rs`) is read by the host's own
   `lifecycle_restore` at boot and by the registration pipeline. It is

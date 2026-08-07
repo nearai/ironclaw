@@ -635,11 +635,9 @@ async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionIn
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     Utc::now(),
-                    ironclaw_extension_registry::InstallationOwner::Users {
-                        user_ids: [UserId::new(*owner).expect("owner user id")]
-                            .into_iter()
-                            .collect(),
-                    },
+                    ironclaw_extension_registry::InstallationOwner::user(
+                        UserId::new(*owner).expect("owner user id"),
+                    ),
                 )
                 .expect("installation"),
             )

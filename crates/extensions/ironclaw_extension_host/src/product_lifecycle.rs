@@ -139,6 +139,7 @@ pub struct ExtensionLifecycleManager {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
+    hosted_mcp_registration: Arc<crate::hosted_mcp_registration::CustomMcpRegistrationService>,
     hosted_mcp_preparation: Arc<crate::hosted_mcp_preparation::HostedMcpPreparationService>,
     // Genuinely optional (not an `optional_arc` smell): a composition without
     // product auth cannot have minted a reusable OAuth credential, so there is
@@ -288,7 +289,7 @@ impl ExtensionLifecycleManager {
         request: RegisterHostedMcpRequest,
         scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        self.hosted_mcp_preparation.register(request, scope).await
+        self.hosted_mcp_registration.register(request, scope).await
     }
 
     /// Run the composed preparation strategy, if this installation's generic
@@ -334,6 +335,13 @@ impl ExtensionLifecycleManager {
         } = dependencies;
         let catalog = Arc::new(RwLock::new(catalog));
         let operation_lock = Arc::new(Mutex::new(()));
+        let hosted_mcp_registration = Arc::new(
+            crate::hosted_mcp_registration::CustomMcpRegistrationService::new(
+                Arc::clone(&installation_store),
+                Arc::clone(&catalog),
+                &hosted_mcp_dependencies,
+            ),
+        );
         let hosted_mcp_preparation = Arc::new(
             crate::hosted_mcp_preparation::HostedMcpPreparationService::new(
                 Arc::clone(&installation_store),
@@ -350,6 +358,7 @@ impl ExtensionLifecycleManager {
             lifecycle_service,
             active_extensions,
             operation_lock,
+            hosted_mcp_registration,
             hosted_mcp_preparation,
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
@@ -633,7 +642,7 @@ impl ExtensionLifecycleManager {
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let extensions = {
             let catalog = self.catalog.read().await;
-            catalog.search(query).collect::<Vec<_>>()
+            catalog.search_visible(query, caller).collect::<Vec<_>>()
         };
         let activation_errors = self.installation_activation_errors().await?;
         let mut summaries = Vec::new();
@@ -699,15 +708,16 @@ impl ExtensionLifecycleManager {
             .installation_store
             .get_installation(&installation_id)
             .await
-            .map_err(map_extension_installation_error)?
-            // A foreign user-private install projects as not-installed for
-            // this caller — same masking as search/list (#5459 P1).
-            .filter(|installation| installation.owner().visible_to(caller));
+            .map_err(map_extension_installation_error)?;
         let activation_errors = self.installation_activation_errors().await?;
         let available = {
             let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref)?
+            catalog.resolve_visible(&package_ref, caller)?
         };
+        let installation = installation
+            // A foreign user-private install projects as not-installed for
+            // this caller — same masking as search/list (#5459 P1).
+            .filter(|installation| installation.owner().visible_to(caller));
         let has_activatable_surface = package_has_activatable_surface(&available.package);
         // A not-installed package has no installation state; `install_scope`
         // (`None` below) is the not-installed signal, so the neutral `Installed`
@@ -925,9 +935,8 @@ impl ExtensionLifecycleManager {
     ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
-        let installation = self
-            .search_installation(&extension.package.id)
-            .await?
+        let installation = self.search_installation(&extension.package.id).await?;
+        let installation = installation
             // A foreign user-private install reads as not-installed for this
             // caller (#5459 P1) — same masking as list/project.
             .filter(|installation| installation.owner().visible_to(caller));
@@ -1220,7 +1229,7 @@ impl ExtensionLifecycleManager {
         // retaining a borrow into the catalog.
         let available = {
             let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref)?
+            catalog.resolve_visible(&package_ref, caller)?
         };
         let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
@@ -3913,23 +3922,22 @@ mod tests {
         );
     }
 
-    /// Wraps a real [`ExtensionInstallationStore`] so `admit_package_definition`
-    /// (the call `HostedMcpPreparationService::register` makes between its two
-    /// lock acquisitions) can be paused mid-flight. Lets the deadlock test below
-    /// force the exact interleaving the lock-order fix depends on: register
-    /// signals `holding` once it is inside `admit_package_definition`, then
-    /// blocks on `release` until the test lets it continue.
-    struct PauseOnAdmitStore {
+    /// Wraps a real [`ExtensionInstallationStore`] so definition admission can
+    /// be paused while an unrelated bundle import proceeds. Registration does
+    /// not take the installation lifecycle lock.
+    struct PauseOnRegistrationCommitStore {
         inner: ExtensionInstallationStore,
         holding: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait]
-    impl ironclaw_extension_registry::ExtensionInstallationStorePort for PauseOnAdmitStore {
+    impl ironclaw_extension_registry::ExtensionInstallationStorePort
+        for PauseOnRegistrationCommitStore
+    {
         async fn admit_package_definition(
             &self,
-            record: ExtensionManifestRecord,
+            record: ironclaw_extension_registry::RegisteredPackageDefinition,
         ) -> Result<
             ironclaw_extension_registry::PackageDefinitionAdmissionOutcome,
             ExtensionInstallationError,
@@ -3937,6 +3945,27 @@ mod tests {
             self.holding.notify_one();
             self.release.notified().await;
             self.inner.admit_package_definition(record).await
+        }
+
+        async fn get_registered_package_definition(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<
+            Option<ironclaw_extension_registry::RegisteredPackageDefinition>,
+            ExtensionInstallationError,
+        > {
+            self.inner
+                .get_registered_package_definition(extension_id)
+                .await
+        }
+
+        async fn list_registered_package_definitions(
+            &self,
+        ) -> Result<
+            Vec<ironclaw_extension_registry::RegisteredPackageDefinition>,
+            ExtensionInstallationError,
+        > {
+            self.inner.list_registered_package_definitions().await
         }
 
         async fn list_manifests(
@@ -4073,7 +4102,7 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     /// Regression test for the AB-BA lock-order deadlock between
-    /// `HostedMcpPreparationService::register` and
+    /// `CustomMcpRegistrationService::register` and
     /// `ExtensionLifecycleManager::import_bundle`: both coordinate the same
     /// `catalog` `RwLock` and `operation_lock` `Mutex`, and must acquire them
     /// in the same order.
@@ -4084,26 +4113,9 @@ output_schema_ref = "schemas/run.output.json"
     /// interleaved (register's own async work completed before import even
     /// reached the catalog lock), so it passed in ~0.07s against the buggy
     /// lock order too — a non-discriminating regression test. This version
-    /// pauses `register` mid-flight (inside `admit_package_definition`, which
-    /// runs between its two lock acquisitions) via a controllable test double,
-    /// forcing `import_bundle` to actually contend for the shared locks before
-    /// `register` is allowed to finish:
-    ///
-    /// 1. `register` grabs its first lock (`catalog` when fixed,
-    ///    `operation_lock` when buggy), then blocks inside
-    ///    `admit_package_definition` and signals `holding`.
-    /// 2. The test waits for `holding`, then spawns `import_bundle`, which
-    ///    unconditionally takes `catalog` first, then `operation_lock` — and
-    ///    waits briefly to let it reach that second lock.
-    /// 3. The test releases `register`.
-    ///    - Fixed order: `register` already holds `catalog`, so `import_bundle`
-    ///      was already blocked on `catalog` in step 2 (never touched
-    ///      `operation_lock`); both complete once `register` finishes.
-    ///    - Buggy order: `register` holds only `operation_lock` in step 1, so
-    ///      `import_bundle` takes `catalog` free in step 2 and blocks on
-    ///      `operation_lock` (held by `register`). Releasing `register` lets it
-    ///      resume and block on `catalog` (held by `import_bundle`): AB-BA
-    ///      deadlock, and the timeout below fires.
+    /// Registration pauses inside its definition-only CAS while import drives
+    /// the installation lifecycle. Both must complete because registration
+    /// does not acquire `operation_lock` or persist an installation.
     #[tokio::test]
     async fn concurrent_register_and_import_bundle_do_not_deadlock() {
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
@@ -4119,7 +4131,7 @@ output_schema_ref = "schemas/run.output.json"
         let release = Arc::new(tokio::sync::Notify::new());
         let installation_store: Arc<
             dyn ironclaw_extension_registry::ExtensionInstallationStorePort,
-        > = Arc::new(PauseOnAdmitStore {
+        > = Arc::new(PauseOnRegistrationCommitStore {
             inner: inner_store,
             holding: Arc::clone(&holding),
             release: Arc::clone(&release),
@@ -4572,6 +4584,7 @@ output_schema_ref = "schemas/search.output.json"
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            catalog_visibility: crate::available_extensions::CatalogVisibility::Tenant,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
@@ -4662,6 +4675,7 @@ input_schema_ref = "schemas/fixture_host_internal/dynamic/mcp_server.input.v1.js
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            catalog_visibility: crate::available_extensions::CatalogVisibility::Tenant,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),

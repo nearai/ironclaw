@@ -360,9 +360,7 @@ effects = ["network"]
             PackageRootBinding::Virtual,
         )
         .expect("test manifest");
-        crate::hosted_mcp_manifest::available_package(&record)
-            .expect("test package")
-            .package
+        crate::hosted_mcp_manifest::registered_extension_package(&record).expect("test package")
     }
 
     #[tokio::test]

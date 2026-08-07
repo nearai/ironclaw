@@ -97,7 +97,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
-            "Register a custom hosted MCP endpoint in the Reborn extension catalog before installing it. First call builtin.extension_search; use this only when the requested MCP server is not already registered. Choose auth_type from provider documentation or explicit user context: no_auth only for a documented public endpoint, bearer for a static API token or PAT sent as a Bearer credential, and oauth for a browser authorization-code flow. If the auth type is unclear, ask the user instead of guessing. On success, pass the returned package_ref.id to builtin.extension_install. Registration never installs or activates the extension.",
+            "Register a custom hosted MCP endpoint as a private catalog definition visible to the calling user. First call builtin.extension_search; use this only when the requested MCP server is not already registered for that user. Choose auth_type from provider documentation or explicit user context: no_auth only for a documented public endpoint, bearer for a static API token or PAT sent as a Bearer credential, and oauth for a browser authorization-code flow. If the auth type is unclear, ask the user instead of guessing. Registration does not create an installation, installation membership, credential setup, activation, or published capabilities. On success, pass the returned package_ref.id to builtin.extension_install only when the user wants to install it through the ordinary lifecycle.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,

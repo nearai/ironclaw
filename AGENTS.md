@@ -150,6 +150,14 @@ product, composition, and frontend contracts when onboarding changes.
   server integrations belong behind MCP and the network boundary.
 - Discovery is side-effect-free. Installation, credential binding, activation,
   execution, deactivation, and removal are explicit lifecycle transitions.
+- Hosted-MCP registration is catalog admission, not installation. Registration
+  may validate a remote definition and persist definition-level manager/member
+  visibility, but it must not create or mutate an `ExtensionInstallation`, add
+  installation membership, advance setup/activation state, or publish
+  capabilities. Only an explicit install action may enter the shared extension
+  installation lifecycle. Registration initializes both explicit managers and
+  visible members to the authenticated caller. Future admin management must use
+  live admin authorization rather than persisting a snapshot of admin user ids.
 - Capability failures the model or user can correct are model-visible outcomes;
   host errors are reserved for failures that make the run unable to continue.
 - Side-effecting success requires durable or provider-issued evidence plus

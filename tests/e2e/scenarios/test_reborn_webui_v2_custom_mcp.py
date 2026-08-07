@@ -2,8 +2,8 @@
 
 The server-side lifecycle journey is covered by the hosted-MCP integration
 suite. This file deliberately mocks only the browser-facing projection and
-mutation routes so it can prove registration creates an available registry
-entry, while the existing install/setup UI owns installation and credentials.
+mutation routes so it can prove registration creates a private, uninstalled
+registry entry, while the existing install/setup UI owns installation and credentials.
 """
 
 import json
@@ -37,7 +37,7 @@ def _registered_catalog_entry() -> dict:
         "package_ref": {"kind": "extension", "id": "custom-weather-mcp"},
         "display_name": "Custom weather MCP",
         "runtime": "mcp",
-        "description": "A registered custom MCP server available to install.",
+        "description": "A privately registered custom MCP server available to install.",
         "keywords": ["custom", "mcp"],
         "installed": False,
         "surfaces": [{"kind": "tool"}],
@@ -193,7 +193,7 @@ async def _install_registered_mcp(page) -> None:
     await card.get_by_role("button", name="Install").click()
 
 
-async def test_custom_mcp_registration_creates_uninstalled_registry_entry(
+async def test_custom_mcp_registration_creates_private_uninstalled_registry_entry(
     reborn_v2_server, reborn_v2_browser
 ):
     context, page, registrations, installations, _ = await _open_custom_mcp_page(
@@ -215,12 +215,25 @@ async def test_custom_mcp_registration_creates_uninstalled_registry_entry(
                 "auth_selection": {"kind": "auto"},
             }
         ]
+        # Registration creates only the private registry definition. The
+        # ordinary install endpoint remains untouched until the user installs.
         assert installations == []
         await expect(page.get_by_role("button", name="Continue setup")).to_have_count(0)
         await page.get_by_role("button", name="Done").click()
+
+        # A fresh projection retains the creator's private catalog definition
+        # as uninstalled and offers the ordinary Install action.
+        await page.reload()
+        await expect(page.get_by_text("Registry").first).to_be_visible(timeout=15000)
+        card = page.get_by_test_id("extension-card").filter(has_text="Custom weather MCP")
+        await expect(card.get_by_role("button", name="Install")).to_be_visible()
+        assert installations == []
         await _install_registered_mcp(page)
         assert len(installations) == 1
         assert installations[0]["package_ref"] == {"kind": "extension", "id": "custom-weather-mcp"}
+        card = page.get_by_test_id("extension-card").filter(has_text="Custom weather MCP")
+        await expect(card.get_by_text("active", exact=True)).to_be_visible(timeout=5000)
+        await expect(card.get_by_role("button", name="Install")).to_have_count(0)
     finally:
         await context.close()
 
@@ -255,7 +268,9 @@ async def test_custom_mcp_bearer_install_hands_off_to_existing_setup_states(
             await expect(page.get_by_text("Token was rejected")).to_be_visible()
         else:
             await expect(page.get_by_role("dialog")).to_have_count(0)
-            await expect(page.get_by_text("Custom weather MCP", exact=True).first).to_be_visible()
+            card = page.get_by_test_id("extension-card").filter(has_text="Custom weather MCP")
+            await expect(card.get_by_text("active", exact=True)).to_be_visible(timeout=5000)
+            await expect(card.get_by_role("button", name="Install")).to_have_count(0)
         assert submissions[0]["payload"]["secrets"] == {"MCP_BEARER_TOKEN": "wrong-or-right-token"}
     finally:
         await context.close()

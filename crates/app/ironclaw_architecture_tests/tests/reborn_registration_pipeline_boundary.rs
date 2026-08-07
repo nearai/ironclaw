@@ -2,9 +2,12 @@
 //!
 //! Hosted-MCP **registration** is its own pipeline: it validates a
 //! user-supplied endpoint, authenticates to it, discovers its tools, and only
-//! then hands the shared extension lifecycle a *complete* package —
-//! indistinguishable from a bundled one. Everything about "registered but not
-//! yet discovered" belongs inside that pipeline.
+//! then admits a *complete* package definition — indistinguishable from a
+//! bundled one — into the catalog with definition-level caller visibility.
+//! Registration must not create an installation, installation membership,
+//! setup checkpoint, activation, or publication. Everything about "registered
+//! but not yet discovered" belongs inside that pipeline; only a later explicit
+//! install action may enter the shared extension lifecycle.
 //!
 //! The shared lifecycle (install → configure → activate → execute → remove)
 //! runs for every extension: gmail, slack, github, telegram. It must not learn
@@ -58,7 +61,9 @@ mod ratchet_support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use ratchet_support::{find_workspace_root, strip_cfg_test_blocks, workspace_root};
+use ratchet_support::{
+    find_workspace_root, strip_cfg_test_blocks, strip_comments_and_strings, workspace_root,
+};
 
 /// Registration-pipeline vocabulary. Naming any of these outside the owning
 /// files below means a registration concept has entered generic code.
@@ -114,14 +119,99 @@ fn registration_boundary_allowlist_ratchets_down_only() {
         ALLOWLIST.len() <= baseline,
         "registration-boundary ALLOWLIST grew to {} entries (baseline {}): this list is \
          shrink-only. Registration owns endpoint validation, MCP-server auth, discovery, retry, \
-         and any not-yet-discovered state; the shared lifecycle receives only a complete \
-         package. Move the concept into the registration pipeline rather than allowlisting a \
+         definition admission, and any not-yet-discovered state; the shared lifecycle begins \
+         only on an explicit install action. Move the concept into the registration pipeline rather than allowlisting a \
          new pair. If the owner has approved a deliberate carve-out, raise \
          REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE in the same PR with the rationale in the PR \
          body.",
         ALLOWLIST.len(),
         REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE
     );
+}
+
+#[test]
+fn hosted_mcp_registration_does_not_enter_installation_lifecycle() {
+    let owner = registration_owner_source(&workspace_root())
+        .unwrap_or_else(|error| panic!("registration owner could not be measured: {error}"));
+
+    assert!(
+        owner.contains("admit_package_definition("),
+        "registration must durably admit a package definition"
+    );
+    if let Some(forbidden) = registration_lifecycle_violations(&owner).first() {
+        panic!("registration must not enter the installation lifecycle through `{forbidden}`");
+    }
+}
+
+fn registration_owner_source(root: &Path) -> Result<String, String> {
+    let host = root.join("crates/extensions/ironclaw_extension_host/src");
+    let mut owner = String::new();
+    for relative in ["hosted_mcp_registration.rs", "hosted_mcp_auth_admission.rs"] {
+        let path = host.join(relative);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        owner.push_str(&strip_cfg_test_blocks(&strip_comments_and_strings(&source)));
+        owner.push('\n');
+    }
+    Ok(owner)
+}
+
+fn registration_lifecycle_violations(source: &str) -> Vec<&'static str> {
+    const FORBIDDEN: &[&str] = &[
+        "prepare_install(",
+        "upsert_manifest_and_installation(",
+        "upsert_manifest_only(",
+        "checkpoint_preparation(",
+        "finalize_preparation(",
+        "get_installation(",
+        "activate_membership(",
+        "operation_lock.lock(",
+    ];
+    FORBIDDEN
+        .iter()
+        .copied()
+        .filter(|forbidden| source.contains(forbidden))
+        .collect()
+}
+
+#[test]
+fn registration_owner_gate_is_order_independent_and_ignores_decoys() {
+    let helper_before = r#"
+        fn helper() { checkpoint_preparation(); }
+        pub async fn register() { admit_package_definition(); }
+    "#;
+    let helper_after = r#"
+        pub async fn register() { admit_package_definition(); }
+        fn helper() { checkpoint_preparation(); }
+    "#;
+    assert_eq!(
+        registration_lifecycle_violations(helper_before),
+        vec!["checkpoint_preparation("]
+    );
+    assert_eq!(
+        registration_lifecycle_violations(helper_after),
+        vec!["checkpoint_preparation("]
+    );
+
+    let decoys = strip_cfg_test_blocks(&strip_comments_and_strings(
+        r#"
+            // checkpoint_preparation();
+            const DECOY: &str = "checkpoint_preparation(";
+            #[cfg(test)]
+            mod tests { fn helper() { checkpoint_preparation(); } }
+            pub async fn register() { admit_package_definition(); }
+        "#,
+    ));
+    assert!(registration_lifecycle_violations(&decoys).is_empty());
+}
+
+#[test]
+fn registration_owner_gate_fails_closed_when_an_owner_file_is_missing() {
+    let missing_root = std::env::temp_dir().join(format!(
+        "ironclaw-registration-owner-missing-{}",
+        std::process::id()
+    ));
+    assert!(registration_owner_source(&missing_root).is_err());
 }
 
 #[test]

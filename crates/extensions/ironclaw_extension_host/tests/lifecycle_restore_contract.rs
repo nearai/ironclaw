@@ -20,6 +20,7 @@ use ironclaw_extension_registry::{
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{approval::sha256_digest_token, ids::CapabilityId, ids::UserId};
+use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 use tokio::sync::Mutex;
 
@@ -193,6 +194,28 @@ async fn restore_installs_but_does_not_enable_an_undiscovered_hosted_mcp_package
 
     let broken_id = ironclaw_host_api::ids::ExtensionId::new("mcp-broken").expect("extension id");
     let healthy_id = ironclaw_host_api::ids::ExtensionId::new("mcp-healthy").expect("extension id");
+
+    // Legacy installations without a separate registered-definition row use
+    // installation membership as their catalog audience. Restore must retain
+    // creator visibility without exposing either definition to another user.
+    let foreign_user = UserId::new("restore-foreign-user").expect("valid foreign user id");
+    for extension_id in [&broken_id, &healthy_id] {
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
+                .expect("valid package ref");
+        assert!(
+            catalog.resolve_visible(&package_ref, &owner).is_ok(),
+            "expected owner-visible restore for extension_id={}",
+            extension_id.as_str()
+        );
+        assert!(
+            catalog
+                .resolve_visible(&package_ref, &foreign_user)
+                .is_err(),
+            "expected foreign-user-hidden restore for extension_id={}",
+            extension_id.as_str()
+        );
+    }
 
     // Assertion 2: mcp-broken is installed (present in the lifecycle service's
     // registry, proving `lifecycle.install(..)` ran) but not enabled or

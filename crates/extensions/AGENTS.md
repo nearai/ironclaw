@@ -59,6 +59,34 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 | Product face: catalog UX, lifecycle commands/capabilities, credential views, the extension hub | `ironclaw_extension_manager` |
 | Concrete vendor behavior: parsing, rendering, vendor calls, recipe data, provider implementations | `packages/*` (native executors for data-only packages: `ironclaw_extension_support`) |
 
+## Registration is not installation
+
+User-registered hosted MCPs cross two separate boundaries. Registration admits
+a remote package definition into the catalog and persists the definition's
+manager/member visibility. Registration initializes both sets to the
+authenticated caller. It must not create or mutate an
+`ExtensionInstallation`, create installation membership, enter credential
+setup, activate a runtime, or publish capabilities. The later explicit install
+action is the only transition into the ordinary install → setup → activate →
+remove lifecycle.
+
+Re-derive the two paths before changing either one:
+
+```bash
+rg -n "register_hosted_mcp|admit_package_definition|registered_package_definition" \
+  crates/extensions crates/product
+rg -n "ExtensionInstall|prepare_install|upsert.*installation|activate" \
+  crates/extensions crates/product
+```
+
+If registration needs caller-scoped discovery, put that authority on the
+registered definition or its catalog-admission record. Do not synthesize an
+inactive installation as an ownership surrogate.
+
+Definition managers and visible members are separate sets. Future product
+operations may authorize an explicit manager or a caller's live tenant-admin
+standing; do not copy current admin identities into the durable definition.
+
 ## The crates
 
 | Crate | Charter (one line) | Go here when |

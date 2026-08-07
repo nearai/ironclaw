@@ -16,7 +16,7 @@ use crate::product_extension_host_api_contract_registry;
 
 use crate::available_extensions::{
     AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
-    bytes_asset, map_binding_error, reserved_host_bundled_extension_id,
+    CatalogVisibility, bytes_asset, map_binding_error, reserved_host_bundled_extension_id,
     surface_kinds_from_manifest_record,
 };
 use crate::{MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES};
@@ -300,6 +300,7 @@ fn extension_package_from_files(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source,
+        catalog_visibility: CatalogVisibility::Tenant,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,

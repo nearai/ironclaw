@@ -26,7 +26,10 @@ use uuid::Uuid;
 
 use crate::resolved::{PackageRootBinding, ResolvedExtensionManifest};
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
-use crate::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
+use crate::{
+    PackageDefinitionAdmissionOutcome, PackageDefinitionRetention, RegisteredPackageDefinition,
+    UserMembership,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -474,27 +477,22 @@ impl ExtensionManifestRef {
 pub enum InstallationOwner {
     #[default]
     Tenant,
-    Users {
-        user_ids: BTreeSet<UserId>,
-    },
+    Users(UserMembership),
 }
 
 impl InstallationOwner {
     /// Singleton member set — what a single member's install produces.
     pub fn user(user_id: UserId) -> Self {
-        Self::Users {
-            user_ids: BTreeSet::from([user_id]),
-        }
+        Self::Users(UserMembership::user(user_id))
     }
 
     /// Member set; rejects an empty set (an installation must belong to the
     /// tenant or to at least one member — an empty set would be a row nobody
     /// can see, operate, or remove).
     pub fn users(user_ids: BTreeSet<UserId>) -> Result<Self, ExtensionInstallationError> {
-        if user_ids.is_empty() {
-            return Err(ExtensionInstallationError::EmptyOwnerMembers);
-        }
-        Ok(Self::Users { user_ids })
+        UserMembership::users(user_ids)
+            .map(Self::Users)
+            .map_err(|_| ExtensionInstallationError::EmptyOwnerMembers)
     }
 
     pub fn is_tenant(&self) -> bool {
@@ -504,7 +502,7 @@ impl InstallationOwner {
     /// The member set, if the installation is member-held.
     pub fn members(&self) -> Option<&BTreeSet<UserId>> {
         match self {
-            Self::Users { user_ids } => Some(user_ids),
+            Self::Users(membership) => Some(membership.user_ids()),
             Self::Tenant => None,
         }
     }
@@ -517,12 +515,7 @@ impl InstallationOwner {
     pub fn joined_by(&self, user_id: &UserId) -> Result<Option<Self>, ExtensionInstallationError> {
         match self {
             Self::Tenant => Ok(Some(Self::user(user_id.clone()))),
-            Self::Users { user_ids } if user_ids.contains(user_id) => Ok(None),
-            Self::Users { user_ids } => {
-                let mut joined = user_ids.clone();
-                joined.insert(user_id.clone());
-                Self::users(joined).map(Some)
-            }
+            Self::Users(membership) => Ok(membership.joined_by(user_id).map(Self::Users)),
         }
     }
 
@@ -537,18 +530,7 @@ impl InstallationOwner {
     ) -> Result<Option<Self>, ExtensionInstallationError> {
         match self {
             Self::Tenant => Err(ExtensionInstallationError::LegacyTenantOwnerNotCanonicalized),
-            Self::Users { user_ids } => {
-                let remaining = user_ids
-                    .iter()
-                    .filter(|member| *member != user_id)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                if remaining.is_empty() {
-                    Ok(None)
-                } else {
-                    Self::users(remaining).map(Some)
-                }
-            }
+            Self::Users(membership) => Ok(membership.without(user_id).map(Self::Users)),
         }
     }
 
@@ -557,7 +539,7 @@ impl InstallationOwner {
     pub fn visible_to(&self, caller: &UserId) -> bool {
         match self {
             Self::Tenant => true,
-            Self::Users { user_ids } => user_ids.contains(caller),
+            Self::Users(membership) => membership.contains(caller),
         }
     }
 }
@@ -597,7 +579,9 @@ impl From<InstallationOwner> for InstallationOwnerWire {
     fn from(owner: InstallationOwner) -> Self {
         match owner {
             InstallationOwner::Tenant => Self::Tenant,
-            InstallationOwner::Users { user_ids } => Self::Users { user_ids },
+            InstallationOwner::Users(membership) => Self::Users {
+                user_ids: membership.user_ids().clone(),
+            },
         }
     }
 }
@@ -786,12 +770,13 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
 pub trait ExtensionInstallationStorePort: Send + Sync {
     /// Immutably admit one package definition into the explicit catalog.
     /// Replaying the exact same definition is idempotent; a different
-    /// definition for the same extension id is rejected without mutation.
+    /// definition or owner for the same extension id is rejected without
+    /// mutation. Definition admission does not create an installation.
     async fn admit_package_definition(
         &self,
-        record: ExtensionManifestRecord,
+        registered: RegisteredPackageDefinition,
     ) -> Result<PackageDefinitionAdmissionOutcome, ExtensionInstallationError> {
-        let _ = record;
+        let _ = registered;
         Err(store_unavailable_error(
             "extension installation store does not implement package definition admission",
         ))
@@ -802,7 +787,7 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
     async fn get_registered_package_definition(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+    ) -> Result<Option<RegisteredPackageDefinition>, ExtensionInstallationError> {
         let _ = extension_id;
         Ok(None)
     }
@@ -815,7 +800,7 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
     /// than an error.
     async fn list_registered_package_definitions(
         &self,
-    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+    ) -> Result<Vec<RegisteredPackageDefinition>, ExtensionInstallationError> {
         Ok(Vec::new())
     }
 
@@ -958,15 +943,15 @@ where
 {
     async fn admit_package_definition(
         &self,
-        record: ExtensionManifestRecord,
+        registered: RegisteredPackageDefinition,
     ) -> Result<PackageDefinitionAdmissionOutcome, ExtensionInstallationError> {
-        (**self).admit_package_definition(record).await
+        (**self).admit_package_definition(registered).await
     }
 
     async fn get_registered_package_definition(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+    ) -> Result<Option<RegisteredPackageDefinition>, ExtensionInstallationError> {
         (**self)
             .get_registered_package_definition(extension_id)
             .await
@@ -974,7 +959,7 @@ where
 
     async fn list_registered_package_definitions(
         &self,
-    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+    ) -> Result<Vec<RegisteredPackageDefinition>, ExtensionInstallationError> {
         (**self).list_registered_package_definitions().await
     }
 
@@ -3266,14 +3251,14 @@ impl ExtensionInstallationStore {
 impl ExtensionInstallationStorePort for ExtensionInstallationStore {
     async fn admit_package_definition(
         &self,
-        record: ExtensionManifestRecord,
+        registered: RegisteredPackageDefinition,
     ) -> Result<PackageDefinitionAdmissionOutcome, ExtensionInstallationError> {
-        let path = self.registered_definition_path(record.extension_id())?;
+        let path = self.registered_definition_path(registered.definition().extension_id())?;
         match self
             .filesystem
             .put(
                 &path,
-                entry_for_registered_definition(&record)?,
+                entry_for_registered_definition(&registered)?,
                 CasExpectation::Absent,
             )
             .await
@@ -3281,18 +3266,18 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             Ok(_) => Ok(PackageDefinitionAdmissionOutcome::Created),
             Err(FilesystemError::VersionMismatch { .. }) => {
                 let existing = self
-                    .get_registered_package_definition(record.extension_id())
+                    .get_registered_package_definition(registered.definition().extension_id())
                     .await?
                     .ok_or_else(|| {
                         store_unavailable_error(
                             "registered package definition disappeared after CAS conflict",
                         )
                     })?;
-                if existing == record {
+                if existing == registered {
                     Ok(PackageDefinitionAdmissionOutcome::ExactExisting)
                 } else {
                     Err(ExtensionInstallationError::PackageDefinitionConflict {
-                        extension_id: record.extension_id().clone(),
+                        extension_id: registered.definition().extension_id().clone(),
                     })
                 }
             }
@@ -3303,7 +3288,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
     async fn get_registered_package_definition(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+    ) -> Result<Option<RegisteredPackageDefinition>, ExtensionInstallationError> {
         let path = self.registered_definition_path(extension_id)?;
         let Some(row) = self
             .filesystem
@@ -3316,12 +3301,12 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         ensure_entry_kind(&row.entry, REGISTERED_DEFINITION_RECORD_KIND, &path)?;
         let record = row
             .entry
-            .parse_json::<WireManifestRecord>()
+            .parse_json::<WireRegisteredPackageDefinition>()
             .map_err(|error| {
                 corrupt_row("deserialize registered package definition", &path, error)
             })?
-            .into_manifest_record()?;
-        if record.extension_id() != extension_id {
+            .into_registered_definition()?;
+        if record.definition().extension_id() != extension_id {
             return Err(corrupt_row(
                 "validate registered package definition identity",
                 &path,
@@ -3333,7 +3318,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
 
     async fn list_registered_package_definitions(
         &self,
-    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+    ) -> Result<Vec<RegisteredPackageDefinition>, ExtensionInstallationError> {
         let rows = query_all(
             &self.filesystem,
             &self.registered_definitions_root()?,
@@ -3346,7 +3331,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                 ensure_entry_kind(&row.entry, REGISTERED_DEFINITION_RECORD_KIND, &row.path)?;
                 let record = row
                     .entry
-                    .parse_json::<WireManifestRecord>()
+                    .parse_json::<WireRegisteredPackageDefinition>()
                     .map_err(|error| {
                         corrupt_row(
                             "deserialize registered package definition",
@@ -3354,11 +3339,24 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                             error,
                         )
                     })?
-                    .into_manifest_record()?;
+                    .into_registered_definition()?;
+                if row.path
+                    != self.registered_definition_path(record.definition().extension_id())?
+                {
+                    return Err(corrupt_row(
+                        "validate registered package definition identity",
+                        &row.path,
+                        "row extension id does not match its path",
+                    ));
+                }
                 Ok(record)
             })
             .collect::<Result<Vec<_>, ExtensionInstallationError>>()?;
-        records.sort_by(|a, b| a.extension_id().cmp(b.extension_id()));
+        records.sort_by(|a, b| {
+            a.definition()
+                .extension_id()
+                .cmp(b.definition().extension_id())
+        });
         Ok(records)
     }
 
@@ -4062,6 +4060,20 @@ struct WireManifestRecordValue {
     definition_retention: PackageDefinitionRetention,
 }
 
+/// Registered definitions keep caller visibility in the same immutable row as
+/// the manifest so admission cannot persist one without the other. Flattening
+/// preserves compatibility with definition rows written before ownership was
+/// recorded; those rows deserialize with both membership fields absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WireRegisteredPackageDefinition {
+    #[serde(flatten)]
+    definition: WireManifestRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manager_user_ids: Option<BTreeSet<UserId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    member_user_ids: Option<BTreeSet<UserId>>,
+}
+
 impl<'de> Deserialize<'de> for WireManifestRecord {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -4148,6 +4160,38 @@ impl From<&ExtensionManifestRecord> for WireManifestRecord {
     }
 }
 
+impl WireRegisteredPackageDefinition {
+    fn into_registered_definition(
+        self,
+    ) -> Result<RegisteredPackageDefinition, ExtensionInstallationError> {
+        let definition = self.definition.into_manifest_record()?;
+        match (self.manager_user_ids, self.member_user_ids) {
+            (Some(manager_user_ids), Some(member_user_ids)) => {
+                RegisteredPackageDefinition::managed_members(
+                    definition,
+                    manager_user_ids,
+                    member_user_ids,
+                )
+                .map_err(invalid_installation_error)
+            }
+            (None, None) => Ok(RegisteredPackageDefinition::legacy_ownerless(definition)),
+            _ => Err(invalid_installation_error(
+                "registered definition manager and members must be persisted together",
+            )),
+        }
+    }
+}
+
+impl From<&RegisteredPackageDefinition> for WireRegisteredPackageDefinition {
+    fn from(registered: &RegisteredPackageDefinition) -> Self {
+        Self {
+            definition: WireManifestRecord::from(registered.definition()),
+            manager_user_ids: registered.audience().manager_user_ids().cloned(),
+            member_user_ids: registered.audience().member_user_ids().cloned(),
+        }
+    }
+}
+
 fn is_default_definition_retention(value: &PackageDefinitionRetention) -> bool {
     *value == PackageDefinitionRetention::RemoveWithLastInstallation
 }
@@ -4222,9 +4266,9 @@ fn entry_for_manifest(
 }
 
 fn entry_for_registered_definition(
-    manifest: &ExtensionManifestRecord,
+    registered: &RegisteredPackageDefinition,
 ) -> Result<Entry, ExtensionInstallationError> {
-    let payload = serde_json::to_value(WireManifestRecord::from(manifest))
+    let payload = serde_json::to_value(WireRegisteredPackageDefinition::from(registered))
         .map_err(invalid_installation_error)?;
     Entry::record(record_kind(REGISTERED_DEFINITION_RECORD_KIND)?, &payload)
         .map_err(invalid_installation_error)
@@ -4931,6 +4975,13 @@ mod tests {
         .expect("pending manifest record")
     }
 
+    fn registered(record: ExtensionManifestRecord) -> RegisteredPackageDefinition {
+        RegisteredPackageDefinition::managed_by(
+            record,
+            UserId::new("definition-owner").expect("definition owner"),
+        )
+    }
+
     #[test]
     fn legacy_installation_wire_loads_without_an_incarnation() {
         let installation = installation("fixture", Some("hash-1"));
@@ -4956,17 +5007,18 @@ mod tests {
         let store = installation_store().await;
         let record = manifest_record("registered", Some("hash-one"))
             .with_definition_retention(PackageDefinitionRetention::RetainInCatalog);
+        let admitted = registered(record.clone());
 
         assert_eq!(
             store
-                .admit_package_definition(record.clone())
+                .admit_package_definition(admitted.clone())
                 .await
                 .expect("create definition"),
             PackageDefinitionAdmissionOutcome::Created
         );
         assert_eq!(
             store
-                .admit_package_definition(record.clone())
+                .admit_package_definition(admitted.clone())
                 .await
                 .expect("replay exact definition"),
             PackageDefinitionAdmissionOutcome::ExactExisting
@@ -5009,7 +5061,7 @@ mod tests {
         ];
         for conflict in conflicts {
             let error = store
-                .admit_package_definition(conflict)
+                .admit_package_definition(registered(conflict))
                 .await
                 .expect_err("different definition conflicts");
             assert!(matches!(
@@ -5022,7 +5074,7 @@ mod tests {
                 .get_registered_package_definition(record.extension_id())
                 .await
                 .expect("read admitted definition"),
-            Some(record)
+            Some(admitted)
         );
         assert!(
             store
@@ -5034,12 +5086,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registered_definition_listing_rejects_path_payload_identity_mismatch() {
+        let store = installation_store().await;
+        let path_extension_id = ExtensionId::new("path-identity").expect("path extension id");
+        let payload = registered(manifest_record("payload-identity", Some("hash-one")));
+        let path = store
+            .registered_definition_path(&path_extension_id)
+            .expect("registered definition path");
+        store
+            .filesystem
+            .put(
+                &path,
+                entry_for_registered_definition(&payload).expect("registered definition entry"),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed corrupt registered definition row");
+
+        let error = store
+            .list_registered_package_definitions()
+            .await
+            .expect_err("listing must reject a row whose payload identity mismatches its path");
+
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::InvalidInstallation { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn registered_definition_survives_its_final_installation_removal() {
         let store = installation_store().await;
         let record = manifest_record("retained", Some("hash-one"))
             .with_definition_retention(PackageDefinitionRetention::RetainInCatalog);
+        let admitted = registered(record.clone());
         store
-            .admit_package_definition(record.clone())
+            .admit_package_definition(admitted.clone())
             .await
             .expect("admit definition");
         let installed = installation("retained", Some("hash-one"));
@@ -5058,7 +5140,7 @@ mod tests {
                 .get_registered_package_definition(record.extension_id())
                 .await
                 .expect("retained definition"),
-            Some(record)
+            Some(admitted)
         );
     }
 
@@ -5088,6 +5170,71 @@ mod tests {
                 .expect("registered definition lookup"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn registered_definition_persists_independent_manager_and_member_sets() {
+        let store = installation_store().await;
+        let record = manifest_record("managed", Some("hash-one"))
+            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog);
+        let owner = UserId::new("owner").expect("owner");
+        let admin = UserId::new("admin").expect("admin");
+        let member = UserId::new("member").expect("member");
+        let registered = RegisteredPackageDefinition::managed_members(
+            record.clone(),
+            BTreeSet::from([owner.clone(), admin.clone()]),
+            BTreeSet::from([owner.clone(), member.clone()]),
+        )
+        .expect("managed definition");
+
+        store
+            .admit_package_definition(registered)
+            .await
+            .expect("admit managed definition");
+        let restored = store
+            .get_registered_package_definition(record.extension_id())
+            .await
+            .expect("definition readback")
+            .expect("managed definition persists");
+
+        assert_eq!(
+            restored.audience().manager_user_ids(),
+            Some(&BTreeSet::from([owner.clone(), admin.clone()])),
+        );
+        assert_eq!(
+            restored.audience().member_user_ids(),
+            Some(&BTreeSet::from([owner, member])),
+        );
+        assert!(!restored.audience().visible_to(&admin));
+    }
+
+    #[test]
+    fn legacy_registered_definition_wire_is_ownerless_but_partial_membership_is_rejected() {
+        let record = manifest_record("legacy-audience", Some("hash-one"));
+        let definition = WireManifestRecord::from(&record);
+        let legacy = WireRegisteredPackageDefinition {
+            definition: definition.clone(),
+            manager_user_ids: None,
+            member_user_ids: None,
+        }
+        .into_registered_definition()
+        .expect("legacy ownerless definition");
+        assert!(matches!(
+            legacy.audience(),
+            crate::PackageDefinitionAudience::LegacyOwnerless
+        ));
+
+        let partial = WireRegisteredPackageDefinition {
+            definition,
+            manager_user_ids: Some(BTreeSet::from([UserId::new("manager").expect("manager")])),
+            member_user_ids: None,
+        }
+        .into_registered_definition()
+        .expect_err("partial managed membership is corrupt");
+        assert!(matches!(
+            partial,
+            ExtensionInstallationError::InvalidInstallation { .. }
+        ));
     }
 
     #[test]

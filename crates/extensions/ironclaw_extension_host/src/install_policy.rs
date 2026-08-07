@@ -12,8 +12,6 @@
 //! installation row's member set. Tenant-wide deployment state is owned by
 //! administrator configuration, not by lifecycle membership.
 
-use std::collections::BTreeSet;
-
 use ironclaw_extension_registry::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::ids::UserId;
 use ironclaw_product_contracts::error::ProductOperationFailure;
@@ -63,18 +61,14 @@ pub fn decide_install_on_existing(
     match existing_owner {
         // A tenant-shared tool is already available to every caller.
         InstallationOwner::Tenant => Err(already_installed()),
-        InstallationOwner::Users { user_ids } => {
-            if user_ids.contains(caller) {
+        InstallationOwner::Users(membership) => {
+            if membership.contains(caller) {
                 Ok(existing_owner.clone())
             } else {
                 // JOIN: the caller becomes a member alongside the others.
-                let mut user_ids = user_ids.clone();
-                user_ids.insert(caller.clone());
-                Ok(InstallationOwner::users(user_ids).map_err(|error| {
-                    ProductOperationFailure::InvalidBindingRequest {
-                        reason: format!("installation owner update failed: {error}"),
-                    }
-                })?)
+                Ok(InstallationOwner::Users(
+                    membership.joined_by(caller).ok_or_else(already_installed)?,
+                ))
             }
         }
     }
@@ -99,24 +93,12 @@ pub fn decide_remove(
 ) -> Result<RemoveDecision, ProductOperationFailure> {
     match existing_owner {
         InstallationOwner::Tenant => Ok(RemoveDecision::TearDown),
-        InstallationOwner::Users { user_ids } => {
-            let remaining: BTreeSet<UserId> = user_ids
-                .iter()
-                .filter(|member| *member != caller)
-                .cloned()
-                .collect();
-            if remaining.is_empty() {
-                Ok(RemoveDecision::TearDown)
-            } else {
-                Ok(RemoveDecision::LeaveMembers(
-                    InstallationOwner::users(remaining).map_err(|error| {
-                        ProductOperationFailure::InvalidBindingRequest {
-                            reason: format!("installation owner update failed: {error}"),
-                        }
-                    })?,
-                ))
-            }
-        }
+        InstallationOwner::Users(membership) => match membership.without(caller) {
+            Some(remaining) => Ok(RemoveDecision::LeaveMembers(InstallationOwner::Users(
+                remaining,
+            ))),
+            None => Ok(RemoveDecision::TearDown),
+        },
     }
 }
 
@@ -126,7 +108,7 @@ pub fn decide_remove(
 pub fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallScope {
     match owner {
         InstallationOwner::Tenant => LifecycleInstallScope::Shared,
-        InstallationOwner::Users { .. } => LifecycleInstallScope::Private,
+        InstallationOwner::Users(_) => LifecycleInstallScope::Private,
     }
 }
 

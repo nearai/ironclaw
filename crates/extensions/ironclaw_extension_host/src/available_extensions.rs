@@ -6,6 +6,7 @@ use ironclaw_extension_contracts::{
 use ironclaw_extension_registry::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
     ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
+    UserMembership,
 };
 use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, nearai_bundle};
 use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
@@ -13,7 +14,7 @@ use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
-    ids::{CapabilityId, ExtensionId, VendorId},
+    ids::{CapabilityId, ExtensionId, UserId, VendorId},
     messaging::STANDARD_SCHEMA_REF_PREFIX,
     path::VirtualPath,
 };
@@ -104,6 +105,9 @@ pub struct AvailableExtensionPackage {
     /// `HostBundled`, which is the only source eligible for
     /// first-party/system trust and runtime claims.
     pub source: ManifestSource,
+    /// Catalog discovery authority. This is definition visibility, not
+    /// installation ownership; install/remove never mutate it.
+    pub(crate) catalog_visibility: CatalogVisibility,
     pub package: ExtensionPackage,
     /// Trusted host-catalog declarations for mandatory external cleanup before
     /// local removal. Never inferred from manifest presentation metadata.
@@ -144,6 +148,21 @@ pub struct AvailableExtensionPackage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CatalogVisibility {
+    Tenant,
+    Members(UserMembership),
+}
+
+impl CatalogVisibility {
+    fn visible_to(&self, caller: &UserId) -> bool {
+        match self {
+            Self::Tenant => true,
+            Self::Members(membership) => membership.contains(caller),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminConfigurationCatalogUse {
     pub descriptor: ExtensionAdminConfigurationDescriptor,
     pub package_id: String,
@@ -151,6 +170,10 @@ pub struct AdminConfigurationCatalogUse {
 }
 
 impl AvailableExtensionPackage {
+    fn visible_to(&self, caller: &UserId) -> bool {
+        self.catalog_visibility.visible_to(caller)
+    }
+
     pub fn summary(&self) -> LifecycleExtensionSummary {
         let visible_capability_ids = visible_capability_ids(self)
             .map(|id| id.as_str().to_string())
@@ -581,6 +604,15 @@ impl AvailableExtensionCatalog {
             .cloned()
     }
 
+    pub fn search_visible<'a>(
+        &'a self,
+        query: &str,
+        caller: &'a UserId,
+    ) -> impl Iterator<Item = Arc<AvailableExtensionPackage>> + 'a {
+        self.search(query)
+            .filter(move |package| package.visible_to(caller))
+    }
+
     pub fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
@@ -589,6 +621,20 @@ impl AvailableExtensionCatalog {
             ProductOperationFailure::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             }
+        })
+    }
+
+    pub fn resolve_visible(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<Arc<AvailableExtensionPackage>, ProductOperationFailure> {
+        let package = self.resolve(package_ref)?;
+        if package.visible_to(caller) {
+            return Ok(package);
+        }
+        Err(ProductOperationFailure::InvalidBindingRequest {
+            reason: "available extension was not found".to_string(),
         })
     }
 
@@ -828,6 +874,7 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::HostBundled,
+        catalog_visibility: CatalogVisibility::Tenant,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -1170,6 +1217,7 @@ where
         // compiled inventory whose ids are skipped above. This prevents both
         // upload -> restart trust laundering and registry provenance loss.
         source: stamp,
+        catalog_visibility: CatalogVisibility::Tenant,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -2385,6 +2433,29 @@ handle = "web_token"
         assert_eq!(catalog.search("fixture").count(), 1);
     }
 
+    #[test]
+    fn managed_definition_visibility_filters_search_and_direct_resolution() {
+        let creator = UserId::new("creator").expect("creator");
+        let other = UserId::new("other").expect("other");
+        let mut package = test_extension_package();
+        package.catalog_visibility =
+            CatalogVisibility::Members(UserMembership::user(creator.clone()));
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap();
+
+        assert_eq!(catalog.search_visible("fixture", &creator).count(), 1);
+        assert_eq!(catalog.search_visible("fixture", &other).count(), 0);
+        assert!(catalog.resolve_visible(&package_ref, &creator).is_ok());
+        let hidden = catalog
+            .resolve_visible(&package_ref, &other)
+            .expect_err("non-member direct lookup is masked");
+        assert_eq!(
+            hidden.to_string(),
+            "invalid binding request: available extension was not found"
+        );
+    }
+
     #[tokio::test]
     async fn materialize_fails_on_filesystem_error_and_rolls_back_written_assets() {
         // The wasm write is faulted at the backend; the real materialize path
@@ -2831,6 +2902,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            catalog_visibility: CatalogVisibility::Tenant,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),

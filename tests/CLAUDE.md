@@ -351,7 +351,7 @@ entries.
 | Recover when the catalog fails, enrichment fails, install fails, or they're offline | `test_reborn_webui_v2_legacy_extensions.py` |
 | Fill in a configure modal (all field variants, https-only setup URLs, focus trapping, enter-to-submit) | `test_reborn_webui_v2_legacy_extensions.py`, `test_extensions.py` |
 | See the right button label for authed vs unauthed extensions (#2235) | `test_settings_extensions_labels.py` (5) |
-| Register a custom hosted MCP server and install it with bearer or OAuth | `test_reborn_webui_v2_custom_mcp.py` (3) |
+| Register a caller-private hosted-MCP catalog definition, then separately install it with no auth, bearer, or OAuth | `test_reborn_webui_v2_custom_mcp.py` (3), `hosted_mcp_registration.rs::user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user`, `hosted_mcp_registration.rs::privately_registered_definition_survives_restart_and_installs_without_reregistration`, `hosted_mcp_registration.rs::registration_cannot_replace_a_non_user_registered_definition`, `hosted_mcp_registration.rs::concurrent_custom_mcp_registration_leaves_exactly_one_managed_definition` |
 | Have uninstall delete that extension's secrets while preserving shared credentials | `test_extension_uninstall_cleanup.py` (4) |
 | Install a private/imported tool and have per-user visibility respected | `test_reborn_private_tool_installs.py` |
 | Drive the whole lifecycle over the API without a browser | `test_reborn_webui_v2_extensions_api.py` (4) |

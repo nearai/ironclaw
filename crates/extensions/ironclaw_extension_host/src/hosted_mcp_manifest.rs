@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::available_extensions::CatalogVisibility;
 use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_registry::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
@@ -169,6 +170,12 @@ pub(crate) fn manifest_with_admitted_oauth(
     endpoint: &hosted_mcp_admission::CanonicalHostedMcpEndpoint,
     admitted: ironclaw_auth::ResolvedVendorAuthRecipe,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
+    if seed.manifest().source != ManifestSource::UserRegistered {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP registration OAuth admission requires user-registered provenance"
+                .to_string(),
+        });
+    }
     if admitted.token_exchange_resource.as_deref() != Some(endpoint.as_str()) {
         return Err(oauth_admission_error(
             ironclaw_auth::AuthProductError::MalformedConfig,
@@ -334,10 +341,15 @@ effects = ["network", "use_secret"]
     .map_err(map_extension_installation_error)
 }
 
-pub(crate) fn available_package(
+pub(crate) fn registered_extension_package(
     record: &ExtensionManifestRecord,
-) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
-    let id = record.resolved().id.as_str();
+) -> Result<ExtensionPackage, ProductOperationFailure> {
+    if record.manifest().source != ManifestSource::UserRegistered {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP registration package requires user-registered provenance"
+                .to_string(),
+        });
+    }
     let manifest: ironclaw_extension_registry::ExtensionManifest =
         record.manifest().clone().try_into().map_err(|error| {
             ProductOperationFailure::InvalidBindingRequest {
@@ -372,19 +384,43 @@ pub(crate) fn available_package(
             standard_op: capability.standard_op,
         })
         .collect();
-    let package = ExtensionPackage::from_virtual_manifest(
+    ExtensionPackage::from_virtual_manifest(
         manifest,
         Some(ironclaw_host_api::approval::sha256_digest_token(
             record.raw_toml().as_bytes(),
         )),
         capabilities,
     )
-    .map_err(map_extension_error)?;
+    .map_err(map_extension_error)
+}
+
+/// Construct a catalog-ready user-registered package with its durable
+/// definition audience applied atomically. There is deliberately no catalog
+/// constructor for a user registration without an audience.
+pub(crate) fn available_registered_package(
+    record: &ExtensionManifestRecord,
+    audience: &ironclaw_extension_registry::PackageDefinitionAudience,
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
+    if record.manifest().source != ManifestSource::UserRegistered {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP registration projection requires user-registered provenance"
+                .to_string(),
+        });
+    }
+    let membership =
+        audience
+            .membership()
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+                reason: "registered package definition has no managed audience".to_string(),
+            })?;
+    let id = record.resolved().id.as_str();
+    let package = registered_extension_package(record)?;
     Ok(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)?,
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
-        source: ManifestSource::UserRegistered,
+        source: record.manifest().source,
+        catalog_visibility: CatalogVisibility::Members(membership.clone()),
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds: surface_kinds_from_manifest_record(record, id)?,
@@ -404,6 +440,25 @@ mod tests {
     };
     use crate::HostedMcpDiscoveryError;
     use ironclaw_product_contracts::error::ProductOperationFailure;
+
+    fn registered_manifest_fixture() -> ironclaw_extension_registry::ExtensionManifestRecord {
+        let extension_id =
+            ironclaw_host_api::ids::ExtensionId::new("mcp-linear").expect("valid extension id");
+        let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
+            &ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
+                "https://mcp.linear.app/rpc".to_string(),
+            )
+            .expect("valid endpoint"),
+        )
+        .expect("canonical endpoint");
+        super::pending_manifest(
+            &extension_id,
+            "Linear",
+            &endpoint,
+            &super::HostedMcpAuthSelection::NoAuth,
+        )
+        .expect("valid registered manifest")
+    }
 
     /// Hosted-MCP discovery talks to a third-party server, so its three
     /// outcomes must stay distinct: a blip the caller should retry, a server
@@ -616,5 +671,40 @@ mod tests {
             .is_ok(),
             "a usable client profile must still register"
         );
+    }
+
+    #[test]
+    fn registration_projection_rejects_non_user_registered_provenance() {
+        let registered = registered_manifest_fixture();
+        let bundled = ironclaw_extension_registry::ExtensionManifestRecord::from_resolved(
+            registered.raw_toml(),
+            ironclaw_extension_registry::ManifestSource::HostBundled,
+            registered.resolved().clone(),
+            registered.manifest_hash().cloned(),
+        )
+        .expect("fixture source replacement remains structurally valid");
+
+        assert!(matches!(
+            super::available_registered_package(
+                &bundled,
+                &ironclaw_extension_registry::PackageDefinitionAudience::managed_by(
+                    ironclaw_host_api::ids::UserId::new("owner").expect("valid owner"),
+                ),
+            ),
+            Err(ProductOperationFailure::InvalidBindingRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn registration_projection_rejects_ownerless_audience() {
+        let registered = registered_manifest_fixture();
+
+        assert!(matches!(
+            super::available_registered_package(
+                &registered,
+                &ironclaw_extension_registry::PackageDefinitionAudience::LegacyOwnerless,
+            ),
+            Err(ProductOperationFailure::InvalidBindingRequest { .. })
+        ));
     }
 }

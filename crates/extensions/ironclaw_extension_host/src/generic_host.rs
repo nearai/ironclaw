@@ -456,7 +456,7 @@ pub(crate) fn rebuild_package_from_resolved(
             // callable dispatch and a placeholder null-schema descriptor is
             // safe here — mirrors the
             // Materialized branch's `!schemas.is_empty()` gate above and
-            // `hosted_mcp_manifest::available_package`'s tolerant
+            // `hosted_mcp_manifest::registered_extension_package`'s tolerant
             // construction for the same not-yet-discovered state. Fail
             // closed only once discovery has recorded at least one schema
             // and a declared capability is STILL missing one — that
@@ -520,7 +520,7 @@ fn descriptors_from_dynamic_schemas(
 /// dynamic-schema map is still empty (no discovery has run yet). Same shape
 /// as `descriptors_from_dynamic_schemas` but never fails closed — every
 /// capability gets a `null` parameters schema, matching
-/// `hosted_mcp_manifest::available_package`'s tolerant construction for this
+/// `hosted_mcp_manifest::registered_extension_package`'s tolerant construction for this
 /// exact pre-discovery state.
 fn placeholder_descriptors_from_manifest(
     manifest: &ExtensionManifest,

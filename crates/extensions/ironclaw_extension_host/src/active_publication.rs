@@ -280,9 +280,8 @@ mod tests {
             &HostedMcpAuthSelection::NoAuth,
         )
         .expect("valid pending hosted MCP manifest");
-        let package = crate::hosted_mcp_manifest::available_package(&record)
-            .expect("available user-registered package")
-            .package;
+        let package = crate::hosted_mcp_manifest::registered_extension_package(&record)
+            .expect("available user-registered package");
         let input = extension_trust_policy_input(&package).expect("trust input");
 
         let before = policy.evaluate(&input).expect("policy evaluates");

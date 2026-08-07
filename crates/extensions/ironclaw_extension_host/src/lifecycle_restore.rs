@@ -1,13 +1,20 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
-    ManifestHash, ManifestSource, canonicalize_installation_rows,
+    ManagedUserMembership, ManifestHash, ManifestSource, PackageDefinitionAudience,
+    RegisteredPackageDefinition, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
+use ironclaw_host_api::{
+    approval::sha256_digest_token,
+    ids::{ExtensionId, UserId},
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 use tokio::sync::Mutex;
@@ -27,7 +34,15 @@ pub async fn restore_extension_lifecycle_state(
     active_extensions: &ActiveExtensionPublisher,
     legacy_tenant_owner: &UserId,
 ) -> Result<(), ProductOperationFailure> {
-    let mut catalog_registered_user_extension_ids: BTreeSet<String> = BTreeSet::new();
+    let registered_definitions = installation_store
+        .list_registered_package_definitions()
+        .await
+        .map_err(map_extension_installation_error)?;
+    let registered_by_extension = registered_definitions
+        .iter()
+        .map(|registered| (registered.definition().extension_id().clone(), registered))
+        .collect::<BTreeMap<_, _>>();
+    let mut catalog_registered_user_extension_ids: BTreeSet<ExtensionId> = BTreeSet::new();
     for installation in
         canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
     {
@@ -38,10 +53,21 @@ pub async fn restore_extension_lifecycle_state(
         if let Some(manifest) = stored_manifest.as_ref()
             && manifest.manifest().source == ManifestSource::UserRegistered
         {
-            let available = crate::hosted_mcp_manifest::available_package(manifest)?;
+            let audience =
+                if let Some(registered) = registered_by_extension.get(manifest.extension_id()) {
+                    restored_installed_definition_audience(registered.audience(), &installation)?
+                } else {
+                    tracing::warn!(
+                        extension_id = manifest.extension_id().as_str(),
+                        "restoring legacy user-registered installation without a separate package \
+                     definition; deriving catalog membership from installation membership"
+                    );
+                    legacy_installed_definition_audience(&installation)?
+                };
+            let available =
+                crate::hosted_mcp_manifest::available_registered_package(manifest, &audience)?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
-            catalog_registered_user_extension_ids
-                .insert(installation.extension_id().as_str().to_string());
+            catalog_registered_user_extension_ids.insert(installation.extension_id().clone());
         }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
@@ -107,11 +133,50 @@ pub async fn restore_extension_lifecycle_state(
     }
     restore_registered_only_definitions(
         catalog,
-        installation_store,
+        &registered_definitions,
         &catalog_registered_user_extension_ids,
+        legacy_tenant_owner,
     )
     .await?;
     Ok(())
+}
+
+fn restored_installed_definition_audience(
+    audience: &PackageDefinitionAudience,
+    installation: &ExtensionInstallation,
+) -> Result<PackageDefinitionAudience, ProductOperationFailure> {
+    match audience {
+        PackageDefinitionAudience::Managed(membership) => {
+            Ok(PackageDefinitionAudience::Managed(membership.clone()))
+        }
+        PackageDefinitionAudience::LegacyOwnerless => {
+            tracing::warn!(
+                extension_id = installation.extension_id().as_str(),
+                "restoring ownerless registered definition from installation membership"
+            );
+            legacy_installed_definition_audience(installation)
+        }
+    }
+}
+
+pub(crate) fn legacy_installed_definition_audience(
+    installation: &ExtensionInstallation,
+) -> Result<PackageDefinitionAudience, ProductOperationFailure> {
+    let member_user_ids = installation.owner().members().ok_or_else(|| {
+        ProductOperationFailure::InvalidBindingRequest {
+            reason: format!(
+                "legacy user-registered installation {} was not narrowed to user membership",
+                installation.installation_id().as_str()
+            ),
+        }
+    })?;
+    PackageDefinitionAudience::managed_members(member_user_ids.clone(), member_user_ids.clone())
+        .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+            reason: format!(
+                "legacy user-registered installation {} has invalid membership: {error}",
+                installation.installation_id().as_str()
+            ),
+        })
 }
 
 /// Repopulate the catalog with hosted MCP definitions that were registered
@@ -126,21 +191,20 @@ pub async fn restore_extension_lifecycle_state(
 /// surface.
 async fn restore_registered_only_definitions(
     catalog: &mut AvailableExtensionCatalog,
-    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
-    already_contributed: &BTreeSet<String>,
+    registered_definitions: &[RegisteredPackageDefinition],
+    already_contributed: &BTreeSet<ExtensionId>,
+    legacy_tenant_owner: &UserId,
 ) -> Result<(), ProductOperationFailure> {
-    let registered_definitions = installation_store
-        .list_registered_package_definitions()
-        .await
-        .map_err(map_extension_installation_error)?;
-    for manifest in &registered_definitions {
+    for registered in registered_definitions {
+        let manifest = registered.definition();
         if manifest.manifest().source != ManifestSource::UserRegistered {
             continue;
         }
-        if already_contributed.contains(manifest.extension_id().as_str()) {
+        if already_contributed.contains(manifest.extension_id()) {
             continue;
         }
-        match crate::hosted_mcp_manifest::available_package(manifest) {
+        let audience = restored_definition_audience(registered, legacy_tenant_owner);
+        match crate::hosted_mcp_manifest::available_registered_package(manifest, &audience) {
             Ok(available) => {
                 catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
             }
@@ -155,6 +219,26 @@ async fn restore_registered_only_definitions(
         }
     }
     Ok(())
+}
+
+fn restored_definition_audience(
+    registered: &RegisteredPackageDefinition,
+    legacy_tenant_owner: &UserId,
+) -> PackageDefinitionAudience {
+    match registered.audience() {
+        PackageDefinitionAudience::Managed(membership) => {
+            PackageDefinitionAudience::Managed(membership.clone())
+        }
+        PackageDefinitionAudience::LegacyOwnerless => {
+            tracing::warn!(
+                extension_id = registered.definition().extension_id().as_str(),
+                "narrowing legacy ownerless registered definition to the configured operator"
+            );
+            PackageDefinitionAudience::Managed(ManagedUserMembership::managed_by(
+                legacy_tenant_owner.clone(),
+            ))
+        }
+    }
 }
 
 async fn canonicalize_persisted_installation_rows(
@@ -411,9 +495,13 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 
 #[cfg(test)]
 mod tests {
-    use super::{map_extension_error, map_extension_installation_error};
+    use super::{
+        map_extension_error, map_extension_installation_error,
+        restored_installed_definition_audience,
+    };
     use ironclaw_extension_registry::{
-        ExtensionError, ExtensionInstallationError, InstallationOwner,
+        ExtensionError, ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+        ExtensionManifestRef, InstallationOwner, PackageDefinitionAudience,
     };
     use ironclaw_product_contracts::error::ProductOperationFailure;
 
@@ -495,6 +583,34 @@ effects = ["network", "use_secret"]
         .expect("fixture manifest parses")
     }
 
+    #[test]
+    fn installed_ownerless_definition_restores_from_installation_membership() {
+        let owner = ironclaw_host_api::ids::UserId::new("legacy-owner").expect("valid owner");
+        let operator =
+            ironclaw_host_api::ids::UserId::new("tenant-operator").expect("valid operator");
+        let record = fixture_record("mcp-legacy-owner", "legacy owner fixture");
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new(record.extension_id().as_str()).expect("installation id"),
+            record.extension_id().clone(),
+            ExtensionManifestRef::new(
+                record.extension_id().clone(),
+                record.manifest_hash().cloned(),
+            ),
+            Vec::new(),
+            chrono::Utc::now(),
+            InstallationOwner::user(owner.clone()),
+        )
+        .expect("legacy user-owned installation");
+
+        let restored = restored_installed_definition_audience(
+            &PackageDefinitionAudience::LegacyOwnerless,
+            &installation,
+        )
+        .expect("installed legacy audience derives from installation membership");
+        assert!(restored.visible_to(&owner));
+        assert!(!restored.visible_to(&operator));
+    }
+
     /// Install may reuse a definition already registered in the catalog, but
     /// only when it is byte-for-byte the same definition. A *different*
     /// registered definition for the same id must be refused rather than
@@ -504,9 +620,12 @@ effects = ["network", "use_secret"]
     #[test]
     fn install_refuses_a_retained_definition_that_disagrees_with_the_catalog() {
         let record = fixture_record("mcp-restore-fixture", "fixture: restore prepare_install");
-        let available = crate::hosted_mcp_manifest::available_package(&record)
-            .expect("fixture record projects to an available package");
         let owner = ironclaw_host_api::ids::UserId::new("restore-owner").expect("valid user");
+        let available = crate::hosted_mcp_manifest::available_registered_package(
+            &record,
+            &PackageDefinitionAudience::managed_by(owner.clone()),
+        )
+        .expect("fixture record projects to an available package");
 
         let plan = super::prepare_install(&available, InstallationOwner::user(owner.clone()), None)
             .expect("install with no retained definition uses the catalog record");

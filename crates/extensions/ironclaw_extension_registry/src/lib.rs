@@ -20,8 +20,6 @@ use ironclaw_host_api::{
 };
 use thiserror::Error;
 
-mod definition_admission;
-
 /// Extension manifest and registry failures.
 #[derive(Debug, Error)]
 pub enum ExtensionError {
@@ -188,17 +186,22 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
 
 mod admin_configuration;
 mod canonicalization;
+mod definition_admission;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
+mod membership;
 mod package;
 mod registry;
 pub mod resolved;
 pub mod v2;
 pub mod v3;
 
-pub use definition_admission::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
+pub use definition_admission::{
+    PackageDefinitionAdmissionOutcome, PackageDefinitionAudience, PackageDefinitionRetention,
+    RegisteredPackageDefinition,
+};
 pub use package::{
     CapabilityDescriptorSchemaMode, ExtensionPackage, composed_capability_description,
 };
@@ -245,6 +248,9 @@ pub use installations::{
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
+};
+pub use membership::{
+    EmptyUserMembership, ManagedUserMembership, ManagedUserMembershipError, UserMembership,
 };
 pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 
