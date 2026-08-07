@@ -266,6 +266,11 @@ test("useSSE delegates framing, credentials, and retries to EventSourcePlus", ()
   assert.equal(stream.options.retryStrategy, "on-error");
   assert.equal(stream.options.maxRetryInterval, 30_000);
   assert.equal(
+    stream.options.maxRetryCount,
+    0,
+    "the package's internal 2ms retry clock must be disabled so mid-stream failures cannot storm the stream budget",
+  );
+  assert.equal(
     stream.requestOptions.query.connection_id,
     "browser-tab-connection",
   );
@@ -479,6 +484,76 @@ test("useSSE cannot exhaust the 30-per-minute stream budget by itself", () => {
     openAttempts <= 7,
     `one continuously failing stream opened ${openAttempts} times in one minute`,
   );
+});
+
+test("useSSE routes a mid-stream body failure through the coordinator backoff", () => {
+  const { statuses, streams, timers } = createHarness();
+  const stream = streams[0];
+  stream.respond();
+
+  // The packaged client surfaces a mid-stream body/network failure (HTTP 200,
+  // then the response body errors) as one `error` abort event. No request or
+  // response error hook fires on that path.
+  stream.controller.abortHandler?.({
+    type: "error",
+    reason: "max retry count reached",
+  });
+
+  assert.equal(statuses.at(-1), "reconnecting");
+  const retry = timers.find(
+    (timer) => !timer.cleared && timer.delay >= 800 && timer.delay <= 1_200,
+  );
+  assert.ok(
+    retry,
+    "a mid-stream body failure must use the coordinator's first backoff step, not the package's 2ms clock",
+  );
+  retry.handler();
+  assert.equal(stream.controller.reconnectCalls, 1);
+  assert.equal(
+    stream.controller.abortCalls.at(-1),
+    "retry scheduled: stream body failure",
+  );
+});
+
+test("the packaged client yields mid-stream body failures to the coordinator instead of retrying at 2ms", async () => {
+  vi.useFakeTimers();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode("event: keep_alive\ndata: {}\n\n"),
+      );
+      controller.error(new Error("connection reset"));
+    },
+  });
+  const fetch = vi.fn(async () =>
+    new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }),
+  );
+  const stream = new PackagedEventSourcePlus("http://localhost/events", {
+    fetch,
+    retryStrategy: "on-error",
+    maxRetryCount: 0,
+  });
+  let controller;
+  const abortEvents = [];
+
+  controller = stream.listen({});
+  controller.onAbort((event) => abortEvents.push(event));
+  await vi.advanceTimersByTimeAsync(1_000);
+
+  assert.equal(
+    fetch.mock.calls.length,
+    1,
+    "a mid-stream body failure must not reopen on the package's 2ms internal clock",
+  );
+  assert.ok(
+    abortEvents.some((event) => event.type === "error"),
+    "a mid-stream body failure must surface as one error abort event the coordinator can schedule",
+  );
+  controller.abort("test complete");
+  vi.useRealTimers();
 });
 
 test("the packaged client yields retry ownership when an error hook aborts", async () => {

@@ -154,6 +154,14 @@ export function useSSE({
       // clock starts at 2ms and resets on HTTP headers rather than a proven
       // live SSE frame. Letting both layers retry creates request storms.
       retryStrategy: "on-error",
+      // The package's internal retry path (`_handleRetry`) is the one storm
+      // source `on-error` alone cannot stop: a mid-stream body/network failure
+      // after a successful handshake bypasses onRequestError and
+      // onResponseError and reopens on the package's own clock. `maxRetryCount`
+      // 0 turns that path into a single `error` abort event, which the
+      // coordinator below routes through the same jittered backoff as every
+      // other reconnect source.
+      maxRetryCount: 0,
     });
 
     function clearActivityWatchdog() {
@@ -352,6 +360,13 @@ export function useSSE({
       controller.onAbort?.((event) => {
         if (event.type === "end-of-stream") {
           scheduleReconnect("stream ended");
+        } else if (event.type === "error") {
+          // The package emits exactly one `error` abort event when its
+          // internal retry path is disabled (maxRetryCount 0): a mid-stream
+          // body/network failure after the SSE handshake. No
+          // onRequestError/onResponseError fires on that path, so this is the
+          // only signal the coordinator sees.
+          scheduleReconnect("stream body failure");
         }
       });
       if (terminalErrorReceived) {
