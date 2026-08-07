@@ -39,7 +39,7 @@ pub mod channel_identity_store;
 pub mod channel_lifecycle;
 pub mod channel_outbound_targets;
 pub mod channel_pairing;
-pub mod channel_subject_routes;
+pub mod channel_shared_admission;
 pub mod channel_triggered_delivery;
 pub mod deployment_channels;
 pub mod egress;
@@ -156,9 +156,9 @@ pub use channel_lifecycle::{
     channel_connect_strategy, channel_connection_requirement,
     package_declares_inbound_product_adapter,
 };
-pub use channel_subject_routes::{
-    ChannelConfigSubjectRouteResolver, SharedChannelAdmissionHandles, handle_declares_field,
-    managed_channel_subject_user_id, shared_channel_admission_handles,
+pub use channel_shared_admission::{
+    ChannelConfigSharedAdmission, SharedChannelAdmissionHandles, handle_declares_field,
+    shared_channel_admission_handles,
 };
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,

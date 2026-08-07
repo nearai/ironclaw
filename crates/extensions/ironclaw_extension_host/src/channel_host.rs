@@ -53,7 +53,7 @@ use ironclaw_product_contracts::channel_workflow::{
 use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
 };
-use ironclaw_product_contracts::subject_route::ProductConversationSubjectRouteResolver;
+use ironclaw_product_contracts::shared_admission::SharedConversationAdmission;
 
 use crate::channel_dm_targets::{FilesystemChannelDmTargetStore, dm_target_payload};
 use crate::channel_pairing::ChannelPairingConsumeOutcome;
@@ -126,11 +126,11 @@ pub struct ChannelExtras {
     /// The vendor half of the triggered-delivery driver; consumed by the
     /// lane that builds the triggered hook.
     pub preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
-    /// Optional shared-channel subject-route resolver override. Absent, the
+    /// Optional shared-conversation admission override. Absent, the
     /// assembly installs the DEFAULT generic resolver over the extension's
-    /// `*_allowed_channels` / `*_subject_routes` `[channel.config]` values
-    /// when the manifest declares either handle.
-    pub subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    /// `*_allowed_channels` `[channel.config]` value when the manifest
+    /// declares the handle.
+    pub shared_admission: Option<Arc<dyn SharedConversationAdmission>>,
     /// Legacy storage-root override for the per-extension workflow state.
     pub storage_roots: Option<ChannelWorkflowStorageRoots>,
 }
@@ -139,7 +139,7 @@ pub struct ChannelExtras {
 #[derive(Clone, Default)]
 struct StoredChannelExtras {
     preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
-    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    shared_admission: Option<Arc<dyn SharedConversationAdmission>>,
     storage_roots: Option<ChannelWorkflowStorageRoots>,
 }
 
@@ -382,7 +382,7 @@ impl GenericChannelHostAssembly {
     pub async fn register_extras(&self, extension_id: &ExtensionId, extras: ChannelExtras) {
         let ChannelExtras {
             preference_target_codec,
-            subject_route_resolver,
+            shared_admission,
             storage_roots,
         } = extras;
         if let Ok(mut stored) = self.extras.lock() {
@@ -390,7 +390,7 @@ impl GenericChannelHostAssembly {
                 extension_id.as_str().to_owned(),
                 StoredChannelExtras {
                     preference_target_codec,
-                    subject_route_resolver,
+                    shared_admission,
                     storage_roots,
                 },
             );
@@ -769,13 +769,14 @@ impl GenericChannelHostAssembly {
         };
         let installation_id = AdapterInstallationId::new(source.installation_id())
             .map_err(|error| format!("invalid installation id: {error}"))?;
-        // Generic shared-channel admission (§5.3): with a subject-route
-        // resolver installed, unrouted shared conversations fail closed —
-        // an extras override wins; otherwise a channel declaring the
-        // `*_allowed_channels` / `*_subject_routes` config convention gets
-        // the default resolver over its `[channel.config]` values.
-        let subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>> =
-            match &extras.subject_route_resolver {
+        // Generic shared-conversation admission (§5.3): fail-closed either
+        // way — an extras override wins; otherwise a channel declaring the
+        // `*_allowed_channels` config convention gets the default resolver
+        // over its `[channel.config]` value, and a channel declaring no
+        // admission handle gets `None`, which rejects every shared
+        // conversation.
+        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> =
+            match &extras.shared_admission {
                 Some(resolver) => Some(Arc::clone(resolver)),
                 None => {
                     let fields = admin_configuration_fields(source.resolved());
@@ -785,10 +786,9 @@ impl GenericChannelHostAssembly {
                         let extension_id = ExtensionId::new(source.extension_id())
                             .map_err(|error| format!("invalid extension id: {error}"))?;
                         Some(Arc::new(
-                            ironclaw_extension_host::ChannelConfigSubjectRouteResolver::new(
+                            ironclaw_extension_host::ChannelConfigSharedAdmission::new(
                                 adapter_id.clone(),
                                 installation_id.clone(),
-                                identity.tenant_id.clone(),
                                 extension_id,
                                 handles,
                                 Arc::clone(&self.deps.channel_config),
@@ -805,7 +805,7 @@ impl GenericChannelHostAssembly {
             installation_id,
             storage_roots,
             actor_user_resolver,
-            subject_route_resolver,
+            shared_admission,
             commands: channel
                 .map(|channel| channel.commands.clone())
                 .unwrap_or_default(),

@@ -1205,9 +1205,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_assistant/Cargo.toml", "telegram"),
     // `conversation_binding.rs` was carved for a vendor example in
     // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
-    // `ironclaw_product_contracts::subject_route`, where a vendor name is
-    // forbidden outright, so the example was rewritten generically rather than
-    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
+    // `ironclaw_product_contracts::subject_route` (today's
+    // `shared_admission`, after the subject retirement), where a vendor name
+    // is forbidden outright, so the example was rewritten generically rather
+    // than re-carved. The entry is deleted, not repointed — the allowlist
+    // shrinks.
     ("crates/ironclaw_assistant/src/lib.rs", "telegram"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
