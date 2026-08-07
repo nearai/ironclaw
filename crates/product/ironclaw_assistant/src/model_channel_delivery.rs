@@ -166,7 +166,24 @@ impl ModelChannelDelivery for CoordinatedModelChannelDelivery {
         // non-final-reply target is indistinguishable here (all `None`).
         let caller = OutboundDeliveryTargetScope::new(
             request.scope.tenant_id.clone(),
-            request.scope.user_id.clone(),
+            // The AUTHENTICATED ACTOR owns the catalog this call may reach —
+            // deliberately not `scope.user_id`.
+            //
+            // The two are the same for a personal thread and for an automation
+            // fire (owner == actor by construction), but they diverge on a
+            // shared-route channel conversation: `ResourceScope.user_id` is the
+            // route's subject (`TurnScope::explicit_owner_user_id`), while the
+            // actor is whoever sent the message. Resolving the SUBJECT's
+            // catalog there would let any participant of a shared channel
+            // enumerate and deliver into that subject's personal
+            // destinations — their DM included — from a conversation the
+            // subject may never read.
+            //
+            // Scoping to the actor keeps a caller inside their own connected
+            // surfaces on every path, so an unfamiliar target simply does not
+            // resolve (`TargetUnavailable`) instead of resolving to someone
+            // else's.
+            request.authenticated_actor_user_id.clone(),
         );
         let entry = self
             .owner_scoped_registry

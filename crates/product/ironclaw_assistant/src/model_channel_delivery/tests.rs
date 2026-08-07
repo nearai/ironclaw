@@ -1149,3 +1149,71 @@ async fn codec_channel_target_resolver_decodes_or_fails_closed() {
     assert_eq!(error, ModelChannelDeliveryError::Internal);
     assert!(harness.adapter.envelopes().is_empty());
 }
+
+/// On a shared-route channel conversation the run's scope owner (the route's
+/// subject) and the authenticated actor (whoever sent the message) are
+/// different users. The catalog this tool may reach must follow the ACTOR.
+///
+/// Otherwise any participant of a shared channel routed to some subject could
+/// name that subject's target ids and push bot-identity content into the
+/// subject's own destinations — their personal DM included — from a
+/// conversation the subject may never read.
+#[tokio::test]
+async fn a_shared_route_participant_cannot_reach_the_route_subjects_targets() {
+    let subject = UserId::new("route-subject").expect("subject id");
+    let participant = UserId::new("route-participant").expect("participant id");
+
+    // The catalog entry belongs to the ROUTE SUBJECT.
+    let mut entry = external_target_entry("acme-chat-1", "reply:fake-codec:subject-dm");
+    entry.owner = OutboundDeliveryTargetOwner::new(tenant(), subject.clone());
+
+    let harness = build_harness_with_target_resolver(
+        vec![entry],
+        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        Arc::new(CodecChannelTargetResolver::new(vec![Arc::new(
+            FakeGrammarCodec,
+        )])),
+    );
+
+    // The run is scoped to the subject (shared-route owner) but driven by a
+    // different authenticated actor.
+    let mut request = base_request(target_id("acme-chat-1"), "leak attempt");
+    request.scope.user_id = subject.clone();
+    request.authenticated_actor_user_id = participant.clone();
+
+    let error = harness
+        .deliverer
+        .deliver_for_model(request)
+        .await
+        .expect_err("a participant must not resolve the route subject's targets");
+    assert_eq!(
+        error,
+        ModelChannelDeliveryError::TargetUnavailable,
+        "the subject's target must be indistinguishable from one that does not exist"
+    );
+    assert!(
+        harness.adapter.envelopes().is_empty(),
+        "nothing may reach a vendor adapter for another user's target"
+    );
+
+    // Control: the same call by the target's own owner still delivers, so the
+    // guard is scoping the catalog rather than breaking delivery outright.
+    let mut owned = external_target_entry("acme-chat-1", "reply:fake-codec:subject-dm");
+    owned.owner = OutboundDeliveryTargetOwner::new(tenant(), subject.clone());
+    let harness = build_harness_with_target_resolver(
+        vec![owned],
+        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        Arc::new(CodecChannelTargetResolver::new(vec![Arc::new(
+            FakeGrammarCodec,
+        )])),
+    );
+    let mut request = base_request(target_id("acme-chat-1"), "own delivery");
+    request.scope.user_id = subject.clone();
+    request.authenticated_actor_user_id = subject;
+    harness
+        .deliverer
+        .deliver_for_model(request)
+        .await
+        .expect("the target's own owner still delivers");
+    assert_eq!(harness.adapter.envelopes().len(), 1);
+}
