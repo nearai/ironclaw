@@ -616,6 +616,37 @@ pub trait MemoryService: Send + Sync {
         Err(MemoryServiceError::unavailable())
     }
 
+    /// Always-on curated lane (retrieve-before-run): the user's standing
+    /// memory document(s), returned on EVERY run without a retrieval match.
+    ///
+    /// This lane exists because the search lanes are query-driven: a fact the
+    /// user stated in an earlier conversation is only recalled when the
+    /// current message happens to share vocabulary with it, so a conversation
+    /// that opens on an unrelated topic sees nothing (#7185). A provider
+    /// implements this by returning its curated standing document(s) — for the
+    /// native backend, `MEMORY.md` — and returns an EMPTY vector when no such
+    /// document exists (absence is a normal state, not a failure).
+    ///
+    /// `request.query` is meaningless here and providers must ignore it;
+    /// `max_snippets` and `context_profile_id` carry the same meaning as in the
+    /// search lanes. Same raw-return contract as
+    /// [`read_long_term`](MemoryService::read_long_term): the host owns scope
+    /// filtering, sanitization, the untrusted envelope, and every model-visible
+    /// budget, and gives this lane its own sub-budget so it cannot starve — or
+    /// be starved by — the search lanes.
+    ///
+    /// The host calls this only when the bound provider's manifest declares the
+    /// `read_curated` lifecycle hook, so a provider with no curated-document
+    /// concept is never opted in.
+    async fn read_curated(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        let _ = (invocation, request);
+        Err(MemoryServiceError::unavailable())
+    }
+
     /// Record a completed interaction exchange (the after-turn `add` seam).
     ///
     /// The host passes the raw interaction DATA — the ordered turn transcript
@@ -856,6 +887,15 @@ mod tests {
             .await
             .expect_err("default read_short_term must fail closed");
         assert_eq!(short.kind(), MemoryServiceErrorKind::Unavailable);
+
+        // The always-on curated lane fails closed the same way, so a provider
+        // that declares `read_curated` without implementing it degrades to an
+        // empty lane at the host instead of silently inventing content.
+        let curated = provider
+            .read_curated(invocation(), request())
+            .await
+            .expect_err("default read_curated must fail closed");
+        assert_eq!(curated.kind(), MemoryServiceErrorKind::Unavailable);
     }
 
     /// The default `record_interaction` is a host-driven no-op: it must NOT error
