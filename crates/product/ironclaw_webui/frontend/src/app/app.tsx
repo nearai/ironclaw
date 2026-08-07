@@ -211,7 +211,7 @@ function AdminRoute({ auth }) {
   }
   return (
     <AdminPage
-      threadScrapingEnabled={auth.regressionArtifactExportEnabled}
+      threadScrapingEnabled={auth.adminThreadScrapeEnabled}
     />
   );
 }

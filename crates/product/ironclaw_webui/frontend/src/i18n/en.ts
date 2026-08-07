@@ -1216,24 +1216,27 @@ registerPack("en", {
   "admin.users.actionFailed": "Action failed: {message}",
   // The lazy admin page registers the full copy for these route-only keys.
   // These stubs preserve locale key/placeholder parity without charging /chat.
-  "admin.users.lastAdminRequired": "",
+  "admin.users.lastAdminRequired":
+    "At least one active administrator is required. Add or activate another administrator before changing this user.",
   "admin.users.activate": "Activate",
   "admin.users.promote": "Promote",
   "admin.users.demote": "Demote",
   "admin.users.token": "Token",
   "admin.users.jobsCount": "{count} jobs",
   "admin.users.suspendTitle": "Suspend user",
-  "admin.users.suspendDesc": "{name}",
+  "admin.users.suspendDesc":
+    "This will prevent \"{name}\" from authenticating. Continue?",
   "admin.users.tokenNamePrompt": "Token name for {name}:",
   "admin.users.tokenCreated": "Token created",
-  "admin.users.tokenCreatedDesc": "",
+  "admin.users.tokenCreatedDesc": "Copy this now — it will not be shown again.",
   "admin.users.copy": "Copy",
   "admin.users.copied": "Copied",
   "admin.users.backToUsers": "Back to users",
   "admin.users.createToken": "Create token",
   "admin.users.delete": "Delete",
   "admin.users.deleteUserTitle": "Delete user",
-  "admin.users.deleteUserDesc": "{name}",
+  "admin.users.deleteUserDesc":
+    "Are you sure you want to delete \"{name}\"? This action cannot be undone.",
 
   // Admin — user detail
   "admin.user.profile": "Profile",
@@ -1252,17 +1255,15 @@ registerPack("en", {
   "admin.user.saveRole": "Save role",
   "admin.user.usage30Days": "Usage (last 30 days)",
   "admin.user.noUsage": "No usage data.",
-  // Route copy is registered by the lazy thread-scraping panel. These stubs
-  // retain locale key/placeholder parity without adding the copy to /chat.
-  "admin.threadScraping.title": "",
-  "admin.threadScraping.description": "",
-  "admin.threadScraping.empty": "",
-  "admin.threadScraping.untitled": "",
-  "admin.threadScraping.selectThread": "",
-  "admin.threadScraping.downloadThread": "",
-  "admin.threadScraping.downloadRun": "{runId}",
-  "admin.threadScraping.loadFailed": "",
-  "admin.threadScraping.downloadFailed": "",
+  "admin.threadScraping.title": "Thread scraping",
+  "admin.threadScraping.description": "Collect redacted thread and run artifacts for debugging and optimization.",
+  "admin.threadScraping.empty": "No threads available for scraping.",
+  "admin.threadScraping.untitled": "Untitled thread",
+  "admin.threadScraping.selectThread": "Select a thread to load its artifact.",
+  "admin.threadScraping.downloadThread": "Download thread artifact",
+  "admin.threadScraping.downloadRun": "Download run {runId}",
+  "admin.threadScraping.loadFailed": "Thread scraping failed.",
+  "admin.threadScraping.downloadFailed": "Artifact download failed.",
   "admin.user.secrets.title": "Secrets",
   "admin.user.secrets.description": "Provision credentials for this user without exposing stored values.",
   "admin.user.secrets.loading": "Loading secrets…",

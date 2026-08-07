@@ -72,6 +72,14 @@ Run and full-thread regression artifact exports are QA-only. Host composition
 mounts their routes and exposes their browser affordances only when
 `IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT=true`; the default is disabled.
 
+Admin cross-user thread scraping is a separate surface with its own
+kill switch: `IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE=true` mounts the three
+`/admin/users/{user_id}/thread-scrape/*` routes and reveals the admin panel.
+It is deliberately NOT implied by the QA-only regression-export flag — a
+caller-owned QA export toggle must never silently mount tenant-wide admin
+transcript access. Both gates are off by default and feed the session
+`features.*` fields so the browser never advertises an unmounted route.
+
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
 **ws-origin → per-route body limit → bearer auth → rate limit → handler** —
 turning the `webui_v2_routes()` descriptors into tower layers.

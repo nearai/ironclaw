@@ -85,15 +85,20 @@ pub async fn admin_list_thread_scrape_threads(
 ) -> Result<Json<RebornListThreadsResponse>, WebUiV2HttpError> {
     let user_id = super::parse_admin_user_id(user_id)?;
     let surface = state.bind_services(caller);
+    // Sibling handlers `take()` the cursor so it travels one wire slot: the
+    // transport page cursor, which the dispatch arm merges back into the
+    // request before the list call.
+    let mut query = query;
+    let cursor = query.cursor.take();
     let response = ADMIN_THREAD_SCRAPE_THREADS_VIEW
         .query_on(
             &surface,
             RebornAdminThreadScrapeListRequest {
-                user_id: user_id.clone(),
+                user_id,
                 limit: query.limit,
-                cursor: query.cursor.clone(),
+                cursor: None,
             },
-            query.cursor,
+            cursor,
         )
         .await?;
     Ok(Json(response))
@@ -111,10 +116,7 @@ pub async fn admin_get_thread_scrape_artifact(
         &state,
         caller,
         ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id,
-        RebornAdminThreadScrapeArtifactRequest {
-            user_id: user_id.clone(),
-            thread_id: thread_id.clone(),
-        },
+        RebornAdminThreadScrapeArtifactRequest { user_id, thread_id },
     )
     .await?;
     Ok(Json(artifact))
@@ -134,9 +136,9 @@ pub async fn admin_get_thread_scrape_run_artifact(
         caller,
         ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id,
         RebornAdminThreadScrapeRunArtifactRequest {
-            user_id: user_id.clone(),
-            thread_id: thread_id.clone(),
-            run_id: run_id.clone(),
+            user_id,
+            thread_id,
+            run_id,
         },
     )
     .await?;

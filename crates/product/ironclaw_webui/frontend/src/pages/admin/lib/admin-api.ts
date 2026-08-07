@@ -51,15 +51,17 @@ export async function fetchThreadScrapeThreads(userId, params) {
   );
 }
 
-export function fetchThreadScrapeArtifact(userId, threadId) {
+export function fetchThreadScrapeArtifact(userId, threadId, params) {
   return apiFetch(
     `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/thread-scrape/threads/${encodeURIComponent(threadId)}/artifact`,
+    { signal: params?.signal },
   );
 }
 
-export function fetchThreadScrapeRunArtifact(userId, threadId, runId) {
+export function fetchThreadScrapeRunArtifact(userId, threadId, runId, params) {
   return apiFetch(
     `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/thread-scrape/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifact`,
+    { signal: params?.signal },
   );
 }
 

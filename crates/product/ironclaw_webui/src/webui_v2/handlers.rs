@@ -200,6 +200,12 @@ pub struct WebUiV2Features {
     /// QA-only run and full-thread artifact export surface. Hidden and
     /// unmounted unless the deployment explicitly opts in.
     pub regression_artifact_export: bool,
+    /// Admin cross-user thread scraping surface. Hidden and unmounted unless
+    /// the deployment explicitly opts in via
+    /// `IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE`; independent of
+    /// `regression_artifact_export` so QA self-export never implies
+    /// tenant-wide admin transcript access.
+    pub admin_thread_scrape: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -233,6 +239,7 @@ pub async fn get_session(
             reborn_projects: state.reborn_projects_enabled(),
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
+            admin_thread_scrape: state.admin_thread_scrape_enabled(),
             global_auto_approve,
         },
         attachments: attachment_capabilities(),

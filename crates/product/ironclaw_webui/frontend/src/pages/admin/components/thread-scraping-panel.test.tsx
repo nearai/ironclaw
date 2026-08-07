@@ -154,7 +154,10 @@ test("switching target users discards the previous user's pending artifact", asy
     );
     assert.ok(threadButton, "the first user's thread renders");
     await act(async () => threadButton.click());
-    assert.deepEqual(requests.fetchArtifact.mock.calls, [["user-one", "thread-one"]]);
+    assert.deepEqual(
+      requests.fetchArtifact.mock.calls.map((call) => call.slice(0, 2)),
+      [["user-one", "thread-one"]],
+    );
 
     await act(async () => {
       root.render(
@@ -587,5 +590,159 @@ test("switching locales preserves the loaded thread and artifact", async () => {
     requests.fetchThreads.mockReset();
     requests.fetchArtifact.mockReset();
     requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("download-thread button saves the artifact under a sanitized filename", async () => {
+  requests.fetchThreads.mockResolvedValueOnce({
+    threads: [{ thread_id: "thread/one", title: "One" }],
+    next_cursor: null,
+  });
+  requests.fetchArtifact.mockResolvedValueOnce({
+    schema: "ironclaw.thread_artifact.v1",
+    generated_at: "2026-08-07T00:00:00Z",
+    thread_id: "thread/one",
+    messages: [
+      {
+        message_id: "message-one",
+        sequence: 1,
+        run_id: "run-one",
+        kind: "assistant",
+        status: "completed",
+        content: "hello",
+      },
+    ],
+    logs: {
+      source: "operator",
+      available: false,
+      complete: false,
+      truncated: false,
+      entries: [],
+    },
+    redaction: { pipeline: "none", applied: false },
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-target" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    const downloadButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-download-thread"]',
+    );
+    assert.ok(downloadButton, "the download button appears once an artifact is loaded");
+    await act(async () => downloadButton.click());
+
+    assert.equal(vi.mocked(saveBlob).mock.calls.length, 1);
+    const [blob, filename] = vi.mocked(saveBlob).mock.calls[0] ?? [];
+    // External input (the thread id) must not leak path separators or
+    // whitespace into the download filename.
+    assert.equal(filename, "ironclaw-thread-thread_one.json");
+    const text = await blob.text();
+    assert.match(text, /"thread_id": "thread\/one"/);
+    assert.match(text, /"content": "hello"/);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+    vi.mocked(saveBlob).mockReset();
+  }
+});
+
+test("download-run button saves the artifact under a sanitized filename", async () => {
+  requests.fetchThreads.mockResolvedValueOnce({
+    threads: [{ thread_id: "thread-one", title: "One" }],
+    next_cursor: null,
+  });
+  const artifactDeferred = deferred();
+  requests.fetchArtifact.mockReturnValue(artifactDeferred.promise);
+  requests.fetchRunArtifact.mockResolvedValueOnce({
+    schema: "ironclaw.run_artifact.v1",
+    generated_at: "2026-08-07T00:00:00Z",
+    thread_id: "thread-one",
+    run: { run_id: "run-one-123" },
+    messages: [{ message_id: "message-one", sequence: 1, kind: "assistant", content: "run payload" }],
+    logs: {
+      source: "operator",
+      available: false,
+      complete: false,
+      truncated: false,
+      entries: [],
+    },
+    redaction: { pipeline: "none", applied: false },
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-target" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    await act(async () => {
+      artifactDeferred.resolve({
+        schema: "ironclaw.thread_artifact.v1",
+        generated_at: "2026-08-07T00:00:00Z",
+        thread_id: "thread-one",
+        messages: [
+          {
+            message_id: "message-one",
+            sequence: 1,
+            run_id: "run-one-123",
+            kind: "assistant",
+            status: "completed",
+            content: "hello",
+          },
+        ],
+        logs: {
+          source: "operator",
+          available: false,
+          complete: false,
+          truncated: false,
+          entries: [],
+        },
+        redaction: { pipeline: "none", applied: false },
+      });
+    });
+    const runButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("run-one-"),
+    );
+    assert.ok(runButton, "a run download button renders for the artifact's run");
+    await act(async () => runButton.click());
+
+    assert.equal(vi.mocked(saveBlob).mock.calls.length, 1);
+    const [blob, filename] = vi.mocked(saveBlob).mock.calls[0] ?? [];
+    assert.equal(filename, "ironclaw-run-run-one-123.json");
+    const text = await blob.text();
+    assert.match(text, /"run_id": "run-one-123"/);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+    vi.mocked(saveBlob).mockReset();
   }
 });

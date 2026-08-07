@@ -24,11 +24,12 @@ use ironclaw_approvals::{
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_assistant::{
-    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
-    ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
-    ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
-    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW,
-    AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
+    ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
+    ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
+    ADMIN_USER_DELETE_SECRET_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID,
+    ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY_ID,
+    ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
+    ADMIN_USERS_VIEW, AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
     AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
     AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
@@ -15748,6 +15749,198 @@ async fn admin_thread_scraping_does_not_match_a_target_from_another_tenant() {
 
     assert_eq!(error.status_code, 404);
     assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scrape_views_dispatch_through_query() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ])));
+    setup_owned_thread(&services, caller(), "thread-admin").await;
+    let target_caller = caller_for_user("user-beta");
+    setup_owned_thread(&services, target_caller.clone(), "thread-target").await;
+    let thread_id = ThreadId::new("thread-target").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope_for(&target_caller),
+        &thread_id,
+        &run_id,
+        "target trajectory",
+    )
+    .await;
+    let target = UserId::new("user-beta").expect("target user");
+
+    // The three scrape views must be reachable through the real query
+    // dispatch (param deserialization, the page-cursor merge, and
+    // view_page_with_cursor propagation) — not only by calling the service
+    // methods directly.
+    // safety: ProductSurface service query calls in a contract test; no
+    // database transaction is involved.
+    let threads_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_THREADS_VIEW
+                .query(
+                    RebornAdminThreadScrapeListRequest {
+                        user_id: target.clone(),
+                        limit: Some(50),
+                        cursor: None,
+                    },
+                    None,
+                )
+                .expect("threads query"),
+        )
+        .await
+        .expect("threads view");
+    let threads: RebornListThreadsResponse =
+        serde_json::from_value(threads_page.payload).expect("threads payload");
+    assert_eq!(threads.threads.len(), 1);
+    assert_eq!(threads.threads[0].thread_id.as_str(), "thread-target");
+
+    let artifact_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW
+                .query(
+                    RebornAdminThreadScrapeArtifactRequest {
+                        user_id: target.clone(),
+                        thread_id: "thread-target".to_string(),
+                    },
+                    None,
+                )
+                .expect("artifact query"),
+        )
+        .await
+        .expect("artifact view");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(artifact_page.payload).expect("artifact payload");
+    assert_eq!(artifact.thread_id, "thread-target");
+
+    let run_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW
+                .query(
+                    RebornAdminThreadScrapeRunArtifactRequest {
+                        user_id: target,
+                        thread_id: "thread-target".to_string(),
+                        run_id: run_id.to_string(),
+                    },
+                    None,
+                )
+                .expect("run query"),
+        )
+        .await
+        .expect("run view");
+    let run_artifact: RebornRunArtifact =
+        serde_json::from_value(run_page.payload).expect("run payload");
+    assert_eq!(run_artifact.run.run_id, run_id);
+    assert_eq!(run_artifact.messages.len(), 1);
+    assert_eq!(run_artifact.messages[0].content, "target trajectory");
+    assert!(logs_contain(
+        "action=\"threads_listed\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"thread_artifact_exported\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"run_artifact_exported\" outcome=\"success\""
+    ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scraping_denies_non_admin_artifact_and_run_artifact_exports() {
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let thread_error = services
+        .build_admin_thread_scrape_artifact(
+            caller(),
+            RebornAdminThreadScrapeArtifactRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                thread_id: "thread-target".to_string(),
+            },
+        )
+        .await
+        .expect_err("member must not export another member's thread artifact");
+    assert_forbidden(thread_error);
+    assert!(logs_contain(
+        "action=\"thread_artifact_exported\" outcome=\"failure\""
+    ));
+
+    let run_error = services
+        .build_admin_thread_scrape_run_artifact(
+            caller(),
+            RebornAdminThreadScrapeRunArtifactRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                thread_id: "thread-target".to_string(),
+                run_id: "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string(),
+            },
+        )
+        .await
+        .expect_err("member must not export another member's run artifact");
+    assert_forbidden(run_error);
+    assert!(logs_contain(
+        "action=\"run_artifact_exported\" outcome=\"failure\""
+    ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scraping_rejects_malformed_ids_before_any_audit_emission() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+
+    // A newline inside a path segment must be rejected as validation before
+    // it can be Display-formatted into the audit trail (forged audit lines).
+    let thread_error = services
+        .build_admin_thread_scrape_artifact(
+            caller(),
+            RebornAdminThreadScrapeArtifactRequest {
+                user_id: UserId::new("user-alpha").expect("target user"),
+                thread_id: "thread-target\nforged-line".to_string(),
+            },
+        )
+        .await
+        .expect_err("malformed thread id must be rejected");
+    assert_eq!(thread_error.status_code, 400);
+    assert_eq!(thread_error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert!(
+        !logs_contain("forged-line"),
+        "the raw id must never reach the audit trail"
+    );
+
+    let run_error = services
+        .build_admin_thread_scrape_run_artifact(
+            caller(),
+            RebornAdminThreadScrapeRunArtifactRequest {
+                user_id: UserId::new("user-alpha").expect("target user"),
+                thread_id: "thread-target".to_string(),
+                run_id: "not-a-uuid\nforged".to_string(),
+            },
+        )
+        .await
+        .expect_err("malformed run id must be rejected");
+    assert_eq!(run_error.status_code, 400);
+    assert_eq!(run_error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert!(
+        !logs_contain("forged"),
+        "the raw run id must never reach the audit trail"
+    );
 }
 
 #[tokio::test]

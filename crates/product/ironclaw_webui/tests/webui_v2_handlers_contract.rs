@@ -320,7 +320,8 @@ fn router_with(services: Arc<dyn ProductSurface>) -> Router {
 fn artifact_router_with(services: Arc<dyn ProductSurface>) -> Router {
     webui_v2_router(
         WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-            .with_regression_artifact_export_enabled(true),
+            .with_regression_artifact_export_enabled(true)
+            .with_admin_thread_scrape_enabled(true),
     )
     .layer(axum::Extension(caller()))
     .layer(axum::Extension(WebUiV2Capabilities::default()))
@@ -2485,7 +2486,9 @@ async fn admin_thread_scrape_routes_forward_target_user_and_artifact_scope() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/admin/users/user-beta/thread-scrape/threads?limit=25")
+                .uri(
+                    "/api/webchat/v2/admin/users/user-beta/thread-scrape/threads?limit=25&cursor=page-cursor-1",
+                )
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2529,6 +2532,13 @@ async fn admin_thread_scrape_routes_forward_target_user_and_artifact_scope() {
     assert_eq!(queries[2].view_id, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id);
     assert_eq!(queries[0].params["user_id"], "user-beta");
     assert_eq!(queries[0].params["limit"], 25);
+    // The browser cursor travels exactly one wire slot (the transport page
+    // cursor, per the sibling `take()` idiom) and is merged back into the
+    // request by the query dispatch arm.
+    assert_eq!(queries[0].cursor.as_deref(), Some("page-cursor-1"));
+    let list_request: RebornAdminThreadScrapeListRequest =
+        serde_json::from_value(queries[0].params.clone()).expect("list params");
+    assert_eq!(list_request.cursor, None);
     assert_eq!(queries[1].params["thread_id"], "thread-x");
     assert_eq!(queries[2].params["run_id"], run_id);
 }
@@ -2541,6 +2551,9 @@ async fn regression_artifact_routes_are_unmounted_by_default() {
     for path in [
         "/api/webchat/v2/threads/thread-x/runs/run-x/artifact",
         "/api/webchat/v2/threads/thread-x/artifact",
+        "/api/webchat/v2/admin/users/user-x/thread-scrape/threads",
+        "/api/webchat/v2/admin/users/user-x/thread-scrape/threads/thread-x/artifact",
+        "/api/webchat/v2/admin/users/user-x/thread-scrape/threads/thread-x/runs/run-x/artifact",
     ] {
         let response = router
             .clone()
@@ -4093,6 +4106,37 @@ async fn get_session_reports_regression_artifact_export_feature_from_state_flag(
         assert_eq!(
             body["features"]["regression_artifact_export"], enabled,
             "session feature must mirror the artifact export gate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_reports_admin_thread_scrape_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_admin_thread_scrape_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["admin_thread_scrape"], enabled,
+            "session feature must mirror the admin thread scrape gate"
         );
     }
 }

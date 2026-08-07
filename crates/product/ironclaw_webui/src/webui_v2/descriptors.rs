@@ -260,7 +260,7 @@ pub const WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL: &str =
 /// unless composition explicitly opts in through
 /// [`webui_v2_routes_with_regression_artifact_export`].
 pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
-    webui_v2_routes_with_regression_artifact_export(false)
+    webui_v2_routes_with_artifact_flags(false, false)
 }
 
 /// Return the canonical descriptor set for the selected artifact-export
@@ -271,6 +271,21 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
 /// route the inner router does not mount.
 pub fn webui_v2_routes_with_regression_artifact_export(
     regression_artifact_export_enabled: bool,
+) -> Vec<IngressRouteDescriptor> {
+    webui_v2_routes_with_artifact_flags(regression_artifact_export_enabled, false)
+}
+
+/// Combined artifact-surface policy: QA-only caller-owned exports plus the
+/// independently gated admin cross-user thread scraping.
+///
+/// The two flags are deliberately separate: enabling QA self-export must
+/// never silently mount tenant-wide admin transcript access. The same two
+/// captured deployment flags must feed this table and
+/// [`crate::webui_v2::WebUiV2State`] so host middleware never advertises a
+/// route the inner router does not mount.
+pub fn webui_v2_routes_with_artifact_flags(
+    regression_artifact_export_enabled: bool,
+    admin_thread_scrape_enabled: bool,
 ) -> Vec<IngressRouteDescriptor> {
     let mut routes = vec![
         get_session_descriptor(),
@@ -375,6 +390,8 @@ pub fn webui_v2_routes_with_regression_artifact_export(
     if regression_artifact_export_enabled {
         routes.push(get_run_artifact_descriptor());
         routes.push(get_thread_artifact_descriptor());
+    }
+    if admin_thread_scrape_enabled {
         routes.push(admin_list_thread_scrape_threads_descriptor());
         routes.push(admin_get_thread_scrape_artifact_descriptor());
         routes.push(admin_get_thread_scrape_run_artifact_descriptor());

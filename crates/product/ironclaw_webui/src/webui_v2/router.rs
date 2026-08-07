@@ -105,6 +105,7 @@ pub struct WebUiV2State {
     reborn_projects_enabled: bool,
     workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
+    admin_thread_scrape_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -123,6 +124,7 @@ impl WebUiV2State {
             reborn_projects_enabled: false,
             workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
+            admin_thread_scrape_enabled: false,
         }
     }
 
@@ -166,6 +168,23 @@ impl WebUiV2State {
         self.regression_artifact_export_enabled
     }
 
+    /// Deployment gate for the admin thread-scraping surface (cross-user
+    /// transcript artifact collection for debugging/optimization). Off by
+    /// default. Deliberately independent of
+    /// [`with_regression_artifact_export_enabled`]: that QA-only caller-owned
+    /// flag must never silently mount tenant-wide admin transcript access.
+    /// Host composition reads `IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE` and feeds
+    /// it here; the browser learns it from `GET /session`'s
+    /// `features.admin_thread_scrape`.
+    pub fn with_admin_thread_scrape_enabled(mut self, enabled: bool) -> Self {
+        self.admin_thread_scrape_enabled = enabled;
+        self
+    }
+
+    pub fn admin_thread_scrape_enabled(&self) -> bool {
+        self.admin_thread_scrape_enabled
+    }
+
     pub fn services(&self) -> &Arc<dyn ProductSurface> {
         &self.services
     }
@@ -190,6 +209,7 @@ pub fn webui_v2_router(state: WebUiV2State) -> Router {
 
 pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOptions) -> Router {
     let regression_artifact_export_enabled = state.regression_artifact_export_enabled();
+    let admin_thread_scrape_enabled = state.admin_thread_scrape_enabled();
     let mut router = Router::new()
         // GET and POST share the `/api/webchat/v2/threads` path
         // (`WEBUI_V2_PATTERN_CREATE_THREAD == WEBUI_V2_PATTERN_LIST_THREADS`);
@@ -399,7 +419,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT,
                 get(handlers::get_thread_artifact),
-            )
+            );
+    }
+    if admin_thread_scrape_enabled {
+        router = router
             .route(
                 WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS,
                 get(handlers::admin_list_thread_scrape_threads),

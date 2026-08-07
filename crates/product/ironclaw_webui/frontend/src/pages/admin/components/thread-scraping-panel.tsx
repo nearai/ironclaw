@@ -3,26 +3,12 @@ import React from "react";
 import { Button } from "../../../design-system/button";
 import { Panel } from "../../../design-system/primitives";
 import { saveBlob } from "../../../lib/download";
-import { registerPack, useT } from "../../../lib/i18n";
+import { useT } from "../../../lib/i18n";
 import {
   fetchThreadScrapeArtifact,
   fetchThreadScrapeRunArtifact,
   fetchThreadScrapeThreads,
 } from "../lib/admin-api";
-
-// Keep this route-specific English slice in the lazy admin chunk instead of
-// charging unrelated entry points for copy they cannot render.
-registerPack("en", {
-  "admin.threadScraping.title": "Thread scraping",
-  "admin.threadScraping.description": "Collect redacted thread and run artifacts for debugging and optimization.",
-  "admin.threadScraping.empty": "No threads available for scraping.",
-  "admin.threadScraping.untitled": "Untitled thread",
-  "admin.threadScraping.selectThread": "Select a thread to load its artifact.",
-  "admin.threadScraping.downloadThread": "Download thread artifact",
-  "admin.threadScraping.downloadRun": "Download run {runId}",
-  "admin.threadScraping.loadFailed": "Thread scraping failed.",
-  "admin.threadScraping.downloadFailed": "Artifact download failed.",
-});
 
 function artifactFilename(prefix, id) {
   const safeId = String(id || "artifact").replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -51,6 +37,7 @@ export function ThreadScrapingPanel({ userId }) {
   const [errorKey, setErrorKey] = React.useState("");
   const artifactRequestRef = React.useRef(0);
   const loadMoreAbortRef = React.useRef(null);
+  const artifactAbortRef = React.useRef(null);
 
   React.useEffect(() => {
     const controller = new AbortController();
@@ -82,6 +69,8 @@ export function ThreadScrapingPanel({ userId }) {
       });
     return () => {
       controller.abort();
+      artifactAbortRef.current?.abort();
+      artifactAbortRef.current = null;
       artifactRequestRef.current += 1;
       loadMoreAbortRef.current?.abort();
       loadMoreAbortRef.current = null;
@@ -93,19 +82,27 @@ export function ThreadScrapingPanel({ userId }) {
   const selectThread = async (threadId) => {
     const requestId = artifactRequestRef.current + 1;
     artifactRequestRef.current = requestId;
+    artifactAbortRef.current?.abort();
+    const controller = new AbortController();
+    artifactAbortRef.current = controller;
     setSelectedThreadId(threadId);
     setArtifact(null);
     setErrorKey("");
     setIsLoadingArtifact(true);
     setDownloadingRunId("");
     try {
-      const response = await fetchThreadScrapeArtifact(userId, threadId);
+      const response = await fetchThreadScrapeArtifact(userId, threadId, {
+        signal: controller.signal,
+      });
       if (artifactRequestRef.current === requestId) setArtifact(response);
     } catch {
       if (artifactRequestRef.current === requestId) {
         setErrorKey("admin.threadScraping.loadFailed");
       }
     } finally {
+      if (artifactAbortRef.current === controller) {
+        artifactAbortRef.current = null;
+      }
       if (artifactRequestRef.current === requestId) setIsLoadingArtifact(false);
     }
   };
@@ -148,7 +145,12 @@ export function ThreadScrapingPanel({ userId }) {
     setDownloadingRunId(runId);
     setErrorKey("");
     try {
-      const runArtifact = await fetchThreadScrapeRunArtifact(userId, selectedThreadId, runId);
+      const runArtifact = await fetchThreadScrapeRunArtifact(
+        userId,
+        selectedThreadId,
+        runId,
+        { signal: artifactAbortRef.current?.signal },
+      );
       if (artifactRequestRef.current !== requestId) return;
       saveArtifact(runArtifact, artifactFilename("run", runId));
     } catch {
