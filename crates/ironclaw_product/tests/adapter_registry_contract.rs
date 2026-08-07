@@ -156,6 +156,124 @@ effect_path = { type = "product_workflow" }
 "#
 }
 
+/// Frozen byte-for-byte from
+/// `release-fix-1.0.0-rc.1:crates/ironclaw_first_party_extensions/assets/slack_bot/manifest.toml`.
+fn exact_released_rc1_slack_bot_manifest() -> &'static str {
+    r#"schema_version = "reborn.extension_manifest.v2"
+id = "slack_bot"
+name = "Slack"
+version = "0.1.0"
+description = "Slack Events API channel for DMs, app mentions, and outbound routine delivery."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "slack_v2_host_beta"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Slack-Signature"
+timestamp_header_name = "X-Slack-Request-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = [
+  "inbound_messages",
+  "inbound_attachments",
+  "external_final_reply_push",
+  "delivery_status_reporting",
+]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "slack_bot_token"
+
+[[product_adapter.inbound.required_credentials]]
+handle = "slack_signing_secret"
+
+[[product_adapter.inbound.egress]]
+host = "slack.com"
+credential_handle = "slack_bot_token"
+
+# Host-ingress route projected by the serve layer (ironclaw_reborn_composition
+# ::slack_serve). The route path/method/policy live here as data — the axum
+# handler + HMAC verifier stay in Rust. Credential coherence: the route is
+# verified by `slack_signing_secret` (the secret behind the runtime's HMAC
+# webhook verifier), declared in required_credentials above. `slack_bot_token`
+# is the outbound egress credential and does not verify inbound routes.
+[[product_adapter.inbound.host_ingress]]
+credential_handles = ["slack_signing_secret"]
+
+[product_adapter.inbound.host_ingress.descriptor]
+route_id = "slack.events"
+method = "post"
+route_pattern = "/webhooks/slack/events"
+
+[product_adapter.inbound.host_ingress.descriptor.policy]
+listener_class = "public_webhook"
+auth = { type = "required", schemes = ["webhook_signature"] }
+scope_source = "host_resolved"
+body_limit = { type = "limited", max_bytes = 1048576 }
+rate_limit = { type = "limited", scope = "global", max_requests = 12000, window_seconds = 60 }
+cors = "not_applicable"
+websocket_origin = "not_applicable"
+streaming = "none"
+audit = "public_callback"
+effect_path = { type = "product_workflow" }
+"#
+}
+
+async fn import_rc1_manifest_only(
+    raw_toml: &str,
+    hash: &str,
+    extension_id: &str,
+    store_name: &str,
+) -> ExtensionManifestRecord {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let snapshot_path =
+        VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json").unwrap();
+    let snapshot = serde_json::json!({
+        "manifests": [{
+            "raw_toml": raw_toml,
+            "source": "host_bundled",
+            "manifest_hash": hash
+        }],
+        "installations": []
+    });
+    filesystem
+        .put(
+            &snapshot_path,
+            Entry::bytes(serde_json::to_vec(&snapshot).unwrap()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let root = VirtualPath::new(format!("/system/extensions/.installations/{store_name}")).unwrap();
+    let mut store = ExtensionInstallationStore::load_at(
+        filesystem,
+        root,
+        HostPortCatalog::empty(),
+        product_contracts(),
+    )
+    .await
+    .unwrap();
+    store
+        .import_rc1_snapshot_at(&snapshot_path)
+        .await
+        .expect("rc1 manifest must normalize during import");
+    store
+        .get_manifest(&ExtensionId::new(extension_id).unwrap())
+        .await
+        .unwrap()
+        .expect("imported manifest remains available")
+}
+
 fn installation() -> ExtensionInstallation {
     ExtensionInstallation::new(
         installation_id(),
@@ -342,6 +460,63 @@ async fn rc1_snapshot_imports_product_workflow_effect_path() {
             .unwrap()
             .is_some(),
         "normalized installation survives restart"
+    );
+}
+
+#[tokio::test]
+async fn exact_released_rc1_slack_bot_imports_through_product_contract() {
+    let ordinary_error = parse_product_adapter_manifest_record(
+        exact_released_rc1_slack_bot_manifest(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        Some(manifest_hash("sha256:slack123")),
+    )
+    .expect_err("ordinary 1.1 parsing must reject the released retired value");
+    assert!(ordinary_error.to_string().contains("product_workflow"));
+
+    let imported = import_rc1_manifest_only(
+        exact_released_rc1_slack_bot_manifest(),
+        "sha256:slack123",
+        "slack_bot",
+        "rc1-slack-bot",
+    )
+    .await;
+    assert!(!imported.raw_toml().contains("product_workflow"));
+    let adapters = product_adapter_sections(&imported).unwrap();
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].adapter_id().as_str(), "slack_bot/inbound");
+    assert_eq!(
+        adapters[0].host_ingress()[0]
+            .descriptor()
+            .policy()
+            .effect_path(),
+        &AllowedEffectPath::ProductSurface
+    );
+}
+
+#[tokio::test]
+async fn rc1_snapshot_normalizes_product_workflow_in_accepted_web_section() {
+    // Synthesize another schema-accepted immediate subsection from the frozen
+    // Telegram fixture so normalization is not accidentally inbound-only.
+    let web_manifest = exact_rc1_product_workflow_manifest()
+        .replace("product_adapter.inbound", "product_adapter.web");
+    let imported = import_rc1_manifest_only(
+        &web_manifest,
+        "sha256:web123",
+        "telegram",
+        "rc1-web-adapter",
+    )
+    .await;
+    assert!(!imported.raw_toml().contains("product_workflow"));
+    assert!(imported.raw_toml().contains("product_surface"));
+    let adapters = product_adapter_sections(&imported).unwrap();
+    assert_eq!(adapters[0].section().as_str(), "product_adapter.web");
+    assert_eq!(
+        adapters[0].host_ingress()[0]
+            .descriptor()
+            .policy()
+            .effect_path(),
+        &AllowedEffectPath::ProductSurface
     );
 }
 

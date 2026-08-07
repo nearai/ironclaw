@@ -375,31 +375,16 @@ fn normalize_rc1_manifest(raw_toml: String) -> Result<String, ExtensionInstallat
         changed = true;
     }
 
-    if let Some(host_ingress) = root
+    if let Some(product_adapter) = root
         .get_mut("product_adapter")
         .and_then(toml::Value::as_table_mut)
-        .and_then(|product_adapter| product_adapter.get_mut("inbound"))
-        .and_then(toml::Value::as_table_mut)
-        .and_then(|inbound| inbound.get_mut("host_ingress"))
-        .and_then(toml::Value::as_array_mut)
     {
-        for route in host_ingress {
-            let Some(effect_path_type) = route
-                .as_table_mut()
-                .and_then(|route| route.get_mut("descriptor"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|descriptor| descriptor.get_mut("policy"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|policy| policy.get_mut("effect_path"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|effect_path| effect_path.get_mut("type"))
-            else {
-                continue;
-            };
-            if effect_path_type.as_str() == Some("product_workflow") {
-                *effect_path_type = toml::Value::String("product_surface".to_string());
-                changed = true;
-            }
+        changed |= normalize_rc1_product_adapter_section(product_adapter);
+        for subsection in product_adapter
+            .iter_mut()
+            .filter_map(|(_, value)| value.as_table_mut())
+        {
+            changed |= normalize_rc1_product_adapter_section(subsection);
         }
     }
 
@@ -409,6 +394,35 @@ fn normalize_rc1_manifest(raw_toml: String) -> Result<String, ExtensionInstallat
 
     toml::to_string(&document)
         .map_err(|error| invalid_installation_error(format!("serialize rc1 manifest: {error}")))
+}
+
+fn normalize_rc1_product_adapter_section(section: &mut toml::value::Table) -> bool {
+    let Some(host_ingress) = section
+        .get_mut("host_ingress")
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for route in host_ingress {
+        let Some(effect_path_type) = route
+            .as_table_mut()
+            .and_then(|route| route.get_mut("descriptor"))
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|descriptor| descriptor.get_mut("policy"))
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|policy| policy.get_mut("effect_path"))
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|effect_path| effect_path.get_mut("type"))
+        else {
+            continue;
+        };
+        if effect_path_type.as_str() == Some("product_workflow") {
+            *effect_path_type = toml::Value::String("product_surface".to_string());
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Exact top-level shape written by the rc1 composition-owned snapshot
