@@ -27,7 +27,7 @@ alone constructs authenticated-caller evidence.
   the fixed middleware order: ws-origin → body limit → bearer/session/OIDC
   auth → rate limit → handler.
 - `webui_v2_router(state)` / `webui_v2_routes()` — the route builder and the
-  frozen descriptor table (93 routes, contract-locked; re-derive:
+  frozen descriptor table (97 routes, contract-locked; re-derive:
   `rg -c 'pub const WEBUI_V2_ROUTE_' src/webui_v2/descriptors.rs`).
 - Handlers dispatch to `ironclaw_product_contracts::surface::ProductSurface`
   and render redacted responses through `WebUiV2HttpError`.
