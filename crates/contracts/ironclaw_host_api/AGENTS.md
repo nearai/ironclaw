@@ -23,6 +23,11 @@ and admission test: [`../AGENTS.md`](../AGENTS.md).
   and no dependency on any other `ironclaw_*` crate (the zero-internal-dep
   assert in `reborn_crate_dependency_boundaries_hold` is the whole system's
   safety property).
+- **Capability-surface policy is neutral visibility vocabulary.**
+  `capability_surface` owns `CapabilitySurfacePolicy` and its capability-id
+  scope algebra. The policy narrows model-visible capabilities and never
+  grants dispatch authority; resolution and enforcement remain in
+  `ironclaw_loop_host` and `ironclaw_host_runtime`.
 - **`turn` is the complete canonical turn language, not a partial one.** If a
   crate needs to *name* a turn — scope, ids, refs, status, gate kind, event
   cursor, origin adapter — it depends on this crate, never on

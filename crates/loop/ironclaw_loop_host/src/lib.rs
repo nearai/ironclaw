@@ -21,10 +21,10 @@ mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
 mod cancellation_port;
-mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
+mod capability_surface_policy;
 mod compaction_task;
 mod context_shadow;
 mod context_window_cache;
@@ -74,9 +74,6 @@ pub use cancellation_port::{
     RunCancellationObservationKind, RunStateLoopCancellationPort,
     verify_product_live_cancellation_probe,
 };
-pub use capability_allow_set::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-};
 pub use capability_port::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
     DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
@@ -85,9 +82,9 @@ pub use capability_port::{
     loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
-    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
-    PerSurfaceCapabilityDenyDecorator,
+    CapabilitySurfacePolicyFilter, CapabilitySurfaceVisibleFilter,
 };
+pub use capability_surface_policy::{CapabilityResolveError, CapabilitySurfaceProfileResolver};
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
     active_task_compaction_prompt_id, default_compaction_prompt_id,
