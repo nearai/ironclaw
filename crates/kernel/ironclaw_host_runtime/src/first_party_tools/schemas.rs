@@ -95,7 +95,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "start": { "type": "integer", "minimum": 0, "description": "Inclusive array start index for slice" },
                 "end": { "type": "integer", "minimum": 0, "description": "Exclusive array end index for slice; at most 4096 items may be returned" },
-                "function": { "type": "string", "enum": ["sum", "average", "min", "max"], "description": "Bounded numeric aggregate to compute" },
+                "function": { "type": "string", "enum": ["sum", "average", "min", "max"], "description": "Bounded numeric aggregate: integer-only input computes exactly (sum, min, max) and average rounds its exact sum once; input mixing integers and decimals computes in floating point" },
                 "value_index": { "type": "integer", "minimum": 0, "description": "Optional numeric index to select from each array row before aggregation" }
             },
             "oneOf": [

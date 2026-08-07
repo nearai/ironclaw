@@ -21,7 +21,7 @@ const MAX_AGGREGATE_ITEMS: usize = 100_000;
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         JSON_CAPABILITY_ID,
-        "Parse, query, stringify, and validate JSON",
+        "Parse, query, stringify, validate, and run bounded collection analysis on JSON",
         vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem],
         PermissionMode::Allow,
         resource_profile(),
@@ -57,53 +57,71 @@ pub(super) async fn dispatch(
                 .map_err(|_| operation_error())
         }
         "query" => {
-            let path = input
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(input_error)?;
             let value = query_input(request).await?;
-            query_json(&value, path).cloned()
+            select(&request.input, &value).cloned()
         }
         "length" => {
-            let selected = selected_input(request).await?;
-            let length = match &selected {
+            let value = query_input(request).await?;
+            let selected = select(&request.input, &value)?;
+            let length = match selected {
                 Value::Array(values) => values.len(),
                 Value::Object(values) => values.len(),
                 _ => {
-                    return Err(collection_input_error(
+                    return Err(structured_input_error(
+                        "JSON collection input failed validation",
                         "path",
                         "a path resolving to an array or object",
-                        json_type(&selected),
+                        json_type(selected),
                     ));
                 }
             };
             Ok(json!(length))
         }
         "last" => {
-            let selected = selected_input(request).await?;
+            let value = query_input(request).await?;
+            let selected = select(&request.input, &value)?;
             let values = selected.as_array().ok_or_else(|| {
-                collection_input_error("path", "a path resolving to an array", json_type(&selected))
+                structured_input_error(
+                    "JSON collection input failed validation",
+                    "path",
+                    "a path resolving to an array",
+                    json_type(selected),
+                )
             })?;
             values.last().cloned().ok_or_else(|| {
-                collection_input_error("path", "a non-empty array", "an empty array")
+                structured_input_error(
+                    "JSON collection input failed validation",
+                    "path",
+                    "a non-empty array",
+                    "an empty array",
+                )
             })
         }
         "slice" => {
-            let selected = selected_input(request).await?;
+            let value = query_input(request).await?;
+            let selected = select(&request.input, &value)?;
             let values = selected.as_array().ok_or_else(|| {
-                collection_input_error("path", "a path resolving to an array", json_type(&selected))
+                structured_input_error(
+                    "JSON collection input failed validation",
+                    "path",
+                    "a path resolving to an array",
+                    json_type(selected),
+                )
             })?;
-            let start = collection_input_usize(input, "start")?;
-            let end = collection_input_usize(input, "end")?;
+            let start =
+                bounded_input_usize(input, "start", "JSON collection input failed validation")?;
+            let end = bounded_input_usize(input, "end", "JSON collection input failed validation")?;
             if end < start {
-                return Err(collection_input_error(
+                return Err(structured_input_error(
+                    "JSON collection input failed validation",
                     "end",
                     "an end index greater than or equal to start",
                     end.to_string(),
                 ));
             }
             if end > values.len() {
-                return Err(collection_input_error(
+                return Err(structured_input_error(
+                    "JSON collection input failed validation",
                     "end",
                     "an end index within the selected array",
                     end.to_string(),
@@ -117,7 +135,10 @@ pub(super) async fn dispatch(
             }
             Ok(Value::Array(values[start..end].to_vec()))
         }
-        "aggregate" => aggregate(request).await,
+        "aggregate" => {
+            let value = query_input(request).await?;
+            aggregate(request, &value).await
+        }
         "validate" => {
             let valid = input
                 .get("data")
@@ -130,27 +151,59 @@ pub(super) async fn dispatch(
     }
 }
 
-async fn selected_input(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let path = request
-        .input
+fn select<'a>(input: &Value, value: &'a Value) -> Result<&'a Value, FirstPartyCapabilityError> {
+    let path = input
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(input_error)?;
-    let value = query_input(request).await?;
-    query_json(&value, path).cloned()
+    query_json(value, path)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AggregateFunction {
+    Sum,
+    Average,
+    Min,
+    Max,
+}
+
+impl AggregateFunction {
+    fn from_wire(function: &str) -> Option<Self> {
+        match function {
+            "sum" => Some(Self::Sum),
+            "average" => Some(Self::Average),
+            "min" => Some(Self::Min),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    fn as_wire(self) -> &'static str {
+        match self {
+            Self::Sum => "sum",
+            Self::Average => "average",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
 }
 
 async fn aggregate(
     request: &FirstPartyCapabilityRequest,
+    value: &Value,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let selected = selected_input(request).await?;
+    let selected = select(&request.input, value)?;
     let values = selected.as_array().ok_or_else(|| {
-        aggregate_input_error("path", "a path resolving to an array", json_type(&selected))
+        structured_input_error(
+            "JSON aggregate input failed validation",
+            "path",
+            "a path resolving to an array",
+            json_type(selected),
+        )
     })?;
     if values.is_empty() {
-        return Err(aggregate_input_error(
+        return Err(structured_input_error(
+            "JSON aggregate input failed validation",
             "path",
             "a non-empty array",
             "an empty array",
@@ -163,43 +216,102 @@ async fn aggregate(
         ));
     }
 
-    let function = request
-        .input
-        .get("function")
-        .and_then(Value::as_str)
-        .ok_or_else(input_error)?;
-    if !matches!(function, "sum" | "average" | "min" | "max") {
-        return Err(aggregate_input_error(
-            "function",
-            "sum, average, min, or max",
-            function,
-        ));
-    }
+    let function = match request.input.get("function").and_then(Value::as_str) {
+        Some(wire) => AggregateFunction::from_wire(wire).ok_or_else(|| {
+            structured_input_error(
+                "JSON aggregate input failed validation",
+                "function",
+                "sum, average, min, or max",
+                bounded_received(wire),
+            )
+        })?,
+        None => return Err(input_error()),
+    };
     let value_index = request
         .input
         .get("value_index")
-        .map(|_| aggregate_input_usize(&request.input, "value_index"))
+        .map(|_| {
+            bounded_input_usize(
+                &request.input,
+                "value_index",
+                "JSON aggregate input failed validation",
+            )
+        })
         .transpose()?;
 
-    let mut sum = 0.0;
-    let mut minimum = f64::INFINITY;
-    let mut maximum = f64::NEG_INFINITY;
+    // Classify the numeric domain before computing: integer-only input
+    // aggregates exactly (no f64 rounding), any decimal input computes in
+    // floating point. This pass also validates numeric shape and row indices.
+    let mut all_integer = true;
     for (position, item) in values.iter().enumerate() {
-        let candidate = if let Some(index) = value_index {
-            item.as_array()
-                .and_then(|row| row.get(index))
-                .ok_or_else(|| {
-                    aggregate_input_error(
-                        "value_index",
-                        "an in-bounds index for every selected array item",
-                        format!("item {} did not resolve", position + 1),
-                    )
-                })?
-        } else {
-            item
-        };
-        let number = candidate.as_f64().ok_or_else(|| {
-            aggregate_input_error(
+        let candidate = aggregate_candidate(item, value_index, position)?;
+        match candidate {
+            Value::Number(number) if number.is_i64() || number.is_u64() => {}
+            Value::Number(_) => all_integer = false,
+            _ => {
+                return Err(structured_input_error(
+                    "JSON aggregate input failed validation",
+                    "path",
+                    "numeric selected values",
+                    format!("item {} was {}", position + 1, json_type(candidate)),
+                ));
+            }
+        }
+    }
+
+    let result = if all_integer {
+        integer_aggregate(values, value_index, function)?
+    } else {
+        float_aggregate(values, value_index, function)?
+    };
+    Ok(json!({
+        "count": values.len(),
+        "function": function.as_wire(),
+        "value": result,
+    }))
+}
+
+fn aggregate_candidate(
+    item: &Value,
+    value_index: Option<usize>,
+    position: usize,
+) -> Result<&Value, FirstPartyCapabilityError> {
+    if let Some(index) = value_index {
+        item.as_array()
+            .and_then(|row| row.get(index))
+            .ok_or_else(|| {
+                structured_input_error(
+                    "JSON aggregate input failed validation",
+                    "value_index",
+                    "an in-bounds index for every selected array item",
+                    format!("item {} did not resolve", position + 1),
+                )
+            })
+    } else {
+        Ok(item)
+    }
+}
+
+fn integer_value(value: &Value) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+fn integer_aggregate(
+    values: &[Value],
+    value_index: Option<usize>,
+    function: AggregateFunction,
+) -> Result<serde_json::Number, FirstPartyCapabilityError> {
+    let mut sum: i128 = 0;
+    let mut minimum = i128::MAX;
+    let mut maximum = i128::MIN;
+    for (position, item) in values.iter().enumerate() {
+        let candidate = aggregate_candidate(item, value_index, position)?;
+        let number = integer_value(candidate).ok_or_else(|| {
+            structured_input_error(
+                "JSON aggregate input failed validation",
                 "path",
                 "numeric selected values",
                 format!("item {} was {}", position + 1, json_type(candidate)),
@@ -209,13 +321,51 @@ async fn aggregate(
         minimum = minimum.min(number);
         maximum = maximum.max(number);
     }
-
     let result = match function {
-        "sum" => sum,
-        "average" => sum / values.len() as f64,
-        "min" => minimum,
-        "max" => maximum,
-        _ => return Err(input_error()),
+        AggregateFunction::Sum => integer_result(sum)?,
+        // A single rounding of the exact i128 sum; the sum itself cannot
+        // overflow because 100000 items bounded by u64/i64 fit in i128.
+        AggregateFunction::Average => {
+            serde_json::Number::from_f64(sum as f64 / values.len() as f64)
+                .ok_or_else(operation_error)?
+        }
+        AggregateFunction::Min => integer_result(minimum)?,
+        AggregateFunction::Max => integer_result(maximum)?,
+    };
+    Ok(result)
+}
+
+fn float_aggregate(
+    values: &[Value],
+    value_index: Option<usize>,
+    function: AggregateFunction,
+) -> Result<serde_json::Number, FirstPartyCapabilityError> {
+    let mut sum = 0.0;
+    // Incremental mean (single-pass update) so "average" never materializes
+    // an overflowing total: [1e308, 1e308] averages to 1e308.
+    let mut mean = 0.0;
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for (position, item) in values.iter().enumerate() {
+        let candidate = aggregate_candidate(item, value_index, position)?;
+        let number = candidate.as_f64().ok_or_else(|| {
+            structured_input_error(
+                "JSON aggregate input failed validation",
+                "path",
+                "numeric selected values",
+                format!("item {} was {}", position + 1, json_type(candidate)),
+            )
+        })?;
+        sum += number;
+        mean += (number - mean) / (position + 1) as f64;
+        minimum = minimum.min(number);
+        maximum = maximum.max(number);
+    }
+    let result = match function {
+        AggregateFunction::Sum => sum,
+        AggregateFunction::Average => mean,
+        AggregateFunction::Min => minimum,
+        AggregateFunction::Max => maximum,
     };
     if !result.is_finite() {
         return Err(FirstPartyCapabilityError::with_safe_summary(
@@ -223,64 +373,44 @@ async fn aggregate(
             "JSON aggregate exceeded the finite numeric range".to_string(),
         ));
     }
-    let result = serde_json::Number::from_f64(result).ok_or_else(operation_error)?;
-    Ok(json!({
-        "count": values.len(),
-        "function": function,
-        "value": result,
-    }))
+    serde_json::Number::from_f64(result).ok_or_else(operation_error)
 }
 
-fn collection_input_usize(
-    input: &Value,
-    field: &'static str,
-) -> Result<usize, FirstPartyCapabilityError> {
-    let value = input
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| collection_input_error(field, "a non-negative integer", "invalid value"))?;
-    usize::try_from(value).map_err(|_| {
-        collection_input_error(field, "an integer that fits in usize", value.to_string())
+fn integer_result(value: i128) -> Result<serde_json::Number, FirstPartyCapabilityError> {
+    serde_json::Number::from_i128(value).ok_or_else(|| {
+        FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::Resource,
+            "JSON aggregate result exceeds the exact integer range".to_string(),
+        )
     })
 }
 
-fn aggregate_input_usize(
+fn bounded_input_usize(
     input: &Value,
     field: &'static str,
+    summary: &'static str,
 ) -> Result<usize, FirstPartyCapabilityError> {
-    let value = input
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| aggregate_input_error(field, "a non-negative integer", "invalid value"))?;
+    let value = input.get(field).and_then(Value::as_u64).ok_or_else(|| {
+        structured_input_error(summary, field, "a non-negative integer", "invalid value")
+    })?;
     usize::try_from(value).map_err(|_| {
-        aggregate_input_error(field, "an integer that fits in usize", value.to_string())
+        structured_input_error(
+            summary,
+            field,
+            "an integer that fits in usize",
+            value.to_string(),
+        )
     })
 }
 
-fn collection_input_error(
-    field: &'static str,
-    expected: impl Into<String>,
-    received: impl Into<String>,
-) -> FirstPartyCapabilityError {
-    structured_input_error(
-        "JSON collection input failed validation",
-        field,
-        expected,
-        received,
-    )
-}
-
-fn aggregate_input_error(
-    field: &'static str,
-    expected: impl Into<String>,
-    received: impl Into<String>,
-) -> FirstPartyCapabilityError {
-    structured_input_error(
-        "JSON aggregate input failed validation",
-        field,
-        expected,
-        received,
-    )
+fn bounded_received(value: &str) -> String {
+    const MAX_RECEIVED_CHARS: usize = 64;
+    let mut chars = value.chars();
+    let mut bounded = chars.by_ref().take(MAX_RECEIVED_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn structured_input_error(
@@ -834,6 +964,300 @@ mod tests {
         assert_eq!(
             empty_last.kind(),
             Some(RuntimeDispatchErrorKind::InputEncode)
+        );
+    }
+
+    #[tokio::test]
+    async fn collection_operations_reject_out_of_range_slice_bounds() {
+        for (input, message) in [
+            (
+                json!({
+                    "operation": "slice",
+                    "data": {"items": [1, 2, 3]},
+                    "path": "items",
+                    "start": 2,
+                    "end": 1
+                }),
+                "an end index below start must fail",
+            ),
+            (
+                json!({
+                    "operation": "slice",
+                    "data": {"items": [1, 2, 3]},
+                    "path": "items",
+                    "start": 0,
+                    "end": 4
+                }),
+                "an end index beyond the selected array must fail",
+            ),
+            (
+                json!({
+                    "operation": "slice",
+                    "data": {"items": [1, 2, 3]},
+                    "path": "items",
+                    "start": -1,
+                    "end": 1
+                }),
+                "a negative start must fail the defensive u64 conversion",
+            ),
+            (
+                json!({
+                    "operation": "slice",
+                    "data": {"items": [1, 2, 3]},
+                    "path": "items",
+                    "start": 1,
+                    "end": 1.5
+                }),
+                "a fractional end must fail the defensive u64 conversion",
+            ),
+        ] {
+            let error = dispatch(&request(input)).await.expect_err(message);
+            assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+            assert_eq!(
+                error.safe_summary(),
+                Some("JSON collection input failed validation")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_operations_reject_non_collection_paths() {
+        assert_eq!(
+            dispatch(&request(json!({
+                "operation": "length",
+                "data": {"obj": {"a": 1, "b": 2}},
+                "path": "obj"
+            })))
+            .await
+            .expect("object length resolves"),
+            json!(2)
+        );
+
+        for operation in ["length", "last", "slice", "aggregate"] {
+            let input = match operation {
+                "slice" => json!({
+                    "operation": operation,
+                    "data": {"n": 5},
+                    "path": "n",
+                    "start": 0,
+                    "end": 1
+                }),
+                "aggregate" => json!({
+                    "operation": operation,
+                    "data": {"n": 5},
+                    "path": "n",
+                    "function": "sum"
+                }),
+                _ => json!({"operation": operation, "data": {"n": 5}, "path": "n"}),
+            };
+            let error = dispatch(&request(input))
+                .await
+                .expect_err("scalar paths must fail collection selection");
+            assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+        }
+
+        let object_last = dispatch(&request(json!({
+            "operation": "last",
+            "data": {"obj": {"a": 1}},
+            "path": "obj"
+        })))
+        .await
+        .expect_err("last requires an array, not an object");
+        assert_eq!(
+            object_last.kind(),
+            Some(RuntimeDispatchErrorKind::InputEncode)
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_rejects_empty_unresolvable_and_unknown_inputs() {
+        let empty = dispatch(&request(json!({
+            "operation": "aggregate",
+            "data": {"items": []},
+            "path": "items",
+            "function": "sum"
+        })))
+        .await
+        .expect_err("aggregate requires a non-empty array");
+        assert_eq!(empty.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+        assert_eq!(
+            empty.safe_summary(),
+            Some("JSON aggregate input failed validation")
+        );
+
+        let missing_row_cell = dispatch(&request(json!({
+            "operation": "aggregate",
+            "data": {"rows": [[1, 10.0], [2]]},
+            "path": "rows",
+            "function": "sum",
+            "value_index": 1
+        })))
+        .await
+        .expect_err("every row must resolve the value_index cell");
+        assert_eq!(
+            missing_row_cell.kind(),
+            Some(RuntimeDispatchErrorKind::InputEncode)
+        );
+
+        let unknown_function = dispatch(&request(json!({
+            "operation": "aggregate",
+            "data": {"items": [1, 2]},
+            "path": "items",
+            "function": "median"
+        })))
+        .await
+        .expect_err("unsupported aggregate functions must fail");
+        assert_eq!(
+            unknown_function.kind(),
+            Some(RuntimeDispatchErrorKind::InputEncode)
+        );
+
+        let overlong_function = dispatch(&request(json!({
+            "operation": "aggregate",
+            "data": {"items": [1, 2]},
+            "path": "items",
+            "function": "x".repeat(200)
+        })))
+        .await
+        .expect_err("overlong function names must fail");
+        let crate::FirstPartyCapabilityError::Dispatch {
+            detail: Some(detail),
+            ..
+        } = overlong_function
+        else {
+            panic!("expected structured invalid-input error");
+        };
+        let DispatchFailureDetail::InvalidInput { issues } = *detail else {
+            panic!("expected invalid-input details");
+        };
+        assert_eq!(issues[0].path, "function");
+        assert!(
+            issues[0]
+                .received
+                .as_ref()
+                .is_some_and(|received| received.len() < 70),
+            "the model-supplied function name must be bounded when echoed back"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_preserves_exact_integer_arithmetic() {
+        // Sums, minimums, and maximums of integers above 2^53 must not be
+        // silently rounded through f64: [2^53, 1] sums to 2^53 + 1 exactly.
+        for (input, function, expected) in [
+            (
+                json!([9_007_199_254_740_992i64, 1]),
+                "sum",
+                json!(9_007_199_254_740_993i64),
+            ),
+            (
+                json!([9_007_199_254_740_993i64, -9_007_199_254_740_993i64]),
+                "min",
+                json!(-9_007_199_254_740_993i64),
+            ),
+            (
+                json!([9_007_199_254_740_993i64, -9_007_199_254_740_993i64]),
+                "max",
+                json!(9_007_199_254_740_993i64),
+            ),
+            (
+                json!([18_446_744_073_709_551_615u64, 0]),
+                "sum",
+                json!(18_446_744_073_709_551_615u64),
+            ),
+        ] {
+            assert_eq!(
+                dispatch(&request(json!({
+                    "operation": "aggregate",
+                    "data": {"items": input},
+                    "path": "items",
+                    "function": function
+                })))
+                .await
+                .expect("exact integer aggregate resolves"),
+                json!({"count": 2, "function": function, "value": expected})
+            );
+        }
+
+        // Average of [2^53 + 1, 1] stays exact: the i128 sum divides once.
+        assert_eq!(
+            dispatch(&request(json!({
+                "operation": "aggregate",
+                "data": {"items": [9_007_199_254_740_993i64, 1]},
+                "path": "items",
+                "function": "average"
+            })))
+            .await
+            .expect("exact integer average resolves"),
+            json!({"count": 2, "function": "average", "value": 4_503_599_627_370_497f64})
+        );
+
+        // A sum beyond the u64 range cannot be represented exactly in JSON;
+        // fail with a Resource error instead of rounding silently.
+        let out_of_range = dispatch(&request(json!({
+            "operation": "aggregate",
+            "data": {"items": [18_446_744_073_709_551_615u64, 18_446_744_073_709_551_615u64]},
+            "path": "items",
+            "function": "sum"
+        })))
+        .await
+        .expect_err("out-of-range exact sums must fail instead of rounding");
+        assert_eq!(
+            out_of_range.kind(),
+            Some(RuntimeDispatchErrorKind::Resource)
+        );
+        assert_eq!(
+            out_of_range.safe_summary(),
+            Some("JSON aggregate result exceeds the exact integer range")
+        );
+
+        // Input mixing integers and decimals computes in floating point.
+        assert_eq!(
+            dispatch(&request(json!({
+                "operation": "aggregate",
+                "data": {"items": [1, 2.5]},
+                "path": "items",
+                "function": "sum"
+            })))
+            .await
+            .expect("mixed numeric aggregate resolves"),
+            json!({"count": 2, "function": "sum", "value": 3.5})
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_average_avoids_sum_overflow() {
+        // The average of near-f64-MAX values is computable even though their
+        // sum is not; incremental mean must not materialize the overflowing total.
+        for function in ["average", "min", "max"] {
+            assert_eq!(
+                dispatch(&request(json!({
+                    "operation": "aggregate",
+                    "data": {"items": [1e308, 1e308]},
+                    "path": "items",
+                    "function": function
+                })))
+                .await
+                .expect("computable near-limit aggregate resolves"),
+                json!({"count": 2, "function": function, "value": 1e308})
+            );
+        }
+
+        let overflowing_sum = dispatch(&request(json!({
+            "operation": "aggregate",
+            "data": {"items": [1e308, 1e308]},
+            "path": "items",
+            "function": "sum"
+        })))
+        .await
+        .expect_err("a genuinely overflowing sum must fail");
+        assert_eq!(
+            overflowing_sum.kind(),
+            Some(RuntimeDispatchErrorKind::Resource)
+        );
+        assert_eq!(
+            overflowing_sum.safe_summary(),
+            Some("JSON aggregate exceeded the finite numeric range")
         );
     }
 
