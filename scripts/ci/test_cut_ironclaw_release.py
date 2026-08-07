@@ -318,6 +318,31 @@ class StableChangelogGateTests(unittest.TestCase):
             )
             release.ensure_stable_changelog_entry(root, self.STABLE)
 
+    def test_rc_labeled_entry_does_not_satisfy_the_stable_gate(self) -> None:
+        """`description="v1.2.0-rc.1"` contains `v1.2.0` as a substring; the
+        exact-attribute probe must still refuse the stable cut."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root,
+                '<Update label="2026-08-10" description="v1.2.0-rc.1">…</Update>\n',
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
+    def test_prose_mention_does_not_satisfy_the_stable_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root, "The v1.2.0 release notes are coming soon.\n"
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
     def test_prerelease_cut_is_exempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             # No docs/ tree at all: an rc cut must not require one.

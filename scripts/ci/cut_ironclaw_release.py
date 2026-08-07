@@ -162,11 +162,14 @@ def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
     The public docs site deploys from the `docs-live` branch, which the
     release workflow repoints at each stable tag — so the changelog page that
     ships is whatever the candidate commit carries, and it must already
-    contain this release. Prerelease (`-rc.N`, hotfix-rc) cuts are exempt so
-    the freeze/blocker flow stays unimpeded; the entry is written on the
-    release branch at the Monday cut per
-    docs/internal/weekly-release-strategy.md. A malformed version is left for
-    `ensure_release_tag` to reject with the canonical message.
+    contain this release. The probe is the exact `description="vX.Y.Z"`
+    attribute, not a bare-substring `vX.Y.Z`: a prose mention or an
+    rc-labeled entry (`description="vX.Y.Z-rc.1"`) must not satisfy the
+    stable gate. Prerelease (`-rc.N`, hotfix-rc) cuts are exempt so the
+    freeze/blocker flow stays unimpeded; the entry lands on `main` before
+    the Monday cut so the candidate inherits it and later candidates keep it
+    (docs/internal/weekly-release-strategy.md). A malformed version is left
+    for `ensure_release_tag` to reject with the canonical message.
     """
     if VERSION_PATTERN.fullmatch(version) is None or "-" in version:
         return
@@ -178,11 +181,13 @@ def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
             f"stable release {version} requires docs/changelog.mdx in the "
             f"candidate checkout, which cannot be read: {error}"
         ) from error
-    if f"v{version}" not in text:
+    if f'description="v{version}"' not in text:
         raise ReleaseTagError(
-            f"docs/changelog.mdx has no entry for v{version}. Add an "
-            f'<Update description="v{version}"> entry to docs/changelog.mdx '
-            "on the release branch before cutting the stable tag "
+            f"docs/changelog.mdx has no entry for v{version}. Land an "
+            f'<Update description="v{version}"> entry on main before the '
+            "Monday cut so the candidate inherits it; if the branch is "
+            "already cut, add the entry there and cherry-pick it to main so "
+            "the next candidate keeps it "
             "(docs/internal/weekly-release-strategy.md, Monday checklist)."
         )
 

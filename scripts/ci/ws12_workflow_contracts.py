@@ -85,6 +85,11 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "publish-docs-live:",
         "refs/heads/docs-live",
         "!fromJson(needs.host.outputs.val).announcement_is_prerelease",
+        # The newest-stable-tag guard: without it, re-running an older
+        # release's workflow force-moves docs-live backwards and silently
+        # reverts the live docs site.
+        "git/matching-refs/tags/ironclaw-v",
+        "skipping docs-live repoint:",
     ),
 }
 
