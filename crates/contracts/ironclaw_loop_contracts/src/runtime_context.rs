@@ -192,29 +192,47 @@ impl LoopRuntimeContext {
                 }
                 ConnectedChannelsState::Known(channels) => {
                     const MAX_RENDERED_CHANNELS: usize = 20;
+                    // The whole rendered slice is validated on
+                    // `PromptTextSurface::SafeSummary` (4 KiB) and exceeding it
+                    // is a run-ending error on every prompt build. Each label is
+                    // individually bounded but their SUM is not, so this is the
+                    // one part that can grow without limit — 20 long channel
+                    // names alone can outweigh every fixed part combined. Bound
+                    // the line and fold whatever does not fit into the "+N more"
+                    // counter this list already carries.
+                    const MAX_CHANNELS_LINE_BYTES: usize = 1024;
                     let render_count = channels.len().min(MAX_RENDERED_CHANNELS);
-                    let remainder = channels.len().saturating_sub(MAX_RENDERED_CHANNELS);
-                    let mut joined = channels[..render_count]
-                        .iter()
-                        .map(|ch| {
-                            let auth = if ch.authenticated {
-                                "authenticated"
-                            } else {
-                                "unauthenticated"
-                            };
-                            let active = if ch.active { "active" } else { "inactive" };
-                            let presentation = ch
-                                .presentation
-                                .as_ref()
-                                .map(|p| format!(", {}", render_presentation_hint(p)))
-                                .unwrap_or_default();
-                            format!(
-                                "{} ({auth}, {active}{presentation})",
-                                model_safe_label(&ch.name, "a connected channel")
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let mut joined = String::new();
+                    let mut rendered = 0usize;
+                    for channel in &channels[..render_count] {
+                        let auth = if channel.authenticated {
+                            "authenticated"
+                        } else {
+                            "unauthenticated"
+                        };
+                        let active = if channel.active { "active" } else { "inactive" };
+                        let presentation = channel
+                            .presentation
+                            .as_ref()
+                            .map(|p| format!(", {}", render_presentation_hint(p)))
+                            .unwrap_or_default();
+                        let entry = format!(
+                            "{} ({auth}, {active}{presentation})",
+                            model_safe_label(&channel.name, "a connected channel")
+                        );
+                        let separator = if joined.is_empty() { 0 } else { 2 };
+                        if !joined.is_empty()
+                            && joined.len() + separator + entry.len() > MAX_CHANNELS_LINE_BYTES
+                        {
+                            break;
+                        }
+                        if !joined.is_empty() {
+                            joined.push_str(", ");
+                        }
+                        joined.push_str(&entry);
+                        rendered += 1;
+                    }
+                    let remainder = channels.len().saturating_sub(rendered);
                     if remainder > 0 {
                         joined.push_str(&format!(" (+{remainder} more)"));
                     }
@@ -1368,5 +1386,70 @@ mod tests {
         // "zh-Hant-CN-x-private" is exactly 20 characters — well within the limit.
         let locale = Locale::new("zh-Hant-CN-x-private").expect("20-char locale must be accepted");
         assert_eq!(locale.as_str(), "zh-Hant-CN-x-private");
+    }
+
+    /// The whole rendered slice is validated on `PromptTextSurface::SafeSummary`
+    /// (4 KiB) by `instruction_bundle::push_runtime_context`, and exceeding it
+    /// is a run-ending error on EVERY prompt build for that user.
+    ///
+    /// Individual parts are bounded per-label, but nothing bounds their sum,
+    /// and this PR adds a fixed ~1.1 KiB delivery-guidance block on top. This
+    /// pins the realistic worst case — max rendered channels, each with a long
+    /// name and presentation hint, a max-length saved location, and the
+    /// guidance — so a future addition that pushes the slice over the cap fails
+    /// here instead of in production.
+    #[test]
+    fn worst_case_runtime_context_stays_within_the_prompt_surface_cap() {
+        const MAX_RENDERED_CHANNELS: usize = 20;
+        let channels: Vec<ConnectedChannelSummary> = (0..MAX_RENDERED_CHANNELS)
+            .map(|i| ConnectedChannelSummary {
+                // Channel names come from installed extensions; 64 chars is
+                // already far beyond every shipped one.
+                name: format!("{i:02}-{}", "c".repeat(61)),
+                authenticated: true,
+                active: true,
+                presentation: Some(ChannelPresentation {
+                    supports_markdown: false,
+                    max_message_chars: Some(4000),
+                    ..Default::default()
+                }),
+            })
+            .collect();
+
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Known(channels),
+                notification_channels: NotificationChannelsState::Known(8),
+                // The arm that appends DELIVERY_GUIDANCE.
+                delivery_tools_visible: true,
+            }),
+            product_context: None,
+            user_profile: Some(UserProfileContext {
+                timezone: Some("America/Los_Angeles".parse().expect("tz")),
+                locale: Some(
+                    Locale::new("en-US-x-".to_string() + &"a".repeat(20)).expect("locale"),
+                ),
+                // `ironclaw.memory.profile_set` caps location at 200 chars.
+                location: Some("l".repeat(200)),
+            }),
+        };
+
+        let rendered = ctx.render_model_content();
+        assert!(
+            rendered.contains("builtin__outbound_deliver"),
+            "the guidance arm must actually be exercised: {rendered}"
+        );
+        crate::prompt_text::validate_model_safe_text(
+            rendered.clone(),
+            "worst-case runtime context",
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "worst-case runtime context ({} bytes) must satisfy the prompt surface \
+                 the instruction bundle validates it on: {error}",
+                rendered.len()
+            )
+        });
     }
 }
