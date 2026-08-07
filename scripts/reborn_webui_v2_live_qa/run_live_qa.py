@@ -1286,17 +1286,11 @@ async def _apply_slack_setup_api_after_start(
         if isinstance(auth_test, dict)
         else ""
     )
-    shared_subject_user_id = (
-        str(slack_preflight.get("auth_user_id") or "").strip()
-        if isinstance(slack_preflight, dict)
-        else ""
-    ) or _auth_user_id()
     payload, preflight = _slack_setup_payload(
         prepared_home.path,
         config_text,
         prepared_home.env,
         bot_user_id=bot_user_id,
-        shared_subject_user_id=shared_subject_user_id,
     )
     if payload is None:
         return {"applied": False, "reason": "setup_payload_missing", **preflight}

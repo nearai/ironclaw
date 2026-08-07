@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Shared channels: a run acts as the user who invoked it.** A shared channel
+  conversation now binds one thread per participant, and the bot answers each
+  participant as themselves — the configured shared-subject user is retired.
+  Unpaired participants in a shared channel get the pairing prompt (Slack OAuth
+  connect) instead of running as the operator. Existing shared-channel threads
+  are retained on disk but stop receiving new messages; each participant's next
+  message starts a fresh thread they own. Shared channels are no longer offered
+  as per-user notification delivery targets (DM targets are unchanged), and
+  previously stored shared-channel notification preferences fail closed at
+  resolution.
+
+### Removed
+
+- The `slack_shared_subject_user_id` and `slack_subject_routes` Slack
+  admin-configuration fields. Shared-channel admission is the
+  `slack_allowed_channels` field (a JSON array of channel ids): channels
+  previously admitted only through subject routes must be re-admitted by
+  listing them there. Legacy saved subject-route values are inert.
+
 ## [1.1.0-rc.1] - 2026-08-03
 
 First release candidate since 1.0.0. The headline work is extension reach —

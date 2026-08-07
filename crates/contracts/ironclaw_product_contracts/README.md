@@ -34,8 +34,9 @@ load-bearing clusters:
 - **Wire DTOs:** `inbound`, `inbound_requests`, `outbound`, `product_wire`
   (the `Reborn*` family), `projection`, `package_lifecycle`,
   `workspace_views`, `admin_users`, `operator_tools`, `views`.
-- **Product-side ports, implemented elsewhere:** delivery (`delivery`,
-  `subject_route`), admission context (`command`), account setup
+- **Product-side ports, implemented elsewhere:** delivery (`delivery`),
+  shared-conversation admission (`shared_admission`), admission context
+  (`command`), account setup
   (`account_setup`), channel config (`channel_config`), prompt sources
   (`prompt_source`), lifecycle (`lifecycle_service`), operator control plane
   (`operator_llm`, `operator_service`, `operator_secrets`), IronHub

@@ -5650,6 +5650,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "team_id": "T123",
                     "api_app_id": "A123",
                     "oauth_client_id": "persisted-client-id",
+                    "allowed_channels": '["C0SHARED"]',
                 },
             )
             payload, preflight = run_live_qa._slack_setup_payload(
@@ -5661,15 +5662,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "oauth-secret",
                 },
                 bot_user_id="U-BOT",
-                shared_subject_user_id="user:web",
             )
 
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "persisted-client-id")
         self.assertEqual(payload.get("bot_user_id"), "U-BOT")
-        self.assertEqual(payload.get("shared_subject_user_id"), "user:web")
-        self.assertEqual(payload.get("allowed_channels"), "[]")
-        self.assertEqual(payload.get("subject_routes"), "{}")
+        # run-acts-as-invoker: no shared_subject_user_id / subject_routes keys;
+        # the persisted allowed-channel admission list rides through.
+        self.assertNotIn("shared_subject_user_id", payload)
+        self.assertNotIn("subject_routes", payload)
+        self.assertEqual(payload.get("allowed_channels"), '["C0SHARED"]')
         self.assertTrue(preflight["personal_oauth_ready"])
 
     def test_slack_setup_payload_prefers_env_oauth_client_id(self):
@@ -5697,12 +5699,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "oauth-secret",
                 },
                 bot_user_id="U-BOT",
-                shared_subject_user_id="user:web",
             )
 
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "fresh-client-id")
         self.assertEqual(preflight["oauth_client_id"], "fresh-client-id")
+        # No admission list configured anywhere -> the empty JSON array default.
+        self.assertEqual(payload.get("allowed_channels"), "[]")
         self.assertTrue(preflight["personal_oauth_ready"])
 
     def test_slack_setup_payload_requires_oauth_client_material(self):
@@ -5740,7 +5743,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         "[slack]\nenabled = true\n",
                         env,
                         bot_user_id="U-BOT",
-                        shared_subject_user_id="user:web",
                     )
                     self.assertIsNone(payload)
                     self.assertFalse(preflight["ready_for_api"])
@@ -5919,10 +5921,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 {"name": "slack_team_id"},
                 {"name": "slack_api_app_id"},
                 {"name": "slack_bot_user_id"},
-                {"name": "slack_shared_subject_user_id"},
                 {"name": "slack_oauth_client_id"},
                 {"name": "slack_allowed_channels"},
-                {"name": "slack_subject_routes"},
             ],
         }
 
@@ -5993,13 +5993,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "team_id": "T123",
                             "api_app_id": "A123",
                             "bot_user_id": "U-BOT",
-                            "shared_subject_user_id": "user:web",
                             "bot_token": "xoxb-bot-token",
                             "signing_secret": "signing-secret-value",
                             "oauth_client_id": "oauth-client-id",
                             "oauth_client_secret": "oauth-client-secret-value",
                             "allowed_channels": "[]",
-                            "subject_routes": "{}",
                         },
                         {},
                     ),
@@ -6038,10 +6036,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                 "slack_team_id": "T123",
                                 "slack_api_app_id": "A123",
                                 "slack_bot_user_id": "U-BOT",
-                                "slack_shared_subject_user_id": "user:web",
                                 "slack_oauth_client_id": "oauth-client-id",
                                 "slack_allowed_channels": "[]",
-                                "slack_subject_routes": "{}",
                             },
                         },
                     },
@@ -6070,8 +6066,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "slack_bot_user_id",
                 "slack_installation_id",
                 "slack_oauth_client_id",
-                "slack_shared_subject_user_id",
-                "slack_subject_routes",
                 "slack_team_id",
             ],
         )
