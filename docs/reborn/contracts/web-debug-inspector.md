@@ -90,7 +90,11 @@ detail states. Concurrent diagnostic streams share the normal per-caller SSE
 capacity gate and return `429` when the configured limit is exhausted. Each
 browser tab uses a bounded connection id and monotonic generation so a reload
 or run change supersedes its prior inspector stream instead of consuming an
-additional slot.
+additional slot. If a delayed request arrives with a connection generation
+older than the generation already admitted for that connection id, the server
+returns HTTP `204 No Content`. That response terminates the stale request: a
+client must not retry the same generation; any later connection attempt uses a
+strictly newer generation.
 
 ## Verification
 

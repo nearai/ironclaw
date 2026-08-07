@@ -100,7 +100,7 @@ pub(crate) async fn record_gate_route_if_needed(
         // to explicit gate refs and the hint path, so a write failure never
         // aborts delivery.
         tracing::debug!(
-            target = "ironclaw::reborn::run_delivery",
+            target: "ironclaw::reborn::run_delivery",
             %run_id,
             error = %error,
             "failed to record delivered gate route"
@@ -115,7 +115,7 @@ pub(crate) async fn record_gate_route_if_needed(
         // silent-ok: sweep is opportunistic; expired routes are filtered at
         // lookup time, so a failed sweep never affects correctness.
         tracing::debug!(
-            target = "ironclaw::reborn::run_delivery",
+            target: "ironclaw::reborn::run_delivery",
             %run_id,
             error = %sweep_err,
             "delivered gate route sweep failed"

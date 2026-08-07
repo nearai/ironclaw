@@ -8,6 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     future::Future,
     sync::{
         Arc,
@@ -1415,29 +1416,33 @@ where
         // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
 
-        let diagnostic_model = self.prompt_diagnostic_sink.as_ref().map(|_| {
-            let requested_model = requested_model_profile_id
+        let diagnostic_requested_model = self.prompt_diagnostic_sink.as_ref().map(|_| {
+            requested_model_profile_id
                 .as_ref()
-                .map(|model| model.as_str().to_string())
-                .unwrap_or_else(|| model_profile_id.as_str().to_string());
-            let effective_model = self
-                .gateway
-                .diagnostic_effective_model(
+                .unwrap_or(&model_profile_id)
+                .as_str()
+                .to_string()
+        });
+        let diagnostic_initial_effective_model =
+            self.prompt_diagnostic_sink.as_ref().and_then(|_| {
+                self.gateway.diagnostic_effective_model(
                     &model_profile_id,
+                    request.fallback_index,
                     self.run_context.resolved_model_route.as_ref(),
                 )
-                .unwrap_or_else(|| model_profile_id.as_str().to_string());
-            (requested_model, effective_model)
-        });
-        if let (Some(sink), Some((_, effective_model))) = (
-            self.prompt_diagnostic_sink.as_ref(),
-            diagnostic_model.as_ref(),
-        ) {
-            let capability_ids = request
-                .capability_view
-                .as_ref()
-                .map(|view| view.visible_capability_ids.clone())
-                .unwrap_or_default();
+            });
+        if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
+            let capability_ids = if let Some(view) = request.capability_view.as_ref() {
+                view.visible_capability_ids.clone()
+            } else if let Some(capabilities) = self.capabilities.as_ref() {
+                capabilities
+                    .tool_definitions()?
+                    .into_iter()
+                    .map(|definition| definition.capability_id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             sink.record_prompt(HostManagedPromptDiagnosticCapture {
                 context: self.run_context.clone(),
                 messages: resolved_messages
@@ -1454,14 +1459,19 @@ where
                     .instruction_snippet_count,
                 active_skills: prompt_grant.diagnostic_metadata.active_skills,
                 capability_ids,
-                requested_model: requested_model_profile_id
-                    .as_ref()
-                    .map(|model| model.as_str().to_string()),
-                effective_model: effective_model.clone(),
+                requested_model: requested_model_profile_id.clone(),
+                effective_model: diagnostic_initial_effective_model.clone(),
                 context_limit: self.prompt_context_budget.context_limit_tokens,
             });
         }
 
+        let diagnostic_model = diagnostic_requested_model.as_ref().map(|requested_model| {
+            let effective_model = diagnostic_initial_effective_model
+                .as_ref()
+                .map(|model| model.as_str().to_string())
+                .unwrap_or_else(|| model_profile_id.as_str().to_string());
+            (requested_model.clone(), effective_model)
+        });
         let diagnostic_started_at = Utc::now();
         let diagnostic_timer = Instant::now();
         let diagnostic_call_id = diagnostic_model.as_ref().map(|_| Uuid::new_v4());
@@ -1470,19 +1480,16 @@ where
             diagnostic_model.as_ref(),
             diagnostic_call_id,
         ) {
-            sink.record_model_call(HostManagedModelCallDiagnosticCapture {
-                call_id,
-                context: self.run_context.clone(),
-                iteration: request.iteration,
-                requested_model: requested_model.clone(),
-                effective_model: effective_model.clone(),
-                started_at: diagnostic_started_at,
-                completed_at: None,
-                duration_ms: None,
-                status: HostManagedModelCallDiagnosticStatus::Started,
-                usage: None,
-                failure_summary: None,
-            });
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture::Started(
+                HostManagedModelCallDiagnostic {
+                    call_id,
+                    context: self.run_context.clone(),
+                    iteration: request.iteration,
+                    requested_model: requested_model.clone(),
+                    effective_model: effective_model.clone(),
+                    started_at: diagnostic_started_at,
+                },
+            ));
         }
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
@@ -1579,40 +1586,39 @@ where
             diagnostic_model.as_ref(),
             diagnostic_call_id,
         ) {
-            let (status, usage, failure_summary) = match &host_response_result {
-                Ok(response) => (
-                    HostManagedModelCallDiagnosticStatus::Succeeded,
-                    diagnostic_usage(response.usage),
-                    None,
-                ),
-                Err(error) => (
-                    HostManagedModelCallDiagnosticStatus::Failed,
-                    diagnostic_usage(error.usage),
-                    Some(error.safe_summary.as_str().to_string()),
-                ),
+            let outcome = match &host_response_result {
+                Ok(response) => HostManagedModelCallDiagnosticOutcome::Succeeded {
+                    usage: diagnostic_usage(response.usage),
+                },
+                Err(error) => HostManagedModelCallDiagnosticOutcome::Failed {
+                    usage: diagnostic_usage(error.usage),
+                    failure_summary: error.safe_summary.as_str().to_string(),
+                },
             };
             let effective_model = diagnostic_effective_model
                 .or_else(|| {
-                    self.gateway.diagnostic_effective_model(
-                        &model_profile_id,
-                        self.run_context.resolved_model_route.as_ref(),
-                    )
+                    self.gateway
+                        .diagnostic_effective_model(
+                            &model_profile_id,
+                            request.fallback_index,
+                            self.run_context.resolved_model_route.as_ref(),
+                        )
+                        .map(ProviderModelId::into_inner)
                 })
                 .unwrap_or_else(|| model_profile_id.as_str().to_string());
-            sink.record_model_call(HostManagedModelCallDiagnosticCapture {
-                call_id,
-                context: self.run_context.clone(),
-                iteration: request.iteration,
-                requested_model: requested_model.clone(),
-                effective_model,
-                started_at: diagnostic_started_at,
-                completed_at: Some(Utc::now()),
-                duration_ms: Some(
-                    u64::try_from(diagnostic_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
-                ),
-                status,
-                usage,
-                failure_summary,
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic: HostManagedModelCallDiagnostic {
+                    call_id,
+                    context: self.run_context.clone(),
+                    iteration: request.iteration,
+                    requested_model: requested_model.clone(),
+                    effective_model,
+                    started_at: diagnostic_started_at,
+                },
+                completed_at: Utc::now(),
+                duration_ms: u64::try_from(diagnostic_timer.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                outcome,
             });
         }
 
@@ -1963,9 +1969,13 @@ pub trait HostManagedModelGateway: Send + Sync {
     fn diagnostic_effective_model(
         &self,
         _model_profile_id: &ModelProfileId,
+        fallback_index: u32,
         resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
-    ) -> Option<String> {
-        resolved_model_route.map(|route| route.model_id().to_string())
+    ) -> Option<ProviderModelId> {
+        if fallback_index != 0 {
+            return None;
+        }
+        resolved_model_route.and_then(|route| ProviderModelId::new(route.model_id()).ok())
     }
 
     async fn stream_model(
@@ -2030,16 +2040,158 @@ pub trait HostManagedPromptDiagnosticSink: Send + Sync {
     fn record_tool_result(&self, _capture: HostManagedToolResultDiagnosticCapture) {}
 }
 
+/// Validated concrete provider model identifier used only for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderModelId(String);
+
+impl ProviderModelId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        ironclaw_loop_contracts::validate_model_route_component_value(
+            "provider model id",
+            &value,
+            256,
+            |character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '-' | '.' | ':' | '/')
+            },
+        )?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ProviderModelId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ProviderModelId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Bounded, non-blocking decorator for best-effort prompt diagnostics.
+///
+/// Prompt, model-call, and tool captures share one ordered queue per decorator.
+/// Captures are dropped when the worker cannot keep up so diagnostic work never
+/// adds backpressure to provider or capability hot paths.
+pub struct BufferedPromptDiagnosticSink {
+    sender: tokio::sync::mpsc::Sender<BufferedDiagnosticCapture>,
+}
+
+pub const DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY: usize = 8;
+/// Separate capacity used by capability-host tool diagnostics so bursts of
+/// input/start/result events cannot crowd prompt captures out of their queue.
+pub const DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY: usize = 64;
+
+enum BufferedDiagnosticCapture {
+    Prompt(HostManagedPromptDiagnosticCapture),
+    ModelCall(HostManagedModelCallDiagnosticCapture),
+    ToolInput(HostManagedToolInputDiagnosticCapture),
+    ToolStarted(HostManagedToolStartedDiagnosticCapture),
+    ToolResult(HostManagedToolResultDiagnosticCapture),
+}
+
+impl BufferedPromptDiagnosticSink {
+    pub fn new(
+        inner: Arc<dyn HostManagedPromptDiagnosticSink>,
+        capacity: usize,
+    ) -> Result<Self, String> {
+        if capacity == 0 {
+            return Err("diagnostic queue capacity must be nonzero".to_string());
+        }
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "prompt diagnostic worker requires a Tokio runtime".to_string())?;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(capacity);
+        runtime.spawn(async move {
+            while let Some(capture) = receiver.recv().await {
+                let sink = Arc::clone(&inner);
+                if let Err(error) = tokio::task::spawn_blocking(move || match capture {
+                    BufferedDiagnosticCapture::Prompt(capture) => sink.record_prompt(capture),
+                    BufferedDiagnosticCapture::ModelCall(capture) => {
+                        sink.record_model_call(capture);
+                    }
+                    BufferedDiagnosticCapture::ToolInput(capture) => {
+                        sink.record_tool_input(capture);
+                    }
+                    BufferedDiagnosticCapture::ToolStarted(capture) => {
+                        sink.record_tool_started(capture);
+                    }
+                    BufferedDiagnosticCapture::ToolResult(capture) => {
+                        sink.record_tool_result(capture);
+                    }
+                })
+                .await
+                {
+                    tracing::warn!(%error, "diagnostic worker failed");
+                }
+            }
+        });
+        Ok(Self { sender })
+    }
+
+    fn enqueue(&self, run_id: TurnRunId, capture: BufferedDiagnosticCapture) {
+        if let Err(error) = self.sender.try_send(capture) {
+            let queue_state = match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "closed",
+            };
+            tracing::debug!(
+                %run_id,
+                queue_state,
+                "dropping best-effort diagnostic capture"
+            );
+        }
+    }
+}
+
+impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::Prompt(capture));
+    }
+
+    fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
+        let run_id = capture.diagnostic().context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ModelCall(capture));
+    }
+
+    fn record_tool_input(&self, capture: HostManagedToolInputDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ToolInput(capture));
+    }
+
+    fn record_tool_started(&self, capture: HostManagedToolStartedDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ToolStarted(capture));
+    }
+
+    fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ToolResult(capture));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HostManagedPromptDiagnosticCapture {
     pub context: LoopRunContext,
     pub messages: Vec<HostManagedPromptDiagnosticMessage>,
     pub identity_message_count: u32,
     pub instruction_snippet_count: u32,
-    pub active_skills: Vec<String>,
+    pub active_skills: Vec<ironclaw_loop_contracts::SkillName>,
     pub capability_ids: Vec<CapabilityId>,
-    pub requested_model: Option<String>,
-    pub effective_model: String,
+    pub requested_model: Option<ModelProfileId>,
+    pub effective_model: Option<ProviderModelId>,
     pub context_limit: u64,
 }
 
@@ -2050,26 +2202,44 @@ pub struct HostManagedPromptDiagnosticMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostManagedModelCallDiagnosticStatus {
-    Started,
-    Succeeded,
-    Failed,
-}
-
 #[derive(Debug, Clone)]
-pub struct HostManagedModelCallDiagnosticCapture {
+pub struct HostManagedModelCallDiagnostic {
     pub call_id: Uuid,
     pub context: LoopRunContext,
     pub iteration: u32,
     pub requested_model: String,
     pub effective_model: String,
     pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub duration_ms: Option<u64>,
-    pub status: HostManagedModelCallDiagnosticStatus,
-    pub usage: Option<LoopModelUsage>,
-    pub failure_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HostManagedModelCallDiagnosticOutcome {
+    Succeeded {
+        usage: Option<LoopModelUsage>,
+    },
+    Failed {
+        usage: Option<LoopModelUsage>,
+        failure_summary: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum HostManagedModelCallDiagnosticCapture {
+    Started(HostManagedModelCallDiagnostic),
+    Completed {
+        diagnostic: HostManagedModelCallDiagnostic,
+        completed_at: DateTime<Utc>,
+        duration_ms: u64,
+        outcome: HostManagedModelCallDiagnosticOutcome,
+    },
+}
+
+impl HostManagedModelCallDiagnosticCapture {
+    pub fn diagnostic(&self) -> &HostManagedModelCallDiagnostic {
+        match self {
+            Self::Started(diagnostic) | Self::Completed { diagnostic, .. } => diagnostic,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2077,7 +2247,19 @@ pub struct HostManagedToolInputDiagnosticCapture {
     pub context: LoopRunContext,
     pub input_ref: String,
     pub capability_name: String,
-    pub arguments: String,
+    pub arguments: serde_json::Value,
+}
+
+impl fmt::Debug for HostManagedToolInputDiagnosticCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostManagedToolInputDiagnosticCapture")
+            .field("run_id", &self.context.run_id)
+            .field("input_ref", &self.input_ref)
+            .field("capability_name", &self.capability_name)
+            .field("arguments", &"[diagnostic arguments redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2093,6 +2275,19 @@ pub enum HostManagedToolResultDiagnosticStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostManagedToolFailureCategory {
+    CapabilityFailed,
+}
+
+impl HostManagedToolFailureCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilityFailed => "capability_failed",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HostManagedToolResultDiagnosticCapture {
     pub context: LoopRunContext,
@@ -2101,8 +2296,27 @@ pub struct HostManagedToolResultDiagnosticCapture {
     pub result: Option<String>,
     pub result_original_bytes: Option<u64>,
     pub status: HostManagedToolResultDiagnosticStatus,
-    pub failure_category: Option<String>,
+    pub failure_category: Option<HostManagedToolFailureCategory>,
     pub failure_summary: Option<String>,
+}
+
+impl fmt::Debug for HostManagedToolResultDiagnosticCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostManagedToolResultDiagnosticCapture")
+            .field("run_id", &self.context.run_id)
+            .field("activity_id", &self.activity_id)
+            .field("capability_name", &self.capability_name)
+            .field("result", &self.result.as_ref().map(|value| value.len()))
+            .field("result_original_bytes", &self.result_original_bytes)
+            .field("status", &self.status)
+            .field("failure_category", &self.failure_category)
+            .field(
+                "failure_summary",
+                &self.failure_summary.as_ref().map(|value| value.len()),
+            )
+            .finish()
+    }
 }
 
 fn diagnostic_usage(usage: Option<LoopModelUsage>) -> Option<LoopModelUsage> {
@@ -2956,6 +3170,261 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    struct BlockingPromptDiagnosticSink {
+        calls: std::sync::atomic::AtomicUsize,
+        model_calls: std::sync::atomic::AtomicUsize,
+        tool_captures: std::sync::Mutex<Vec<&'static str>>,
+        first_started: tokio::sync::Notify,
+        release_first: (std::sync::Mutex<bool>, std::sync::Condvar),
+    }
+
+    impl BlockingPromptDiagnosticSink {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                model_calls: std::sync::atomic::AtomicUsize::new(0),
+                tool_captures: std::sync::Mutex::new(Vec::new()),
+                first_started: tokio::sync::Notify::new(),
+                release_first: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            }
+        }
+
+        fn release(&self) {
+            let (lock, condvar) = &self.release_first;
+            *lock.lock().expect("release lock") = true;
+            condvar.notify_all();
+        }
+    }
+
+    impl HostManagedPromptDiagnosticSink for BlockingPromptDiagnosticSink {
+        fn record_prompt(&self, _capture: HostManagedPromptDiagnosticCapture) {
+            let previous = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.first_started.notify_waiters();
+            if previous == 0 {
+                let (lock, condvar) = &self.release_first;
+                let mut released = lock.lock().expect("release lock");
+                while !*released {
+                    released = condvar.wait(released).expect("release wait");
+                }
+            }
+        }
+
+        fn record_model_call(&self, _capture: HostManagedModelCallDiagnosticCapture) {
+            self.model_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn record_tool_input(&self, _capture: HostManagedToolInputDiagnosticCapture) {
+            self.tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .push("input");
+        }
+
+        fn record_tool_started(&self, _capture: HostManagedToolStartedDiagnosticCapture) {
+            self.tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .push("started");
+        }
+
+        fn record_tool_result(&self, _capture: HostManagedToolResultDiagnosticCapture) {
+            self.tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .push("result");
+        }
+    }
+
+    fn prompt_diagnostic_capture_for_test() -> HostManagedPromptDiagnosticCapture {
+        let context = LoopRunContext::new(
+            TurnScope::new(
+                ironclaw_host_api::ids::TenantId::new("diagnostic-tenant").expect("tenant"),
+                None,
+                None,
+                ironclaw_host_api::ids::ThreadId::new("diagnostic-thread").expect("thread"),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            ironclaw_loop_contracts::ResolvedRunProfile::legacy_compatibility(
+                ironclaw_host_api::turn::RunProfileId::interactive_default(),
+                ironclaw_host_api::turn::RunProfileVersion::new(1),
+                true,
+            ),
+        );
+        HostManagedPromptDiagnosticCapture {
+            context,
+            messages: Vec::new(),
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
+            active_skills: Vec::new(),
+            capability_ids: Vec::new(),
+            requested_model: None,
+            effective_model: None,
+            context_limit: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_prompt_diagnostics_drop_when_the_bounded_queue_is_full() {
+        let inner = Arc::new(BlockingPromptDiagnosticSink::new());
+        let buffered = BufferedPromptDiagnosticSink::new(
+            inner.clone() as Arc<dyn HostManagedPromptDiagnosticSink>,
+            1,
+        )
+        .expect("buffered sink");
+        let capture = prompt_diagnostic_capture_for_test();
+
+        buffered.record_prompt(capture.clone());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let notified = inner.first_started.notified();
+                if inner.calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("first capture starts");
+
+        buffered.record_prompt(capture.clone());
+        buffered.record_prompt(capture);
+        inner.release();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while inner.calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued capture drains");
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn buffered_prompt_diagnostics_forward_model_calls() {
+        let inner = Arc::new(BlockingPromptDiagnosticSink::new());
+        let buffered = BufferedPromptDiagnosticSink::new(
+            inner.clone() as Arc<dyn HostManagedPromptDiagnosticSink>,
+            1,
+        )
+        .expect("buffered sink");
+        let context = prompt_diagnostic_capture_for_test().context;
+        let now = Utc::now();
+
+        buffered.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
+            diagnostic: HostManagedModelCallDiagnostic {
+                call_id: Uuid::new_v4(),
+                context,
+                iteration: 1,
+                requested_model: "interactive_model".to_string(),
+                effective_model: "provider-model".to_string(),
+                started_at: now,
+            },
+            completed_at: now,
+            duration_ms: 1,
+            outcome: HostManagedModelCallDiagnosticOutcome::Succeeded { usage: None },
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while inner.model_calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("model-call capture drains");
+    }
+
+    #[tokio::test]
+    async fn buffered_diagnostics_forward_tool_captures_in_order() {
+        let inner = Arc::new(BlockingPromptDiagnosticSink::new());
+        let buffered = BufferedPromptDiagnosticSink::new(
+            inner.clone() as Arc<dyn HostManagedPromptDiagnosticSink>,
+            3,
+        )
+        .expect("buffered sink");
+        let context = prompt_diagnostic_capture_for_test().context;
+        let activity_id = Uuid::new_v4();
+
+        buffered.record_tool_input(HostManagedToolInputDiagnosticCapture {
+            context: context.clone(),
+            input_ref: "input:tool".to_string(),
+            capability_name: "builtin.echo".to_string(),
+            arguments: serde_json::json!({"message": "hello"}),
+        });
+        buffered.record_tool_started(HostManagedToolStartedDiagnosticCapture {
+            context: context.clone(),
+            activity_id,
+            input_ref: "input:tool".to_string(),
+        });
+        buffered.record_tool_result(HostManagedToolResultDiagnosticCapture {
+            context,
+            activity_id,
+            capability_name: "builtin.echo".to_string(),
+            result: Some("ok".to_string()),
+            result_original_bytes: Some(2),
+            status: HostManagedToolResultDiagnosticStatus::Succeeded,
+            failure_category: None,
+            failure_summary: None,
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if inner.tool_captures.lock().expect("tool capture lock").len() == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool captures drain");
+        assert_eq!(
+            inner
+                .tool_captures
+                .lock()
+                .expect("tool capture lock")
+                .as_slice(),
+            ["input", "started", "result"]
+        );
+    }
+
+    #[test]
+    fn tool_diagnostic_capture_debug_hides_arguments_results_and_failures() {
+        let context = prompt_diagnostic_capture_for_test().context;
+        let secret = "Bearer abcdefghijklmnopqrstuvwxyz";
+        let input = HostManagedToolInputDiagnosticCapture {
+            context: context.clone(),
+            input_ref: "input:tool".to_string(),
+            capability_name: "builtin.echo".to_string(),
+            arguments: serde_json::json!({"token": secret}),
+        };
+        let result = HostManagedToolResultDiagnosticCapture {
+            context,
+            activity_id: Uuid::new_v4(),
+            capability_name: "builtin.echo".to_string(),
+            result: Some(secret.to_string()),
+            result_original_bytes: Some(secret.len() as u64),
+            status: HostManagedToolResultDiagnosticStatus::Failed,
+            failure_category: Some(HostManagedToolFailureCategory::CapabilityFailed),
+            failure_summary: Some(secret.to_string()),
+        };
+
+        assert!(!format!("{input:?}").contains(secret));
+        assert!(!format!("{result:?}").contains(secret));
+    }
+
+    #[test]
+    fn provider_model_id_enforces_bounded_route_grammar() {
+        assert_eq!(
+            ProviderModelId::new("openai/gpt-5.1")
+                .expect("valid model")
+                .as_str(),
+            "openai/gpt-5.1"
+        );
+        assert!(ProviderModelId::new(" model ").is_err());
+        assert!(ProviderModelId::new("sk-secret-model").is_err());
+    }
 
     #[test]
     fn missing_model_route_evidence_stays_explicit_after_deserialization() {

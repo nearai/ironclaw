@@ -55,8 +55,7 @@ test location.
 ```bash
 cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
-cargo test                                                   # unit tests
-cargo test --features integration                            # + PostgreSQL tests
+cargo test                                                   # unit + integration suites (Postgres legs self-provision testcontainers; skipped when Docker is unavailable)
 ```
 
 These commands are for day-to-day iteration while you are developing locally. The pre-submission checks below are intentionally stricter and use CI-style flags so you can catch formatting drift and clippy warnings before requesting review.
@@ -72,10 +71,12 @@ cargo build
 cargo test
 ```
 
-Also run this when your change touches database-backed or integration behavior:
+Also run the owning crate's feature-gated suite when your change touches
+database-backed or runtime-integration behavior (the workspace-root
+`integration` feature is empty — the flag only means something per-crate):
 
 ```bash
-cargo test --features integration
+cargo test -p <owning-crate> --features integration    # e.g. -p ironclaw_hooks for the Postgres/libSQL parity matrix
 ```
 
 Before asking for review:
@@ -126,13 +127,13 @@ All PRs follow a risk-based review process:
 |-------|-------|-------------|
 | **A** | Docs, tests, chore, dependency bumps | 1 approval + CI green |
 | **B** | Features, maintainer-requested refactors, new tools/channels | 1 approval + CI green + test evidence |
-| **C** | Security (`src/safety/`, `src/secrets/`), runtime (`src/agent/`, `src/worker/`), database schema, CI workflows | 2 approvals + rollback plan documented |
+| **C** | Security (`crates/substrates/ironclaw_safety/`, `crates/substrates/ironclaw_secrets/`), turn runtime and agent loop (`crates/kernel/`, `crates/loop/`), database schema, CI workflows | 2 approvals + rollback plan documented |
 
 Select the appropriate track in the PR template based on what your changes touch.
 
 ## Database Changes
 
-IronClaw uses dual-backend persistence (PostgreSQL + libSQL). All new persistence features must support both backends. See `src/db/CLAUDE.md`.
+IronClaw uses dual-backend persistence (PostgreSQL + libSQL) behind the `RootFilesystem` mount catalog. All new persistence features must support both backends. See `crates/substrates/ironclaw_filesystem/CLAUDE.md` and `.claude/rules/database.md`.
 
 ## Adding Dependencies
 
@@ -148,7 +149,7 @@ Run `cargo deny check` before adding new dependencies to verify license compatib
 
 In case you want to document the library itself (i.e. reference documentation) for other core contributors, use the `docs/internal/` folder
 
-If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/plans` folder.
+If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/internal/plans` folder.
 
 ### Skills
 Read the `.claude/skills/mintlify-docs` for guidelines on how to generate documentation with mintlify.

@@ -981,7 +981,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
 
 #[test]
 fn all_failure_kinds_produce_stable_sanitized_category_strings() {
-    // matrix: docs/plans/2026-07-03-loop-failure-matrix.md — this table must
+    // matrix: docs/internal/plans/2026-07-03-loop-failure-matrix.md — this table must
     // stay exhaustive over LoopFailureKind. `ContextBuildFailed` and
     // `InterruptedUnexpectedly` currently have no production constructor
     // (category-string lock only); the rest are exercised at their real

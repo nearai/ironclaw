@@ -37,7 +37,7 @@ extension  (one manifest.toml, one installed identity, e.g. `slack`)
   `google`). The manifest field is `vendor = "..."`. It is **not** the
   extension id. (Renamed from `ProviderId`/`RuntimeCredentialAccountProviderId`
   in this train — overview §2; stored id strings are unchanged.)
-- `CapabilitySurfaceKind` (`crates/contracts/ironclaw_host_api/src/surface.rs`) — `tool`,
+- `CapabilitySurfaceKind` (`crates/contracts/ironclaw_extension_contracts/src/surface.rs`) — `tool`,
   `channel`, `auth` (+ reserved `trigger`, `file`).
 - Surfaces are **derived** from the resolved manifest — never store a parallel
   taxonomy. The manifest compiles **once** per install into a typed
@@ -72,16 +72,16 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    default_permission, visibility, `input_schema_ref`, optional
    `prompt_doc_ref`) with a `[[tools.credentials]]` block naming its `vendor`,
    `audience`, and `injection`. Copy the shape from
-   `assets/slack/manifest.toml` (8 `[[tools]]` entries — count with
+   `crates/extensions/packages/slack/manifest.toml` (8 `[[tools]]` entries — count with
    `grep -c '^\[\[tools\]\]' <manifest>`) or
-   `assets/github/manifest.toml`.
+   `crates/extensions/packages/github/manifest.toml`.
 2. Schemas and prompt docs are **package assets** (`schemas/…`, `prompts/…`)
    embedded by the package module — not composition.
 3. Model-visible tool wording is product surface: if a tool acts *as the user*
    (delegated authority), its description and prompt doc must say so — and must
    say the tool is for side effects inside a job, never for delivering the final
    answer (the host delivers final replies on the outbound channel surface —
-   overview §5.4). Exemplar: `assets/slack/prompts/slack/send_message.md`.
+   overview §5.4). Exemplar: `crates/extensions/packages/slack/prompts/slack/send_message.md`.
 4. A **messaging-shaped** tool (send/read/react over a conversation) binds
    `standard_op = "<op_name>"` instead of declaring its own schemas — a
    closed, host-owned vocabulary with host-canonical input/output schemas.
@@ -93,7 +93,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
 1. Add a `[channel]` section (**at most one per extension**) with `id`,
    `display_name`, `inbound`/`outbound` bools, and **required**
    `conversation_model` (`continuous` | `isolated`, overview §3). Then its
-   subsections, all worked in `assets/slack/manifest.toml`:
+   subsections, all worked in `crates/extensions/packages/slack/manifest.toml`:
    `[channel.ingress]` (route_suffix, method, body limit),
    `[channel.ingress.verification]` (declarative recipe the *host* executes —
    `hmac_sha256` segment list or `shared_secret_header`; signing secrets never
@@ -137,7 +137,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    `scope_param`, PKCE, `client_credentials` handles, `[auth.<vendor>].token_response`
    + `[auth.<vendor>].identity` JSON-pointer maps) or `method = "api_key"` (form
    `fields` + optional `validation` probe). Worked example: `[auth.slack]` in
-   `assets/slack/manifest.toml`; the full recipe vocabulary is overview §4.3 +
+   `crates/extensions/packages/slack/manifest.toml`; the full recipe vocabulary is overview §4.3 +
    implementation.md §7. There is **no auth adapter trait and no extension code
    in an auth flow** — the host engine (`crates/domains/ironclaw_auth`) runs each method
    once over the recipe data.
@@ -146,37 +146,44 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    vendor must be identical except `scopes`/`display_name`, or activation fails
    with a conflict; scopes union across active extensions (overview §3.2).
 3. Renaming any persisted identity (vendor id, extension id) requires a one-time
-   forward data migration, never a runtime alias. Exemplars:
-   the retired-identity migration step in
-   `crates/extensions/ironclaw_extension_host/src/lifecycle_restore.rs`
-   (`RETIRED_SLACK_USER_EXTENSION_ID`). The two `migrate_retired_*` symbols this
-   skill used to name by hand no longer exist (`rg -n "migrate_retired" crates/`
-   → nothing); the live pin on retired vocabulary is
-   `crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs`. These are
-   sanctioned to name the retired vocabulary (both the retired-taxonomy and
-   specificity gates carve migration code out).
+   forward data migration, never a runtime alias. There is currently **no
+   in-tree migration exemplar**: the retired-identity boot migration this skill
+   used to cite was deleted 2026-08-04 by owner ruling, and its identifiers
+   (`RETIRED_SLACK_USER_EXTENSION_ID`, `remove_retired_internal_installation`)
+   are now on the banned list in
+   `crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs` — do not
+   reintroduce them. The behavioral pin is
+   `restore_special_cases_no_extension_id_and_leaves_every_uncatalogued_row_intact`
+   (`crates/extensions/ironclaw_extension_host/tests/lifecycle_restore_contract.rs`):
+   boot restore must leave uncatalogued rows intact, never delete or re-key
+   them.
 
 ## Hosted-MCP extensions
 
 An extension whose tools are discovered from a server declares one `[mcp]`
 section (server, namespace, max_tools, effects, `[[mcp.credentials]]`) **instead
-of** `[runtime]` + `[[tools]]` + `[channel]`, plus its `[auth.<vendor>]` recipe.
+of** `[runtime]` (and normally instead of `[[tools]]` + `[channel]`), plus its
+`[auth.<vendor>]` recipe. A hosted-MCP package MAY additionally pin static
+`[[tools]]` entries beside `[mcp]` — guaranteed model-visible from first boot
+and on the bundled-manifest fallback; a successful `tools/list` discovery
+replaces the static set with the server's live catalog (worked example:
+`nearai.web_search` in `crates/extensions/packages/nearai-mcp/manifest.toml`).
 The MCP loader owns discovery; past activation a discovered tool is an ordinary
 tool surface (overview §3.1). Worked example:
-`assets/notion-mcp/manifest.toml`.
+`crates/extensions/packages/notion-mcp/manifest.toml`.
 
 ## Testing surfaces
 
 - Manifest projection (v3): `crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`;
   channel ingestion through the real contract:
-  `crates/product/ironclaw_assistant/tests/adapter_registry_manifest_ingestion.rs`
+  `crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`
   (drives `parse_product_adapter_manifest_record` in
   `crates/extensions/ironclaw_extension_registry/src/host_api/product_adapter.rs`). Extend
   these rather than adding parallel suites.
 - Adapter behavior: the exported conformance suites — channel in
-  `crates/contracts/ironclaw_host_api/src/product_adapter/test_support/conformance.rs`
+  `crates/contracts/ironclaw_extension_contracts/src/test_support/conformance.rs`
   (`run_channel_adapter_conformance`, consumed by
-  `crates/ironclaw_{slack,telegram}_extension/tests/channel_conformance.rs`),
+  `crates/extensions/packages/{slack,telegram}/tests/channel_conformance.rs`),
   standard-messaging schema conformance in
   `crates/contracts/ironclaw_host_api/src/test_support/messaging_conformance.rs`, and auth
   in `crates/domains/ironclaw_auth/src/test_support/conformance.rs`. Run by every

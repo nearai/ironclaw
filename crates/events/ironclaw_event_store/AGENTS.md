@@ -1,9 +1,14 @@
-# Agent Map — ironclaw_event_store
+# ironclaw_event_store — working rules
+
+Canonical crate guidance (this crate has no `CLAUDE.md`, by design — it is not
+in the root module-spec table). Orientation and public surface:
+[`README.md`](./README.md). Family boundary and the one-way pipeline rule:
+[`../AGENTS.md`](../AGENTS.md).
 
 ## Start Here
 
-- No crate-local `CLAUDE.md` exists yet; use this map plus the Reborn contracts below.
-- Read `Cargo.toml` for actual dependencies and feature shape.
+- Read `README.md` for what the crate is; read `Cargo.toml` for actual
+  dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
 - `docs/reborn/contracts/events.md`
 - `docs/reborn/contracts/events-projections.md`

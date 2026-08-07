@@ -2,16 +2,19 @@ import React from "react";
 
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
+import { ActivityKind } from "./activity-kind";
 import { fetchInspectorTool } from "./inspector-api";
+import {
+  reduceInspectorActivity,
+  rememberInspectorRun,
+  type InspectorActivityRow,
+} from "./inspector-activity";
 import {
   INSPECTOR_HEALTH,
   INSPECTOR_TABS,
   inspectorViewportMode,
-  reduceInspectorActivity,
   readInspectorPreferences,
-  rememberInspectorRun,
   writeInspectorPreferences,
-  type InspectorActivityRow,
   type InspectorPreferences,
   type InspectorTab,
 } from "./inspector-state";
@@ -336,20 +339,20 @@ function TurnNavigation({
   );
 }
 
-const ACTIVITY_LABEL_KEYS: Record<string, string> = {
-  turn_started: "inspector.activity.turnStarted",
-  prompt_prepared: "inspector.activity.promptPrepared",
-  model_call_started: "inspector.activity.modelCallStarted",
-  model_call_completed: "inspector.activity.modelCallCompleted",
-  model_call_failed: "inspector.activity.modelCallFailed",
-  progress: "inspector.activity.progress",
-  tool_started: "inspector.activity.toolStarted",
-  tool_completed: "inspector.activity.toolCompleted",
-  tool_failed: "inspector.activity.toolFailed",
-  gate_blocked: "inspector.activity.gateBlocked",
-  final_response_completed: "inspector.activity.finalResponseCompleted",
-  stream_disconnected: "inspector.activity.streamDisconnected",
-  stream_resumed: "inspector.activity.streamResumed",
+const ACTIVITY_LABEL_KEYS: Record<ActivityKind, string> = {
+  [ActivityKind.TurnStarted]: "inspector.activity.turnStarted",
+  [ActivityKind.PromptPrepared]: "inspector.activity.promptPrepared",
+  [ActivityKind.ModelCallStarted]: "inspector.activity.modelCallStarted",
+  [ActivityKind.ModelCallCompleted]: "inspector.activity.modelCallCompleted",
+  [ActivityKind.ModelCallFailed]: "inspector.activity.modelCallFailed",
+  [ActivityKind.Progress]: "inspector.activity.progress",
+  [ActivityKind.ToolStarted]: "inspector.activity.toolStarted",
+  [ActivityKind.ToolCompleted]: "inspector.activity.toolCompleted",
+  [ActivityKind.ToolFailed]: "inspector.activity.toolFailed",
+  [ActivityKind.GateBlocked]: "inspector.activity.gateBlocked",
+  [ActivityKind.FinalResponseCompleted]: "inspector.activity.finalResponseCompleted",
+  [ActivityKind.StreamDisconnected]: "inspector.activity.streamDisconnected",
+  [ActivityKind.StreamResumed]: "inspector.activity.streamResumed",
 };
 
 function shortId(value: string | null): string | null {
@@ -457,7 +460,12 @@ function ActivityEntry({
   runId: string | null;
 }) {
   const t = useT();
-  const failed = entry.kind.endsWith("_failed") || entry.kind === "gate_blocked";
+  const failed = entry.kind === ActivityKind.ModelCallFailed
+    || entry.kind === ActivityKind.ToolFailed
+    || entry.kind === ActivityKind.GateBlocked;
+  const hasToolDetails = entry.kind === ActivityKind.ToolStarted
+    || entry.kind === ActivityKind.ToolCompleted
+    || entry.kind === ActivityKind.ToolFailed;
   const correlation = shortId(entry.activity_id || entry.model_call_id);
   const timestamp = new Date(entry.occurred_at);
   return (
@@ -495,7 +503,7 @@ function ActivityEntry({
         {entry.iteration != null ? ` · ${t("inspector.activity.iteration", { count: entry.iteration })}` : ""}
         {correlation ? ` · ${correlation}` : ""}
       </p>
-      {entry.kind.startsWith("tool_") && entry.activity_id && threadId && runId && (
+      {hasToolDetails && entry.activity_id && threadId && runId && (
         <ToolDetailDisclosure
           threadId={threadId}
           runId={runId}

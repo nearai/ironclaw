@@ -48,20 +48,25 @@ fail-closed guard, which is deliberate.
 ## Position in the stack
 
 Bottom-of-stack, downstream-facing. Among internal `ironclaw_*` crates it
-depends **only** on `ironclaw_host_api` (identity/scope newtypes, `ScopedPath`)
-and `ironclaw_filesystem` (the durable substrate). It must never reach upstream
-(`ironclaw_composition`, `ironclaw_assistant`) or onto the v1
-legacy enclave. This is machine-enforced: `reborn_crate_dependency_boundaries_hold`
-in `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` allows
-exactly those two edges. Its consumers are `ironclaw_composition` (which
-re-exports a curated subset via its service) and `ironclaw_assistant` (the
-admin-user directory and the project-gating service).
+depends **only** on `ironclaw_host_api` (identity/scope newtypes,
+`ScopedPath`), `ironclaw_filesystem` (the durable substrate), and
+`ironclaw_product_contracts` (the `ProjectService` port its `projects` module
+implements). It must never reach upstream (`ironclaw_composition`,
+`ironclaw_assistant`). This is machine-enforced:
+`reborn_crate_dependency_boundaries_hold` in
+`crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
+allows exactly those three edges — all contracts- or substrates-layer, so the
+never-reach-upstream guarantee is unchanged in kind. Its consumers are
+`ironclaw_composition` (which re-exports a curated subset via its service) and
+`ironclaw_assistant` (the admin-user directory and project surfaces).
 
-The 2026-08-05 `projects` merge below **did not widen that allowlist** — the
-merged module's only workspace dependencies were `ironclaw_host_api` and
-`ironclaw_filesystem`, the same two, which is one of the reasons the
-consolidation audit ruled it was never its own trust unit. Re-measured at the
-merge, not assumed.
+✎ *Corrected 2026-08-05: this section used to read "exactly those two edges"
+and stated that the 2026-08-05 `projects` merge "did not widen that
+allowlist". Both were true of the record merge (PR 1) alone and re-measured
+there — but the same day's tail batch (PROPOSAL §12.13 D-P/D-Q) moved the
+gating adapter here too, hoisting `trait ProjectService` into
+`ironclaw_product_contracts` and widening the armed allowlist by exactly that
+one entry. See "The `projects` module" below for the full sequence.*
 
 ## The `projects` module
 

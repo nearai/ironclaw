@@ -84,23 +84,46 @@ pub(crate) async fn submit_trace_envelope_to_endpoint_with_token(
         .await
         .map_err(|error| TraceRemoteRequestFailure::request_failed("trace submission", error))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await;
     if !status.is_success() {
+        // The rejection stays classified by the received status — the 401/403
+        // auth-retry and the Credential/HttpRejection telemetry split both key
+        // off it, so this must remain an `http_rejection` — but a failed
+        // rejection-body read may not lose its own cause: fold the read error
+        // into the rejection detail instead of collapsing it to an empty
+        // string that reads as "the server sent no detail".
+        let detail = body.unwrap_or_else(|error| format!("(rejection body read failed: {error})"));
         return Err(TraceRemoteRequestFailure::http_rejection(
             "trace submission",
             status,
-            body,
+            detail,
         ));
     }
+    // On a 2xx the body IS the receipt: a stream that dies mid-read is a
+    // transport failure and must keep its I/O cause (and its network
+    // telemetry kind) rather than collapse into an empty body that the
+    // strict parse below would misreport as a server-protocol violation.
+    let body = body.map_err(|error| {
+        TraceRemoteRequestFailure::request_failed("trace submission response body", error)
+    })?;
 
-    Ok(
-        parse_trace_submission_receipt(&body).unwrap_or_else(|| TraceSubmissionReceipt {
-            status: "submitted".to_string(),
-            credit_points_pending: Some(envelope.value.credit_points_pending),
-            credit_points_final: None,
-            explanation: envelope.value.explanation.clone(),
-        }),
-    )
+    // A 2xx whose body does not parse as a receipt is not an acknowledgement.
+    // Synthesizing `status: "submitted"` with a *locally estimated* credit told
+    // the user the server had accepted something it may never have seen — and
+    // the caller then recorded it as Submitted and deleted the queued envelope,
+    // destroying the only retryable copy (#7144). The same synthesis used to
+    // hide inside the wire type: every `TraceSubmissionReceipt` field carried a
+    // serde default, so a proxy's `200 {}` (or any JSON object with no
+    // server-sent `status`) manufactured a "submitted" receipt out of thin air.
+    // `status` is now required — the acknowledgement is the server naming what
+    // happened to the submission — so a status-less body lands here instead of
+    // counting as success.
+    parse_trace_submission_receipt(&body).ok_or_else(|| {
+        TraceRemoteRequestFailure::response_invalid(
+            "trace submission",
+            "server returned success with a body that is not a submission receipt",
+        )
+    })
 }
 
 pub fn record_submitted_trace_envelope_for_scope(

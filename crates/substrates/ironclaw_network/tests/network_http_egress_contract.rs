@@ -338,6 +338,13 @@ async fn http_egress_follows_allowlisted_redirect_and_strips_credentials() {
     // Authorization header must NOT travel to the redirect destination — GitHub
     // job-log downloads redirect to a pre-signed blob host that needs no token,
     // and forwarding the token there would leak it off its audience host.
+    //
+    // #7144: this used to assert only that `authorization` was absent, which the
+    // then-current three-name denylist appeared to deliver. It did not — the
+    // header buffer is moved into the transport request, so the denylist only
+    // ever ran over an empty vector and the test passed because *no* header
+    // survived a hop. The real, and stronger, property is asserted below:
+    // nothing follows, whatever a manifest chose to name its credential header.
     let transport = ScriptedTransport::new(vec![
         redirect_response("https://logs.example.test/blob/abc"),
         ok_response("logdata"),
@@ -359,7 +366,12 @@ async fn http_egress_follows_allowlisted_redirect_and_strips_credentials() {
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/logs".to_string(),
-            headers: vec![("authorization".to_string(), "Bearer sk-secret".to_string())],
+            headers: vec![
+                ("authorization".to_string(), "Bearer sk-secret".to_string()),
+                // A manifest may inject its credential under any header name it
+                // likes, so a name-based strip could never have been complete.
+                ("x-api-key".to_string(), "sk-also-secret".to_string()),
+            ],
             body: vec![],
             policy: allow,
             response_body_limit: Some(1024),
@@ -385,11 +397,10 @@ async fn http_egress_follows_allowlisted_redirect_and_strips_credentials() {
     );
     assert_eq!(requests[1].url, "https://logs.example.test/blob/abc");
     assert!(
-        requests[1]
-            .headers
-            .iter()
-            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
-        "the credential must be stripped before following a cross-host redirect"
+        requests[1].headers.is_empty(),
+        "no header may follow a cross-host redirect — a name-based strip would \
+         miss whatever a manifest called its credential header; got {:?}",
+        requests[1].headers
     );
 }
 

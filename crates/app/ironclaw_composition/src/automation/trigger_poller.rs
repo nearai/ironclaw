@@ -149,7 +149,7 @@ impl PostSubmitHookObserver {
             if pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
                 pending.pop_front();
                 tracing::debug!(
-                    target = "ironclaw::reborn::trigger_poller",
+                    target: "ironclaw::reborn::trigger_poller",
                     pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
                     "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
                 );
@@ -204,7 +204,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
         let Some(hook) = self.hook_slot.get().cloned() else {
             tracing::debug!(
-                target = "ironclaw::reborn::trigger_poller",
+                target: "ironclaw::reborn::trigger_poller",
                 "post-submit hook not installed; buffering trigger settlement"
             );
             self.buffer_until_hook_installed(event);

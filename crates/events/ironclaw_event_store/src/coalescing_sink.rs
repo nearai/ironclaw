@@ -165,7 +165,7 @@ impl EventSink for CoalescingEventSink {
                 let new_dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 if new_dropped == 1 || new_dropped.is_multiple_of(1000) {
                     tracing::debug!(
-                        target = "ironclaw::reborn::event_store::coalescing",
+                        target: "ironclaw::reborn::event_store::coalescing",
                         dropped = new_dropped,
                         "event dropped: coalescing channel at capacity ({CHANNEL_CAPACITY}); drain may be stalled"
                     );
@@ -291,7 +291,7 @@ async fn flush_batch(
             for result in results {
                 if let Err(error) = result {
                     tracing::debug!(
-                        target = "ironclaw::reborn::event_store::coalescing",
+                        target: "ironclaw::reborn::event_store::coalescing",
                         %error,
                         "durable event append failed during coalescing flush"
                     );
@@ -307,7 +307,7 @@ async fn flush_batch(
         }
         Err(join_error) => {
             tracing::error!(
-                target = "ironclaw::reborn::event_store::coalescing",
+                target: "ironclaw::reborn::event_store::coalescing",
                 %join_error,
                 "coalescing event flush panicked; dropping this batch and continuing"
             );

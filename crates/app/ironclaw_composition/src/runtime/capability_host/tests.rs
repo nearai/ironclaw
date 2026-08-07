@@ -75,6 +75,37 @@ mod tests {
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
+    #[derive(Default)]
+    struct RecordingToolDiagnosticSink {
+        result: std::sync::Mutex<Option<HostManagedToolResultDiagnosticCapture>>,
+    }
+
+    impl HostManagedPromptDiagnosticSink for RecordingToolDiagnosticSink {
+        fn record_prompt(&self, _capture: ironclaw_loop_host::HostManagedPromptDiagnosticCapture) {}
+
+        fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+            *self.result.lock().expect("diagnostic result lock") = Some(capture);
+        }
+    }
+
+    impl StagedCapabilityIo {
+        fn latest_result_output(
+            &self,
+        ) -> Result<Option<(String, serde_json::Value)>, AgentLoopHostError> {
+            self.results
+                .lock()
+                .map_err(|_| capability_io_error())
+                .map(|results| {
+                    results.oldest_refs.back().and_then(|result_ref| {
+                        results
+                            .get(result_ref)
+                            .cloned()
+                            .map(|output| (result_ref.clone(), output))
+                    })
+                })
+        }
+    }
+
     /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
     /// `Resolution::Done(Outcome)`; the minted `refs.result` is an opaque uuid,
     /// while the originating loop result ref the capability io staged the output
@@ -1618,8 +1649,13 @@ mod tests {
             Resolution::Done(done) => done,
             other => panic!("result_read should complete, got {other:?}"),
         };
-        let continuation_output = capability_io
-            .result_output(&completed_loop_result_ref(&done))
+        assert_eq!(
+            completed_loop_result_ref(&done),
+            write_result.result_ref.as_str(),
+            "result_read must surface the original pageable result reference"
+        );
+        let (_, continuation_output) = capability_io
+            .latest_result_output()
             .expect("continuation result output lookup succeeds")
             .expect("continuation result output exists");
         let continuation_content = continuation_output["content"]
@@ -1928,6 +1964,21 @@ mod tests {
             other => panic!("result_read should complete, got {other:?}"),
         };
 
+        assert_eq!(
+            completed_loop_result_ref(&done),
+            write_result.result_ref.as_str(),
+            "result_read must surface the original pageable result reference"
+        );
+        let (inline_result_ref, _) = capability_io
+            .latest_result_output()
+            .expect("inline result lookup succeeds")
+            .expect("result_read stages inline output evidence");
+        assert_ne!(
+            inline_result_ref,
+            write_result.result_ref.as_str(),
+            "the inline write reference remains distinct from continuation authority"
+        );
+
         // RED before the fix: `result_read`'s chunk write went through the
         // same durable path as every other capability result, so this read
         // would find a durable record for the chunk's own (freshly minted)
@@ -1937,7 +1988,7 @@ mod tests {
             .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
-                result_ref: completed_loop_result_ref(&done),
+                result_ref: inline_result_ref,
                 offset: 0,
                 max_bytes: 64,
             })
@@ -2038,6 +2089,94 @@ mod tests {
         assert!(store.get("result:first").is_none());
         assert!(store.get("result:second").is_some());
         assert!(store.total_bytes <= CAPABILITY_IO_MAX_STAGED_BYTES);
+    }
+
+    #[test]
+    fn tool_diagnostic_result_capture_bounds_work_and_preserves_redaction_context() {
+        let secret = format!("Bearer {}", "s".repeat(80));
+        let retained_prefix = "x".repeat(TOOL_RESULT_MAX_BYTES - 32);
+        let payload = format!(
+            "{retained_prefix}{secret}{}",
+            "y".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES)
+        );
+
+        let captured = bounded_tool_diagnostic_result(payload.as_bytes())
+            .expect("serialized JSON diagnostic text is valid UTF-8");
+        assert_eq!(captured.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert!(captured.len() < payload.len());
+        assert!(captured.contains(&secret));
+
+        let (redacted, changed) =
+            ironclaw_safety::LeakDetector::new().redact_all_secrets(&captured);
+        assert!(changed, "boundary-crossing secret must remain detectable");
+        let retained =
+            ironclaw_product_contracts::inspector::BoundedDiagnosticText::retained_tool_result(
+                redacted,
+                u64::try_from(payload.len()).expect("test payload length fits u64"),
+            )
+            .expect("bounded diagnostic text accepts the original byte count");
+        assert!(retained.content().len() <= TOOL_RESULT_MAX_BYTES);
+        assert!(!retained.content().contains(&secret));
+        assert!(retained.truncated());
+    }
+
+    #[test]
+    fn tool_diagnostic_result_capture_drops_a_split_utf8_suffix() {
+        let mut payload = "a".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
+        payload.push('€');
+        payload.push_str("tail");
+
+        let captured = bounded_tool_diagnostic_result(payload.as_bytes())
+            .expect("valid prefix is retained when the cap splits a code point");
+        assert_eq!(captured.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
+        assert!(captured.is_char_boundary(captured.len()));
+    }
+
+    #[tokio::test]
+    async fn capability_io_sends_only_bounded_output_to_the_diagnostic_sink() {
+        let sink = Arc::new(RecordingToolDiagnosticSink::default());
+        let capability_io = StagedCapabilityIo::default().with_tool_diagnostic_sink(Some(
+            Arc::clone(&sink) as Arc<dyn HostManagedPromptDiagnosticSink>,
+        ));
+        let run_context = run_context("bounded-tool-diagnostic").await;
+        let input_ref = CapabilityInputRef::new(format!(
+            "input:{}:bounded-tool-diagnostic",
+            run_context.run_id
+        ))
+        .expect("input ref");
+        let output =
+            serde_json::Value::String("x".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2));
+        let serialized_bytes = serialized_result_output(&output)
+            .expect("result serializes")
+            .len();
+
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &CapabilityId::new("builtin.echo").expect("capability id"),
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::InlineOnly,
+            })
+            .await
+            .expect("result writes");
+
+        let capture = sink
+            .result
+            .lock()
+            .expect("diagnostic result lock")
+            .take()
+            .expect("tool diagnostic captured");
+        let retained = capture
+            .result
+            .expect("successful result has diagnostic text");
+        assert_eq!(retained.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert_eq!(
+            capture.result_original_bytes,
+            Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))
+        );
     }
 
     #[test]
@@ -3066,8 +3205,9 @@ mod tests {
         // structured fields are dropped from the loop-visible channel and can no
         // longer be asserted here. Re-express against the durable observation or
         // the preview summary.
-        let output = capability_io
-            .result_output(&completed_loop_result_ref(&done))
+        assert_eq!(completed_loop_result_ref(&done), original_result_ref);
+        let (_, output) = capability_io
+            .latest_result_output()
             .expect("result output lookup succeeds")
             .expect("result_read output exists");
         assert_eq!(output["content"], "abcdefgh");
@@ -3099,8 +3239,9 @@ mod tests {
             Resolution::Done(done) => done,
             other => panic!("adjacent result_read should complete, got {other:?}"),
         };
-        let adjacent_output = capability_io
-            .result_output(&completed_loop_result_ref(&adjacent))
+        assert_eq!(completed_loop_result_ref(&adjacent), original_result_ref);
+        let (_, adjacent_output) = capability_io
+            .latest_result_output()
             .expect("adjacent result output lookup succeeds")
             .expect("adjacent result_read output exists");
         assert_eq!(adjacent_output["content"], "ijklmnop");
@@ -3131,8 +3272,9 @@ mod tests {
             Resolution::Done(done) => done,
             other => panic!("final result_read should complete, got {other:?}"),
         };
-        let final_output = capability_io
-            .result_output(&completed_loop_result_ref(&final_chunk))
+        assert_eq!(completed_loop_result_ref(&final_chunk), original_result_ref);
+        let (_, final_output) = capability_io
+            .latest_result_output()
             .expect("final result output lookup succeeds")
             .expect("final result_read output exists");
         assert_eq!(final_output["content"], "qrstuvwxyz");
