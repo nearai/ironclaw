@@ -1687,6 +1687,10 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
     harness.messages[0].content,
     "The run failed because the execution driver rejected the request.",
   );
+  // #7369 — the failed run's id must land on the error message itself so the
+  // WebUI can offer the same run-artifact/trace download a completed reply
+  // gets; without it there is no way to capture a trace for a failed run.
+  assert.equal(harness.messages[0].turnRunId, "run-failed-1");
 });
 
 test("useChatEvents: restored run and stream failures use the selected language", () => {
@@ -1825,6 +1829,7 @@ test("useChatEvents: repeated failed projection updates existing error content",
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-failed-update");
   assert.equal(harness.messages[0].content, "driver_protocol_violation");
+  assert.equal(harness.messages[0].turnRunId, "run-failed-update");
 });
 
 test("useChatEvents: typed failed event appends visible error", () => {
@@ -1935,6 +1940,11 @@ test("useChatEvents: adjacent duplicate run failures collapse across unknown and
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-known-failure");
   assert.equal(harness.messages[0].content, failureCategory);
+  // #7369 — promoting an unknown-run failure bubble to its now-known run id
+  // must also backfill `turnRunId`, or the trace-download action stays
+  // permanently unavailable for a run that only resolved its id after the
+  // bubble was first created.
+  assert.equal(harness.messages[0].turnRunId, "run-known-failure");
 
   harness.replaceMessages([
     ...harness.messages,
@@ -1960,6 +1970,7 @@ test("useChatEvents: adjacent duplicate run failures collapse across unknown and
   assert.equal(harness.messages.length, 3);
   assert.equal(harness.messages[2].id, "err-run-next-failure");
   assert.equal(harness.messages[2].content, failureCategory);
+  assert.equal(harness.messages[2].turnRunId, "run-next-failure");
 });
 
 test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
