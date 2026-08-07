@@ -108,6 +108,16 @@ run_architecture_runtime() {
   # model-visible failed capability outcome, not transport-level success.
   run_test_exact ironclaw_host_runtime first_party_builtin_tools \
     builtin_http_surfaces_http_error_status_as_failed_outcome
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_surfaces_server_error_status_as_failed_outcome
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_save_surfaces_http_error_status_as_failed_outcome
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_classifies_status_range_boundaries
+  # Pins docs/reborn/contracts/host-runtime.md: the failure diagnostic is
+  # trimmed to the model-visible diagnostic budget and stays valid JSON.
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_error_diagnostic_respects_model_diagnostic_budget
   run_test ironclaw_host_runtime builtin_obligation_handler_contract
   run_test ironclaw_host_runtime obligation_services_composition_contract
   run_test ironclaw_host_runtime production_trust_contract
