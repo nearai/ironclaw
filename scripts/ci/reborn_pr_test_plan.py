@@ -173,6 +173,13 @@ EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # whole tree to the embedding crate over-schedules those rather than
     # letting a fixture change select nothing at all.
     ("test-tools/", "ironclaw_extension_host"),
+    # the bundled skill catalog, which `ironclaw_extension_host`'s `build.rs`
+    # walks and embeds as `EMBEDDED_REBORN_SKILL_{SUMMARIES,BUNDLES}_JSON`
+    # (`src/bundled_skills.rs`). A SKILL.md edit changes what every fresh
+    # tenant is seeded with and what the routing-metadata lint reads, so it has
+    # to select that crate's lanes rather than fall through to the
+    # unclassified-path error.
+    ("skills/", "ironclaw_extension_host"),
 )
 EMBEDDED_ASSET_PREFIXES: tuple[str, ...] = tuple(
     prefix for prefix, _ in EMBEDDED_ASSET_OWNERS

@@ -50,14 +50,44 @@ def _workspace_crate_directories() -> dict[str, Path]:
     return directories
 
 
+def _build_script_embeds(directory: Path, prefix: str) -> bool:
+    """True when a crate's build script embeds `prefix` at build time.
+
+    `include_str!` is not the only embedding mechanism. A build script can walk
+    a tree and generate the constant instead — `ironclaw_extension_host` does
+    exactly that for the bundled skill catalog, emitting
+    `EMBEDDED_REBORN_SKILL_{SUMMARIES,BUNDLES}_JSON` into `OUT_DIR`, so the only
+    `include_str!` in the crate points at `OUT_DIR` and names no asset path.
+
+    The evidence used here is cargo's own declaration: a build script that
+    reads a tree must emit `cargo:rerun-if-changed` for it or its output goes
+    stale. That line, plus the tree's own name, is what a build-time embed
+    looks like from the outside.
+    """
+    build_script = directory / "build.rs"
+    if not build_script.is_file():
+        return False
+    text = build_script.read_text(encoding="utf-8", errors="replace")
+    if "rerun-if-changed" not in text:
+        return False
+    root_segment = prefix.strip("/").split("/")[0]
+    return f'"{root_segment}"' in text
+
+
 def _crates_embedding(prefix: str, crate_dirs: dict[str, Path]) -> set[str]:
     """Crates with an include of a *table-routed* file under `prefix`.
 
     Table-routed means "owned by no crate": the planner resolves package
     directories first, so `crates/extensions/packages/telegram/manifest.toml`
     is its own crate's file and never reaches `EMBEDDED_ASSET_OWNERS`.
+
+    Covers both embedding mechanisms: a direct `include_*!` literal, and a
+    build script that generates the constant (see `_build_script_embeds`).
     """
     embedders: set[str] = set()
+    for name, directory in crate_dirs.items():
+        if _build_script_embeds(directory, prefix):
+            embedders.add(name)
     for name, directory in crate_dirs.items():
         for source in directory.rglob("*.rs"):
             if "target" in source.parts or name in embedders:
