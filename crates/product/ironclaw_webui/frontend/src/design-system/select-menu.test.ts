@@ -268,10 +268,17 @@ test("SelectMenu supports a compact reusable size", () => {
   const harness = createHarness();
   let rendered = harness.render({ size: "sm" });
   let classes = collectScalars(rendered).filter((value) => typeof value === "string");
+  const classTokens = new Set(
+    classes.flatMap((value) => value.split(/\s+/).filter(Boolean))
+  );
 
-  assert.ok(classes.some((value) => value.includes("min-w-[7.5rem] text-xs")));
-  assert.ok(classes.some((value) => value.includes("h-8 px-2")));
-  assert.ok(!classes.some((value) => value.includes("min-w-[9.5rem] text-ui")));
+  assert.ok(classTokens.has("min-w-[7.5rem]"));
+  assert.ok(classTokens.has("text-xs"));
+  assert.ok(classTokens.has("h-8"));
+  assert.ok(classTokens.has("px-2"));
+  assert.ok(!classTokens.has("px-2.5"));
+  assert.ok(!classTokens.has("min-w-[9.5rem]"));
+  assert.ok(!classTokens.has("text-ui"));
 
   firstValueAfter(rendered, "onClick=")();
   rendered = harness.render({ size: "sm" });

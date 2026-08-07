@@ -2653,9 +2653,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     level_trigger = level_filter.get_by_role("button")
     await expect(level_trigger).to_have_attribute("aria-haspopup", "listbox")
     await expect(level_filter.locator("select")).to_have_count(0)
-    await reborn_v2_page.get_by_placeholder("Filter by target…").fill(
-        "ironclaw::ui"
-    )
+    await reborn_v2_page.locator(SEL_V2["logs_target_filter"]).fill("ironclaw::ui")
     await level_trigger.click()
     await expect(reborn_v2_page.get_by_role("listbox")).to_be_visible()
     await reborn_v2_page.get_by_role("option", name="WARN", exact=True).click()
