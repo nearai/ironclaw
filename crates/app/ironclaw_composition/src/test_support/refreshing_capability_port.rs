@@ -76,7 +76,7 @@ pub struct RefreshingCapabilityPortTestParts {
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_service:
         Option<std::sync::Arc<dyn ironclaw_assistant::OutboundPreferencesProductService>>,
-    pub outbound_delivery_target_set_requires_approval: bool,
+    pub outbound_preference_write_requires_approval: bool,
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`standalone.rs:1002`).
     pub tool_permission_overrides:

@@ -37,13 +37,12 @@ use ironclaw_assistant::{
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
     LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    NOTIFICATION_CHANNELS_SET_COMMAND_ID, NOTIFICATION_CHANNELS_VIEW, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat,
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
@@ -61,10 +60,10 @@ use ironclaw_assistant::{
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
     RebornGetProjectRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
     RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornNotificationChannel,
+    RebornNotificationChannelsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -72,22 +71,22 @@ use ironclaw_assistant::{
     RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetCapabilities,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornThreadArtifact, RebornThreadArtifactRequest,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse, RunArtifactLogs,
-    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, rejecting_product_surface_error,
+    RebornOutboundDeliveryTargetSummary, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectInfo, RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse,
+    RebornProjectRole, RebornProjectState, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact,
+    RebornRunArtifactRequest, RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, RunArtifactLogs, RunArtifactRedaction,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::state::LifecyclePublicState;
@@ -175,6 +174,7 @@ enum ProductSurfaceCallId {
     AutomationResume,
     AutomationRename,
     AutomationDelete,
+    NotificationChannelsSet,
 }
 
 impl ProductSurfaceCallId {
@@ -205,6 +205,7 @@ impl ProductSurfaceCallId {
             Self::AutomationResume => "automation.resume",
             Self::AutomationRename => "automation.rename",
             Self::AutomationDelete => "automation.delete",
+            Self::NotificationChannelsSet => NOTIFICATION_CHANNELS_SET_COMMAND_ID,
         }
     }
 
@@ -235,6 +236,7 @@ impl ProductSurfaceCallId {
             "automation.resume" => Some(Self::AutomationResume),
             "automation.rename" => Some(Self::AutomationRename),
             "automation.delete" => Some(Self::AutomationDelete),
+            NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
             _ => None,
         }
     }
@@ -524,8 +526,13 @@ struct StubServices {
     /// Forwarded caller user-ids for each `trace_account_login_link` call.
     trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<ProductSurfaceError>>,
-    get_outbound_preferences_calls: Mutex<usize>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
+    get_notification_channels_calls: Mutex<usize>,
+    /// Recorded `(caller, target_ids body)` for each `set_notification_channels`
+    /// dispatch, so tests can assert the authenticated caller scope AND the
+    /// full-replace POST body reached the service unmodified.
+    set_notification_channels_calls:
+        Mutex<Vec<(ProductSurfaceCaller, RebornSetNotificationChannelsRequest)>>,
     list_operator_config_calls: Mutex<usize>,
     operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
@@ -1002,14 +1009,6 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
-            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
-                *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(outbound_preferences_response("slack-dm-alpha"))
-                        .expect("outbound preferences payload"),
-                    next_cursor: None,
-                })
-            }
             id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
                 *self
                     .list_outbound_delivery_targets_calls
@@ -1018,6 +1017,14 @@ impl StubServices {
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(outbound_delivery_targets_response())
                         .expect("outbound delivery targets payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == NOTIFICATION_CHANNELS_VIEW.id => {
+                *self.get_notification_channels_calls.lock().expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(notification_channels_response())
+                        .expect("notification channels payload"),
                     next_cursor: None,
                 })
             }
@@ -1772,6 +1779,15 @@ impl StubServices {
                     automation: None,
                 })
             }
+            ProductSurfaceCallId::NotificationChannelsSet => {
+                let request: RebornSetNotificationChannelsRequest =
+                    serde_json::from_value(request.input).expect("input");
+                self.set_notification_channels_calls
+                    .lock()
+                    .expect("lock")
+                    .push((caller, request));
+                RecordedProductSurfaceCallResponse::json(notification_channels_response())
+            }
         }
     }
 }
@@ -1983,11 +1999,31 @@ fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSumma
     .expect("valid target summary")
 }
 
-fn outbound_preferences_response(target_id: &str) -> RebornOutboundPreferencesResponse {
-    RebornOutboundPreferencesResponse {
-        final_reply_target: Some(outbound_target_summary(target_id)),
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-        default_modality: Default::default(),
+/// One available channel plus one stored-but-unavailable channel (`option:
+/// None`) — the shape the WebUI multi-select panel must render as a greyed,
+/// still-deselectable row rather than dropping it (Task 8's
+/// `RebornNotificationChannel`).
+fn notification_channels_response() -> RebornNotificationChannelsResponse {
+    RebornNotificationChannelsResponse {
+        channels: vec![
+            RebornNotificationChannel {
+                target_id: outbound_target_id("slack-dm-alpha"),
+                status: RebornOutboundDeliveryTargetStatus::Available,
+                option: Some(RebornOutboundDeliveryTargetOption {
+                    target: outbound_target_summary("slack-dm-alpha"),
+                    capabilities: RebornOutboundDeliveryTargetCapabilities {
+                        final_replies: true,
+                        gate_prompts: true,
+                        auth_prompts: true,
+                    },
+                }),
+            },
+            RebornNotificationChannel {
+                target_id: outbound_target_id("slack-dm-gone"),
+                status: RebornOutboundDeliveryTargetStatus::Unavailable,
+                option: None,
+            },
+        ],
     }
 }
 
@@ -3563,7 +3599,7 @@ async fn list_automations_malformed_include_completed_rejected_with_400() {
 }
 
 #[tokio::test]
-async fn get_outbound_preferences_dispatches_through_service() {
+async fn get_notification_channels_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -3571,7 +3607,7 @@ async fn get_outbound_preferences_dispatches_through_service() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/outbound/preferences")
+                .uri("/api/webchat/v2/outbound/notification-channels")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -3580,11 +3616,22 @@ async fn get_outbound_preferences_dispatches_through_service() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
-    assert_eq!(body["final_reply_target_status"], "available");
+    let channels = body["channels"].as_array().expect("channels array");
+    assert_eq!(channels.len(), 2);
+    assert_eq!(channels[0]["target_id"], "slack-dm-alpha");
+    assert_eq!(channels[0]["status"], "available");
+    assert_eq!(
+        channels[0]["option"]["target"]["target_id"],
+        "slack-dm-alpha"
+    );
+    // A stored id that no longer resolves must still be represented —
+    // `unavailable` with no resolved `option` — not dropped from the list.
+    assert_eq!(channels[1]["target_id"], "slack-dm-gone");
+    assert_eq!(channels[1]["status"], "unavailable");
+    assert!(channels[1]["option"].is_null());
     assert_eq!(
         *services
-            .get_outbound_preferences_calls
+            .get_notification_channels_calls
             .lock()
             .expect("lock"),
         1
@@ -3596,24 +3643,22 @@ async fn get_outbound_preferences_dispatches_through_service() {
         .iter()
         .map(|query| query.view_id.clone())
         .collect();
-    assert!(view_ids.contains(&OUTBOUND_PREFERENCES_VIEW.id.to_string()));
+    assert!(view_ids.contains(&NOTIFICATION_CHANNELS_VIEW.id.to_string()));
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_dispatches_body_through_invoke() {
+async fn set_notification_channels_dispatches_body_through_invoke() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
-        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/outbound/preferences")
+                .uri("/api/webchat/v2/outbound/notification-channels")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                    r#"{"target_ids":["slack-dm-alpha","slack-dm-beta"]}"#,
                 ))
                 .expect("request"),
         )
@@ -3622,130 +3667,75 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
-    let retry_response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/outbound/preferences")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(retry_response.status(), StatusCode::OK);
-    let invoke_calls = services.invoke_calls.lock().expect("lock");
-    assert_eq!(invoke_calls.len(), 2);
-    assert_eq!(
-        invoke_calls[0].0.as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
-    assert_eq!(
-        invoke_calls[0].1,
-        serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
-    );
-    assert_eq!(
-        invoke_calls[1].1,
-        serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
-    );
-    assert_eq!(
-        invoke_calls[0].2, invoke_calls[1].2,
-        "identical outbound preference retries should reuse ProductSurface activity ids"
-    );
-    drop(invoke_calls);
-    let view_ids: Vec<String> = services
-        .view_queries
+    // The command dispatch path returns its own typed response directly:
+    // there is no secondary view re-query to reconcile from.
+    let channels = body["channels"].as_array().expect("channels array");
+    assert_eq!(channels.len(), 2);
+    let recorded = services
+        .set_notification_channels_calls
         .lock()
-        .expect("lock")
-        .iter()
-        .map(|query| query.view_id.clone())
-        .collect();
+        .expect("lock");
     assert_eq!(
-        view_ids,
-        vec![
-            OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-            OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-        ]
+        recorded.len(),
+        1,
+        "the full-replace body must reach the service exactly once"
+    );
+    let (recorded_caller, recorded_request) = &recorded[0];
+    assert_eq!(
+        recorded_caller.tenant_id.as_str(),
+        "tenant-alpha",
+        "the authenticated tenant must be forwarded, never a default"
+    );
+    assert_eq!(
+        recorded_caller.user_id.as_str(),
+        "user-alpha",
+        "the authenticated user must be forwarded, never a default"
+    );
+    assert_eq!(
+        recorded_request
+            .target_ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["slack-dm-alpha", "slack-dm-beta"],
+        "target_ids must flow through unmodified — the sole canonical wire name"
+    );
+    drop(recorded);
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "the command path must not fall through to a view query"
     );
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_accepts_explicit_clear() {
+async fn set_notification_channels_accepts_empty_list() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/outbound/preferences")
+                .uri("/api/webchat/v2/outbound/notification-channels")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"final_reply_target_id":null,"client_action_id":"outbound-clear-1"}"#,
-                ))
+                .body(Body::from(r#"{"target_ids":[]}"#))
                 .expect("request"),
         )
         .await
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
-    let invoke_calls = services.invoke_calls.lock().expect("lock");
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0].0.as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
-    assert_eq!(invoke_calls[0].1, serde_json::json!({}));
-    drop(invoke_calls);
-    assert_eq!(
-        *services
-            .get_outbound_preferences_calls
-            .lock()
-            .expect("lock"),
-        1
+    let recorded = services
+        .set_notification_channels_calls
+        .lock()
+        .expect("lock");
+    assert_eq!(recorded.len(), 1);
+    assert!(
+        recorded[0].1.target_ids.is_empty(),
+        "an empty target_ids list must reach the service, not be rejected as a missing field"
     );
 }
 
-#[tokio::test]
-async fn set_outbound_preferences_error_maps_to_http_status() {
-    let services = Arc::new(StubServices::default());
-    services.enqueue_invoke_response(Err(ProductSurfaceError {
-        code: ProductSurfaceErrorCode::NotFound,
-        kind: ProductSurfaceErrorKind::NotFound,
-        status_code: 404,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }));
-    let router = router_with(services);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/outbound/preferences")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"final_reply_target_id":"target-does-not-exist","client_action_id":"outbound-error-1"}"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let body = read_json(response).await;
-    assert_eq!(body["error"], "not_found");
-    assert_eq!(body["kind"], "not_found");
-    assert_eq!(body["retryable"], false);
-}
 #[tokio::test]
 async fn list_outbound_delivery_targets_uses_product_view() {
     let services = Arc::new(StubServices::default());

@@ -38,8 +38,8 @@ exceptions. Every rule below serves that.
   authority. `Loop*Port` implementations live in `ironclaw_loop_host`,
   `ironclaw_turn_runner`, and `ironclaw_hooks` — the single declared decorator
   chain (`docs/reborn/target-architecture/families/loop.md`).
-- **No prompt content, no model-gateway implementation.** (One inherited
-  exception, recorded under "Known debt" below.)
+- **No prompt content, no model-gateway implementation.** (Two inherited
+  exceptions, recorded under "Known debt" below.)
 - Public/wire DTOs carry refs, bounded safe summaries, typed ids, versions,
   cursors, and sanitized errors. Transient prompt-construction types may carry
   bounded, host-approved model-visible content, but must not be serde
@@ -79,8 +79,9 @@ does **not** re-export them: one type, one import path.
 
 ## Known debt (recorded, not accepted)
 
-- `instruction_bundle.rs` embeds one prompt asset
-  (`prompts/capability_surface_usage_policy.md`) through `include_str!`.
+- `instruction_bundle.rs` embeds two prompt assets
+  (`prompts/capability_surface_usage_policy.md` and `prompts/delivery.md`)
+  through `include_str!`.
   PROPOSAL §6.1.4 says a contracts crate holds no prompt content; the module
   moved here anyway because `ironclaw_hooks` consumes
   `InstructionMaterializationStore` and leaving it in the turn kernel would

@@ -2679,6 +2679,41 @@ async fn completion_nudge_skipped_on_clean_reply() {
 }
 
 #[tokio::test]
+async fn completion_nudge_skips_confirmation_with_quoted_literal_ending_in_colon() {
+    let confirmation = "Done — routine **QA Recurring Telegram** is active and scheduled to run every minute, sending the current Toronto time to Telegram with messages beginning:\n\n> QA recurring tick:";
+    let host = MockHost::new(vec![
+        reply_response_with_text(confirmation),
+        reply_response_with_text("duplicate confirmation one"),
+        reply_response_with_text("duplicate confirmation two"),
+    ])
+    .with_driver_nudges_enabled();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec![confirmation.to_string()],
+        "a quoted literal is completed content, not an unfinished narration"
+    );
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
+#[test]
+fn trailing_off_detection_keeps_bare_unfinished_colon_but_accepts_markdown_quote() {
+    assert!(super::reply_trailed_off("Let me write the file:"));
+    assert!(!super::reply_trailed_off(
+        "The message will begin:\n\n> QA recurring tick:"
+    ));
+}
+
+#[tokio::test]
 async fn consumed_iteration_warning_falls_back_to_failed_exit() {
     let host = MockHost::new(vec![reply_response_with_text("iteration explanation")]);
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
