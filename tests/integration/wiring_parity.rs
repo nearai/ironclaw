@@ -44,7 +44,7 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
 // ---------------------------------------------------------------------------
 
-/// Hand-derived from `crates/ironclaw_composition/src/runtime.rs`
+/// Hand-derived from `crates/app/ironclaw_composition/src/runtime.rs`
 /// lines 3365-3459 (`build_reborn_runtime`, `Standalone`/`StandaloneUnrestricted`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
@@ -64,6 +64,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         cancellation_factory: false,        // :3407 hardcoded None
         skill_context_source: true,         // :2917-2929 standalone_filesystem_skill_context_source
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        prompt_diagnostic_sink: true, // process-local bounded inspector store
         reply_attachment_intent_port: true, // shared production outbound-state store
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: true, // steering/follow-up host input queue — always wired (InMemory or Filesystem)
@@ -153,6 +154,7 @@ fn mask(
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
+        "prompt_diagnostic_sink" => shape.prompt_diagnostic_sink = from.prompt_diagnostic_sink,
         "reply_attachment_intent_port" => {
             shape.reply_attachment_intent_port = from.reply_attachment_intent_port
         }
@@ -229,7 +231,7 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
 /// referenced `Standalone` literal still exists and the profile still builds.
-/// Mirrors `crates/ironclaw_composition/tests/runtime.rs:132-146`. The
+/// Mirrors `crates/app/ironclaw_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
 /// introspecting this built `RebornRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted
@@ -279,8 +281,8 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     ),
     (
         "outbound",
-        "OUTBOUND_DELIVERY_TARGETS_LIST/TARGET_SET_CAPABILITY_ID (harness/profiles/outbound.rs) \
-         are local-dev synthetic capabilities (C-SYNTH outbound, \
+        "OUTBOUND_DELIVERY_TARGETS_LIST/NOTIFICATION_CHANNELS_SET_CAPABILITY_ID \
+         (harness/profiles/outbound.rs) are local-dev synthetic capabilities (C-SYNTH outbound, \
          ironclaw_composition::test_support), not part of builtin_first_party_package()",
     ),
     (

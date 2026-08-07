@@ -101,6 +101,10 @@ run_architecture_boundaries() {
 run_architecture_runtime() {
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
+  # Pins docs/reborn/contracts/host-runtime.md: scoped JSON files expose
+  # bounded collection selection and numeric aggregation through the real turn.
+  run_test_exact ironclaw_integration_tests reborn_integration_tool_call \
+    json_runs_bounded_collection_operations
   run_test ironclaw_host_runtime reborn_e2e_gate
   run_test ironclaw_host_runtime reborn_invoke_vertical_slice
   run_test ironclaw_host_runtime runtime_http_egress_contract

@@ -4,9 +4,9 @@ use crate::{
 };
 
 use super::{
-    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFailedFireSettlement,
-    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
-    TriggerPollerTickReport, TriggerPollerWorker, failure::classify_failure,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
+    TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
+    TriggerPollerWorker, TriggerRunFailureSettlement, failure::classify_failure,
 };
 
 struct ActiveLookupItem {
@@ -172,7 +172,7 @@ impl TriggerPollerWorker {
                     if cleared && status == TriggerRunHistoryStatus::Error {
                         self.deps
                             .fire_settlement_observer
-                            .on_failed_fire_settled(TriggerFailedFireSettlement {
+                            .on_run_failure_settled(TriggerRunFailureSettlement {
                                 tenant_id: record.tenant_id.clone(),
                                 trigger_id: record.trigger_id,
                                 fire_slot,

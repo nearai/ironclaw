@@ -31,7 +31,7 @@
 //! cargo feature and was reached through two `ironclaw_assistant` re-export paths.
 //! The feature sealed nothing — cargo unifies features across a build, so one
 //! consumer's opt-in compiled the family open workspace-wide. See
-//! `crates/ironclaw_host_api/src/product_adapter/auth.rs` for the measurement.
+//! `crates/contracts/ironclaw_host_api/src/product_adapter/auth.rs` for the measurement.
 //!
 //! ✎ **WS8, 2026-08-05:** the family is two functions, not four. The
 //! `_for_tenant` variants of both recipes had zero callers in any build and

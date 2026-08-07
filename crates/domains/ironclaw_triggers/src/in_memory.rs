@@ -50,6 +50,29 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(())
     }
 
+    async fn migrate_legacy_delivery_target(
+        &self,
+        expected: &TriggerRecord,
+        migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        let mut migrated = expected.clone();
+        migrated.prompt = migrated_prompt;
+        migrated.delivery_target = None;
+        migrated.validate()?;
+
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&expected.tenant_id, expected.trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(false);
+        };
+        if record.prompt != expected.prompt || record.delivery_target != expected.delivery_target {
+            return Ok(false);
+        }
+        record.prompt = migrated.prompt;
+        record.delivery_target = None;
+        Ok(true)
+    }
+
     async fn get_trigger(
         &self,
         tenant_id: TenantId,
@@ -160,6 +183,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
+        record.next_run_at = next_run_at_for_state_transition(record, new_state, Utc::now())?;
         record.state = new_state;
         Ok(Some(record.clone()))
     }

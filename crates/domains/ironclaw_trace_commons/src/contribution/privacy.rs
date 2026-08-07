@@ -386,62 +386,149 @@ impl PrivacyFilterAdapter for CommandPrivacyFilterAdapter {
                 reason: format!("failed to serialize privacy filter request: {error}"),
             }
         })?;
-        stdin.write_all(&request_body).await.map_err(|error| {
-            TraceContributionError::RedactionFailed {
-                reason: format!("failed to write privacy filter request: {error}"),
-            }
-        })?;
-        drop(stdin);
-
-        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
+        // The write must run *concurrently* with draining stdout, and the whole
+        // exchange must sit under the timeout.
+        //
+        // Before #7144 the parent wrote up to `max_input_bytes` (1 MiB by
+        // default) into stdin while nothing read stdout, and the timeout covered
+        // only `wait_with_output`. A sidecar that emits more than one pipe
+        // buffer (64 KiB) before draining its input deadlocks both ends, and the
+        // parked `write_all` is under no timeout at all — so the redaction task
+        // wedges forever, leaking a live child process per turn.
+        // `kill_on_drop` does not help: nothing cancels a future that is never
+        // polled to completion.
+        let write_request = async move {
+            stdin.write_all(&request_body).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+            Ok::<(), std::io::Error>(())
+        };
+        // Both output pipes are drained with a **capped capture**: at most
+        // `limit + 1` bytes are retained per stream (enough to prove an
+        // overflow) and the rest is read and discarded. `wait_with_output`
+        // buffered both streams unbounded *before* the length checks ran, so a
+        // runaway sidecar could exhaust process memory before
+        // `max_stdout_bytes` ever rejected it. Discard-draining keeps the
+        // child from blocking on a full pipe (so it can still exit and the
+        // limit error surfaces), keeps peak memory bounded by the limits, and
+        // leaves the timeout as the backstop for a sidecar that never stops.
+        let mut stdout_pipe =
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| TraceContributionError::RedactionFailed {
+                    reason: "privacy filter sidecar stdout was not available".to_string(),
+                })?;
+        let mut stderr_pipe =
+            child
+                .stderr
+                .take()
+                .ok_or_else(|| TraceContributionError::RedactionFailed {
+                    reason: "privacy filter sidecar stderr was not available".to_string(),
+                })?;
+        let stdout_cap = self.max_stdout_bytes;
+        let stderr_cap = self.max_stderr_bytes;
+        let (write_result, stdout_result, stderr_result, status_result) =
+            tokio::time::timeout(self.timeout, async move {
+                tokio::join!(
+                    write_request,
+                    read_pipe_capped(&mut stdout_pipe, stdout_cap),
+                    read_pipe_capped(&mut stderr_pipe, stderr_cap),
+                    child.wait()
+                )
+            })
             .await
             .map_err(|_| TraceContributionError::RedactionFailed {
                 reason: format!(
                     "privacy filter sidecar timed out after {}ms",
                     self.timeout.as_millis()
                 ),
-            })?
-            .map_err(|error| TraceContributionError::RedactionFailed {
+            })?;
+        write_result.map_err(|error| TraceContributionError::RedactionFailed {
+            reason: format!("failed to write privacy filter request: {error}"),
+        })?;
+        let (stdout, stdout_total) =
+            stdout_result.map_err(|error| TraceContributionError::RedactionFailed {
                 reason: format!("privacy filter sidecar failed: {error}"),
             })?;
+        let (stderr, stderr_total) =
+            stderr_result.map_err(|error| TraceContributionError::RedactionFailed {
+                reason: format!("privacy filter sidecar failed: {error}"),
+            })?;
+        let status = status_result.map_err(|error| TraceContributionError::RedactionFailed {
+            reason: format!("privacy filter sidecar failed: {error}"),
+        })?;
 
-        if output.stdout.len() > self.max_stdout_bytes {
+        if stdout_total > self.max_stdout_bytes {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
                     "stdout exceeded privacy filter sidecar limit: stdout_len={} max_stdout_bytes={}",
-                    output.stdout.len(),
-                    self.max_stdout_bytes
+                    stdout_total, self.max_stdout_bytes
                 ),
             });
         }
-        if output.stderr.len() > self.max_stderr_bytes {
+        if stderr_total > self.max_stderr_bytes {
+            // The hash fingerprints the retained prefix — the overflowed tail
+            // was discarded unread, by design.
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
                     "stderr exceeded privacy filter sidecar limit: stderr_len={} stderr_hash={} max_stderr_bytes={}",
-                    output.stderr.len(),
-                    privacy_filter_bytes_hash(&output.stderr),
+                    stderr_total,
+                    privacy_filter_bytes_hash(&stderr),
                     self.max_stderr_bytes
                 ),
             });
         }
 
-        if !output.status.success() {
+        if !status.success() {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!(
                     "privacy filter sidecar exited with {}; stderr_len={} stderr_hash={}",
-                    output.status,
-                    output.stderr.len(),
-                    privacy_filter_bytes_hash(&output.stderr)
+                    status,
+                    stderr_total,
+                    privacy_filter_bytes_hash(&stderr)
                 ),
             });
         }
 
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        let value: Value = serde_json::from_slice(&stdout).map_err(|error| {
             TraceContributionError::RedactionFailed {
                 reason: format!("failed to parse privacy filter output: {error}"),
             }
         })?;
         safe_privacy_filter_redaction_from_output(&value).map(Some)
+    }
+}
+
+/// Reads `reader` to EOF, **capturing at most `cap + 1` bytes** and discarding
+/// the rest, returning `(captured, total_read)`.
+///
+/// The one extra byte is what lets the caller distinguish "exactly at the
+/// limit" from "over it" without retaining an unbounded buffer; `total_read`
+/// keeps the limit-violation message honest about how much the sidecar
+/// actually produced.
+async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, usize)> {
+    use tokio::io::AsyncReadExt;
+
+    let mut captured = Vec::new();
+    let mut total = 0usize;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok((captured, total));
+        }
+        total = total.saturating_add(read);
+        if captured.len() <= cap {
+            let keep = cap
+                .saturating_add(1)
+                .saturating_sub(captured.len())
+                .min(read);
+            captured.extend_from_slice(&buffer[..keep]);
+        }
     }
 }
 
@@ -785,7 +872,7 @@ impl DeterministicTraceRedactor {
         }
 
         let residual_pii_risk = residual_risk(&trace.consent, &report);
-        let redaction_hash = redaction_hash(&events, &report.counts);
+        let redaction_hash = redaction_hash(&events, &report.counts)?;
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
@@ -798,6 +885,7 @@ impl DeterministicTraceRedactor {
             residual_pii_risk,
             redaction_hash,
             warnings,
+            quarantined: quarantines_trace(residual_pii_risk),
         };
 
         let trace_card = build_trace_card(
@@ -831,15 +919,17 @@ impl DeterministicTraceRedactor {
     }
 }
 
-pub fn rescrub_trace_envelope(envelope: &mut TraceContributionEnvelope) {
+pub fn rescrub_trace_envelope(
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<(), TraceContributionError> {
     let redactor = DeterministicTraceRedactor::default();
-    rescrub_trace_envelope_with(&redactor, envelope);
+    rescrub_trace_envelope_with(&redactor, envelope)
 }
 
 pub fn rescrub_trace_envelope_with(
     redactor: &DeterministicTraceRedactor,
     envelope: &mut TraceContributionEnvelope,
-) {
+) -> Result<(), TraceContributionError> {
     let mut report = RedactionReport::default();
     let mut state = RedactionState::default();
 
@@ -909,8 +999,12 @@ pub fn rescrub_trace_envelope_with(
         &mut envelope.privacy.warnings,
         vec!["Server-side trace re-scrub was applied before corpus storage.".to_string()],
     );
+    // `max_residual_risk` only ever raises the risk, so the quarantine flag
+    // follows it upward and is never cleared by a re-scrub.
+    envelope.privacy.quarantined |= quarantines_trace(envelope.privacy.residual_pii_risk);
     envelope.privacy.redaction_hash =
-        redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
+        redaction_hash(&envelope.events, &envelope.privacy.redaction_counts)?;
+    Ok(())
 }
 
 pub(crate) fn residual_risk(
@@ -943,6 +1037,13 @@ pub(crate) fn merge_privacy_warnings(existing: &mut Vec<String>, new_warnings: V
             existing.push(warning);
         }
     }
+}
+
+/// Whether `risk` means the trace must be held back from datasets pending
+/// review. Single source of truth for the quarantine decision, so the operator
+/// sentence in [`privacy_warnings`] stays prose an author may freely reword.
+pub(crate) fn quarantines_trace(risk: ResidualPiiRisk) -> bool {
+    matches!(risk, ResidualPiiRisk::High)
 }
 
 pub(crate) fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {

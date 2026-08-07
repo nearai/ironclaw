@@ -189,7 +189,7 @@ pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
     /// [`ProductSurfaceCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
-    /// `crates/ironclaw_assistant/CLAUDE.md`.
+    /// `crates/product/ironclaw_assistant/AGENTS.md`.
     pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
@@ -1005,7 +1005,7 @@ fn panic_handler(
         detail
     };
     tracing::error!(
-        target = "ironclaw::reborn::webui_serve",
+        target: "ironclaw::reborn::webui_serve",
         "Handler panicked: {safe_detail}"
     );
     axum::http::Response::builder()

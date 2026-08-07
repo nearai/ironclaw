@@ -18,6 +18,7 @@ use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -50,22 +51,22 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
@@ -173,6 +174,13 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             .contains("Prefer GitHub extension capabilities"),
         "builtin.http should steer GitHub repository API tasks toward the GitHub extension"
     );
+    assert!(
+        http.description.contains("structured HTTP APIs")
+            && http.description.contains("web_search")
+            && http.description.contains("does not render JavaScript"),
+        "builtin.http should reserve raw HTTP for APIs and downloads while steering public web \
+         content retrieval toward web search"
+    );
     let http_save = package
         .capabilities
         .iter()
@@ -191,6 +199,13 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             .description
             .contains("Prefer GitHub extension capabilities"),
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
+    );
+    assert!(
+        http_save.description.contains("structured HTTP APIs")
+            && http_save.description.contains("web_search")
+            && http_save.description.contains("does not render JavaScript"),
+        "builtin.http.save should reserve raw HTTP for APIs and downloads while steering public \
+         web content retrieval toward web search"
     );
 
     // Memory tools now live in the always-on `ironclaw.memory` package,
@@ -313,7 +328,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         HTTP_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID,
     ] {
         assert_eq!(
             loop_run(gated),
@@ -870,104 +885,14 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
     assert_eq!(listed["triggers"][0]["state"], json!("scheduled"));
 }
 
-/// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
-/// shape-validated, host-validated through the create hook, persisted on the
-/// record, and echoed in the model-facing output — so one automation's
-/// routing no longer depends on the mutable user-global preference.
+/// Retired stored routing: a routine delivers externally only by calling
+/// `builtin.outbound_deliver` from its own prompt, so the create surface no
+/// longer accepts a delivery route. A call that still passes one is refused as
+/// invalid input through the real runtime dispatch path — never accepted and
+/// silently ignored, which would leave the caller believing a route was sealed
+/// — and nothing persists.
 #[tokio::test]
-async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_validates() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
-        "slack:personal-dm:T123:user-a",
-    ));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    let output = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
-            "delivery_target_id": "slack:personal-dm:T123:user-a"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        output["trigger"]["delivery_target_id"],
-        json!("slack:personal-dm:T123:user-a")
-    );
-    assert_eq!(
-        hook.validated(),
-        vec!["slack:personal-dm:T123:user-a".to_string()],
-        "the host validation hook must see the model-supplied target"
-    );
-
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0]
-            .delivery_target
-            .as_ref()
-            .map(|target| target.as_str()),
-        Some("slack:personal-dm:T123:user-a")
-    );
-}
-
-/// When the model omits `delivery_target_id`, the host hook still receives the
-/// trusted loop run id and may seal a source-derived target into the record.
-/// This is the authority path used for an automation created from an external
-/// conversation; prompt text never supplies the target.
-#[tokio::test]
-async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_context() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let inherited = "external:source-conversation";
-    let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
-    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-    let run_id = ironclaw_host_api::ids::RunId::new();
-    context.run_id = Some(run_id);
-
-    let output = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Source-routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(output["trigger"]["delivery_target_id"], json!(inherited));
-    assert_eq!(hook.seen_run_ids(), vec![Some(run_id)]);
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        records[0]
-            .delivery_target
-            .as_ref()
-            .map(|target| target.as_str()),
-        Some(inherited)
-    );
-}
-
-/// Fail closed: without host wiring that can resolve outbound delivery
-/// targets (the default no-op hook), a supplied `delivery_target_id` must be
-/// rejected as invalid input instead of being persisted unvalidated.
-#[tokio::test]
-async fn builtin_trigger_create_rejects_delivery_target_without_host_validation() {
+async fn builtin_trigger_create_rejects_the_retired_delivery_target_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -980,41 +905,6 @@ async fn builtin_trigger_create_rejects_delivery_target_without_host_validation(
             "prompt": "Summarize yesterday",
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "delivery_target_id": "slack:personal-dm:T123:user-a"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::InputEncode);
-    assert!(
-        repository
-            .list_triggers(context.resource_scope.tenant_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-/// A target the host rejects (unknown id, foreign owner, disconnected
-/// product) is invalid input and nothing persists.
-#[tokio::test]
-async fn builtin_trigger_create_rejects_delivery_target_the_host_rejects() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
-        "slack:personal-dm:T123:user-a",
-    ));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook);
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    let error = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
-            "delivery_target_id": "slack:shared-channel:T123:C_SOMEONE_ELSES"
         }),
         context.clone(),
     )
@@ -5358,13 +5248,14 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     );
 }
 
+/// An agent must not be able to forge install provenance: `source`/`source_url` are set by the
+/// URL-fetch path, so accepting them inline would let an agent label its own output as fetched.
+///
+/// A `content` + `files` case was removed from here deliberately, not by accident -- rejecting it
+/// was the bug this PR fixes.
 #[tokio::test]
-async fn builtin_skill_install_rejects_hidden_url_install_fields() {
+async fn builtin_skill_install_rejects_forged_provenance_fields() {
     let cases = [
-        json!({
-            "content": "---\nname: hidden-files\n---\nPrompt.\n",
-            "files": [{"path": "references/injected.md", "bytes_base64": "IyBJbmplY3RlZAo="}]
-        }),
         json!({
             "content": "---\nname: hidden-source\n---\nPrompt.\n",
             "source": "installed_url"
@@ -5396,6 +5287,176 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
         assert_eq!(error, FailureKind::InputEncode);
         assert!(temp.path().read_dir().unwrap().next().is_none());
     }
+}
+
+// The direct-install input contract, asserted at the capability boundary rather than against
+// whichever helper currently normalizes the input -- the normalizer has already moved crates once,
+// and these were written to pass on both sides of that move. The dividing line is provenance, not
+// shape: `files` is caller content, `source`/`source_url` are not.
+
+/// A direct install may carry the rest of the bundle, not just prose.
+///
+/// Refused before nearai/ironclaw#6745, and it failed the ENTIRE install rather than dropping the
+/// file: on the 31-task SkillsBench subset (nearai/benchmarks#287) 18 correctly-shaped entries
+/// across 9 calls were all refused. A skill that cannot carry a script is a prose description.
+#[tokio::test]
+async fn builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: egfr-calc\ndescription: CKD-EPI eGFR\n---\nRun scripts/egfr.py.\n",
+            "files": [
+                { "path": "scripts/egfr.py", "text": "print('eGFR')\n" },
+                { "path": "references/units.md", "text": "mg/dL -> mmol/L: x 0.0555\n" }
+            ]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("egfr-calc"));
+    // `source` stays `user`: authoring a bundle locally is not a URL install, and the
+    // normalizer must not infer provenance from the presence of `files`.
+    assert_eq!(installed["source"], json!("user"));
+    assert_eq!(installed["files_installed"], json!(2));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("egfr-calc/scripts/egfr.py")).unwrap(),
+        "print('eGFR')\n",
+        "the script the agent authored must be on disk verbatim, or the skill it belongs to \
+         cannot run it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("egfr-calc/references/units.md")).unwrap(),
+        "mg/dL -> mmol/L: x 0.0555\n"
+    );
+
+    let listed = invoke_with_context(
+        &runtime,
+        SKILL_LIST_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_mounts([SKILL_LIST_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["count"], json!(1));
+    assert_eq!(listed["skills"][0]["name"], json!("egfr-calc"));
+    assert_eq!(listed["skills"][0]["source"], json!("user"));
+}
+
+/// `bytes_base64` is the shape the URL-fetch path constructs, so the direct arm must accept it too;
+/// both arms converge on one install request.
+#[tokio::test]
+async fn builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: binary-helper\ndescription: has a binary asset\n---\nPrompt.\n",
+            "files": [{ "path": "assets/blob.bin", "bytes_base64": "aGVsbG8=" }]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["files_installed"], json!(1));
+    assert_eq!(
+        std::fs::read(temp.path().join("binary-helper/assets/blob.bin")).unwrap(),
+        b"hello"
+    );
+}
+
+/// Carrying `files` does not buy the right to forge provenance. Sends both, and the install must be
+/// refused whole rather than accepted with the provenance ignored.
+#[tokio::test]
+async fn builtin_skill_install_rejects_a_bundle_that_also_forges_provenance() {
+    let cases = [
+        json!({
+            "content": "---\nname: forged-with-files\n---\nPrompt.\n",
+            "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+            "source": "installed_url"
+        }),
+        json!({
+            "content": "---\nname: forged-url-with-files\n---\nPrompt.\n",
+            "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+            "source_url": "https://api.example.test/skills/forged/SKILL.md"
+        }),
+    ];
+
+    for input in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let runtime = runtime_with_filesystem(filesystem);
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_CAPABILITY_ID,
+            input,
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, FailureKind::InputEncode);
+        assert!(
+            temp.path().read_dir().unwrap().next().is_none(),
+            "a refused install must leave the skill root untouched"
+        );
+    }
+}
+
+/// A bundle-relative path may not climb out of its own skill directory. Accepting caller `files`
+/// means each path is caller-controlled, so this is what makes that safe.
+#[tokio::test]
+async fn builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: escaper\ndescription: tries to climb out\n---\nPrompt.\n",
+            "files": [{ "path": "../../escaped.py", "text": "print('escaped')\n" }]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, FailureKind::InputEncode);
+    assert!(
+        !temp.path().join("escaped.py").exists(),
+        "a traversing bundle path must not write outside the skill directory"
+    );
 }
 
 // URL-install coverage stays in this integration file because these cases assert
@@ -8918,86 +8979,6 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
     }
 }
 
-/// Test hook standing in for host composition's outbound-target resolution:
-/// accepts exactly one target id, records every validation request.
-struct DeliveryTargetValidatingTriggerCreateHook {
-    accepted: String,
-    validated: std::sync::Mutex<Vec<String>>,
-}
-
-struct SourceResolvingTriggerCreateHook {
-    target: String,
-    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::ids::RunId>>>,
-}
-
-impl SourceResolvingTriggerCreateHook {
-    fn new(target: &str) -> Self {
-        Self {
-            target: target.to_string(),
-            seen_run_ids: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::ids::RunId>> {
-        self.seen_run_ids.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
-    async fn resolve_implicit_delivery_target(
-        &self,
-        _scope: &ironclaw_host_api::resource::ResourceScope,
-        run_id: Option<ironclaw_host_api::ids::RunId>,
-    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-        self.seen_run_ids.lock().unwrap().push(run_id);
-        Ok(Some(
-            ironclaw_triggers::TriggerDeliveryTargetId::new(self.target.clone())
-                .expect("fixture target id"),
-        ))
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
-impl DeliveryTargetValidatingTriggerCreateHook {
-    fn accepting(target: &str) -> Self {
-        Self {
-            accepted: target.to_string(),
-            validated: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn validated(&self) -> Vec<String> {
-        self.validated.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
-    async fn validate_delivery_target(
-        &self,
-        _scope: &ironclaw_host_api::resource::ResourceScope,
-        target: &ironclaw_triggers::TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        self.validated.lock().unwrap().push(target.to_string());
-        if target.as_str() == self.accepted {
-            Ok(())
-        } else {
-            Err(TriggerError::InvalidRecord {
-                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-                reason: "delivery target is not available to this caller".to_string(),
-            })
-        }
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 #[cfg(feature = "test-support")]
 struct FixedTriggerClock(DateTime<Utc>);
@@ -9827,7 +9808,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID,
         ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,

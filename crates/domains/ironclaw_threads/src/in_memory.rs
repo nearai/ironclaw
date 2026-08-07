@@ -509,6 +509,11 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let provider_call = request.provider_call;
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
+        }
         let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
@@ -520,15 +525,20 @@ impl SessionThreadService for InMemorySessionThreadService {
                 && message.status == MessageStatus::Finalized
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
+                && provider_call.as_ref().is_none_or(|requested| {
+                    message
+                        .tool_result_provider_call
+                        .as_ref()
+                        .is_none_or(|existing| {
+                            existing.provider_call_id == requested.provider_call_id
+                        })
+                })
         }) {
             let now = Utc::now();
             let before_created_at = existing.created_at;
             let before_updated_at = existing.updated_at;
             let mut changed = false;
             if let Some(provider_call) = provider_call.as_ref() {
-                provider_call
-                    .validate()
-                    .map_err(SessionThreadError::Serialization)?;
                 match existing.tool_result_provider_call.as_ref() {
                     None => {
                         existing.tool_result_provider_call = Some(provider_call.clone());
@@ -576,11 +586,6 @@ impl SessionThreadService for InMemorySessionThreadService {
                 thread.record.updated_at = Some(now);
             }
             return Ok(updated);
-        }
-        if let Some(provider_call) = &provider_call {
-            provider_call
-                .validate()
-                .map_err(SessionThreadError::Serialization)?;
         }
         let content = serde_json::to_string(&envelope)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
@@ -676,21 +681,40 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let updated = {
+            let matches_request = |message: &ThreadMessageRecord| {
+                message.kind == MessageKind::ToolResultReference
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                    && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
+            };
+            let message_index = match request.provider_call_id.as_deref() {
+                Some(requested) => thread
+                    .messages
+                    .iter()
+                    .position(|message| {
+                        matches_request(message)
+                            && message
+                                .tool_result_provider_call
+                                .as_ref()
+                                .is_some_and(|existing| existing.provider_call_id == requested)
+                    })
+                    .or_else(|| {
+                        thread.messages.iter().position(|message| {
+                            matches_request(message) && message.tool_result_provider_call.is_none()
+                        })
+                    }),
+                None => thread.messages.iter().position(matches_request),
+            }
+            .ok_or_else(|| {
+                SessionThreadError::Backend(format!(
+                    "tool result reference {} was not found in thread {}",
+                    request.result_ref, request.thread_id
+                ))
+            })?;
             let message = thread
                 .messages
-                .iter_mut()
-                .find(|message| {
-                    message.kind == MessageKind::ToolResultReference
-                        && message.status == MessageStatus::Finalized
-                        && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                        && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
-                })
-                .ok_or_else(|| {
-                    SessionThreadError::Backend(format!(
-                        "tool result reference {} was not found in thread {}",
-                        request.result_ref, request.thread_id
-                    ))
-                })?;
+                .get_mut(message_index)
+                .ok_or_else(|| SessionThreadError::Backend("tool result index vanished".into()))?;
             let before_created_at = message.created_at;
             let before_updated_at = message.updated_at;
             let content = message.content.as_deref().ok_or_else(|| {

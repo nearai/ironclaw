@@ -7,6 +7,7 @@ use ironclaw_host_api::{
     ids::{TenantId, ThreadId},
 };
 
+use super::report::TriggerPollerFailureReason;
 use crate::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerRecord,
     TriggerRunHistoryStatus,
@@ -127,12 +128,20 @@ pub struct TriggerAcceptedFireSettlement {
     pub turn_scope: TurnScope,
 }
 
+/// A claimed fire that permanently failed before any run was submitted.
+/// Emitted only after the repository has durably settled the fire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFailedFireSettlement {
+    pub fire: TriggerFire,
+    pub reason: TriggerPollerFailureReason,
+}
+
 /// A previously-accepted fire whose run reached a terminal *failure* state
 /// observed by the active-cleanup sweep. Carries enough identity to let an
 /// observer correlate it back to the originating fire for automation-health
 /// telemetry without re-deriving it from display strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriggerFailedFireSettlement {
+pub struct TriggerRunFailureSettlement {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
@@ -142,13 +151,16 @@ pub struct TriggerFailedFireSettlement {
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
     /// The worker invokes these hooks **inline** while processing poller
-    /// work: `on_accepted_fire_settled` from the per-fire submit path and
-    /// `on_failed_fire_settled` from the active-cleanup sweep. Implementors
+    /// work: `on_accepted_fire_settled` from the per-fire submit path,
+    /// `on_failed_fire_settled` from the claim-time failure path, and
+    /// `on_run_failure_settled` from the active-cleanup sweep. Implementors
     /// MUST be cheap and non-blocking; any heavy work (delivery, telemetry
     /// egress) must be detached internally (for example a bounded spawn, as
     /// the composition `PostSubmitHookObserver` does for accepted-fire
     /// delivery) rather than awaited through this call.
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
+
+    async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
 
     /// A previously-accepted fire settled into a terminal failure state.
     ///
@@ -157,7 +169,7 @@ pub trait TriggerFireSettlementObserver: Send + Sync {
     /// strictly observational — it must not mint runs or mutate trigger state.
     /// Invoked inline from the active-cleanup sweep; see the trait contract
     /// above: keep this implementation cheap and non-blocking.
-    async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement);
+    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement);
 }
 
 #[derive(Debug, Default)]
@@ -167,7 +179,7 @@ pub struct NoopTriggerFireSettlementObserver;
 impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
     async fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
 
-    async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
+    async fn on_run_failure_settled(&self, _event: TriggerRunFailureSettlement) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

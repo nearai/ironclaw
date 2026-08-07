@@ -64,6 +64,10 @@ IGNORED_PREFIXES = (
     "openwiki/",
     ".claude/",
     ".github/ISSUE_TEMPLATE/",
+    # `ISSUE_TEMPLATE/`'s exact sibling: a GitHub UI template that changes no
+    # crate, test, or runtime surface (`classify-test-scope.sh` already pairs
+    # the two in its docs-only arm). The rest of `.github/` stays undecided.
+    ".github/pull_request_template.md",
     # Agent bootstrap data only. The compressed graph and its attributes do
     # not change an Ironclaw crate, test, or runtime surface. (#7215 commits
     # the artifact; ported from main's planner at the #7152 refresh.)
@@ -131,6 +135,11 @@ QA_HARNESS_PREFIXES = (
     # every downstream Reborn lane. Same class as the `.claude/` gap this row
     # already records.
     "scripts/reborn_qa_matrix/",
+    # The live Telegram release smoke harness (`run_smoke.py` + config +
+    # README): run by hand against a real bot, referenced by no workflow, never
+    # by a `Tests (Reborn)` lane. Unclassified until 2026-08-06, when PR
+    # #7264's stale-command fix in its README hit the fail-closed arm.
+    "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # Asset trees that live outside every crate root but are compiled *into* a
@@ -150,6 +159,7 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 #
 # `scripts/ci/test_reborn_pr_test_plan.py` pins both halves: that the mapping
 # routes (not ignores), and that every prefix and owner below still exists.
+BUNDLED_SKILLS_PREFIX = "skills/"
 EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # manifests, prompts, schemas and built `wasm/*.wasm` for the first-party
     # extension packages -> `ironclaw_extension_support`
@@ -164,6 +174,16 @@ EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # whole tree to the embedding crate over-schedules those rather than
     # letting a fixture change select nothing at all.
     ("test-tools/", "ironclaw_extension_host"),
+    # the bundled Reborn product skills. `ironclaw_extension_host`'s build
+    # script (`build.rs`, `embed_reborn_skills`) walks this repo-root tree,
+    # parses every `skills/<name>/SKILL.md`, and embeds each skill's complete
+    # file set byte-for-byte into the binary (`src/bundled_skills.rs`), with
+    # `cargo:rerun-if-changed` on every file. Unlike the two trees above,
+    # *every* file here is shipped product output — Markdown included, which
+    # is why `_is_shipped_asset_markdown` special-cases this prefix instead of
+    # keying on a `prompts/` segment. Unclassified until 2026-08-05, when the
+    # fail-closed arm rejected #7157 on `skills/delegation/SKILL.md`.
+    (BUNDLED_SKILLS_PREFIX, "ironclaw_extension_host"),
 )
 EMBEDDED_ASSET_PREFIXES: tuple[str, ...] = tuple(
     prefix for prefix, _ in EMBEDDED_ASSET_OWNERS
@@ -174,18 +194,26 @@ CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
 )
 
 
-def _is_package_prompt(path: str) -> bool:
-    """True for a shipped prompt inside an asset tree owned by the table above.
+def _is_shipped_asset_markdown(path: str) -> bool:
+    """True for Markdown that is itself a shipped asset in a table-owned tree.
 
-    Prompts are the one Markdown *asset* kind: the table owns "manifests,
-    prompts, schemas and built `wasm/*.wasm`", and the other three are `.toml`,
-    `.json` and `.wasm`. Everything else ending in `.md` under those trees is
-    documentation — `test-tools/README.md`, a package `AGENTS.md` — and stays
-    prose. Keyed on the directory segment so it holds at any depth
-    (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    Two Markdown *asset* kinds exist, and everything else ending in `.md`
+    under the asset trees is documentation — `test-tools/README.md`, a package
+    `AGENTS.md` — and stays prose:
+
+    * **Prompts** in the package and fixture trees: the table owns "manifests,
+      prompts, schemas and built `wasm/*.wasm`", and of those kinds only a
+      prompt is Markdown (the other three are `.toml`, `.json` and `.wasm`).
+      Keyed on the directory segment so it holds at any depth
+      (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    * **Bundled skills**: under `skills/` every file is the shipped artifact —
+      `build.rs` parses each `SKILL.md` and embeds each skill's complete file
+      set — so all Markdown there is product output, keyed on the tree itself.
     """
     if not path.startswith(EMBEDDED_ASSET_PREFIXES):
         return False
+    if path.startswith(BUNDLED_SKILLS_PREFIX):
+        return True
     return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
     "tests/fixtures/extensions/acme-messenger/manifest.toml": (
@@ -261,11 +289,25 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/check_no_panics.py",
     #   * `dev_metrics.py` is a reporting tool; nothing gates on it.
     "scripts/dev_metrics.py",
+    #   * `check-type-duplicates.py` is a local dev analysis tool (type-dedup
+    #     backlog reporting); no workflow or hook invokes it, so no lane can
+    #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
+    #     path sweep touched its docstring.
+    "scripts/check-type-duplicates.py",
+    #   * `render-architecture-video.sh` is a local one-command Remotion
+    #     render for docs/internal/architecture-video; referenced only by the
+    #     `architecture-video` Claude skill, never by a workflow. Same PR,
+    #     same reason: the sweep rewrote its VIDEO_DIR path.
+    "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,
     #     driven by its own lane rather than by a crate/integration selection.
     "scripts/test-mutation-audit.sh",
+    #   * `mutation-audit.sh` is the audit those guardrails self-test, run by
+    #     the same dedicated lane (`nightly-deep-ci.yml`'s mutation-frontier
+    #     job) and by hand; no Reborn PR lane invokes it.
+    "scripts/mutation-audit.sh",
     #   * the rest of the repo-root metadata class, classified 2026-08-04 as a
     #     class rather than one file per red run. Every entry above this block
     #     was added the other way — a rename-shaped diff touches root files no
@@ -306,6 +348,17 @@ PR_STATIC_CONTROL_PATHS = {
     "ironclaw.png",
     "LICENSE-APACHE",
     "LICENSE-MIT",
+    # The Reborn container entrypoint is shell, not Rust: no Reborn test lane
+    # executes it. Code Style owns it end to end — `code_style.yml`'s `has_code`
+    # filter names `docker/reborn/entrypoint.sh` and its "Self-test CI scripts"
+    # step runs `scripts/ci/test-reborn-docker-entrypoint.sh`, which drives the
+    # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
+    # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
+    # and owns the image build, not the entrypoint's behaviour. `docker/` stays
+    # per-file, never a prefix: `docker/reborn/config.*.toml` and
+    # `docker/process-sandbox-entrypoint.sh` have no owning lane and must keep
+    # refusing.)
+    "docker/reborn/entrypoint.sh",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
@@ -707,24 +760,27 @@ def build_plan(
             # after the WS7 family move. A crate-resident doc still resolves to
             # its package below and keeps selecting that package's lane.
             #
-            # The carve-out yields to a shipped *prompt*, and must. The asset
-            # table declares it owns "manifests, prompts, schemas and built
-            # `wasm/*.wasm`"; of those kinds only a prompt is Markdown
-            # (manifests are `.toml`, schemas `.json`, wasm `.wasm`), so
-            # `.md` under a `prompts/` directory is an asset and every other
-            # `.md` is prose. Without this clause the prose arm fired first and
-            # a change to a shipped prompt — production output that
-            # `ironclaw_extension_support` compiles in — planned `mode=none`,
-            # selecting no lane at all, while its sibling `manifest.toml` in the
-            # same package correctly selected two. That is exactly the "silent
-            # under-schedule of a change to production output" the comment above
-            # `EMBEDDED_ASSET_OWNERS` forbids.
+            # The carve-out yields to shipped Markdown *assets*, and must.
+            # Prompts: the asset table declares it owns "manifests, prompts,
+            # schemas and built `wasm/*.wasm`"; of those kinds only a prompt is
+            # Markdown (manifests are `.toml`, schemas `.json`, wasm `.wasm`),
+            # so `.md` under a `prompts/` directory is an asset. Bundled
+            # skills: under `skills/` every file is embedded product output,
+            # `SKILL.md` first among them, so all its Markdown is an asset.
+            # Every other `.md` is prose. Without this clause the prose arm
+            # fired first and a change to a shipped prompt — production output
+            # that `ironclaw_extension_support` compiles in — planned
+            # `mode=none`, selecting no lane at all, while its sibling
+            # `manifest.toml` in the same package correctly selected two. That
+            # is exactly the "silent under-schedule of a change to production
+            # output" the comment above `EMBEDDED_ASSET_OWNERS` forbids.
             #
-            # Keyed on the `prompts/` segment rather than on the asset prefixes
-            # themselves, because those prefixes also cover genuine prose:
-            # `test-tools/README.md` is documentation of the fixture bundles and
-            # stays prose, as its own test pins.
-            if Path(path).suffix == ".md" and not _is_package_prompt(path):
+            # Keyed on the `prompts/` segment (or the `skills/` tree) rather
+            # than on the asset prefixes themselves, because the package and
+            # fixture prefixes also cover genuine prose: `test-tools/README.md`
+            # is documentation of the fixture bundles and stays prose, as its
+            # own test pins.
+            if Path(path).suffix == ".md" and not _is_shipped_asset_markdown(path):
                 if not any(
                     path.startswith(f"{directory}/")
                     for directory in package_directories

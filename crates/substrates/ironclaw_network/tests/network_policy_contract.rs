@@ -379,7 +379,7 @@ fn parse_host_pattern_rejects_empty_and_bare_wildcard() {
 
 // `parse_host_pattern` is documented as the *stricter* chokepoint relative
 // to `NetworkTargetPattern::validate_declaration`
-// (`crates/ironclaw_host_api/src/action.rs`), which caps host patterns at
+// (`crates/contracts/ironclaw_host_api/src/action.rs`), which caps host patterns at
 // 253 bytes (the DNS name length limit). A validator billed as strictly
 // stricter must not be laxer on any axis, including length — an unbounded
 // `parse_host_pattern` would let an operator-supplied env var push an

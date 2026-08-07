@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(failure.detail(), Some("HTTP 404 model not found"));
     }
 
-    /// §5a.5 (docs/plans/2026-07-03-loop-failure-matrix.md): the planned
+    /// §5a.5 (docs/internal/plans/2026-07-03-loop-failure-matrix.md): the planned
     /// driver maps an in-flight `Cancelled` executor error to
     /// `interrupted_unexpectedly`; runner sanitization must preserve that
     /// category instead of overwriting it with the generic `driver_failed`.

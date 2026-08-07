@@ -1,4 +1,4 @@
-//! The `reborn_services` module-charter map in `CLAUDE.md` is a contract, not a
+//! The `reborn_services` module-charter map in `AGENTS.md` is a contract, not a
 //! comment.
 //!
 //! `src/reborn_services.rs` plus its `reborn_services/` submodules is the
@@ -114,7 +114,7 @@ fn strip_visibility(line: &str) -> &str {
     }
 }
 
-/// Every chartable item, keyed the way `CLAUDE.md` names it: bare for
+/// Every chartable item, keyed the way `AGENTS.md` names it: bare for
 /// `reborn_services.rs`, `reborn_services/<file>.rs::<name>` for a submodule.
 fn charted_surface() -> Vec<String> {
     let dir = src_dir();
@@ -150,11 +150,11 @@ fn charted_surface() -> Vec<String> {
 /// An item listed under two sub-owners keeps both entries so the caller can
 /// report the ambiguity rather than silently taking the last one.
 fn charter_assignments() -> BTreeMap<String, Vec<String>> {
-    let doc = std::fs::read_to_string(crate_root().join("CLAUDE.md")).expect("read CLAUDE.md");
+    let doc = std::fs::read_to_string(crate_root().join("AGENTS.md")).expect("read AGENTS.md");
     let section = doc
         .split("## `reborn_services` module-charter map")
         .nth(1)
-        .expect("CLAUDE.md must contain a '## `reborn_services` module-charter map' section");
+        .expect("AGENTS.md must contain a '## `reborn_services` module-charter map' section");
     // Stop at the next top-level heading so neighbouring tables are not read.
     let section = section.split("\n## ").next().unwrap_or(section);
     parse_charter_table(section)
@@ -263,7 +263,7 @@ fn every_reborn_services_item_has_exactly_one_sub_owner() {
         .collect();
     assert!(
         unassigned.is_empty(),
-        "{} reborn_services item(s) have no sub-owner in CLAUDE.md's \
+        "{} reborn_services item(s) have no sub-owner in AGENTS.md's \
          '## `reborn_services` module-charter map'.\nAdd each to the row of the \
          concern it belongs to (see PROPOSAL §6.9.1). A helper belongs to the \
          concern whose request shape it reads, not to `dispatch`, unless more \

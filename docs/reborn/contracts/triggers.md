@@ -118,6 +118,10 @@ It is the source of truth for fire eligibility.
 Pre-submit permanent failures are handled separately by the worker: `Once`
 triggers complete on failure so the one-shot slot is retired, while exhausted
 Cron triggers stay `Scheduled`/retryable for manual investigation or removal.
+After that state transition is durably visible, the settlement observer emits
+a typed failed-fire event. Composition may hand that event to the ordinary
+outbound notification policy, but the poller never sends a message itself and
+no synthetic run or thread-history row is created.
 
 Run threads for completed triggers remain accessible by design; their history is
 retained user data and must not become unreachable when the trigger transitions
@@ -404,7 +408,7 @@ and submit-result bookkeeping:
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
   has observed a terminal turn outcome;
 - after an accepted run is durably cleared with `TriggerRunHistoryStatus::Error`,
-  `TriggerFireSettlementObserver::on_failed_fire_settled` receives the exact
+  `TriggerFireSettlementObserver::on_run_failure_settled` receives the exact
   tenant, trigger, fire-slot, and run identities. Successful terminal runs and
   clear races do not emit this failure settlement. The observer is an
   automation-health signal only; it does not mint a replacement turn or bypass
@@ -420,7 +424,9 @@ trigger turn is waiting for human interaction, the trigger remains active throug
 `active_run_ref` back-pressure. Later lifecycle/notification work must define
 durable gate expiry, stale gate rejection, reminder throttling, and user/admin
 notification paths without making the trigger poller deliver outbound messages
-directly.
+directly. A permanently failed pre-submit fire uses the same rule: notification
+starts only after durable failure settlement, carries a stable fire identity
+for idempotency, and records no `TurnRunId` because no run exists.
 
 ---
 
@@ -452,6 +458,10 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
+  Resuming a recurring trigger atomically rebases `next_run_at` to the first
+  future schedule slot, so slots elapsed during the pause are not replayed as
+  catch-up deliveries. A paused fire-once trigger retains its original slot
+  and remains eligible to fire exactly once when resumed.
 - Local-dev builds store trigger records in the local-dev libSQL database
   (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
   by production libSQL.
@@ -463,9 +473,9 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
   profile, not the interactive default. That profile's capability surface
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
-  `trigger_resume` via a host-level per-surface-profile deny decorator
-  (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_host`, composed in
-  `ironclaw_turn_runner::runtime`). Read-only `trigger_list` remains visible and
+  `trigger_resume` by subtracting them from the one resolved
+  `ironclaw_host_api::capability_surface::CapabilitySurfacePolicy` in
+  `ironclaw_turn_runner::runtime`. Read-only `trigger_list` remains visible and
   callable during a fire, so a routine can still inspect triggers. This
   prevents a fired trigger's own run from creating or mutating the trigger
   fleet — a malformed or self-referential routine prompt could otherwise

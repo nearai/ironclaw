@@ -1,0 +1,49 @@
+{
+  "model_name": "synthetic-notification-channels-set-slack-and-telegram",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Set my notification channels to my Slack DM and my Telegram DM."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_notify_targets_list",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_notify_channels_set",
+            "name": "builtin__notification_channels_set",
+            "arguments": {
+              "target_ids": ["slack:qa-trace-dm", "telegram:qa-trace-dm"]
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Your notification channels are now set to your Slack DM and your Telegram DM. NOTIFICATION_CHANNELS_SET_CANARY",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

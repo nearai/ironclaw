@@ -180,7 +180,7 @@ fn worker_with_config(
 }
 
 /// Like [`worker_with_config`] but with a custom settlement observer, so the
-/// `on_failed_fire_settled` hook (#6896) can be asserted on active-cleanup
+/// `on_run_failure_settled` hook (#6896) can be asserted on active-cleanup
 /// terminal-failure clears.
 fn worker_with_observer(
     repo: Arc<dyn TriggerRepository>,
@@ -377,6 +377,51 @@ async fn tick_notifies_settlement_observer_after_accepted_fire_persists() {
     assert_eq!(events[0].fire.identity.trigger_id, trigger_id);
     assert_eq!(events[0].fire.identity.fire_slot, fire_slot);
     assert_eq!(events[0].fire.creator_user_id, record.creator_user_id);
+}
+
+#[tokio::test]
+async fn tick_notifies_settlement_observer_after_permanent_pre_submit_failure_persists() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZV").expect("ulid");
+    let tenant_id = tenant("tenant-failed-settlement-observer");
+    let fire_slot = ts(1_704_067_200);
+    let mut record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    repo.upsert_trigger(record.clone()).await.expect("insert");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = TriggerPollerWorker::new(
+        TriggerPollerWorkerConfig::default(),
+        TriggerPollerWorkerDeps {
+            repository: repo.clone(),
+            source_provider: Arc::new(NullSourceProvider),
+            materializer: Arc::new(RecordingMaterializer::success("content:unused")),
+            trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            fire_settlement_observer: observer.clone(),
+        },
+    )
+    .expect("valid worker");
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(matches!(
+        report.results.last().map(|result| &result.outcome),
+        Some(TriggerPollerFireOutcome::OncePermanentFailed {
+            reason: TriggerPollerFailureReason::SourceNoFire,
+        })
+    ));
+    let persisted = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("load")
+        .expect("record");
+    assert_eq!(persisted.state, TriggerState::Completed);
+    let failed = observer.failed_events();
+    assert_eq!(failed.len(), 1, "one durable permanent failure settlement");
+    assert_eq!(failed[0].fire.identity.trigger_id, trigger_id);
+    assert_eq!(failed[0].fire.identity.fire_slot, fire_slot);
+    assert_eq!(failed[0].fire.creator_user_id, record.creator_user_id);
+    assert_eq!(failed[0].reason, TriggerPollerFailureReason::SourceNoFire);
 }
 
 #[tokio::test]
@@ -741,7 +786,7 @@ async fn tick_records_failed_terminal_active_run_as_error() {
 }
 
 /// A terminal-failed active fire must surface to the settlement observer's
-/// `on_failed_fire_settled` hook so automation-health telemetry can see
+/// `on_run_failure_settled` hook so automation-health telemetry can see
 /// post-accept failures (#6896). `Ok`/`Running` and already-cleared fires
 /// must NOT fire the hook.
 #[tokio::test]
@@ -773,7 +818,7 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
         report.results.last().map(|result| &result.outcome),
         Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
     );
-    let failed = observer.failed_events();
+    let failed = observer.run_failure_events();
     assert_eq!(failed.len(), 1, "exactly one failed-fire settlement");
     assert_eq!(failed[0].tenant_id, tenant("tenant-a"));
     assert_eq!(failed[0].trigger_id, trigger_id);
@@ -785,7 +830,7 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     );
 }
 
-/// A terminal-`Ok` active fire clears but must NOT fire `on_failed_fire_settled`
+/// A terminal-`Ok` active fire clears but must NOT fire `on_run_failure_settled`
 /// — the hook is failure-only.
 #[tokio::test]
 async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook() {
@@ -813,7 +858,7 @@ async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook()
     worker.tick_once(fire_slot).await.expect("tick succeeds");
 
     assert!(
-        observer.failed_events().is_empty(),
+        observer.run_failure_events().is_empty(),
         "a successful terminal fire must not fire the failure hook"
     );
 }
@@ -1236,7 +1281,7 @@ async fn tick_does_not_surface_failed_terminal_fire_when_clear_loses_race() {
         Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
     );
     assert!(
-        observer.failed_events().is_empty(),
+        observer.run_failure_events().is_empty(),
         "a lost clear race must not emit duplicate failure telemetry"
     );
 }
@@ -3070,6 +3115,7 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
     failed_events: Mutex<Vec<TriggerFailedFireSettlement>>,
+    run_failure_events: Mutex<Vec<TriggerRunFailureSettlement>>,
     visibility_assertion: Option<SettlementVisibilityAssertion>,
 }
 
@@ -3094,6 +3140,7 @@ impl RecordingSettlementObserver {
         Self {
             events: Mutex::new(Vec::new()),
             failed_events: Mutex::new(Vec::new()),
+            run_failure_events: Mutex::new(Vec::new()),
             visibility_assertion: Some(SettlementVisibilityAssertion {
                 repository,
                 tenant_id,
@@ -3113,6 +3160,13 @@ impl RecordingSettlementObserver {
         self.failed_events
             .lock()
             .expect("failed events lock")
+            .clone()
+    }
+
+    fn run_failure_events(&self) -> Vec<TriggerRunFailureSettlement> {
+        self.run_failure_events
+            .lock()
+            .expect("run failure events lock")
             .clone()
     }
 }
@@ -3150,6 +3204,13 @@ impl TriggerFireSettlementObserver for RecordingSettlementObserver {
         self.failed_events
             .lock()
             .expect("failed events lock")
+            .push(event);
+    }
+
+    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
+        self.run_failure_events
+            .lock()
+            .expect("run failure events lock")
             .push(event);
     }
 }
