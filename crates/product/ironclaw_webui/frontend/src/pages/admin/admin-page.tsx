@@ -1,6 +1,17 @@
 import { Navigate, useNavigate, useParams } from "react-router";
 import React from "react";
 import { RouteLoadBoundary } from "../../app/route-load-boundary";
+import { registerPack } from "../../lib/i18n";
+
+// Keep admin-only English copy out of the eagerly loaded /chat locale pack.
+registerPack("en", {
+  "admin.users.lastAdminRequired":
+    "At least one active administrator is required. Add or activate another administrator before changing this user.",
+  "admin.users.suspendDesc": 'This will prevent "{name}" from authenticating. Continue?',
+  "admin.users.tokenCreatedDesc": "Copy this now — it will not be shown again.",
+  "admin.users.deleteUserDesc":
+    'Are you sure you want to delete "{name}"? This action cannot be undone.',
+});
 
 const UserDetail = React.lazy(() =>
   import("./components/user-detail").then(({ UserDetail }) => ({ default: UserDetail }))
