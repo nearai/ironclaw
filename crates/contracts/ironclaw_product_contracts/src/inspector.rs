@@ -14,6 +14,17 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::descriptors::ProductView;
+
+pub const INSPECTOR_SNAPSHOT_VIEW: ProductView<DiagnosticRunRequest, serde_json::Value> =
+    ProductView::unpaginated("inspector.snapshot");
+pub const INSPECTOR_PROMPT_VIEW: ProductView<DiagnosticRunRequest, serde_json::Value> =
+    ProductView::unpaginated("inspector.prompt");
+pub const INSPECTOR_TOOL_VIEW: ProductView<DiagnosticToolRequest, serde_json::Value> =
+    ProductView::unpaginated("inspector.tool");
+pub const INSPECTOR_UPDATES_VIEW: ProductView<DiagnosticRunRequest, serde_json::Value> =
+    ProductView::unpaginated("inspector.updates");
+
 pub const PROMPT_COMPONENT_CONTENT_MAX_BYTES: usize = 64 * 1024;
 pub const PROMPT_COMPONENT_TOTAL_MAX_BYTES: usize = 256 * 1024;
 pub const RECONSTRUCTED_PROMPT_MAX_BYTES: usize = 256 * 1024;
@@ -77,6 +88,10 @@ impl DiagnosticStreamId {
     pub fn as_uuid(self) -> Uuid {
         self.0
     }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
 }
 
 impl Default for DiagnosticStreamId {
@@ -122,6 +137,39 @@ impl DiagnosticCursor {
             sequence,
         }
     }
+
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        let (stream_id, sequence) = value
+            .split_once(':')
+            .ok_or("diagnostic cursor has an invalid shape")?;
+        let stream_id = Uuid::parse_str(stream_id)
+            .map(DiagnosticStreamId::from_uuid)
+            .map_err(|_| "diagnostic cursor has an invalid stream id")?;
+        let sequence = sequence
+            .parse::<u64>()
+            .map(DiagnosticSequence::new)
+            .map_err(|_| "diagnostic cursor has an invalid sequence")?;
+        Ok(Self::new(stream_id, sequence))
+    }
+}
+
+impl std::fmt::Display for DiagnosticCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}", self.stream_id, self.sequence.as_u64())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticRunRequest {
+    pub thread_id: String,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticToolRequest {
+    pub thread_id: String,
+    pub run_id: String,
+    pub activity_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -920,6 +968,21 @@ pub struct DiagnosticSnapshot {
     pub latest_sequence: DiagnosticSequence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagnosticSnapshotResponse {
+    pub snapshot: Option<DiagnosticSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagnosticPromptResponse {
+    pub prompt: Option<PromptDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagnosticToolResponse {
+    pub tool: Option<ToolExecutionDiagnostic>,
+}
+
 #[cfg(test)]
 mod tests {
     use serde::de::DeserializeOwned;
@@ -957,6 +1020,16 @@ mod tests {
             TOOL_RESULT_MAX_BYTES / '€'.len_utf8()
         );
         assert_eq!(bounded.original_bytes(), value.len() as u64);
+    }
+
+    #[test]
+    fn cursor_round_trips_through_the_opaque_wire_token() {
+        let cursor = DiagnosticCursor::new(
+            DiagnosticStreamId::from_uuid(Uuid::nil()),
+            DiagnosticSequence::new(42),
+        );
+        assert_eq!(DiagnosticCursor::parse(&cursor.to_string()), Ok(cursor));
+        assert!(DiagnosticCursor::parse("not-a-cursor").is_err());
     }
 
     #[test]

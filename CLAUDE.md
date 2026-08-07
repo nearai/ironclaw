@@ -179,6 +179,10 @@ graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
 `ironclaw` in `crates/app/ironclaw_cli`).
 
+`docs/` is the public Mintlify site; new internal engineering docs go only
+under `docs/internal/` (the `docs/.mintignore` fence is frozen — enforced by
+`scripts/ci/docs_publication_boundary.py` in the Code Style workflow).
+
 ```
 crates/                     # all production code, grouped by family (see crates/AGENTS.md for the full map)
 ├── app/                    # ironclaw_cli (binary `ironclaw`), ironclaw_composition, ironclaw_config, ironclaw_architecture_tests
