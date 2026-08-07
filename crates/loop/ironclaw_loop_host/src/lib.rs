@@ -16,6 +16,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 mod await_edge_port;
 mod budget_accountant;
@@ -195,6 +196,7 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, RunId};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -1412,12 +1414,22 @@ where
         // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
 
+        let diagnostic_requested_model = self.prompt_diagnostic_sink.as_ref().map(|_| {
+            requested_model_profile_id
+                .as_ref()
+                .unwrap_or(&model_profile_id)
+                .as_str()
+                .to_string()
+        });
+        let diagnostic_initial_effective_model =
+            self.prompt_diagnostic_sink.as_ref().and_then(|_| {
+                self.gateway.diagnostic_effective_model(
+                    &model_profile_id,
+                    request.fallback_index,
+                    self.run_context.resolved_model_route.as_ref(),
+                )
+            });
         if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
-            let effective_model = self.gateway.diagnostic_effective_model(
-                &model_profile_id,
-                request.fallback_index,
-                self.run_context.resolved_model_route.as_ref(),
-            );
             let capability_ids = if let Some(view) = request.capability_view.as_ref() {
                 view.visible_capability_ids.clone()
             } else if let Some(capabilities) = self.capabilities.as_ref() {
@@ -1454,12 +1466,37 @@ where
                 active_skills: prompt_grant.diagnostic_metadata.active_skills,
                 capability_ids,
                 requested_model: requested_model_profile_id.clone(),
-                effective_model,
+                effective_model: diagnostic_initial_effective_model.clone(),
                 context_limit: self.prompt_context_budget.context_limit_tokens,
             });
         }
 
+        let diagnostic_model = diagnostic_requested_model.as_ref().map(|requested_model| {
+            let effective_model = diagnostic_initial_effective_model
+                .as_ref()
+                .map(|model| model.as_str().to_string());
+            (requested_model.clone(), effective_model)
+        });
+        let diagnostic_started_at = Utc::now();
+        let diagnostic_call_id = diagnostic_model.as_ref().map(|_| Uuid::new_v4());
+        if let (Some(sink), Some((requested_model, effective_model)), Some(call_id)) = (
+            self.prompt_diagnostic_sink.as_ref(),
+            diagnostic_model.as_ref(),
+            diagnostic_call_id,
+        ) {
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture::Started(
+                HostManagedModelCallDiagnostic {
+                    call_id,
+                    context: self.run_context.clone(),
+                    iteration: request.iteration,
+                    requested_model: requested_model.clone(),
+                    effective_model: effective_model.clone(),
+                    started_at: diagnostic_started_at,
+                },
+            ));
+        }
         self.emit_model_started(requested_model_profile_id).await;
+        let diagnostic_timer = Instant::now();
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
             fallback_index: request.fallback_index,
@@ -1500,6 +1537,16 @@ where
             self.gateway.stream_model(host_request).await
         };
 
+        let diagnostic_effective_model = match &gateway_result {
+            Ok(response) => response
+                .diagnostic_effective_model
+                .as_ref()
+                .map(|model| model.as_str().to_string()),
+            Err(error) => error
+                .diagnostic_effective_model
+                .as_ref()
+                .map(|model| model.as_str().to_string()),
+        };
         let host_response_result = match gateway_result {
             Ok(response) => {
                 let HostManagedModelResponse {
@@ -1508,12 +1555,17 @@ where
                     output,
                     usage,
                     effective_fallback_index,
+                    diagnostic_effective_model: _,
                 } = response;
                 if effective_fallback_index != Some(request.fallback_index) {
-                    Err(AgentLoopHostError::new(
+                    let error = AgentLoopHostError::new(
                         AgentLoopHostErrorKind::Internal,
                         "model gateway returned mismatched fallback route evidence",
-                    ))
+                    );
+                    Err(match usage {
+                        Some(usage) => error.with_usage(usage),
+                        None => error,
+                    })
                 } else {
                     let chunks = safe_text_deltas
                         .into_iter()
@@ -1533,6 +1585,45 @@ where
             }
             Err(error) => Err(model_gateway_error(error)),
         };
+
+        if let (Some(sink), Some((requested_model, _)), Some(call_id)) = (
+            self.prompt_diagnostic_sink.as_ref(),
+            diagnostic_model.as_ref(),
+            diagnostic_call_id,
+        ) {
+            let outcome = match &host_response_result {
+                Ok(response) => HostManagedModelCallDiagnosticOutcome::Succeeded {
+                    usage: diagnostic_usage(response.usage),
+                },
+                Err(error) => HostManagedModelCallDiagnosticOutcome::Failed {
+                    usage: diagnostic_usage(error.usage),
+                    failure_summary: error.safe_summary.as_str().to_string(),
+                },
+            };
+            let effective_model = diagnostic_effective_model.or_else(|| {
+                self.gateway
+                    .diagnostic_effective_model(
+                        &model_profile_id,
+                        request.fallback_index,
+                        self.run_context.resolved_model_route.as_ref(),
+                    )
+                    .map(ProviderModelId::into_inner)
+            });
+            sink.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
+                diagnostic: HostManagedModelCallDiagnostic {
+                    call_id,
+                    context: self.run_context.clone(),
+                    iteration: request.iteration,
+                    requested_model: requested_model.clone(),
+                    effective_model,
+                    started_at: diagnostic_started_at,
+                },
+                completed_at: Utc::now(),
+                duration_ms: u64::try_from(diagnostic_timer.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                outcome,
+            });
+        }
 
         match host_response_result {
             Ok(response) => {
@@ -1942,6 +2033,8 @@ pub trait HostManagedModelStreamSink: Send + Sync {
 /// product events and apply their own authorization, redaction, and bounds.
 pub trait HostManagedPromptDiagnosticSink: Send + Sync {
     fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture);
+
+    fn record_model_call(&self, _capture: HostManagedModelCallDiagnosticCapture) {}
 }
 
 /// Validated concrete provider model identifier used only for diagnostics.
@@ -1986,13 +2079,19 @@ impl fmt::Display for ProviderModelId {
 
 /// Bounded, non-blocking decorator for best-effort prompt diagnostics.
 ///
-/// Captures are dropped when the worker cannot keep up so diagnostic work
-/// never adds backpressure to the provider request path.
+/// Prompt and model-call captures share one ordered queue. Captures are dropped
+/// when the worker cannot keep up so diagnostic work never adds backpressure to
+/// the provider request path.
 pub struct BufferedPromptDiagnosticSink {
-    sender: tokio::sync::mpsc::Sender<HostManagedPromptDiagnosticCapture>,
+    sender: tokio::sync::mpsc::Sender<BufferedDiagnosticCapture>,
 }
 
 pub const DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY: usize = 8;
+
+enum BufferedDiagnosticCapture {
+    Prompt(HostManagedPromptDiagnosticCapture),
+    ModelCall(HostManagedModelCallDiagnosticCapture),
+}
 
 impl BufferedPromptDiagnosticSink {
     pub fn new(
@@ -2008,20 +2107,22 @@ impl BufferedPromptDiagnosticSink {
         runtime.spawn(async move {
             while let Some(capture) = receiver.recv().await {
                 let sink = Arc::clone(&inner);
-                if let Err(error) =
-                    tokio::task::spawn_blocking(move || sink.record_prompt(capture)).await
+                if let Err(error) = tokio::task::spawn_blocking(move || match capture {
+                    BufferedDiagnosticCapture::Prompt(capture) => sink.record_prompt(capture),
+                    BufferedDiagnosticCapture::ModelCall(capture) => {
+                        sink.record_model_call(capture);
+                    }
+                })
+                .await
                 {
-                    tracing::debug!(%error, "prompt diagnostic worker failed");
+                    tracing::debug!(%error, "diagnostic worker failed");
                 }
             }
         });
         Ok(Self { sender })
     }
-}
 
-impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
-    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
-        let run_id = capture.context.run_id;
+    fn enqueue(&self, run_id: TurnRunId, capture: BufferedDiagnosticCapture) {
         if let Err(error) = self.sender.try_send(capture) {
             let queue_state = match error {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => "full",
@@ -2030,9 +2131,21 @@ impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
             tracing::debug!(
                 %run_id,
                 queue_state,
-                "dropping best-effort prompt diagnostic capture"
+                "dropping best-effort diagnostic capture"
             );
         }
+    }
+}
+
+impl HostManagedPromptDiagnosticSink for BufferedPromptDiagnosticSink {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
+        let run_id = capture.context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::Prompt(capture));
+    }
+
+    fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
+        let run_id = capture.diagnostic().context.run_id;
+        self.enqueue(run_id, BufferedDiagnosticCapture::ModelCall(capture));
     }
 }
 
@@ -2054,6 +2167,55 @@ pub struct HostManagedPromptDiagnosticMessage {
     pub role: HostManagedModelMessageRole,
     pub content_ref: LoopMessageRef,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostManagedModelCallDiagnostic {
+    pub call_id: Uuid,
+    pub context: LoopRunContext,
+    pub iteration: u32,
+    pub requested_model: String,
+    pub effective_model: Option<String>,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HostManagedModelCallDiagnosticOutcome {
+    Succeeded {
+        usage: Option<LoopModelUsage>,
+    },
+    Failed {
+        usage: Option<LoopModelUsage>,
+        failure_summary: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum HostManagedModelCallDiagnosticCapture {
+    Started(HostManagedModelCallDiagnostic),
+    Completed {
+        diagnostic: HostManagedModelCallDiagnostic,
+        completed_at: DateTime<Utc>,
+        duration_ms: u64,
+        outcome: HostManagedModelCallDiagnosticOutcome,
+    },
+}
+
+impl HostManagedModelCallDiagnosticCapture {
+    pub fn diagnostic(&self) -> &HostManagedModelCallDiagnostic {
+        match self {
+            Self::Started(diagnostic) | Self::Completed { diagnostic, .. } => diagnostic,
+        }
+    }
+}
+
+fn diagnostic_usage(usage: Option<LoopModelUsage>) -> Option<LoopModelUsage> {
+    usage.filter(|usage| {
+        usage.input_tokens > 0
+            || usage.output_tokens > 0
+            || usage.cache_read_input_tokens > 0
+            || usage.cache_creation_input_tokens > 0
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2188,6 +2350,10 @@ pub struct HostManagedModelResponse {
     /// Authoritative ordered-chain index used for this successful call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_fallback_index: Option<u32>,
+    /// Concrete provider model that handled this call. This is runtime
+    /// diagnostic evidence, not an authority or routing input.
+    #[serde(skip)]
+    pub diagnostic_effective_model: Option<Arc<String>>,
 }
 
 impl HostManagedModelResponse {
@@ -2202,6 +2368,7 @@ impl HostManagedModelResponse {
             }),
             usage: None,
             effective_fallback_index: Some(0),
+            diagnostic_effective_model: None,
         }
     }
 
@@ -2229,6 +2396,7 @@ impl HostManagedModelResponse {
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
             effective_fallback_index: Some(0),
+            diagnostic_effective_model: None,
         }
     }
 
@@ -2251,6 +2419,11 @@ impl HostManagedModelResponse {
 
     pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
         self.effective_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_diagnostic_effective_model(mut self, model: impl Into<String>) -> Self {
+        self.diagnostic_effective_model = Some(Arc::new(model.into()));
         self
     }
 }
@@ -2309,7 +2482,7 @@ pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
-    pub gate_ref: Option<LoopGateRef>,
+    pub gate_ref: Option<Box<LoopGateRef>>,
     /// Provider-supplied retry delay. Typed so the recovery strategy does not
     /// have to parse model-visible detail text.
     pub retry_after_ms: Option<u64>,
@@ -2318,6 +2491,9 @@ pub struct HostManagedModelError {
     pub next_fallback_index: Option<u32>,
     /// Provider-reported usage for a call that consumed tokens before failing.
     pub usage: Option<LoopModelUsage>,
+    /// Concrete provider model that handled this failed call. This is runtime
+    /// diagnostic evidence, not an authority or routing input.
+    pub diagnostic_effective_model: Option<Arc<String>>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -2337,6 +2513,7 @@ impl HostManagedModelError {
             retry_after_ms: None,
             next_fallback_index: None,
             usage: None,
+            diagnostic_effective_model: None,
             detail: None,
         }
     }
@@ -2350,6 +2527,7 @@ impl HostManagedModelError {
             retry_after_ms: None,
             next_fallback_index: None,
             usage: None,
+            diagnostic_effective_model: None,
             detail: None,
         }
     }
@@ -2378,7 +2556,7 @@ impl HostManagedModelError {
     }
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
-        self.gate_ref = Some(gate_ref);
+        self.gate_ref = Some(Box::new(gate_ref));
         self
     }
 
@@ -2400,6 +2578,11 @@ impl HostManagedModelError {
 
     pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_diagnostic_effective_model(mut self, model: impl Into<String>) -> Self {
+        self.diagnostic_effective_model = Some(Arc::new(model.into()));
         self
     }
 }
@@ -2791,7 +2974,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
         host_error = host_error.with_reason_kind(reason_kind);
     }
     if let Some(gate_ref) = error.gate_ref {
-        host_error = host_error.with_gate_ref(gate_ref);
+        host_error = host_error.with_gate_ref(*gate_ref);
     }
     if let Some(retry_after_ms) = error.retry_after_ms {
         host_error = host_error.with_retry_after_ms(retry_after_ms);
@@ -2880,6 +3063,7 @@ mod tests {
 
     struct BlockingPromptDiagnosticSink {
         calls: std::sync::atomic::AtomicUsize,
+        model_calls: std::sync::atomic::AtomicUsize,
         first_started: tokio::sync::Notify,
         release_first: (std::sync::Mutex<bool>, std::sync::Condvar),
     }
@@ -2888,6 +3072,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                model_calls: std::sync::atomic::AtomicUsize::new(0),
                 first_started: tokio::sync::Notify::new(),
                 release_first: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
             }
@@ -2911,6 +3096,10 @@ mod tests {
                     released = condvar.wait(released).expect("release wait");
                 }
             }
+        }
+
+        fn record_model_call(&self, _capture: HostManagedModelCallDiagnosticCapture) {
+            self.model_calls.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2978,6 +3167,40 @@ mod tests {
         .await
         .expect("queued capture drains");
         assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn buffered_prompt_diagnostics_forward_model_calls() {
+        let inner = Arc::new(BlockingPromptDiagnosticSink::new());
+        let buffered = BufferedPromptDiagnosticSink::new(
+            inner.clone() as Arc<dyn HostManagedPromptDiagnosticSink>,
+            1,
+        )
+        .expect("buffered sink");
+        let context = prompt_diagnostic_capture_for_test().context;
+        let now = Utc::now();
+
+        buffered.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
+            diagnostic: HostManagedModelCallDiagnostic {
+                call_id: Uuid::new_v4(),
+                context,
+                iteration: 1,
+                requested_model: "interactive_model".to_string(),
+                effective_model: Some("provider-model".to_string()),
+                started_at: now,
+            },
+            completed_at: now,
+            duration_ms: 1,
+            outcome: HostManagedModelCallDiagnosticOutcome::Succeeded { usage: None },
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while inner.model_calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("model-call capture drains");
     }
 
     #[test]

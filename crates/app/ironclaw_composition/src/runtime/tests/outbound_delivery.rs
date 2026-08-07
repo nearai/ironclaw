@@ -9,6 +9,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    ToolDisclosureMode,
 };
 use ironclaw_threads::{MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::TurnStatus;
@@ -134,6 +135,7 @@ async fn production_reply_attachment_capability_registers_durable_run_intent() {
             "runtime-reply-attachment-owner",
             root.path().join("standalone"),
         ))
+        .with_tool_disclosure(ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-reply-attachment-tenant".to_string(),
             agent_id: "runtime-reply-attachment-agent".to_string(),

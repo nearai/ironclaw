@@ -26,27 +26,30 @@ use ironclaw_loop_contracts::{
     LoopContextBundle, LoopContextCompactionKind, LoopContextMessage, LoopContextPort,
     LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind,
     LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView,
-    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
-    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort, ModelProfileId,
-    ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PersonalContextPolicy,
-    PromptMode, PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
-    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillName,
-    SkillTrustLevel, SkillVisibility, ToolObservationDetail, ToolObservationStatus,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopModelUsage,
+    LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort,
+    ModelProfileId, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
+    PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
+    ProviderToolCallReplay, ProviderToolDefinition, RunProfileResolutionRequest,
+    RunProfileResolver, SkillName, SkillTrustLevel, SkillVisibility, ToolObservationDetail,
+    ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostManagedPromptDiagnosticCapture,
-    HostManagedPromptDiagnosticSink, HostManagedToolResultContent, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
-    IdentityFileName, LoopAttachmentReadError, LoopAttachmentReadPort, PromptContextTokenBudget,
-    ProviderModelId, SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId,
-    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
-    ThreadContextWindowCache, build_skill_run_snapshot, identity_message_ref,
+    HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelCallDiagnostic,
+    HostManagedModelCallDiagnosticCapture, HostManagedModelCallDiagnosticOutcome,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedPromptDiagnosticCapture, HostManagedPromptDiagnosticSink,
+    HostManagedToolResultContent, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, IdentityApplicability, IdentityBudget, IdentityFileName,
+    LoopAttachmentReadError, LoopAttachmentReadPort, PromptContextTokenBudget, ProviderModelId,
+    SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_outbound::{
     OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
@@ -213,6 +216,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -227,7 +231,16 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
 #[tokio::test]
 async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boundary() {
     let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
-    let gateway = Arc::new(RecordingGateway::reply_with_fallback("model says hi", 2));
+    let gateway = Arc::new(RecordingGateway::reply_with_usage_and_fallback(
+        "model says hi",
+        LoopModelUsage {
+            input_tokens: 21,
+            output_tokens: 8,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 3,
+        },
+        2,
+    ));
     let sink = Arc::new(RecordingPromptDiagnosticSink::default());
     let messages = user_model_messages(&fixture);
     let bundle = LoopPromptBundle {
@@ -267,6 +280,7 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         surface_version: None,
         model_preference: None,
         fallback_index: 2,
+        iteration: 7,
         capability_view: Some(LoopModelCapabilityView {
             visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
         }),
@@ -288,6 +302,167 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         Some("fallback-provider-model")
     );
     assert_eq!(captures[0].context_limit, 64_000);
+    drop(captures);
+    let model_calls = sink.model_calls.lock().expect("model calls");
+    assert_eq!(model_calls.len(), 2);
+    let started = model_call_diagnostic(&model_calls[0]);
+    let completed = model_call_diagnostic(&model_calls[1]);
+    assert!(matches!(
+        model_calls[0],
+        HostManagedModelCallDiagnosticCapture::Started(_)
+    ));
+    assert_eq!(started.call_id, completed.call_id);
+    assert_eq!(completed.iteration, 7);
+    assert_eq!(completed.requested_model, "interactive_model");
+    assert_eq!(
+        completed.effective_model.as_deref(),
+        Some("provider-model-from-response")
+    );
+    let Some(HostManagedModelCallDiagnosticOutcome::Succeeded { usage }) =
+        model_call_outcome(&model_calls[1])
+    else {
+        panic!("completed model call should succeed");
+    };
+    assert_eq!(usage.as_ref().map(|usage| usage.input_tokens), Some(21));
+}
+
+#[tokio::test]
+async fn model_port_keeps_effective_model_unavailable_without_provider_evidence() {
+    let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
+    let gateway = Arc::new(MissingDiagnosticModelGateway);
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 2,
+        iteration: 7,
+        capability_view: None,
+    })
+    .await
+    .expect("model response");
+
+    let model_calls = sink.model_calls.lock().expect("model calls");
+    assert_eq!(model_calls.len(), 2);
+    let started = model_call_diagnostic(&model_calls[0]);
+    let completed = model_call_diagnostic(&model_calls[1]);
+    assert_eq!(started.call_id, completed.call_id);
+    assert_eq!(completed.requested_model, "interactive_model");
+    assert_eq!(started.effective_model, None);
+    assert_eq!(completed.effective_model, None);
+}
+
+#[tokio::test]
+async fn model_port_retains_usage_reported_by_failed_calls() {
+    let fixture = ThreadFixture::new_with_user_content("failed diagnostic prompt").await;
+    let usage = LoopModelUsage {
+        input_tokens: 34,
+        output_tokens: 2,
+        cache_read_input_tokens: 8,
+        cache_creation_input_tokens: 1,
+    };
+    let gateway = Arc::new(RecordingGateway::model_error_with_usage(
+        HostManagedModelErrorKind::ProviderUnavailable,
+        "model provider unavailable",
+        usage,
+    ));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        iteration: 0,
+        capability_view: None,
+    })
+    .await
+    .expect_err("model call fails");
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+
+    let model_calls = sink.model_calls.lock().expect("model calls");
+    assert_eq!(model_calls.len(), 2);
+    let started = model_call_diagnostic(&model_calls[0]);
+    let completed = model_call_diagnostic(&model_calls[1]);
+    assert_eq!(started.call_id, completed.call_id);
+    let Some(HostManagedModelCallDiagnosticOutcome::Failed {
+        usage: completed_usage,
+        failure_summary,
+    }) = model_call_outcome(&model_calls[1])
+    else {
+        panic!("completed model call should fail");
+    };
+    assert_eq!(*completed_usage, Some(usage));
+    assert_eq!(
+        completed.effective_model.as_deref(),
+        Some("provider-model-from-error")
+    );
+    assert_eq!(failure_summary, "model provider unavailable");
+}
+
+#[tokio::test]
+async fn model_port_keeps_omitted_usage_unavailable() {
+    let fixture = ThreadFixture::new_with_user_content("usage unavailable prompt").await;
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        iteration: 0,
+        capability_view: None,
+    })
+    .await
+    .expect("model call succeeds");
+
+    let model_calls = sink.model_calls.lock().expect("model calls");
+    assert_eq!(model_calls.len(), 2);
+    assert_eq!(
+        model_call_diagnostic(&model_calls[0]).call_id,
+        model_call_diagnostic(&model_calls[1]).call_id
+    );
+    let Some(HostManagedModelCallDiagnosticOutcome::Succeeded { usage }) =
+        model_call_outcome(&model_calls[1])
+    else {
+        panic!("completed model call should succeed");
+    };
+    assert_eq!(*usage, None);
 }
 
 #[tokio::test]
@@ -316,6 +491,7 @@ async fn model_port_records_full_capability_surface_when_request_has_no_view() {
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -358,6 +534,7 @@ async fn model_port_continues_when_diagnostic_capability_lookup_fails() {
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -429,6 +606,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -484,6 +662,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -578,6 +757,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -1500,6 +1680,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -1541,6 +1722,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1584,6 +1766,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -1629,6 +1812,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1901,6 +2085,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -2004,6 +2189,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -2093,6 +2279,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -2141,6 +2328,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -2342,6 +2530,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -2411,6 +2600,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3788,6 +3978,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3834,6 +4025,7 @@ async fn model_port_rejects_mismatched_fallback_route_evidence() {
             surface_version: None,
             model_preference: None,
             fallback_index: 2,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3880,6 +4072,7 @@ async fn model_port_rejects_missing_fallback_route_evidence() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3916,6 +4109,7 @@ async fn model_port_accepts_matching_fallback_route_evidence() {
             surface_version: None,
             model_preference: None,
             fallback_index: 2,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4006,6 +4200,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -4055,6 +4250,7 @@ async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
         model_preference: None,
         capability_view: None,
         fallback_index: 0,
+        iteration: 0,
     })
     .await
     .unwrap();
@@ -4112,6 +4308,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -4157,6 +4354,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -4229,6 +4427,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         surface_version: None,
         model_preference: None,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     })
     .await
@@ -4352,6 +4551,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4403,6 +4603,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4447,6 +4648,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4491,6 +4693,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
                     .clone(),
             ),
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4550,6 +4753,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4609,6 +4813,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4651,6 +4856,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4691,6 +4897,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4721,6 +4928,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4757,6 +4965,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -4817,6 +5026,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -5997,14 +6207,52 @@ struct RecordingGateway {
     response: Result<HostManagedModelResponse, HostManagedModelError>,
 }
 
+struct MissingDiagnosticModelGateway;
+
+#[async_trait]
+impl HostManagedModelGateway for MissingDiagnosticModelGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(
+            HostManagedModelResponse::assistant_reply("model says hi".to_string())
+                .with_effective_fallback_index(request.fallback_index),
+        )
+    }
+}
+
 #[derive(Default)]
 struct RecordingPromptDiagnosticSink {
     captures: Mutex<Vec<HostManagedPromptDiagnosticCapture>>,
+    model_calls: Mutex<Vec<HostManagedModelCallDiagnosticCapture>>,
+}
+
+fn model_call_diagnostic(
+    capture: &HostManagedModelCallDiagnosticCapture,
+) -> &HostManagedModelCallDiagnostic {
+    match capture {
+        HostManagedModelCallDiagnosticCapture::Started(diagnostic)
+        | HostManagedModelCallDiagnosticCapture::Completed { diagnostic, .. } => diagnostic,
+    }
+}
+
+fn model_call_outcome(
+    capture: &HostManagedModelCallDiagnosticCapture,
+) -> Option<&HostManagedModelCallDiagnosticOutcome> {
+    match capture {
+        HostManagedModelCallDiagnosticCapture::Started(_) => None,
+        HostManagedModelCallDiagnosticCapture::Completed { outcome, .. } => Some(outcome),
+    }
 }
 
 impl HostManagedPromptDiagnosticSink for RecordingPromptDiagnosticSink {
     fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
         self.captures.lock().expect("captures").push(capture);
+    }
+
+    fn record_model_call(&self, capture: HostManagedModelCallDiagnosticCapture) {
+        self.model_calls.lock().expect("model calls").push(capture);
     }
 }
 
@@ -6016,6 +6264,23 @@ impl RecordingGateway {
             response: Ok(HostManagedModelResponse::assistant_reply(
                 content.to_string(),
             )),
+        }
+    }
+
+    fn reply_with_usage_and_fallback(
+        content: &str,
+        usage: LoopModelUsage,
+        fallback_index: u32,
+    ) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(
+                HostManagedModelResponse::assistant_reply(content.to_string())
+                    .with_usage(usage)
+                    .with_effective_fallback_index(fallback_index)
+                    .with_diagnostic_effective_model("provider-model-from-response"),
+            ),
         }
     }
 
@@ -6067,6 +6332,20 @@ impl RecordingGateway {
             calls: Mutex::new(Vec::new()),
             tool_definition_calls: Mutex::new(Vec::new()),
             response: Err(HostManagedModelError::safe(kind, safe_summary)),
+        }
+    }
+
+    fn model_error_with_usage(
+        kind: HostManagedModelErrorKind,
+        safe_summary: &str,
+        usage: LoopModelUsage,
+    ) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)
+                .with_usage(usage)
+                .with_diagnostic_effective_model("provider-model-from-error")),
         }
     }
 

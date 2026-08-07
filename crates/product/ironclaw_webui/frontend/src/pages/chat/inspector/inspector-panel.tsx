@@ -1,6 +1,12 @@
 import React from "react";
 
 import { cn } from "../../../utils/cn";
+import { ActivityKind } from "./activity-kind";
+import {
+  reduceInspectorActivity,
+  rememberInspectorRun,
+  type InspectorActivityRow,
+} from "./inspector-activity";
 import {
   INSPECTOR_HEALTH,
   INSPECTOR_TABS,
@@ -213,53 +219,249 @@ function PromptShell({
 
 function ActivityShell({
   snapshot,
-  updateCount,
+  updates,
+  runHistory,
+  selectedRunId,
+  onSelectRun,
 }: {
   snapshot: Record<string, unknown> | null;
-  updateCount: number;
+  updates: Array<Record<string, unknown>>;
+  runHistory: string[];
+  selectedRunId: string | null;
+  onSelectRun: (runId: string) => void;
 }) {
-  const retained = Array.isArray(snapshot?.activity) ? snapshot.activity.length : 0;
-  if (retained === 0 && updateCount === 0) {
+  const activity = React.useMemo(
+    () => reduceInspectorActivity(snapshot, updates),
+    [snapshot, updates],
+  );
+  const requestedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
+  const selectedIndex = requestedIndex >= 0 ? requestedIndex : runHistory.length > 0 ? 0 : -1;
+  const previousRun = selectedIndex > 0 ? runHistory[selectedIndex - 1] : null;
+  const nextRun = selectedIndex >= 0 && selectedIndex < runHistory.length - 1
+    ? runHistory[selectedIndex + 1]
+    : null;
+  if (activity.length === 0) {
     return (
-      <EmptyTab
-        title="No activity yet"
-        description="Ordered model and tool activity will appear here as the run progresses."
-      />
+      <div>
+        <TurnNavigation
+          runHistory={runHistory}
+          selectedIndex={selectedIndex}
+          previousRun={previousRun}
+          nextRun={nextRun}
+          onSelectRun={onSelectRun}
+        />
+        <EmptyTab
+          title="No activity yet"
+          description="Ordered model and tool activity will appear here as the run progresses."
+        />
+      </div>
     );
   }
   return (
-    <div className="space-y-3 p-4">
-      <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
-        <p className="text-xs uppercase tracking-wide text-[var(--v2-text-faint)]">Activity</p>
-        <p className="mt-1 text-sm text-[var(--v2-text-strong)]">
-          {retained} retained · {updateCount} live updates
-        </p>
+    <div className="space-y-3 p-4" data-testid="inspector-activity-content">
+      <TurnNavigation
+        runHistory={runHistory}
+        selectedIndex={selectedIndex}
+        previousRun={previousRun}
+        nextRun={nextRun}
+        onSelectRun={onSelectRun}
+      />
+      <ol className="space-y-2" aria-label="Run activity timeline">
+        {activity.map((entry) => <ActivityEntry key={entry.key} entry={entry} />)}
+      </ol>
+    </div>
+  );
+}
+
+function TurnNavigation({
+  runHistory,
+  selectedIndex,
+  previousRun,
+  nextRun,
+  onSelectRun,
+}: {
+  runHistory: string[];
+  selectedIndex: number;
+  previousRun: string | null;
+  nextRun: string | null;
+  onSelectRun: (runId: string) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
+      <button
+        type="button"
+        aria-label="Previous turn"
+        disabled={!previousRun}
+        onClick={() => previousRun && onSelectRun(previousRun)}
+        className="rounded px-2 py-1 text-xs disabled:opacity-40"
+      >
+        ← Previous
+      </button>
+      <p className="text-center text-xs text-[var(--v2-text-muted)]">
+        Turn {selectedIndex >= 0 ? selectedIndex + 1 : 0} of {runHistory.length}
+      </p>
+      <button
+        type="button"
+        aria-label="Next turn"
+        disabled={!nextRun}
+        onClick={() => nextRun && onSelectRun(nextRun)}
+        className="rounded px-2 py-1 text-xs disabled:opacity-40"
+      >
+        Next →
+      </button>
+    </div>
+  );
+}
+
+const ACTIVITY_LABELS: Record<ActivityKind, string> = {
+  [ActivityKind.TurnStarted]: "Turn started",
+  [ActivityKind.PromptPrepared]: "Prompt prepared",
+  [ActivityKind.ModelCallStarted]: "Model call started",
+  [ActivityKind.ModelCallCompleted]: "Model call completed",
+  [ActivityKind.ModelCallFailed]: "Model call failed",
+  [ActivityKind.Progress]: "Progress",
+  [ActivityKind.ToolStarted]: "Tool started",
+  [ActivityKind.ToolCompleted]: "Tool completed",
+  [ActivityKind.ToolFailed]: "Tool failed",
+  [ActivityKind.GateBlocked]: "Gate blocked",
+  [ActivityKind.FinalResponseCompleted]: "Final response completed",
+  [ActivityKind.StreamDisconnected]: "Stream disconnected",
+  [ActivityKind.StreamResumed]: "Stream resumed",
+};
+
+function shortId(value: string | null): string | null {
+  return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
+}
+
+function ActivityEntry({ entry }: { entry: InspectorActivityRow }) {
+  const failed = entry.kind === ActivityKind.ModelCallFailed
+    || entry.kind === ActivityKind.ToolFailed
+    || entry.kind === ActivityKind.GateBlocked;
+  const correlation = shortId(entry.activity_id || entry.model_call_id);
+  const timestamp = new Date(entry.occurred_at);
+  return (
+    <li className="rounded-xl border border-[var(--v2-panel-border)] p-3" data-activity-kind={entry.kind}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-[var(--v2-text-strong)]">
+            {ACTIVITY_LABELS[entry.kind] || entry.kind.replaceAll("_", " ")}
+          </p>
+          {entry.summary?.content && (
+            <p className="mt-1 break-words text-xs text-[var(--v2-text-muted)]">
+              {entry.summary.content}{entry.summary.truncated ? "…" : ""}
+            </p>
+          )}
+        </div>
+        <span className={cn(
+          "shrink-0 rounded-full px-2 py-0.5 text-[10px]",
+          failed
+            ? "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
+            : entry.pending
+              ? "bg-[var(--v2-surface-soft)] text-[var(--v2-warning-text)]"
+              : "bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]",
+        )}>
+          {failed ? "Failed" : entry.pending ? "Pending" : "Recorded"}
+        </span>
       </div>
+      <p className="mt-2 font-mono text-[10px] text-[var(--v2-text-faint)]">
+        {Number.isNaN(timestamp.getTime()) ? entry.occurred_at : timestamp.toLocaleTimeString()}
+        {entry.iteration != null ? ` · iteration ${entry.iteration}` : ""}
+        {correlation ? ` · ${correlation}` : ""}
+      </p>
+    </li>
+  );
+}
+
+interface DiagnosticMetricTotal {
+  known_total: number;
+  unavailable_samples: number;
+}
+
+interface SessionDiagnosticStats {
+  total_model_calls: number;
+  calls_per_model: Array<{ model: BoundedDiagnosticText; calls: number }>;
+  calls_per_model_truncated: boolean;
+  input_tokens: DiagnosticMetricTotal;
+  output_tokens: DiagnosticMetricTotal;
+  cache_read_input_tokens: DiagnosticMetricTotal;
+  cache_creation_input_tokens: DiagnosticMetricTotal;
+  total_latency_ms: DiagnosticMetricTotal;
+}
+
+function metricValue(
+  metric: DiagnosticMetricTotal,
+  sampleCount: number,
+  suffix = "",
+): string {
+  if (sampleCount > 0 && metric.unavailable_samples >= sampleCount) return "Unavailable";
+  return `${metric.known_total.toLocaleString()}${suffix}`;
+}
+
+function MetricCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
+      <p className="text-xs text-[var(--v2-text-muted)]">{label}</p>
+      <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">{value}</p>
     </div>
   );
 }
 
 function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) {
-  const stats = snapshot?.stats as { total_model_calls?: unknown } | undefined;
+  const stats = snapshot?.stats as SessionDiagnosticStats | undefined;
   if (!stats) {
     return (
       <EmptyTab
         title="No statistics yet"
-        description="Session totals will appear after the run records model or tool activity."
+        description="Session totals will appear after the run records model activity."
       />
     );
   }
-  const totalCalls = typeof stats.total_model_calls === "number" ? stats.total_model_calls : 0;
+  const knownLatencySamples = Math.max(
+    0,
+    stats.total_model_calls - stats.total_latency_ms.unavailable_samples,
+  );
+  const averageLatency = knownLatencySamples > 0
+    ? `${Math.round(stats.total_latency_ms.known_total / knownLatencySamples).toLocaleString()} ms`
+    : "Unavailable";
+  const partialMetricCount = [
+    stats.input_tokens,
+    stats.output_tokens,
+    stats.cache_read_input_tokens,
+    stats.cache_creation_input_tokens,
+    stats.total_latency_ms,
+  ].reduce((total, metric) => total + metric.unavailable_samples, 0);
   return (
-    <div className="grid grid-cols-2 gap-3 p-4">
-      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-        <p className="text-xs text-[var(--v2-text-muted)]">Model calls</p>
-        <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">{totalCalls}</p>
+    <div className="space-y-4 p-4" data-testid="inspector-stats-content">
+      <div className="grid grid-cols-2 gap-3">
+        <MetricCard label="Model calls" value={stats.total_model_calls.toLocaleString()} />
+        <MetricCard label="Average latency" value={averageLatency} />
+        <MetricCard label="Input tokens" value={metricValue(stats.input_tokens, stats.total_model_calls)} />
+        <MetricCard label="Output tokens" value={metricValue(stats.output_tokens, stats.total_model_calls)} />
+        <MetricCard label="Cache-read tokens" value={metricValue(stats.cache_read_input_tokens, stats.total_model_calls)} />
+        <MetricCard label="Cache-created tokens" value={metricValue(stats.cache_creation_input_tokens, stats.total_model_calls)} />
+        <MetricCard label="Total latency" value={metricValue(stats.total_latency_ms, stats.total_model_calls, " ms")} />
       </div>
-      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-        <p className="text-xs text-[var(--v2-text-muted)]">Live updates</p>
-        <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">Available</p>
+      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs">
+        <p className="font-medium text-[var(--v2-text-strong)]">Calls per model</p>
+        {stats.calls_per_model.length === 0 ? (
+          <p className="mt-2 text-[var(--v2-text-muted)]">No model breakdown available.</p>
+        ) : (
+          <dl className="mt-2 space-y-1.5">
+            {stats.calls_per_model.map((entry, index) => (
+              <div key={index} className="flex justify-between gap-3">
+                <dt className="min-w-0 truncate text-[var(--v2-text-muted)]">{entry.model.content}</dt>
+                <dd>{entry.calls.toLocaleString()}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
       </div>
+      {(partialMetricCount > 0 || stats.calls_per_model_truncated) && (
+        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
+          Statistics are partial: {partialMetricCount.toLocaleString()} metric samples were unavailable
+          {stats.calls_per_model_truncated ? " and the model breakdown was truncated" : ""}.
+        </p>
+      )}
     </div>
   );
 }
@@ -288,10 +490,30 @@ function InspectorPanelCore({
   const [preferences, setPreferences] = React.useState<InspectorPreferences>(() =>
     readInspectorPreferences(),
   );
+  const [runHistory, setRunHistory] = React.useState<string[]>([]);
+  const [selectedRunId, setSelectedRunId] = React.useState<string | null>(null);
+  const selectedThreadRef = React.useRef(threadId);
+  const selectionPinnedRef = React.useRef(false);
+  React.useEffect(() => {
+    const history = rememberInspectorRun(threadId, runId);
+    const threadChanged = selectedThreadRef.current !== threadId;
+    selectedThreadRef.current = threadId;
+    if (threadChanged) selectionPinnedRef.current = false;
+    setRunHistory(history);
+    setSelectedRunId((current) => {
+      if (!selectionPinnedRef.current) return runId || history.at(-1) || null;
+      if (current && history.includes(current)) return current;
+      return history[0] || runId || null;
+    });
+  }, [threadId, runId]);
+  const selectRun = React.useCallback((nextRunId: string) => {
+    selectionPinnedRef.current = true;
+    setSelectedRunId(nextRunId);
+  }, []);
   const inspector = useInspector({
     enabled: preferences.open && viewportMode !== "mobile",
     threadId,
-    runId,
+    runId: selectedRunId,
   });
 
   const updatePreferences = React.useCallback((next: InspectorPreferences) => {
@@ -360,7 +582,9 @@ function InspectorPanelCore({
           </button>
         </div>
         <p className="mt-2 truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
-          {threadId && runId ? `${threadId} · ${runId}` : "Waiting for an active run"}
+          {threadId && selectedRunId
+            ? `${threadId} · ${selectedRunId}`
+            : "Waiting for an active run"}
         </p>
       </header>
 
@@ -391,7 +615,13 @@ function InspectorPanelCore({
           <PromptShell snapshot={snapshot} health={inspector.health} />
         )}
         {preferences.activeTab === "activity" && (
-          <ActivityShell snapshot={snapshot} updateCount={inspector.updates.length} />
+          <ActivityShell
+            snapshot={snapshot}
+            updates={inspector.updates}
+            runHistory={runHistory}
+            selectedRunId={selectedRunId}
+            onSelectRun={selectRun}
+          />
         )}
         {preferences.activeTab === "stats" && <StatsShell snapshot={snapshot} />}
       </section>

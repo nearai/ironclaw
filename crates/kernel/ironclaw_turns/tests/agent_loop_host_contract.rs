@@ -287,6 +287,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -346,6 +347,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -391,6 +393,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -433,6 +436,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -2914,6 +2918,7 @@ impl AgentLoopDriver for ReplyDriver {
                         .clone(),
                 ),
                 fallback_index: 0,
+                iteration: 0,
                 capability_view: None,
             })
             .await
@@ -3206,6 +3211,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3244,6 +3250,7 @@ async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress(
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3861,6 +3868,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
         surface_version: None,
         model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     }
 }
