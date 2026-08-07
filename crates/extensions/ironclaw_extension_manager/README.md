@@ -20,7 +20,7 @@ keeps lifecycle *authority*, and the edge between them is one-way.
 (`extension_lifecycle_capabilities`, `extension_lifecycle_command`),
 admin/operator/skill-auto-activate capability handlers, credential views
 (`webui_extension_credentials`), and `ironhub/` (search / info / install). The
-module table lives in [`CLAUDE.md`](./CLAUDE.md).
+module table lives in [`AGENTS.md`](./AGENTS.md).
 
 ## Depends on / consumed by
 
@@ -56,6 +56,6 @@ cargo test -p ironclaw_architecture_tests reborn_extension_manager_split
 
 ## See also
 
-[`CLAUDE.md`](./CLAUDE.md) — the canonical working rules for this crate (module
+[`AGENTS.md`](./AGENTS.md) — the canonical working rules for this crate (module
 table, what deliberately stayed in the host, conventions) ·
 `crates/extensions/AGENTS.md` — the family model.

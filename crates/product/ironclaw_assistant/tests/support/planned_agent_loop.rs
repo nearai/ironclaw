@@ -386,6 +386,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: None,
             gate_record_store: turn_executor_gate_store,
             process_system,

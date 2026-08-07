@@ -442,6 +442,35 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
+    # The guidance-surface companion to `has_code`: check-guidance.py scans
+    # `.claude/` rules and skills, the root AGENTS.md/CLAUDE.md pair, and
+    # resolves references into docs/, none of which `has_code` covers (the row
+    # above pins docs/ OUT of it on purpose). This filter OR-s into
+    # fast-checks' condition only, so a `.claude/`-only PR runs the gate built
+    # for exactly that change shape (#7306 review: the gate must run for the
+    # files it governs).
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_guidance",
+        anchor="\\.claude/",
+        kind="regex",
+        in_scope=(
+            ".claude/rules/testing.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "docs/reborn/guidance-conventions.md",
+        ),
+        out_of_scope=(
+            # Crate-tier guidance rides `has_code`'s `crates/` prefix; this
+            # filter must stay the narrow guidance-surface half, and the root
+            # README is not a guidance scan surface.
+            "crates/AGENTS.md",
+            "crates/domains/ironclaw_llm/AGENTS.md",
+            "README.md",
+            "openwiki/index.md",
+        ),
+    ),
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
         name="has_reborn_cli",

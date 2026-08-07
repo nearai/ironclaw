@@ -1,7 +1,7 @@
 # ironclaw_common — working rules
 
-Canonical crate guidance (this crate has no `CLAUDE.md`, by design — it is not
-in the root module-spec table). Orientation and public surface:
+Canonical crate guidance (the sibling `CLAUDE.md` is a symlink alias of this
+file, per `docs/reborn/guidance-conventions.md`). Orientation and public surface:
 [`README.md`](./README.md). Family boundary and admission test:
 [`../AGENTS.md`](../AGENTS.md).
 
@@ -11,7 +11,7 @@ in the root module-spec table). Orientation and public surface:
   dependencies and feature shape.
 - Use these sources of truth before changing shared types:
 - `.claude/rules/types.md` (the newtype template contract is anchored here)
-- the repo root `CLAUDE.md`
+- the repo root `AGENTS.md`
 
 ## What This Crate Owns
 

@@ -4,12 +4,17 @@
 //! content out of durable events and drops all state at process restart.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::Utc;
 use ironclaw_host_api::{
     ids::{TenantId, ThreadId, UserId},
     turn::TurnRunId,
+};
+use ironclaw_loop_host::{
+    HostManagedModelMessageRole, HostManagedPromptDiagnosticCapture,
+    HostManagedPromptDiagnosticMessage, HostManagedPromptDiagnosticSink,
+    estimate_tokens_from_chars,
 };
 use ironclaw_product_contracts::inspector::{
     DEFAULT_MAX_ACTIVITY_ENTRIES, DEFAULT_MAX_LIVE_UPDATE_SCOPES, DEFAULT_MAX_MODEL_CALLS_PER_RUN,
@@ -17,9 +22,10 @@ use ironclaw_product_contracts::inspector::{
     DEFAULT_MAX_TOOL_EXECUTIONS_PER_RUN, DEFAULT_MAX_TRACKED_SESSIONS, DiagnosticActivityEntry,
     DiagnosticActivityEvent, DiagnosticCursor, DiagnosticScope, DiagnosticSequence,
     DiagnosticSnapshot, DiagnosticStreamId, DiagnosticUpdateBatch, DiagnosticUpdateEnvelope,
-    DiagnosticUpdateKind, ModelCallDiagnostic, PromptDiagnostic, SessionDiagnosticStats,
-    ToolExecutionDiagnostic,
+    DiagnosticUpdateKind, ModelCallDiagnostic, PromptComponentDiagnostic, PromptComponentKind,
+    PromptDiagnostic, SessionDiagnosticStats, ToolExecutionDiagnostic,
 };
+use ironclaw_safety::LeakDetector;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -306,6 +312,40 @@ pub struct InMemoryDiagnosticStore {
     state: RwLock<DiagnosticStoreState>,
 }
 
+/// Operator inspection store surface exposed by product composition.
+///
+/// Capture remains behind [`HostManagedPromptDiagnosticSink`]; consumers of
+/// diagnostics do not depend on the in-memory implementation.
+pub trait DiagnosticStorePort: Send + Sync {
+    fn record_activity(
+        &self,
+        scope: DiagnosticScope,
+        event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError>;
+
+    fn snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError>;
+
+    fn prompt(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError>;
+
+    fn tool_execution(
+        &self,
+        scope: &DiagnosticScope,
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError>;
+
+    fn updates_after(
+        &self,
+        scope: &DiagnosticScope,
+        after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError>;
+}
+
 impl InMemoryDiagnosticStore {
     pub fn new(limits: DiagnosticStoreLimits) -> Result<Self, DiagnosticStoreError> {
         let limits = limits.validate()?;
@@ -551,6 +591,191 @@ impl InMemoryDiagnosticStore {
     }
 }
 
+impl DiagnosticStorePort for InMemoryDiagnosticStore {
+    fn record_activity(
+        &self,
+        scope: DiagnosticScope,
+        event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::record_activity(self, scope, event)
+    }
+
+    fn snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::snapshot(self, scope)
+    }
+
+    fn prompt(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::prompt(self, scope)
+    }
+
+    fn tool_execution(
+        &self,
+        scope: &DiagnosticScope,
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::tool_execution(self, scope, activity_id)
+    }
+
+    fn updates_after(
+        &self,
+        scope: &DiagnosticScope,
+        after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::updates_after(self, scope, after)
+    }
+}
+
+fn diagnostic_prompt_text(detector: &LeakDetector, value: &str) -> String {
+    let validated = value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+        .collect::<String>();
+    detector.redact_all_secrets(&validated).0
+}
+
+fn prompt_leak_detector() -> &'static LeakDetector {
+    static DETECTOR: OnceLock<LeakDetector> = OnceLock::new();
+    DETECTOR.get_or_init(LeakDetector::new)
+}
+
+fn prompt_component_kind(
+    index: usize,
+    identity_message_count: u32,
+    message: &HostManagedPromptDiagnosticMessage,
+) -> PromptComponentKind {
+    let content_ref = message.content_ref.as_str();
+    if index < identity_message_count as usize {
+        PromptComponentKind::Identity
+    } else if content_ref.starts_with("msg:instruction.") {
+        PromptComponentKind::Instruction
+    } else if content_ref.starts_with("msg:snippet.") {
+        PromptComponentKind::Skill
+    } else if content_ref.contains("capability") {
+        PromptComponentKind::Capability
+    } else {
+        match message.role {
+            HostManagedModelMessageRole::System => PromptComponentKind::System,
+            HostManagedModelMessageRole::User
+            | HostManagedModelMessageRole::Assistant
+            | HostManagedModelMessageRole::ToolResult => PromptComponentKind::Conversation,
+        }
+    }
+}
+
+fn prompt_component_label(kind: PromptComponentKind, index: usize) -> String {
+    let source = match kind {
+        PromptComponentKind::System => "System",
+        PromptComponentKind::Identity => "Identity",
+        PromptComponentKind::Instruction => "Instruction",
+        PromptComponentKind::Skill => "Skill",
+        PromptComponentKind::Capability => "Capability",
+        PromptComponentKind::Conversation => "Conversation",
+        PromptComponentKind::Other => "Other",
+    };
+    format!("{source} {}", index.saturating_add(1))
+}
+
+impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
+    fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
+        let user_id = capture
+            .context
+            .actor
+            .as_ref()
+            .map(|actor| actor.user_id.clone())
+            .or_else(|| capture.context.scope.explicit_owner_user_id().cloned());
+        let Some(user_id) = user_id else {
+            tracing::debug!(
+                run_id = %capture.context.run_id,
+                "prompt diagnostics skipped because the run has no user scope"
+            );
+            return;
+        };
+        let scope = DiagnosticScope::new(
+            capture.context.scope.tenant_id.clone(),
+            user_id,
+            capture.context.thread_id.clone(),
+            capture.context.run_id,
+        );
+        let detector = prompt_leak_detector();
+        let reconstruction_capacity = capture
+            .messages
+            .iter()
+            .map(|message| message.content.len().saturating_add(32))
+            .sum();
+        let mut reconstructed = String::with_capacity(reconstruction_capacity);
+        let mut total_estimated_tokens = 0u64;
+        let mut components = Vec::with_capacity(
+            capture
+                .messages
+                .len()
+                .saturating_add(capture.capability_ids.len()),
+        );
+        for (index, message) in capture.messages.iter().enumerate() {
+            let kind = prompt_component_kind(index, capture.identity_message_count, message);
+            let label = prompt_component_label(kind, index);
+            let content = diagnostic_prompt_text(detector, &message.content);
+            let estimated_tokens = estimate_tokens_from_chars(&message.content).as_u64();
+            total_estimated_tokens = total_estimated_tokens.saturating_add(estimated_tokens);
+            if !reconstructed.is_empty() {
+                reconstructed.push_str("\n\n");
+            }
+            reconstructed.push_str(&label);
+            reconstructed.push_str(":\n");
+            reconstructed.push_str(&content);
+            components.push(PromptComponentDiagnostic::new(
+                kind,
+                label,
+                content,
+                Some(estimated_tokens),
+            ));
+        }
+        for capability_id in &capture.capability_ids {
+            components.push(PromptComponentDiagnostic::new(
+                PromptComponentKind::Capability,
+                "Capability surface",
+                capability_id.as_str(),
+                Some(0),
+            ));
+        }
+        let active_skills = capture
+            .active_skills
+            .iter()
+            .map(|skill| diagnostic_prompt_text(detector, skill.as_str()))
+            .collect();
+        let requested_model = capture
+            .requested_model
+            .as_ref()
+            .map(|model| diagnostic_prompt_text(detector, model.as_str()));
+        let effective_model = capture
+            .effective_model
+            .as_ref()
+            .map(|model| diagnostic_prompt_text(detector, model.as_str()));
+        let prompt = PromptDiagnostic::new(
+            Utc::now(),
+            components,
+            reconstructed,
+            Some(total_estimated_tokens),
+            u32::try_from(capture.messages.len()).unwrap_or(u32::MAX),
+            capture.identity_message_count,
+            capture.instruction_snippet_count,
+            active_skills,
+            u32::try_from(capture.capability_ids.len()).unwrap_or(u32::MAX),
+            requested_model,
+            effective_model,
+            Some(capture.context_limit),
+        );
+        if let Err(error) = InMemoryDiagnosticStore::record_prompt(self, scope, prompt) {
+            tracing::debug!(%error, "prompt diagnostics could not be retained");
+        }
+    }
+}
+
 impl Default for InMemoryDiagnosticStore {
     fn default() -> Self {
         let limits = DiagnosticStoreLimits::default();
@@ -605,9 +830,11 @@ mod tests {
 
     use chrono::Utc;
     use ironclaw_host_api::{
-        ids::{TenantId, ThreadId, UserId},
-        turn::TurnRunId,
+        ids::{CapabilityId, TenantId, ThreadId, UserId},
+        turn::{RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope},
     };
+    use ironclaw_loop_contracts::{LoopRunContext, ModelProfileId, ResolvedRunProfile, SkillName};
+    use ironclaw_loop_host::ProviderModelId;
     use ironclaw_product_contracts::inspector::{
         BoundedDiagnosticText, DIAGNOSTIC_LABEL_MAX_BYTES, DIAGNOSTIC_SUMMARY_MAX_BYTES,
         DiagnosticActivityEvent, DiagnosticActivityKind, DiagnosticModelCallId,
@@ -1068,6 +1295,122 @@ mod tests {
                 .calls_per_model
                 .iter()
                 .all(|count| count.model.content().len() <= DIAGNOSTIC_LABEL_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn host_prompt_capture_is_scoped_redacted_validated_and_bounded() {
+        let store = InMemoryDiagnosticStore::default();
+        let tenant_id = TenantId::new("tenant").expect("tenant");
+        let user_id = UserId::new("user").expect("user");
+        let thread_id = ThreadId::new("thread").expect("thread");
+        let run_id = TurnRunId::new();
+        let profile = ResolvedRunProfile::legacy_compatibility(
+            RunProfileId::interactive_default(),
+            RunProfileVersion::new(1),
+            true,
+        );
+        let context = LoopRunContext::new(
+            TurnScope::new(tenant_id.clone(), None, None, thread_id.clone()),
+            TurnId::new(),
+            run_id,
+            profile,
+        )
+        .with_actor(TurnActor::new(user_id.clone()));
+        let secret = format!("sk-{}", "diagnostictestvalue0123456789");
+        HostManagedPromptDiagnosticSink::record_prompt(
+            &store,
+            HostManagedPromptDiagnosticCapture {
+                context,
+                messages: vec![
+                    HostManagedPromptDiagnosticMessage {
+                        role: HostManagedModelMessageRole::System,
+                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                            "msg:identity.system",
+                        )
+                        .expect("ref"),
+                        content: format!(
+                            "identity sk-diagnostic\u{1b}testvalue0123456789 {}",
+                            "x".repeat(70 * 1024)
+                        ),
+                    },
+                    HostManagedPromptDiagnosticMessage {
+                        role: HostManagedModelMessageRole::System,
+                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                            "msg:instruction.system.0.deadbeef",
+                        )
+                        .expect("ref"),
+                        content: "Follow the workspace instructions.".to_string(),
+                    },
+                    HostManagedPromptDiagnosticMessage {
+                        role: HostManagedModelMessageRole::System,
+                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                            "msg:snippet.skill.workspace-search.0.deadbeef",
+                        )
+                        .expect("ref"),
+                        content: "Use workspace search when needed.".to_string(),
+                    },
+                    HostManagedPromptDiagnosticMessage {
+                        role: HostManagedModelMessageRole::User,
+                        content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
+                            "msg:thread.user",
+                        )
+                        .expect("ref"),
+                        content: "hello".to_string(),
+                    },
+                ],
+                identity_message_count: 1,
+                instruction_snippet_count: 2,
+                active_skills: vec![
+                    SkillName::new("workspace-search").expect("skill name"),
+                    SkillName::new(secret.clone()).expect("secret-like skill name"),
+                ],
+                capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
+                requested_model: Some(
+                    ModelProfileId::new("diagnostic-profile").expect("model profile"),
+                ),
+                effective_model: Some(
+                    ProviderModelId::new("provider/diagnostic-model").expect("provider model"),
+                ),
+                context_limit: 128_000,
+            },
+        );
+
+        let prompt = store
+            .prompt(&DiagnosticScope::new(tenant_id, user_id, thread_id, run_id))
+            .expect("prompt read")
+            .expect("prompt captured");
+        assert_eq!(prompt.message_count, 4);
+        assert_eq!(prompt.identity_message_count, 1);
+        assert_eq!(prompt.instruction_snippet_count, 2);
+        assert_eq!(prompt.capability_count, 1);
+        assert_eq!(prompt.active_skills[0].content(), "workspace-search");
+        assert!(prompt.active_skills[1].content().contains("[REDACTED]"));
+        assert!(!prompt.active_skills[1].content().contains(&secret));
+        assert_eq!(
+            prompt.requested_model.as_ref().map(|model| model.content()),
+            Some("diagnostic-profile")
+        );
+        assert_eq!(
+            prompt.effective_model.as_ref().map(|model| model.content()),
+            Some("provider/diagnostic-model")
+        );
+        assert!(prompt.components[0].content.truncated());
+        assert!(!prompt.components[0].content.content().contains(&secret));
+        assert!(!prompt.components[0].content.content().contains('\u{1b}'));
+        assert!(
+            prompt.components[0]
+                .content
+                .content()
+                .contains("[REDACTED]")
+        );
+        assert_eq!(prompt.components[0].kind, PromptComponentKind::Identity);
+        assert_eq!(prompt.components[1].kind, PromptComponentKind::Instruction);
+        assert_eq!(prompt.components[2].kind, PromptComponentKind::Skill);
+        assert_eq!(prompt.components[3].kind, PromptComponentKind::Conversation);
+        assert_eq!(
+            prompt.components.last().map(|component| component.kind),
+            Some(PromptComponentKind::Capability)
         );
     }
 
