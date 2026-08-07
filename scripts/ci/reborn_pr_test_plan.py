@@ -233,6 +233,10 @@ PROMPT_SURFACE_PREFIXES = (
     "crates/contracts/ironclaw_host_api/prompts/",
     "crates/loop/ironclaw_agent_loop/prompts/",
     "crates/loop/ironclaw_loop_host/prompts/",
+    # The host-managed ports assemble the exact request the goldens pin:
+    # `prompt.rs` drives the InstructionBundleBuilder into the message list
+    # and `model.rs` shapes the model request around it.
+    "crates/kernel/ironclaw_turns/src/host_managed_ports/",
 )
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",

@@ -1457,6 +1457,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 "ironclaw_host_api",
                 "crates/contracts/ironclaw_host_api/Cargo.toml",
             ),
+            package("ironclaw_turns", "crates/kernel/ironclaw_turns/Cargo.toml"),
+            package(
+                "ironclaw_agent_loop",
+                "crates/loop/ironclaw_agent_loop/Cargo.toml",
+            ),
+            package(
+                "ironclaw_loop_host",
+                "crates/loop/ironclaw_loop_host/Cargo.toml",
+            ),
             package("ironclaw_memory", "crates/domains/ironclaw_memory/Cargo.toml"),
         ]
         metadata = {
@@ -1478,28 +1487,45 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
 
     def test_prompt_surface_change_schedules_golden_lane_and_crate_bucket(self) -> None:
+        """Every configured entry gets a positive case BY CONSTRUCTION.
+
+        The cases are derived from the `PROMPT_SURFACE_*` tables themselves
+        (each exact path, plus one representative file per prefix), so adding
+        an entry whose crate is missing from the fixture fails here instead of
+        shipping untested — the expected package is resolved from the fixture
+        directories, and an unresolvable entry is an explicit failure, not a
+        skip.
+        """
         golden_lane = planner._integration_test_lanes()[
             planner.PROMPT_SURFACE_GOLDEN_OWNER
         ]
-        for path, package in [
-            (
-                "crates/kernel/ironclaw_host_runtime/src/surface.rs",
-                "ironclaw_host_runtime",
-            ),
-            (
-                "crates/contracts/ironclaw_loop_contracts/src/instruction_bundle.rs",
-                "ironclaw_loop_contracts",
-            ),
-            (
-                "crates/contracts/ironclaw_loop_contracts/prompts/delivery.md",
-                "ironclaw_loop_contracts",
-            ),
-            (
-                "crates/contracts/ironclaw_host_api/prompts/messaging/search_messages.core.md",
-                "ironclaw_host_api",
-            ),
-        ]:
+        fixture_directories = {
+            "crates/kernel/ironclaw_host_runtime": "ironclaw_host_runtime",
+            "crates/contracts/ironclaw_loop_contracts": "ironclaw_loop_contracts",
+            "crates/contracts/ironclaw_host_api": "ironclaw_host_api",
+            "crates/kernel/ironclaw_turns": "ironclaw_turns",
+            "crates/loop/ironclaw_agent_loop": "ironclaw_agent_loop",
+            "crates/loop/ironclaw_loop_host": "ironclaw_loop_host",
+        }
+        cases = list(planner.PROMPT_SURFACE_PATHS) + [
+            f"{prefix}golden_probe.md" for prefix in planner.PROMPT_SURFACE_PREFIXES
+        ]
+        for path in cases:
             with self.subTest(path=path):
+                package = next(
+                    (
+                        name
+                        for directory, name in fixture_directories.items()
+                        if path.startswith(f"{directory}/")
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(
+                    package,
+                    f"prompt-surface entry {path} names a crate the fixture does "
+                    "not carry; add it to plan_prompt_surface_owners so the "
+                    "entry is actually tested",
+                )
                 plan = self.plan_prompt_surface_owners([path])
                 self.assertIn(
                     golden_lane,
