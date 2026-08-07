@@ -1948,6 +1948,31 @@ mod tests {
         );
     }
 
+    /// Hard schema-token reduction floor for the representative wide catalog,
+    /// as defined by the default-on rollout outcome (#6810). Dropping below
+    /// this means bridged disclosure no longer pays for its round trip.
+    const REPRESENTATIVE_REDUCTION_FLOOR_PCT: f64 = 50.0;
+
+    /// Recorded reduction for the representative catalog on `main`. Drift
+    /// history, so a future move is explained rather than rediscovered:
+    ///
+    /// - 93.3% (21,240 -> 1,427): first one-off measurement, when a deferred
+    ///   surface advertised only the bridge meta-tools.
+    /// - 83.7%: after the bridge grew (`tool_search`'s description became the
+    ///   always-on catalog index, plus `tool_describe`/`tool_call`) and the
+    ///   always-advertised Core tier was introduced.
+    /// - 82.9% (21,130 -> 3,618, 20 advertised): current, with 17 Core-tier
+    ///   loop primitives in this fixture always advertised alongside the three
+    ///   bridge tools.
+    ///
+    /// Moving this constant is allowed, but the PR that moves it must say which
+    /// of core-set width, bridge-schema growth, or fixture change caused it.
+    const REPRESENTATIVE_REDUCTION_BASELINE_PCT: f64 = 82.9;
+
+    /// Band around the recorded baseline that counts as noise rather than
+    /// material drift.
+    const REPRESENTATIVE_REDUCTION_DRIFT_TOLERANCE_PCT: f64 = 2.0;
+
     #[test]
     fn benchmark_tool_disclosure_token_reduction() {
         let definitions = representative_tool_fixture();
@@ -1972,15 +1997,43 @@ mod tests {
             (reduction_abs as f64 / full_tokens as f64) * 100.0
         };
 
+        // Attribute the advertised cost so drift points at its cause instead of
+        // just moving a number.
+        let (bridge_definitions, core_definitions): (Vec<_>, Vec<_>) = disclosed
+            .definitions
+            .iter()
+            .partition(|definition| is_bridge_name(definition.name.as_str()));
+        let bridge_tokens = bridge_definitions.iter().fold(0_u32, |total, definition| {
+            total.saturating_add(estimate_definition_tokens(definition))
+        });
+        let core_tokens = core_definitions.iter().fold(0_u32, |total, definition| {
+            total.saturating_add(estimate_definition_tokens(definition))
+        });
+        let breakdown = format!(
+            "measured={reduction_pct:.1}% (full={full_count} tools/{full_tokens} tokens, \
+             advertised={disclosed_count} tools/{disclosed_tokens} tokens; \
+             bridge={} tools/{bridge_tokens} tokens, core={} tools/{core_tokens} tokens)",
+            bridge_definitions.len(),
+            core_definitions.len(),
+        );
+
         println!(
-            "\n| full_count | full_tokens | disclosed_count | disclosed_tokens | reduction_abs | reduction_pct |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| {full_count} | {full_tokens} | {disclosed_count} | {disclosed_tokens} | {reduction_abs} | {reduction_pct:.1}% |"
+            "\n| full_count | full_tokens | disclosed_count | disclosed_tokens | reduction_abs | reduction_pct |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| {full_count} | {full_tokens} | {disclosed_count} | {disclosed_tokens} | {reduction_abs} | {reduction_pct:.1}% |\n{breakdown}"
         );
 
         assert_eq!(full_count, 91);
         assert!(disclosed.deferred);
         assert!(
-            disclosed_tokens as f64 <= full_tokens as f64 * 0.5,
-            "disclosed={disclosed_tokens}, full={full_tokens}"
+            reduction_pct >= REPRESENTATIVE_REDUCTION_FLOOR_PCT,
+            "wide-catalog schema-token reduction fell below the {REPRESENTATIVE_REDUCTION_FLOOR_PCT}% floor (#6810): {breakdown}"
+        );
+        assert!(
+            (reduction_pct - REPRESENTATIVE_REDUCTION_BASELINE_PCT).abs()
+                <= REPRESENTATIVE_REDUCTION_DRIFT_TOLERANCE_PCT,
+            "wide-catalog schema-token reduction drifted more than \
+             {REPRESENTATIVE_REDUCTION_DRIFT_TOLERANCE_PCT} points from the recorded \
+             {REPRESENTATIVE_REDUCTION_BASELINE_PCT}% baseline: {breakdown}. Update \
+             REPRESENTATIVE_REDUCTION_BASELINE_PCT and explain the cause in the PR body."
         );
     }
 
