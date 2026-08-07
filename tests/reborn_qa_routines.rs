@@ -568,7 +568,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
     // `detail.preview` so the model does not need a follow-up `result_read`
     // call; the marker here is well under the cap. Mirrors
     // `assert_standalone_result_reference` in
-    // `crates/ironclaw_composition/src/runtime.rs`.
+    // `crates/app/ironclaw_composition/src/runtime.rs`.
     assert!(
         tool_result.content.contains(QA_DM_ACTION_MARKER),
         "a result under the first-look preview cap should appear inline in model replay: {}",

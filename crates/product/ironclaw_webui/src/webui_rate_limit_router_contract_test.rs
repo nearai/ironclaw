@@ -4,7 +4,7 @@
 //! handlers, real `SseCapacity`) rather than a synthetic always-429
 //! handler.
 //!
-//! Intentionally NOT under `crates/ironclaw_webui/tests/`: every test
+//! Intentionally NOT under `crates/product/ironclaw_webui/tests/`: every test
 //! here builds `RateLimitState` / `RouteLimit` / `ResolvedPolicy` literals
 //! and calls `enforce_rate_limit` directly, all `pub(crate)`-only
 //! internals of this module. Moving this file to `tests/` (an external,

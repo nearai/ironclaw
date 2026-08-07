@@ -259,7 +259,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             output,
             display_preview,
             // `ProductLiveCapabilityIo` is an ephemeral in-memory test fixture
-            // (see crate CLAUDE.md / #5902) that never durably persists a
+            // (see crate CONTRACT.md / #5902) that never durably persists a
             // result, so the durable-vs-inline distinction does not apply here.
             durable_persistence: _,
         } = write;

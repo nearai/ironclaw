@@ -668,7 +668,7 @@ async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
 /// otherwise have surfaced it: the flavor-aware `SubagentSpawnCapabilityDecorator`
 /// (always wired, independent of any harness extension registry) or the
 /// host-runtime first-party manifest stub (`builtin_first_party_package()` in
-/// `crates/ironclaw_host_runtime/src/first_party_tools/mod.rs`, included in
+/// `crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs`, included in
 /// `core_builtin_tools()`'s registry unconditionally).
 ///
 /// Non-vacuity: confirmed by direct inspection that `core_builtin_tools()`'s

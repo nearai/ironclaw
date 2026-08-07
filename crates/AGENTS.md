@@ -18,8 +18,8 @@ those commands before trusting it in a later month.
 3. **`crates/<family>/<crate>/README.md`** — what the crate is, when you want
    it, when you want a different one. Every crate has one.
 4. **Crate working rules** — `crates/<family>/<crate>/AGENTS.md` where the
-   crate has rules beyond orientation, and the module spec (`CLAUDE.md` or
-   `CONTRACT.md`) for crates in the root `CLAUDE.md` Module Specs table. Code
+   crate has rules beyond orientation, and the module spec (`CONTRACT.md`)
+   for crates in the root `AGENTS.md` Module Specs table. Code
    follows spec; spec is the tiebreaker.
 5. **Cross-crate behavior** — `docs/reborn/contracts/*.md` (source-of-truth
    contracts) and `docs/reborn/target-architecture/` (the design record:
@@ -137,9 +137,9 @@ Run the architecture suite whenever dependency edges, layer keys, crate
 placement, or test-pinned guidance files change. Run the E2E script when
 turns, runtime lanes, host services, authorization, approvals, networking,
 secrets, ProductSurface behavior, or capability dispatch change. The full
-workspace gate (`cargo fmt`, workspace clippy, `cargo test`,
-`--features integration`) is the root `CLAUDE.md`'s; test tiers and the
-regression rules are `.claude/rules/testing.md`.
+workspace gate (`cargo fmt`, workspace clippy, `cargo test`) is the root
+`AGENTS.md`'s; test tiers and the regression rules are
+`.claude/rules/testing.md`.
 
 > **Do not reach for `scripts/check-boundaries.sh`.** Measured 2026-08-05: it
 > fails on a clean tree (its check 5 grep false-positives on live test files)
@@ -165,7 +165,7 @@ worth naming here because they cross most families:
 | `crates/<family>/AGENTS.md` | Family boundary + crate table (one per family) |
 | `crates/<family>/<crate>/README.md` | Crate orientation (one per crate) |
 | `crates/<family>/<crate>/AGENTS.md` | Crate working rules (only where needed) |
-| Crate `CLAUDE.md` / `CONTRACT.md` | Module spec — the tiebreaker over code |
+| Crate `CONTRACT.md` | Module spec — the tiebreaker over code |
 | `docs/reborn/contracts/*.md` | Cross-crate behavior contracts |
 | `docs/reborn/target-architecture/` | Design record; guidance links it, never forks it |
 | `openwiki/` | Generated prose wiki — never hand-edit |
@@ -173,6 +173,6 @@ worth naming here because they cross most families:
 One canonical home per fact. Where two documents disagree, the code and its
 gates win, and both documents get a dated correction
 (`docs/reborn/guidance-conventions.md`). Some guidance files are pinned by
-tests — before editing one, run
-`rg -l '<file>' crates/app/ironclaw_architecture_tests/tests` and the owning
-suite.
+tests or read by CI classifiers — before editing one, run
+`rg -l '<file>' crates/app/ironclaw_architecture_tests/tests scripts/ci` and
+the owning suite.

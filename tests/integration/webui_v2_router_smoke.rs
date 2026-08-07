@@ -2,7 +2,7 @@
 //!
 //! First scenario crossing an enumerated `--test` binary into the WebChat v2
 //! route surface: the crate's own 5,801-line contract suite
-//! (`crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs`) never
+//! (`crates/product/ironclaw_webui/tests/webui_v2_handlers_contract.rs`) never
 //! runs under the coverage-lane invocation, which passes only the root-tree
 //! suite names.
 //!
