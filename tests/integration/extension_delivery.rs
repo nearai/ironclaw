@@ -2773,52 +2773,76 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    paused.release();
-    let coordinator = inbound.turn_coordinator_for_test();
-    wait_for_run_status_in_scope(&coordinator, &race_scope, first_run, TurnStatus::Completed).await;
-    ingress.drain().await;
-    // Every race-chat sendMessage quotes the message it belongs to: the
-    // working indicator and final reply anchor to the FIRST message
-    // (dm_body assigns update_id + 10 → 618) and the immediate busy notice
-    // anchors to the SECOND (619). Bounded poll — the final reply lands
-    // observer-driven after drain returns.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let race_bodies: Vec<serde_json::Value> = inbound
+    let race_bodies = || -> Vec<serde_json::Value> {
+        inbound
             .captured_network_requests_for_test()
             .iter()
             .filter(|request| request.url.ends_with("/sendMessage"))
             .filter_map(|request| serde_json::from_slice(&request.body).ok())
             .filter(|body: &serde_json::Value| body["chat_id"] == "717171")
-            .collect();
-        let anchored_reply_count = race_bodies
+            .collect()
+    };
+    let anchored_count = |bodies: &[serde_json::Value], needle: &str, anchor: i64| -> usize {
+        bodies
             .iter()
             .filter(|body| {
                 body["text"]
                     .as_str()
-                    .is_some_and(|text| text.contains(RACE_REPLY))
-                    && body["reply_to_message_id"] == 618
+                    .is_some_and(|text| text.contains(needle))
+                    && body["reply_to_message_id"] == anchor
             })
-            .count();
-        let busy_notice_anchored_to_second = race_bodies.iter().any(|body| {
-            body["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("still working on a previous message"))
-                && body["reply_to_message_id"] == 619
-        });
-        if anchored_reply_count == 1 && busy_notice_anchored_to_second {
+            .count()
+    };
+    // The busy notice must land while the first run is STILL parked on its
+    // model call — immediacy is the #6643 contract (feedback arrives during
+    // the run, not after it finishes). The paused gateway holds the first
+    // run open, so this poll can only pass on admission-time feedback.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if anchored_count(&race_bodies(), "still working on a previous message", 619) == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the overlapping DM must get its anchored busy notice while the \
+             first run is still executing; saw: {:?}",
+            race_bodies()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    paused.release();
+    let coordinator = inbound.turn_coordinator_for_test();
+    wait_for_run_status_in_scope(&coordinator, &race_scope, first_run, TurnStatus::Completed).await;
+    ingress.drain().await;
+    // Every race-chat sendMessage quotes the message it belongs to: exactly
+    // one working indicator and one final reply anchored to the FIRST
+    // message (dm_body assigns update_id + 10 → 618), the one busy notice
+    // anchored to the SECOND (619), and no other anchors. Bounded poll —
+    // the final reply lands observer-driven after drain returns.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let bodies = race_bodies();
+        if anchored_count(&bodies, RACE_REPLY, 618) == 1
+            && anchored_count(&bodies, "is thinking", 618) == 1
+        {
+            assert_eq!(
+                anchored_count(&bodies, "still working on a previous message", 619),
+                1,
+                "the busy notice stays a single anchored message: {bodies:?}"
+            );
             assert!(
-                race_bodies
+                bodies
                     .iter()
-                    .all(|body| body["reply_to_message_id"].is_i64()),
-                "every race-chat message must be anchored to a prompting message: {race_bodies:?}"
+                    .all(|body| matches!(body["reply_to_message_id"].as_i64(), Some(618 | 619))),
+                "every race-chat message must anchor to one of the two prompting \
+                 messages: {bodies:?}"
             );
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the overlapping DM must get an anchored busy notice and the final \
-             reply must anchor to its own prompt; saw: {race_bodies:?}"
+            "the working indicator and final reply must each anchor to their \
+             own prompt exactly once; saw: {bodies:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
