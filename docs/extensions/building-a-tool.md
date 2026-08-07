@@ -254,7 +254,11 @@ scopes = ["records.read"]
 ```
 
 Host ports are derived from effects in v3 — do not declare
-`required_host_ports`. The full auth-recipe vocabulary (`oauth2_code`,
+`required_host_ports`. The derived entries are validation vocabulary checked
+against the host's `HostPortCatalog` allowlist; concrete host-port adapters
+are constructed by host-runtime services only after authorization and
+obligation preparation, never from the manifest. The full auth-recipe
+vocabulary (`oauth2_code`,
 `api_key`, token-response captures, identity maps) is worked in
 `crates/extensions/packages/slack/manifest.toml`.
 
