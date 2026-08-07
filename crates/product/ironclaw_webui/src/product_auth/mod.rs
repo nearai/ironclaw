@@ -119,11 +119,7 @@ const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new
     // SAFETY: 1024 is a non-zero literal cache cap.
     None => unreachable!(),
 };
-const OAUTH_CALLBACK_SINGLE_FLIGHT_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
-    Some(value) => value,
-    // SAFETY: 1024 is a non-zero literal callback concurrency cap.
-    None => unreachable!(),
-};
+const OAUTH_CALLBACK_SINGLE_FLIGHT_CAPACITY: usize = 1024;
 const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
     Some(value) => value,
     // SAFETY: 16 KiB is a non-zero literal body cap.
@@ -556,11 +552,11 @@ impl std::fmt::Debug for ProductAuthRouteState {
 #[derive(Clone)]
 struct CallbackSingleFlight {
     locks: Arc<Mutex<HashMap<AuthFlowId, Weak<tokio::sync::Mutex<()>>>>>,
-    capacity: NonZeroUsize,
+    capacity: usize,
 }
 
 impl CallbackSingleFlight {
-    fn new(capacity: NonZeroUsize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             locks: Arc::new(Mutex::new(HashMap::new())),
             capacity,
@@ -579,7 +575,7 @@ impl CallbackSingleFlight {
         if let Some(lock) = locks.get(&flow_id).and_then(Weak::upgrade) {
             return Ok(lock);
         }
-        if locks.len() >= self.capacity.get() {
+        if locks.len() >= self.capacity {
             return Err(ProductAuthRouteFailure::backend_unavailable());
         }
         let lock = Arc::new(tokio::sync::Mutex::new(()));
