@@ -336,6 +336,12 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activation_credential_requirements(&package_ref, &request.scope.user_id)
                     .await
                     .map_err(install_activation_readiness_error)?;
+                // Declared requirements that survive the gate below were
+                // verified present for THIS caller — activation success then
+                // means the account is already connected, and the response
+                // must say so (an empty list means the extension simply
+                // declares no per-user credentials).
+                let caller_credentials_verified = !requirements.is_empty();
                 let credential_gate = activation_credential_gate(
                     &request.scope,
                     &self.credential_accounts,
@@ -360,6 +366,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         Ok(install_response_with_activation(
                             install_response,
                             &activation_response,
+                            caller_credentials_verified,
                         ))
                     }
                     Ok(activation_response)
@@ -517,13 +524,30 @@ fn display_channel_name(channel: &str) -> String {
     }
 }
 
+/// Appended when install-driven activation succeeded and the caller's
+/// declared credential requirements were all verified present by the
+/// activation credential gate. Without this, an explicit "connect account"
+/// request on an already-connected extension gets only conditional guidance
+/// ("If WebChat shows an account connection panel…") and the model deflects
+/// the user to the web interface instead of continuing.
+const CALLER_ALREADY_CONNECTED_CONFIRMATION: &str = "The calling user's account credentials for this extension were verified as already \
+     connected during this activation. Do not ask the user to connect, authorize, or complete \
+     OAuth again — continue their original request.";
+
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: &LifecycleProductResponse,
+    caller_credentials_verified: bool,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers.clone();
     install_response.message = activation_response.message.clone();
+    if caller_credentials_verified && activation_response.phase == InstallationState::Active {
+        install_response.message = Some(match install_response.message.take() {
+            Some(message) => format!("{message} {CALLER_ALREADY_CONNECTED_CONFIRMATION}"),
+            None => CALLER_ALREADY_CONNECTED_CONFIRMATION.to_string(),
+        });
+    }
 
     let activation_visible_capability_ids = match activation_response.payload.as_ref() {
         Some(LifecycleProductPayload::ExtensionActivate {
@@ -1047,6 +1071,51 @@ mod tests {
     }
 
     #[test]
+    fn install_response_confirms_connection_only_when_caller_credentials_were_verified() {
+        let install = || LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Installed,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                visible_capability_ids: Vec::new(),
+                next_step: "pending".to_string(),
+            }),
+        };
+        let activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: None,
+            }),
+        };
+
+        let confirmed = install_response_with_activation(install(), &activation, true);
+        let message = confirmed.message.expect("message");
+        assert!(
+            message.starts_with("activation guidance"),
+            "activation guidance must stay first: {message}"
+        );
+        assert!(
+            message.contains("already connected")
+                && message.contains("continue their original request"),
+            "verified caller credentials must be confirmed to the model: {message}"
+        );
+
+        let unverified = install_response_with_activation(install(), &activation, false);
+        assert_eq!(
+            unverified.message.as_deref(),
+            Some("activation guidance"),
+            "an extension without declared per-user credentials must not claim a connection"
+        );
+    }
+
+    #[test]
     fn channel_connection_display_preview_marks_inbound_channel_activations() {
         // The in-chat connection panel is opened from this structured display preview,
         // never from the activation prose. Guard the exact seam: the output_kind
@@ -1179,6 +1248,25 @@ mod tests {
             install.parameters_schema["required"],
             serde_json::json!(["extension_id"])
         );
+
+        // Host-compiled builtin descriptions must carry verified-catalog
+        // trust. Under the untrusted default the loop-tier prompt-text
+        // denylist strict-scans them and silently omits any description
+        // containing ordinary auth vocabulary (register_hosted_mcp's
+        // "browser authorization-code flow") from the model prompt's
+        // capability surface.
+        for capability_id in [
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            assert_eq!(
+                description_trust_for(&surface, capability_id),
+                ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog,
+                "{capability_id} description must survive the model-safe descriptor scan"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1364,6 +1452,13 @@ mod tests {
         .await
         .expect("install succeeds");
         assert_eq!(install["payload"]["installed"], true);
+        assert!(
+            !install["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already connected"),
+            "a credential-free install must not claim an account connection: {install}"
+        );
 
         let after_install = active_extension_capability_ids(&extension_management).await;
         assert!(after_install.iter().any(|id| id == "web-access.search"));
@@ -2037,6 +2132,18 @@ mod tests {
         let activate = activate.expect("install-driven hosted MCP activation succeeds");
         assert_eq!(activate["phase"], "active");
 
+        // The caller's declared credential requirement was verified satisfied
+        // by the activation gate, so the model must be told the account is
+        // already connected — otherwise it deflects an explicit "connect
+        // account" request to the web interface (QA thread e79a994f).
+        let message = activate["message"].as_str().expect("activation message");
+        assert!(
+            message.contains("already connected")
+                && message.contains("continue their original request"),
+            "install with pre-satisfied credential requirements must state the \
+             caller's account is already connected: {message}"
+        );
+
         // Live discovery ran through the staged pipeline: the discovered
         // tool is model-visible.
         let active = active_extension_capability_ids(&extension_management).await;
@@ -2393,6 +2500,18 @@ mod tests {
             .find(|capability| capability.descriptor.id.as_str() == capability_id)
             .map(|capability| &capability.descriptor)
             .expect("capability descriptor")
+    }
+
+    fn description_trust_for(
+        surface: &VisibleCapabilitySurface,
+        capability_id: &str,
+    ) -> ironclaw_host_api::capability::CapabilityDescriptionTrust {
+        surface
+            .capabilities
+            .iter()
+            .find(|capability| capability.descriptor.id.as_str() == capability_id)
+            .map(|capability| capability.description_trust)
+            .expect("visible capability")
     }
 
     fn allowed_effects() -> Vec<EffectKind> {

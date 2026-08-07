@@ -103,25 +103,9 @@ struct QaPhrase {
     phrase: &'static str,
 }
 
-const ROUTINE_HEALTH_PING: QaPhrase = QaPhrase {
-    fixture: "routine_health_ping",
-    phrase: "Every 5 minutes, ping https://cloud-api.near.ai/health and send me a dm in Slack if it does not return a 200.",
-};
-const ROUTINE_MEETING_PREP: QaPhrase = QaPhrase {
-    fixture: "routine_meeting_prep",
-    phrase: "Every 30 minutes in UTC, use my Google Calendar to find the company for my next upcoming meeting, then send the configured Email delivery target a meeting-prep summary from matching Google Drive files and the latest web news about that company.",
-};
-const ROUTINE_RELEASE_WATCH: QaPhrase = QaPhrase {
-    fixture: "routine_release_watch",
-    phrase: "Every 5 minutes in UTC, create a routine that checks the public GitHub releases API for https://github.com/nearai/ironclaw and sends me a Slack message summarizing any new releases. Do not require GitHub account authorization.",
-};
 const ROUTINE_CRM_INBOX: QaPhrase = QaPhrase {
     fixture: "routine_crm_inbox",
     phrase: "Every 30 minutes in UTC, create a routine that checks my Gmail inbox and adds any new emails from a near.ai address to my Google Sheet called ABC. Do not run the inbox check now.",
-};
-const ROUTINE_HN_MONITOR: QaPhrase = QaPhrase {
-    fixture: "routine_hn_monitor",
-    phrase: "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack.",
 };
 const WEB_STATUS_CHECK: QaPhrase = QaPhrase {
     fixture: "web_status_check",
@@ -161,6 +145,24 @@ const INVESTIGATE_CI_JOB: QaPhrase = QaPhrase {
              clone the repository, run shell commands, or edit any files.",
 };
 
+// Source-channel-default matrix cells (the routing UX agreed 2026-08-06: a
+// bare "send me" defaults to the channel the request came from; the web app
+// default is no delivery step — results are already in the run thread).
+// These two are LIVE-recordable today because they are web-app-origin
+// conversations. The origin-channel cell (bare "send me" asked from a
+// Slack/Telegram conversation pins that channel's target) needs a
+// channel-bound conversation in this harness before it can be recorded;
+// until then the trigger_create description pin carries the guidance and the
+// deterministic delivery journeys prove the fire machinery.
+const ROUTINE_BARE_SEND_ME_WEBUI: QaPhrase = QaPhrase {
+    fixture: "routine_bare_send_me_webui",
+    phrase: "Every morning at 9 in UTC, send me a one-line status of my workspace. Do not run it now.",
+};
+const ROUTINE_MULTI_CHANNEL_DELIVERY: QaPhrase = QaPhrase {
+    fixture: "routine_multi_channel_delivery",
+    phrase: "Every morning at 9 in UTC, send me the workspace status to Slack and Telegram. Do not run it now.",
+};
+
 const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
 const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
 const SLACK_MENTION_ENCODING_FIXTURE: &str = "slack_mention_encoding";
@@ -168,6 +170,40 @@ const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
 const SLACK_SELF_ATTRIBUTION_FIXTURE: &str = "slack_self_attribution";
 const SLACK_OOO_STATUS_FIXTURE: &str = "slack_ooo_status";
 const SLACK_THREAD_REPLIES_FIXTURE: &str = "slack_thread_replies";
+
+// Explicit-delivery tool-choice fixtures (design doc
+// docs/superpowers/specs/2026-07-27-channel-delivery-tool-design.md §13/14,
+// Task 16 of docs/superpowers/plans/2026-07-27-channel-delivery-tool.md):
+// prove the model reaches for the model-initiated `builtin.outbound_deliver`
+// capability -- never the act-as-user `slack.send_message` -- both for an
+// interactive "send me X on Slack" ask and for a routine's own fire when its
+// stored prompt carries an explicit delivery step written at creation time.
+// No live LLM credentials are available in this environment, so these are
+// hand-authored scripted traces (same convention as `SLACK_RECENT_MESSAGE_FIXTURE`
+// and its siblings above -- see that fixture's "synthetic-..." `model_name`),
+// not `record_qa_phrase` recordings; there is deliberately no `recorder_test!`
+// registration for them, matching the existing scripted fixtures' precedent.
+const SLACK_SUMMARY_DELIVERY_FIXTURE: &str = "slack_summary_delivery";
+const ROUTINE_STATUS_DIGEST_DELIVERY_FIXTURE: &str = "routine_status_digest_delivery";
+// Task 11 carry: successor for the four `outbound_delivery_target_set` replay
+// fixtures deleted with that capability -- "set my notification channels to
+// X and Y" must call `builtin.notification_channels_set` with both ids.
+// Both X and Y must be real channels: Slack and Telegram are the only
+// first-party extensions that declare a `[channel]` capability surface
+// (`crates/extensions/packages/{slack,telegram}/manifest.toml`);
+// Gmail has none, so an `email:*` id can never appear in the real
+// `outbound_delivery_targets_list` catalog and the real service would reject
+// it as an unknown target -- an earlier revision of this fixture used
+// `email:qa-trace-inbox` and was fixed in review (see the Fix Report in
+// task-16-report.md). `"telegram:qa-trace-dm"` mirrors the exact model-facing
+// catalog-id convention `tests/integration/delivery_user_journeys.rs` uses
+// for a real Telegram delivery target (`CROSS_TELEGRAM_TARGET_ID =
+// "telegram:journey-dm"`) -- not to be confused with the internal
+// `tg:<chat_id>:_:_` binding-ref encoding that same file documents, which
+// the model never sees.
+const NOTIFICATION_CHANNELS_SET_SLACK_AND_TELEGRAM_FIXTURE: &str =
+    "notification_channels_set_slack_and_telegram";
+
 #[derive(serde::Deserialize)]
 struct LiveCanaryManifest {
     schema_version: u64,
@@ -289,11 +325,15 @@ macro_rules! recorder_test {
     };
 }
 
-recorder_test!(record_routine_health_ping, ROUTINE_HEALTH_PING);
-recorder_test!(record_routine_meeting_prep, ROUTINE_MEETING_PREP);
-recorder_test!(record_routine_release_watch, ROUTINE_RELEASE_WATCH);
 recorder_test!(record_routine_crm_inbox, ROUTINE_CRM_INBOX);
-recorder_test!(record_routine_hn_monitor, ROUTINE_HN_MONITOR);
+recorder_test!(
+    record_routine_bare_send_me_webui,
+    ROUTINE_BARE_SEND_ME_WEBUI
+);
+recorder_test!(
+    record_routine_multi_channel_delivery,
+    ROUTINE_MULTI_CHANNEL_DELIVERY
+);
 recorder_test!(record_web_status_check, WEB_STATUS_CHECK);
 recorder_test!(record_web_release_summary, WEB_RELEASE_SUMMARY);
 recorder_test!(record_web_hn_search, WEB_HN_SEARCH);
@@ -432,28 +472,59 @@ fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
 }
 
 #[tokio::test]
-async fn contract_routine_health_ping_creates_5_minute_trigger() {
-    assert_routine_contract(&ROUTINE_HEALTH_PING, "*/5 * * * *");
-}
-
-#[tokio::test]
-async fn contract_routine_meeting_prep_creates_30_minute_trigger() {
-    assert_routine_contract(&ROUTINE_MEETING_PREP, "*/30 * * * *");
-}
-
-#[tokio::test]
-async fn contract_routine_release_watch_creates_5_minute_trigger() {
-    assert_routine_contract(&ROUTINE_RELEASE_WATCH, "*/5 * * * *");
-}
-
-#[tokio::test]
 async fn contract_routine_crm_inbox_creates_30_minute_trigger() {
     assert_routine_contract(&ROUTINE_CRM_INBOX, "*/30 * * * *");
 }
 
 #[tokio::test]
-async fn contract_routine_hn_monitor_creates_hourly_trigger() {
-    assert_routine_contract(&ROUTINE_HN_MONITOR, "0 * * * *");
+async fn contract_routine_bare_send_me_from_web_app_pins_no_delivery_step() {
+    let trace = load_qa_trace(ROUTINE_BARE_SEND_ME_WEBUI.fixture);
+    // Web-app half of the source-channel default: results are already in the
+    // run thread the user is looking at, so a bare "send me" writes NO
+    // delivery step and the creation turn performs no delivery itself.
+    assert_tool_called_with(&trace, "builtin.trigger_create", &["0 9 * * *"]);
+    assert!(
+        !recorded_tool_calls(&trace)
+            .iter()
+            .any(|(name, arguments)| name == "builtin.trigger_create"
+                && arguments.contains("outbound_deliver")),
+        "a web-app bare send-me routine must not embed a delivery step"
+    );
+    assert_tool_not_called(&trace, "builtin.outbound_deliver");
+    assert!(
+        final_text_reply(&trace).is_some(),
+        "routine phrase should end with a finalized assistant reply"
+    );
+}
+
+#[tokio::test]
+async fn contract_routine_multi_channel_delivery_pins_both_targets_in_prompt() {
+    let trace = load_qa_trace(ROUTINE_MULTI_CHANNEL_DELIVERY.fixture);
+    // "to Slack and Telegram" resolves BOTH destinations while the user is
+    // present and pins each in the routine's own prompt as an explicit
+    // delivery step — one delivery call per channel at fire time.
+    assert_tool_called_with(&trace, "builtin.outbound_delivery_targets_list", &[]);
+    let create_arguments = recorded_tool_calls(&trace)
+        .iter()
+        .find(|(name, _)| name == "builtin.trigger_create")
+        .map(|(_, arguments)| arguments.clone())
+        .expect("multi-channel routine phrase must create a trigger");
+    for needle in [
+        "outbound_deliver",
+        "slack:qa-trace-dm",
+        "telegram:qa-trace-dm",
+        "0 9 * * *",
+    ] {
+        assert!(
+            create_arguments.contains(needle),
+            "trigger_create must pin {needle} in the routine prompt; arguments: {create_arguments}"
+        );
+    }
+    assert_tool_not_called(&trace, "slack.send_message");
+    assert!(
+        final_text_reply(&trace).is_some(),
+        "routine phrase should end with a finalized assistant reply"
+    );
 }
 
 #[tokio::test]
@@ -771,6 +842,105 @@ async fn contract_slack_thread_replies_expands_the_recent_thread() {
             "thread-replies reply should include {marker}; reply: {reply:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn contract_slack_summary_delivery_uses_outbound_deliver_not_send_message() {
+    let trace = load_qa_trace(SLACK_SUMMARY_DELIVERY_FIXTURE);
+    // An interactive "send me a summary of X on Slack" ask resolves the
+    // destination, then delivers through the model-initiated capability --
+    // never the act-as-user Slack tool, which would DM from the user's own
+    // account instead of the bot (see prompts/slack/send_message.md).
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.outbound_delivery_targets_list",
+            "builtin.outbound_deliver",
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "builtin.outbound_deliver",
+        "target_id",
+        "slack:qa-trace-dm",
+    );
+    assert_tool_called_with(
+        &trace,
+        "builtin.outbound_deliver",
+        &["slack:qa-trace-dm", "SLACK_SUMMARY_DELIVERY_CANARY"],
+    );
+    assert_tool_not_called(&trace, "slack.send_message");
+
+    let reply = final_text_reply(&trace).expect("delivery fixture should end with a reply");
+    assert!(
+        reply.contains("SLACK_SUMMARY_DELIVERY_CANARY"),
+        "reply should confirm the delivery; reply: {reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn contract_routine_status_digest_delivery_fire_calls_outbound_deliver_not_send_message() {
+    let trace = load_qa_trace(ROUTINE_STATUS_DIGEST_DELIVERY_FIXTURE);
+    // Creation turn: the destination is resolved and pinned into the
+    // routine's own prompt while the user is present; `trigger_create`
+    // itself never carries a destination -- the retired `delivery_target_id`
+    // field is gone from the schema, so a fresh call cannot smuggle it back in.
+    assert_tool_called_with(&trace, "builtin.trigger_create", &["0 9 * * *"]);
+    assert!(
+        !recorded_tool_calls(&trace)
+            .iter()
+            .any(|(name, arguments)| name == "builtin.trigger_create"
+                && arguments.contains("delivery_target_id")),
+        "trigger_create must not carry the retired delivery_target_id field"
+    );
+    // Fire turn: the model reads its own persisted prompt (which carries the
+    // explicit delivery step) and calls the delivery capability itself --
+    // nothing delivers a fire's reply automatically in the explicit-delivery
+    // world, and the act-as-user Slack tool must not be used for it either.
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "builtin.outbound_deliver",
+        "target_id",
+        "slack:qa-trace-dm",
+    );
+    assert_tool_called_with(
+        &trace,
+        "builtin.outbound_deliver",
+        &[
+            "slack:qa-trace-dm",
+            "ROUTINE_STATUS_DIGEST_DELIVERED_CANARY",
+        ],
+    );
+    assert_tool_not_called(&trace, "slack.send_message");
+
+    let reply = final_text_reply(&trace).expect("fired routine should end with a reply");
+    assert!(
+        reply.contains("ROUTINE_STATUS_DIGEST_DELIVERED_CANARY"),
+        "fired routine's reply should confirm delivery; reply: {reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn contract_notification_channels_set_slack_and_telegram_sets_both_targets() {
+    let trace = load_qa_trace(NOTIFICATION_CHANNELS_SET_SLACK_AND_TELEGRAM_FIXTURE);
+    // Task 11 carry: successor for the four `outbound_delivery_target_set`
+    // replay fixtures deleted with that capability. Both targets are real
+    // channels (Slack and Telegram both declare a `[channel]` manifest
+    // surface; Gmail does not, so an `email:*` id could never reach this
+    // catalog in production -- see the const-level comment above).
+    assert_tool_called_with(
+        &trace,
+        "builtin.notification_channels_set",
+        &[
+            "\"target_ids\"",
+            "slack:qa-trace-dm",
+            "telegram:qa-trace-dm",
+        ],
+    );
+    // Setting notification channels is not a delivery act: it must not also
+    // reach for the explicit delivery tool or an act-as-user send tool.
+    assert_tool_not_called(&trace, "builtin.outbound_deliver");
+    assert_tool_not_called(&trace, "slack.send_message");
 }
 
 #[test]
@@ -1129,22 +1299,29 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
     gateway.assert_exhausted();
 }
 
+// The runtime-replay lane previously ran on `routine_health_ping` /
+// `routine_hn_monitor`. Both recorded traces called the retired
+// `builtin.outbound_delivery_target_set` and were deleted with that capability,
+// so the lane moved to `routine_crm_inbox` — the surviving routine fixture,
+// whose recorded tool choice (`extension_search` → `extension_install` →
+// `trigger_create`) never touched the delivery-preference tool. Successor
+// delivery-tool-choice fixtures are recorded in a later task.
 #[tokio::test]
-async fn replay_routine_health_ping_creates_real_trigger() {
-    replay_routine_phrase(&ROUTINE_HEALTH_PING, "*/5 * * * *").await;
+async fn replay_routine_crm_inbox_creates_real_trigger() {
+    replay_routine_phrase(&ROUTINE_CRM_INBOX, "*/30 * * * *").await;
 }
 
 #[tokio::test]
-async fn replay_routine_hn_monitor_creates_real_trigger() {
-    replay_routine_phrase(&ROUTINE_HN_MONITOR, "0 * * * *").await;
+async fn replay_routine_bare_send_me_webui_creates_real_trigger() {
+    replay_routine_phrase(&ROUTINE_BARE_SEND_ME_WEBUI, "0 9 * * *").await;
 }
 
 #[tokio::test]
-async fn replay_routine_health_ping_fires_recorded_automation() {
-    replay_routine_phrase_fires(&ROUTINE_HEALTH_PING, "*/5 * * * *").await;
+async fn replay_routine_multi_channel_delivery_creates_real_trigger() {
+    replay_routine_phrase(&ROUTINE_MULTI_CHANNEL_DELIVERY, "0 9 * * *").await;
 }
 
 #[tokio::test]
-async fn replay_routine_hn_monitor_fires_recorded_automation() {
-    replay_routine_phrase_fires(&ROUTINE_HN_MONITOR, "0 * * * *").await;
+async fn replay_routine_crm_inbox_fires_recorded_automation() {
+    replay_routine_phrase_fires(&ROUTINE_CRM_INBOX, "*/30 * * * *").await;
 }

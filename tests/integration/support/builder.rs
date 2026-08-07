@@ -461,6 +461,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Exercise the production enum default without making the general
+    /// integration harness depend on ambient process configuration.
+    pub fn with_tool_disclosure_production_default(mut self) -> Self {
+        self.tool_disclosure = ToolDisclosureMode::default();
+        self
+    }
+
     /// Force `ToolDisclosureMode::Off` for this harness's underlying group,
     /// bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
     /// negative-control test's mode explicitly rather than relying on the

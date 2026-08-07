@@ -1747,6 +1747,15 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
     }
 }
 
+/// Slack conversation id reserved by the delivery user journeys to script a
+/// permanent vendor rejection (`channel_not_found`, mirroring the real
+/// vendor error `ironclaw_slack_extension::channel` maps to
+/// `PartDeliveryOutcome::Permanent`) instead of the happy-path
+/// `chat.postMessage` body below — proves a partial-failure leg without a
+/// second, per-test HTTP double. Mirrored (not imported — a separate test
+/// binary) as `PARTIAL_FAILING_DM_CHANNEL` in `delivery_user_journeys.rs`.
+const DELIVERY_VENDOR_PERMANENT_FAILURE_CHANNEL: &str = "D-JOURNEY-VENDOR-REJECT";
+
 /// Vendor-shaped scripted responses for the delivery proofs: the Slack Web
 /// API and the Telegram Bot API answer their happy-path bodies (the adapters
 /// parse these for vendor message refs), everything else falls back to the
@@ -1763,6 +1772,13 @@ fn delivery_vendor_router(
                     .map(str::to_string)
             })
             .unwrap_or_else(|| "D0000000000".to_string());
+        if channel == DELIVERY_VENDOR_PERMANENT_FAILURE_CHANNEL {
+            let body = serde_json::json!({
+                "ok": false,
+                "error": "channel_not_found",
+            });
+            return Some((200, serde_json::to_vec(&body).ok()?));
+        }
         let body = serde_json::json!({
             "ok": true,
             "channel": channel,
@@ -1817,10 +1833,13 @@ fn delivery_vendor_router_with_flaky_get_file() -> Arc<VendorResponseRouter> {
 /// vendor-shaped bodies so the real adapters can parse delivery responses.
 pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_runtime_acme_tools_profile()?;
+    // Explicit model-initiated delivery (`builtin.outbound_deliver`): the
+    // delivery user journeys drive it through this profile's real
+    // coordinator → adapter → vendor-router wire.
     profile
         .capability_ids
         .push(ironclaw_host_api::ids::CapabilityId::new(
-            ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+            ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID,
         )?);
     profile
         .capability_ids
@@ -1847,6 +1866,40 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     Ok(profile)
 }
 
+/// [`extension_delivery_tools_profile`] PLUS `builtin.write_file`, so a
+/// scripted run can raise a REAL `BlockedApproval` gate while the whole
+/// channel/coordinator surface (Slack + Telegram adapters, recording vendor
+/// egress, delivery coordinator) stays wired.
+///
+/// This is the only profile where a BACKGROUND run's gate prompt can fan out
+/// over real notification channels: `extension_delivery` alone has channels
+/// but nothing gateable, and `live_approvals`/`triggers_with_gated_write` have
+/// gates but no delivery coordinator.
+///
+/// Auto-approve stays ON (as everywhere in the delivery chain) so extension
+/// lifecycle and delivery verbs dispatch gate-free; the scenario gates ONLY
+/// the write with `set_ask_each_time_override_for_test`, which beats global
+/// auto-approve (#4776 precedence) — the same mechanism
+/// `trigger_management_with_gated_write_profile` uses.
+///
+/// `options` is MUTATED, never rebuilt: rebuilding it would drop the channel
+/// extension bindings, native factories, and recording vendor egress the
+/// delivery profile installed.
+pub(crate) fn extension_delivery_with_gated_write_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = extension_delivery_tools_profile()?;
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID,
+        )?);
+    // The lifecycle chain this profile inherits from mounts nothing;
+    // `write_file` needs a workspace to write into.
+    profile.options.mounts = super::super::workspace_mounts(
+        ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+    )?;
+    Ok(profile)
+}
+
 /// Slack's channel-adapter binding, mirrored from the binary assembly
 /// (`ironclaw_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
 /// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
@@ -1869,7 +1922,16 @@ fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensio
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
-        preference_target_codec: None,
+        // Explicit model-initiated delivery (`builtin.outbound_deliver`)
+        // decodes a Telegram target's conversation through THIS codec
+        // (`CoordinatedModelChannelDelivery`'s `CodecChannelTargetResolver`
+        // is built from every binding's `preference_target_codec` —
+        // the production assembly's `target_codecs` filter). Without it a
+        // Telegram target's binding ref is undecodable and the tool fails
+        // closed as `Internal` before ever reaching the coordinator.
+        preference_target_codec: Some(Arc::new(
+            ironclaw_telegram_extension::TelegramPreferenceTargetCodec,
+        )),
     }
 }
 
