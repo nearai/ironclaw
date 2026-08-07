@@ -1,4 +1,4 @@
-// arch-exempt: large_file, Basic credential wire-contract coverage stays with the existing host API credential fixtures, plan #4088
+// arch-exempt: large_file, missing dedicated host API credential-contract fixture module; Basic credential wire-contract coverage stays with the existing host API credential fixtures, plan #4088
 use std::path::PathBuf;
 
 use ironclaw_host_api::{

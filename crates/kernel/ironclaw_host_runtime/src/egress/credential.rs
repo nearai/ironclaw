@@ -439,7 +439,7 @@ fn apply_credential_injection(
                     reason: "credential injection header value is invalid".to_string(),
                 });
             }
-            request.headers.push((name.clone(), injected));
+            push_injected_header(request, name, injected)?;
         }
         RuntimeCredentialTarget::Basic { username } => {
             if value.chars().any(char::is_control) {
@@ -450,9 +450,7 @@ fn apply_credential_injection(
             let joined = Zeroizing::new(format!("{username}:{value}"));
             let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
             let authorization = format!("Basic {encoded}");
-            request
-                .headers
-                .push(("Authorization".to_string(), authorization.clone()));
+            push_injected_header(request, "Authorization", authorization.clone())?;
             return Ok(vec![encoded, authorization]);
         }
         RuntimeCredentialTarget::QueryParam { name } => {
@@ -555,6 +553,29 @@ fn apply_credential_injection(
         }
     }
     Ok(Vec::new())
+}
+
+/// Push an injected header, rejecting the request when a header with the same
+/// name (case-insensitive) already exists — either supplied by the caller or
+/// injected by an earlier credential. A proxy or origin may select either of
+/// two colliding `Authorization` fields, so the request could execute under a
+/// different identity than the credential the caller approved.
+fn push_injected_header(
+    request: &mut RuntimeHttpEgressRequest,
+    name: &str,
+    value: String,
+) -> Result<(), RuntimeHttpEgressError> {
+    if request
+        .headers
+        .iter()
+        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    {
+        return Err(RuntimeHttpEgressError::Credential {
+            reason: format!("credential injection header '{name}' duplicates an existing header"),
+        });
+    }
+    request.headers.push((name.to_string(), value));
+    Ok(())
 }
 
 /// Insert `value` as a JSON string at the RFC 6901 `pointer`. The parent must
