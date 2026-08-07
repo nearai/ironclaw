@@ -174,6 +174,11 @@ struct ApiUser {
     label: String,
     bearer_token: Option<String>,
     thread_id: String,
+    /// Additional threads of the same user. Scripted hot writers use these
+    /// so concurrent operations run on distinct threads (no per-thread turn
+    /// serialization) while still contending on the same per-user durable
+    /// memory document.
+    extra_thread_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -725,9 +730,9 @@ async fn run_window(
         });
     }
 
-    // Scripted hot writers: extra concurrent writers sharing the first
-    // user's thread so several operations contend on the same durable
-    // document at once (CAS contention on one memory document).
+    // Scripted hot writers: extra concurrent writers on distinct threads of
+    // the first user so several operations contend on the same per-user
+    // durable memory document at once (CAS contention on one document).
     if args.api_scripted_tool.is_some()
         && args.api_hot_writers > 0
         && let Some(hot_user) = users.first().cloned()
@@ -904,8 +909,10 @@ async fn run_virtual_user(
     run_virtual_user_with_identity(args, operation_namespace, harness, user, progress, None).await
 }
 
-/// A hot writer task: a scripted writer sharing the first user's thread so
-/// several operations contend on the same durable document at once.
+/// A hot writer task: a scripted writer on its own thread of the first user
+/// so several operations run concurrently (no per-thread turn
+/// serialization) while contending on the same per-user durable memory
+/// document.
 async fn run_hot_writer(
     args: &Args,
     operation_namespace: &str,
@@ -914,6 +921,12 @@ async fn run_hot_writer(
     progress: Arc<ProgressCounters>,
     hot_index: usize,
 ) -> Result<TaskResult, String> {
+    let thread_id = user
+        .extra_thread_ids
+        .get(hot_index)
+        .cloned()
+        .unwrap_or_else(|| user.thread_id.clone());
+    let user = ApiUser { thread_id, ..user };
     let identity = ScriptedTaskIdentity {
         op_prefix: format!("h{hot_index}-"),
         marker_user: format!("u{}", user.index),
@@ -1564,6 +1577,7 @@ impl ApiHarness {
             label: identity.label.clone(),
             bearer_token: identity.bearer_token.clone(),
             thread_id: requested_thread_id.to_string(),
+            extra_thread_ids: Vec::new(),
         };
         self.request_json(
             &user,
@@ -1770,6 +1784,14 @@ async fn setup_users(
             let user_index = next_index;
             let threads_per_user = args.api_threads_per_user.max(1);
             let enable_auto_approve = args.api_scripted_tool.is_some();
+            // The first user hosts the scripted hot writers: one thread per
+            // hot writer in addition to the primary thread.
+            let hot_extra_count = if enable_auto_approve && user_index == 0 {
+                args.api_hot_writers
+            } else {
+                0
+            };
+            let extra_count = threads_per_user.saturating_sub(1).max(hot_extra_count);
             join_set.spawn(async move {
                 let create = harness.create_thread(&identity, &thread_id).await;
                 let primary = match create.value {
@@ -1791,6 +1813,7 @@ async fn setup_users(
                         label: identity.label.clone(),
                         bearer_token: identity.bearer_token.clone(),
                         thread_id: primary.clone(),
+                        extra_thread_ids: Vec::new(),
                     };
                     let approve = harness.enable_tools_auto_approve(&user).await;
                     if let Err(failure) = approve.value {
@@ -1800,16 +1823,23 @@ async fn setup_users(
                         ));
                     }
                 }
-                // Extra threads exist purely to grow the user's sidebar; sends
+                // Extra threads grow the user's sidebar; scripted hot writers
+                // additionally use them as distinct contention lanes. Sends
                 // keep targeting the primary thread.
-                for extra in 1..threads_per_user {
+                let mut extra_thread_ids = Vec::with_capacity(extra_count);
+                for extra in 1..=extra_count {
                     let extra_id = format!("{primary}-extra-{extra}");
                     let create = harness.create_thread(&identity, &extra_id).await;
-                    if let Err(failure) = create.value {
-                        return Err(format!(
-                            "create extra thread {extra} for api user {user_index}: {}: {}",
-                            failure.bucket, failure.detail
-                        ));
+                    match create.value {
+                        Ok(value) => {
+                            extra_thread_ids.push(extract_thread_id(&value).unwrap_or(extra_id));
+                        }
+                        Err(failure) => {
+                            return Err(format!(
+                                "create extra thread {extra} for api user {user_index}: {}: {}",
+                                failure.bucket, failure.detail
+                            ));
+                        }
                     }
                 }
                 Ok(ApiUser {
@@ -1817,6 +1847,7 @@ async fn setup_users(
                     label: identity.label,
                     bearer_token: identity.bearer_token,
                     thread_id: primary,
+                    extra_thread_ids,
                 })
             });
             next_index += 1;
@@ -2999,6 +3030,62 @@ mod tests {
 
         serde_json::from_value::<rig::providers::openai::completion::CompletionResponse>(response)
             .expect("stress mock should deserialize as rig-core OpenAI completion response");
+    }
+
+    #[test]
+    fn mock_tool_call_response_matches_rig_openai_shape() {
+        let call = scripted::ToolCallSpec {
+            wire_name: "ironclaw__memory__write".to_string(),
+            arguments: json!({
+                "target": "stress/shared.md",
+                "content": "IRONCLAW_STRESS_READBACK_u0__1 payload",
+                "append": false,
+            }),
+        };
+        let response = mock_tool_call_response("stress-mock", 7, &call);
+
+        assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(response["choices"][0]["message"]["content"], Value::Null);
+        let parsed: rig::providers::openai::completion::CompletionResponse =
+            serde_json::from_value(response)
+                .expect("stress mock tool call should deserialize as rig-core OpenAI completion");
+        let message = &parsed.choices[0].message;
+        let tool_calls = match message {
+            rig::providers::openai::Message::Assistant { tool_calls, .. } => tool_calls,
+            other => panic!("expected assistant message, got {other:?}"),
+        };
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "ironclaw__memory__write");
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            json!({
+                "target": "stress/shared.md",
+                "content": "IRONCLAW_STRESS_READBACK_u0__1 payload",
+                "append": false,
+            })
+        );
+    }
+
+    #[test]
+    fn mock_streaming_tool_call_chunks_carry_indexed_delta_tool_calls() {
+        let call = scripted::ToolCallSpec {
+            wire_name: "builtin__write_file".to_string(),
+            arguments: json!({"path": "stress/u0__1.txt", "content": "payload"}),
+        };
+        let (header, body, done) = mock_streaming_tool_call_chunks("stress-mock", 7, &call);
+
+        let header_call = &header["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(header_call["index"], 0);
+        assert_eq!(header_call["function"]["name"], "builtin__write_file");
+        assert_eq!(header["choices"][0]["delta"]["role"], "assistant");
+
+        let body_call = &body["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(body_call["index"], 0);
+        let arguments: Value =
+            serde_json::from_str(body_call["function"]["arguments"].as_str().expect("string"))
+                .expect("arguments json");
+        assert_eq!(arguments["path"], "stress/u0__1.txt");
+        assert_eq!(done["choices"][0]["finish_reason"], "tool_calls");
     }
 
     #[test]

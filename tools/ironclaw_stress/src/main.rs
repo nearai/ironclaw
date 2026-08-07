@@ -1150,9 +1150,12 @@ fn validate_args(args: &Args) -> Result<(), String> {
             return Err("--api-scripted-doc-sizes must not be empty".to_string());
         }
         for size in &args.api_scripted_doc_sizes {
-            if *size == 0 || *size > scripted::MAX_SCRIPTED_DOC_SIZE_BYTES {
+            if *size < scripted::MIN_SCRIPTED_DOC_SIZE_BYTES
+                || *size > scripted::MAX_SCRIPTED_DOC_SIZE_BYTES
+            {
                 return Err(format!(
-                    "--api-scripted-doc-sizes values must be between 1 and {} bytes",
+                    "--api-scripted-doc-sizes values must be between {} and {} bytes",
+                    scripted::MIN_SCRIPTED_DOC_SIZE_BYTES,
                     scripted::MAX_SCRIPTED_DOC_SIZE_BYTES
                 ));
             }

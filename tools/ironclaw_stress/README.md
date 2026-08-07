@@ -184,10 +184,11 @@ Scripts:
 
 All memory scripts target the same relative path for every user, so each run
 also exercises same-relative-path isolation. `--api-scripted-doc-sizes` cycles
-document sizes per operation (default `4096,32768,131072,1048576`); results are
-bucketed per size with submit-to-tool-visible and submit-to-finalize stage
-latencies. `--api-hot-writers N` spawns N extra concurrent writers sharing the
-first user's thread to contend on the same memory document.
+document sizes per operation (default `4096,32768,131072,1048576`, minimum
+4096); results are bucketed per size with submit-to-tool-visible and
+submit-to-finalize stage latencies. `--api-hot-writers N` spawns N extra
+concurrent writers on distinct threads of the first user so they contend on
+the same per-user memory document without per-thread turn serialization.
 
 Scripted mode requires `--mock-llm-bind` (the sidecar serves the tool calls)
 and `--api-wait-for-assistant`. Gated tools (`builtin.write_file`, memory

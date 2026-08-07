@@ -50,6 +50,11 @@ pub(crate) const READBACK_MARKER: &str = "IRONCLAW_STRESS_READBACK";
 /// share the same logical relative path, so each operation doubles as a
 /// same-relative-path isolation check.
 pub(crate) const SHARED_MEMORY_TARGET: &str = "stress/shared.md";
+/// Lower bound for a scripted document size, in bytes. Scripted content is
+/// a read-back token plus deterministic padding; below 4 KiB the token
+/// dominates and sizes lose meaning, and the issue's workloads start at
+/// 4 KiB.
+pub(crate) const MIN_SCRIPTED_DOC_SIZE_BYTES: usize = 4096;
 /// Upper bound for a scripted document size, in bytes.
 pub(crate) const MAX_SCRIPTED_DOC_SIZE_BYTES: usize = 8 * 1024 * 1024;
 /// Number of assistant turns to wait for a scripted tool to be disclosed
@@ -316,7 +321,7 @@ pub(crate) fn parse_marker(content: &str) -> Option<ScriptedOp> {
     let key = ScriptKey::parse(parts.next()?)?;
     let identity = parts.next()?;
     let size_bytes = parts.next()?.parse::<usize>().ok()?;
-    if size_bytes == 0 || size_bytes > MAX_SCRIPTED_DOC_SIZE_BYTES {
+    if !(MIN_SCRIPTED_DOC_SIZE_BYTES..=MAX_SCRIPTED_DOC_SIZE_BYTES).contains(&size_bytes) {
         return None;
     }
     let (user, op) = identity.split_once(IDENTITY_SEPARATOR)?;
@@ -677,6 +682,10 @@ mod tests {
         );
         assert_eq!(
             parse_marker("ironclaw-stress-tool memory_roundtrip u0__1 0"),
+            None
+        );
+        assert_eq!(
+            parse_marker("ironclaw-stress-tool memory_roundtrip u0__1 4095"),
             None
         );
         assert_eq!(

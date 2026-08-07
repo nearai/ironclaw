@@ -200,11 +200,11 @@ fn scripted_api_requires_wait_for_assistant() {
 #[test]
 fn scripted_api_rejects_out_of_range_doc_sizes() {
     let mut args = scripted_api_args();
-    args.api_scripted_doc_sizes = vec![0];
+    args.api_scripted_doc_sizes = vec![1024];
 
-    let error = validate_args(&args).expect_err("zero-byte documents are meaningless");
+    let error = validate_args(&args).expect_err("sub-4KiB documents are meaningless");
 
-    assert!(error.contains("--api-scripted-doc-sizes values must be between 1 and"));
+    assert!(error.contains("--api-scripted-doc-sizes values must be between 4096 and"));
 }
 
 #[test]
