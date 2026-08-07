@@ -1426,6 +1426,100 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["tests/snapshots/unowned__case.snap"])
 
+    def plan_prompt_surface_owners(self, paths: list[str]) -> dict:
+        """Plan a pull request in a workspace naming the prompt-surface crates.
+
+        Same shape as `real_owner_metadata`: the planner rejects changed
+        packages outside the canonical set, so the crates the
+        `PROMPT_SURFACE_*` tables route from have to exist with their real
+        manifest paths for the paths under test to classify as production
+        changes rather than falling into the exhaustive-plan arm.
+        """
+
+        def package(name: str, manifest: str) -> dict:
+            return {
+                "id": name,
+                "name": name,
+                "manifest_path": str(ROOT / manifest),
+            }
+
+        packages = [
+            package("ironclaw_integration_tests", "Cargo.toml"),
+            package(
+                "ironclaw_host_runtime",
+                "crates/kernel/ironclaw_host_runtime/Cargo.toml",
+            ),
+            package(
+                "ironclaw_loop_contracts",
+                "crates/contracts/ironclaw_loop_contracts/Cargo.toml",
+            ),
+            package(
+                "ironclaw_host_api",
+                "crates/contracts/ironclaw_host_api/Cargo.toml",
+            ),
+            package("ironclaw_memory", "crates/domains/ironclaw_memory/Cargo.toml"),
+        ]
+        metadata = {
+            "workspace_members": [entry["id"] for entry in packages],
+            "packages": packages,
+            "resolve": {
+                "nodes": [{"id": entry["id"], "deps": []} for entry in packages]
+            },
+        }
+        return planner.build_plan(
+            event="pull_request",
+            changed_paths=paths,
+            metadata=metadata,
+            canonical_packages=[
+                entry["name"]
+                for entry in packages
+                if entry["name"] != "ironclaw_integration_tests"
+            ],
+        )
+
+    def test_prompt_surface_change_schedules_golden_lane_and_crate_bucket(self) -> None:
+        golden_lane = planner._integration_test_lanes()[
+            planner.PROMPT_SURFACE_GOLDEN_OWNER
+        ]
+        for path, package in [
+            (
+                "crates/kernel/ironclaw_host_runtime/src/surface.rs",
+                "ironclaw_host_runtime",
+            ),
+            (
+                "crates/contracts/ironclaw_loop_contracts/src/instruction_bundle.rs",
+                "ironclaw_loop_contracts",
+            ),
+            (
+                "crates/contracts/ironclaw_loop_contracts/prompts/delivery.md",
+                "ironclaw_loop_contracts",
+            ),
+            (
+                "crates/contracts/ironclaw_host_api/prompts/messaging/search_messages.core.md",
+                "ironclaw_host_api",
+            ),
+        ]:
+            with self.subTest(path=path):
+                plan = self.plan_prompt_surface_owners([path])
+                self.assertIn(
+                    golden_lane,
+                    plan["integration_lanes"],
+                    "a prompt-surface change must run the golden snapshots on the PR",
+                )
+                self.assertIn(package, plan["changed_packages"])
+
+    def test_non_prompt_production_change_does_not_schedule_golden_lane(self) -> None:
+        plan = self.plan_prompt_surface_owners(
+            ["crates/domains/ironclaw_memory/src/lib.rs"]
+        )
+        self.assertEqual(
+            plan["integration_lanes"],
+            [],
+            "ordinary production changes keep the narrow plan; the merge queue "
+            "remains the exhaustive gate",
+        )
+        self.assertIn("ironclaw_memory", plan["changed_packages"])
+
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])
         self.assertEqual(plan["mode"], "none")
