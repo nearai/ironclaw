@@ -323,6 +323,7 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
     let cfg = super::skill_activation_selector_config(
         false,
         ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         !cfg.regex_activation_enabled,
@@ -343,10 +344,55 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         cfg.regex_activation_enabled,
         "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+    );
+}
+
+/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the unset one --
+/// previously unreachable, since unsetting the key in-process races the other tests here.
+#[test]
+fn skill_injection_mode_resolves_every_env_branch() {
+    use ironclaw_loop_host::SkillInjectionMode;
+
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotPresent)),
+            Ok(mode) if mode == super::DEFAULT_SKILL_INJECTION_MODE
+        ),
+        "an unset key must resolve to the product default, not an error"
+    );
+    assert!(matches!(
+        super::skill_injection_mode_from_env_value(Ok("full".to_string())),
+        Ok(SkillInjectionMode::Full)
+    ));
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok("  Listing  ".to_string())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "values are trimmed and case-insensitive"
+    );
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok(String::new())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "an empty value is the same as asking for the listing, not an error"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Ok("bodies".to_string())).is_err(),
+        "an unrecognized mode must fail loudly rather than silently pick one"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("full")
+        )))
+        .is_err(),
+        "an unreadable value must not be mistaken for an unset key"
     );
 }
 
@@ -355,6 +401,7 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -365,17 +412,45 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
 /// Wiring guard for the `IRONCLAW_REBORN_SKILL_INJECTION` env switch: the
 /// parsed injection mode must reach
 /// [`SkillActivationSelectorConfig::injection_mode`] unchanged (not get
-/// clobbered by the `..default()` spread), and the parser must default to
-/// `listing` while still accepting the `full` legacy escape hatch.
+/// clobbered by the `..default()` spread). The parser still maps an explicit
+/// empty value to `listing`; the ENV-ABSENT default is `full` (see
+/// `DEFAULT_SKILL_INJECTION_MODE`).
 #[test]
 fn standalone_selector_config_propagates_injection_mode() {
     for mode in [
         ironclaw_loop_host::SkillInjectionMode::Listing,
         ironclaw_loop_host::SkillInjectionMode::Full,
     ] {
-        let cfg = super::skill_activation_selector_config(true, mode);
+        let cfg =
+            super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
         assert_eq!(cfg.injection_mode, mode);
     }
+}
+
+/// Guards the injection default.
+///
+/// Currently `Listing`. The measurement argues for `Full` (79.8% -> 85.6% on the
+/// 31-task SkillsBench subset, nearai/benchmarks#287, because the model reads the
+/// one-line listing and then opens a skill in 0 of 30 runs), but three local-dev
+/// tests HANG under `Full` — they drive a mock that expects the listing candidate —
+/// so the flip is a maintainer call and `Full` ships as an opt-in switch.
+///
+/// If you flip `DEFAULT_SKILL_INJECTION_MODE`, update those three tests too:
+/// `local_dev_skill_activate_tool_loads_selected_skill_context`,
+/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
+/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`.
+#[test]
+fn skill_injection_mode_default_is_documented_and_guarded() {
+    assert_eq!(
+        super::DEFAULT_SKILL_INJECTION_MODE,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
+        "flipping this default changes three local-dev expectations; see the doc comment"
+    );
+    // and the opt-in path must still resolve
+    assert_eq!(
+        super::skill_injection_mode_from("full").expect("full parses"),
+        ironclaw_loop_host::SkillInjectionMode::Full
+    );
 }
 
 #[test]
