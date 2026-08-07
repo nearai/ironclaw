@@ -108,8 +108,11 @@ inspectable successful results; redirects are still never followed automatically
 The failure diagnostic is trimmed to the model-visible diagnostic budget
 (`MODEL_DIAGNOSTIC_MAX_BYTES`) before serialization, so `status`, `auth_hint`, and
 the truncation envelope survive intact as valid JSON; the full sanitized body
-remains available through `builtin.http.save` with `save_to`, then
-`builtin.read_file`. In save mode the sanitized body is written to the scoped
+remains inspectable by re-issuing the original request through `builtin.http.save`
+with `save_to` — that new request writes the sanitized body to the scoped mount as
+`saved_body`, which `builtin.read_file` can then read. A later save call cannot
+retrieve the body of the prior failed call, and re-issuing a mutating request may
+repeat its external side effect. In save mode the sanitized body is written to the scoped
 mount before the failure verdict is produced, and the diagnostic carries only
 `saved_body` path metadata (`path`, `bytes_written`) — a retry decision must
 inspect `saved_body` first, because treating the verdict as "nothing happened"
