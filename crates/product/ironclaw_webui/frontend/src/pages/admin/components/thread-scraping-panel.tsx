@@ -3,12 +3,26 @@ import React from "react";
 import { Button } from "../../../design-system/button";
 import { Panel } from "../../../design-system/primitives";
 import { saveBlob } from "../../../lib/download";
-import { useT } from "../../../lib/i18n";
+import { registerPack, useT } from "../../../lib/i18n";
 import {
   fetchThreadScrapeArtifact,
   fetchThreadScrapeRunArtifact,
   fetchThreadScrapeThreads,
 } from "../lib/admin-api";
+
+// Keep this route-specific English slice in the lazy admin chunk instead of
+// charging unrelated entry points for copy they cannot render.
+registerPack("en", {
+  "admin.threadScraping.title": "Thread scraping",
+  "admin.threadScraping.description": "Collect redacted thread and run artifacts for debugging and optimization.",
+  "admin.threadScraping.empty": "No threads available for scraping.",
+  "admin.threadScraping.untitled": "Untitled thread",
+  "admin.threadScraping.selectThread": "Select a thread to load its artifact.",
+  "admin.threadScraping.downloadThread": "Download thread artifact",
+  "admin.threadScraping.downloadRun": "Download run {runId}",
+  "admin.threadScraping.loadFailed": "Thread scraping failed.",
+  "admin.threadScraping.downloadFailed": "Artifact download failed.",
+});
 
 function artifactFilename(prefix, id) {
   const safeId = String(id || "artifact").replace(/[^a-zA-Z0-9._-]/g, "_");
