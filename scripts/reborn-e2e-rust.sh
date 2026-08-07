@@ -109,6 +109,8 @@ run_architecture_runtime() {
   run_test_exact ironclaw_host_runtime first_party_builtin_tools \
     builtin_http_surfaces_http_error_status_as_failed_outcome
   run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_keeps_redirect_responses_model_visible
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
     builtin_http_surfaces_server_error_status_as_failed_outcome
   run_test_exact ironclaw_host_runtime first_party_builtin_tools \
     builtin_http_save_surfaces_http_error_status_as_failed_outcome

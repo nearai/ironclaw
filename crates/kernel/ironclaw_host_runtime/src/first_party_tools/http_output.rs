@@ -100,7 +100,7 @@ pub(super) fn classify_status(
     Err(FirstPartyCapabilityError::dispatch_with_diagnostic(
         RuntimeDispatchErrorKind::OperationFailed,
         Some(format!("HTTP request returned status {status}")),
-        bounded_failure_diagnostic(&shaped.output, status),
+        bounded_failure_diagnostic(shaped.output, status),
     )
     .with_usage(usage))
 }
@@ -112,72 +112,46 @@ pub(super) fn classify_status(
 /// sorted order, so an untrimmed diagnostic would cut `status`, `auth_hint`,
 /// and the truncation envelope out of the model-visible text. Trimming here
 /// keeps the verdict fields intact and the diagnostic valid JSON.
-fn bounded_failure_diagnostic(output: &Value, status: u16) -> String {
-    let Some(output) = output.as_object() else {
+fn bounded_failure_diagnostic(output: Value, status: u16) -> String {
+    let Value::Object(mut output) = output else {
         return fallback_diagnostic(status);
     };
-    let mut output = output.clone();
     if serialized_output_len(&output) <= MODEL_DIAGNOSTIC_MAX_BYTES {
-        return serialize_diagnostic(&output, status);
+        return scrub_model_diagnostic_controls(serialize_diagnostic(&output, status));
     }
-    let mut body_bytes_returned = None;
-    let mut headers_truncated = output.contains_key("headers_truncated");
-    let mut trimmed_any = false;
-    // Truncation markers and the truncation envelope grow the serialized size
-    // too, so re-measure after each trim and keep shrinking until the
-    // diagnostic fits; the fixed verdict fields alone are always far below
-    // the budget.
-    for _ in 0..8 {
-        if trimmed_any {
-            insert_truncation_envelope(&mut output, headers_truncated, body_bytes_returned);
-        }
-        let current_len = serialized_output_len(&output);
-        if current_len <= MODEL_DIAGNOSTIC_MAX_BYTES {
-            break;
-        }
-        let excess_bytes = current_len.saturating_sub(MODEL_DIAGNOSTIC_MAX_BYTES);
-        if let Some(body_text) = output.get("body_text").and_then(Value::as_str) {
-            let current_body_budget = serialized_json_content_len(body_text);
-            let target_body_budget = current_body_budget.saturating_sub(excess_bytes);
-            let (body_text, _) =
-                truncate_str_for_json_content_budget(body_text, target_body_budget);
-            let returned_body_bytes = body_text.len();
-            output.insert(
-                "body_text".to_string(),
-                Value::String(body_text.to_string()),
-            );
-            mark_inline_body_truncated(&mut output, returned_body_bytes);
-            body_bytes_returned = Some(returned_body_bytes);
-            trimmed_any = true;
-        } else if let Some(body_base64) = output.get("body_base64").and_then(Value::as_str) {
-            let target_len = body_base64.len().saturating_sub(excess_bytes) / 4 * 4;
-            // safety: base64 text is ASCII and `target_len` is a multiple of 4
-            // no larger than `body_base64.len()`, so the slice lands on a
-            // UTF-8 boundary.
-            let body_base64 = body_base64[..target_len].to_string(); // safety: ASCII base64, multiple-of-4 length
-            let returned_body_bytes = max_binary_bytes_for_base64_budget(target_len);
-            output.insert("body_base64".to_string(), Value::String(body_base64));
-            mark_inline_body_truncated(&mut output, returned_body_bytes);
-            body_bytes_returned = Some(returned_body_bytes);
-            trimmed_any = true;
-        } else if output
-            .get("headers")
-            .and_then(Value::as_array)
-            .is_some_and(|headers| !headers.is_empty())
-        {
-            headers_truncated |=
-                trim_headers_for_final_budget(&mut output, MODEL_DIAGNOSTIC_MAX_BYTES, current_len);
-            trimmed_any = true;
-        } else {
-            // The fixed verdict fields alone exceed the budget; keep the
-            // verdict rather than a broken JSON fragment.
-            return fallback_diagnostic(status);
-        }
-    }
-    if serialized_output_len(&output) > MODEL_DIAGNOSTIC_MAX_BYTES {
+    // The truncation envelope grows the serialized size too, so pre-account it
+    // exactly like `enforce_final_model_visible_output_budget` does; the fixed
+    // verdict fields alone are always far below the budget.
+    let final_budget =
+        MODEL_DIAGNOSTIC_MAX_BYTES.saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES);
+    let trim = fit_output_to_budget(&mut output, final_budget);
+    if serialized_output_len(&output) > final_budget {
         return fallback_diagnostic(status);
     }
-    serialize_diagnostic(&output, status)
+    insert_truncation_envelope(
+        &mut output,
+        trim.headers_truncated,
+        trim.body_bytes_returned,
+    );
+    scrub_model_diagnostic_controls(serialize_diagnostic(&output, status))
+}
+
+/// `ModelDiagnostic` validation rejects raw control characters other than
+/// line breaks and tabs. `serde_json` escapes U+0000..U+001F, but DEL/C1
+/// control bytes (U+007F..U+009F) survive serialization raw and would
+/// otherwise fail the whole diagnostic at the resolution boundary, replacing
+/// it with the fixed "no additional diagnostic detail" sentence.
+fn scrub_model_diagnostic_controls(diagnostic: String) -> String {
+    if !diagnostic
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return diagnostic;
+    }
+    diagnostic
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect()
 }
 
 /// The diagnostic string is produced from a `serde_json::Value`, which can
@@ -369,11 +343,26 @@ fn enforce_final_model_visible_output_budget(
     let final_budget = response_body_limit
         .saturating_add(MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES)
         .saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES);
+    fit_output_to_budget(output, final_budget)
+}
+
+/// Shared one-pass budget trim: shrink the inline body (text then base64),
+/// then pop headers until the serialized output fits `final_budget`. Each
+/// branch re-measures incrementally so at most three serializations happen
+/// per output. Used by the success-path final budget and by the failure
+/// diagnostic budget trim, which differ only in the target size.
+fn fit_output_to_budget(output: &mut Map<String, Value>, final_budget: usize) -> FinalBudgetTrim {
     let mut trim = FinalBudgetTrim::default();
     let mut current_len = serialized_output_len(output);
 
-    if current_len > final_budget
+    // Each trim inserts truncation markers that grow the output again, so
+    // re-measure and keep trimming the same body until it fits or is empty.
+    // The loop makes strict progress (target is always smaller than the
+    // current body) and an empty body falls through to the base64/headers
+    // branches instead of spinning.
+    while current_len > final_budget
         && let Some(body_text) = output.get("body_text").and_then(Value::as_str)
+        && !body_text.is_empty()
     {
         let excess_bytes = current_len.saturating_sub(final_budget);
         let current_body_budget = serialized_json_content_len(body_text);
@@ -389,11 +378,15 @@ fn enforce_final_model_visible_output_budget(
         current_len = serialized_output_len(output);
     }
 
-    if current_len > final_budget
+    while current_len > final_budget
         && let Some(body_base64) = output.get("body_base64").and_then(Value::as_str)
+        && !body_base64.is_empty()
     {
         let excess_bytes = current_len.saturating_sub(final_budget);
         let target_len = body_base64.len().saturating_sub(excess_bytes) / 4 * 4;
+        // safety: base64 text is ASCII and `target_len` is a multiple of 4
+        // no larger than `body_base64.len()`, so the slice lands on a
+        // UTF-8 boundary.
         let body_base64 = body_base64[..target_len].to_string();
         let returned_body_bytes = max_binary_bytes_for_base64_budget(target_len);
         output.insert("body_base64".to_string(), Value::String(body_base64));
@@ -514,7 +507,7 @@ mod tests {
             48 * 1024,
         );
 
-        let diagnostic = bounded_failure_diagnostic(&shaped.output, 403);
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
 
         assert!(
             diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
@@ -536,6 +529,153 @@ mod tests {
     }
 
     #[test]
+    fn failure_diagnostic_trims_headers_when_body_is_empty_or_absent() {
+        // Empty text body: shape_response inserts an empty body_text key, which
+        // must not block header trimming on the failure-diagnostic path.
+        let shaped = shape_response(
+            RuntimeHttpEgressResponse {
+                status: 403,
+                headers: (0..32)
+                    .map(|i| (format!("x-header-{i}"), "h".repeat(1024)))
+                    .collect(),
+                body: Vec::new(),
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 0,
+                redaction_applied: false,
+            },
+            48 * 1024,
+        );
+
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
+        let parsed: Value =
+            serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
+        assert_eq!(parsed["status"], json!(403));
+        assert_eq!(parsed["truncation"]["headers"], json!(true));
+        assert!(
+            diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "diagnostic must fit the budget, got {} bytes",
+            diagnostic.len()
+        );
+        assert!(
+            parsed["auth_hint"].as_str().is_some(),
+            "auth_hint must survive header trimming"
+        );
+
+        // Save-mode shape: no inline body keys at all, oversized headers.
+        let shaped = shape_response(
+            RuntimeHttpEgressResponse {
+                status: 503,
+                headers: (0..32)
+                    .map(|i| (format!("x-header-{i}"), "h".repeat(1024)))
+                    .collect(),
+                body: Vec::new(),
+                saved_body: Some(RuntimeHttpSavedBody {
+                    path: ScopedPath::new("/workspace/x.bin").unwrap(),
+                    bytes_written: 10,
+                }),
+                request_bytes: 0,
+                response_bytes: 10,
+                redaction_applied: false,
+            },
+            48 * 1024,
+        );
+
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 503);
+        let parsed: Value =
+            serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
+        assert_eq!(parsed["status"], json!(503));
+        assert_eq!(parsed["truncation"]["headers"], json!(true));
+        assert_eq!(parsed["saved_body"]["bytes_written"], json!(10));
+        assert!(
+            diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "diagnostic must fit the budget, got {} bytes",
+            diagnostic.len()
+        );
+    }
+
+    #[test]
+    fn failure_diagnostic_trims_base64_body_with_large_headers() {
+        // Binary inline body (base64 branch) pushed over budget by large
+        // headers: the base64 slice must stay multiple-of-4 aligned and the
+        // verdict fields must survive.
+        let shaped = shape_response(
+            RuntimeHttpEgressResponse {
+                status: 403,
+                headers: (0..32)
+                    .map(|i| (format!("x-header-{i}"), "h".repeat(1024)))
+                    .collect(),
+                body: vec![0xFF; 512],
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 512,
+                redaction_applied: false,
+            },
+            48 * 1024,
+        );
+        assert!(
+            shaped
+                .output
+                .get("body_base64")
+                .and_then(Value::as_str)
+                .is_some(),
+            "512-byte binary body must inline as body_base64"
+        );
+
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
+        assert!(
+            diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "diagnostic must fit the budget, got {} bytes",
+            diagnostic.len()
+        );
+        let parsed: Value =
+            serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
+        assert_eq!(parsed["status"], json!(403));
+        assert_eq!(parsed["truncation"]["headers"], json!(true));
+        let trimmed_base64 = parsed["body_base64"]
+            .as_str()
+            .expect("base64 body survives");
+        assert_eq!(
+            trimmed_base64.len() % 4,
+            0,
+            "trimmed base64 must stay multiple-of-4 aligned"
+        );
+    }
+
+    #[test]
+    fn failure_diagnostic_scrubs_disallowed_control_characters() {
+        // DEL/C1 control bytes are not escaped by serde_json and would fail
+        // ModelDiagnostic validation at the resolution boundary.
+        let mut body = vec![b'a'; 256];
+        // DEL (U+007F) and C1 control (U+0081) are valid UTF-8 but are not
+        // escaped by serde_json; they must be scrubbed from the diagnostic.
+        body.extend_from_slice(&[0x7F, 0xC2, 0x81, b'b']);
+        let shaped = shape_response(
+            RuntimeHttpEgressResponse {
+                status: 403,
+                headers: Vec::new(),
+                body,
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 259,
+                redaction_applied: false,
+            },
+            48 * 1024,
+        );
+
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
+        assert!(
+            !diagnostic
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+            "diagnostic must not carry raw control bytes"
+        );
+        let parsed: Value =
+            serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
+        assert_eq!(parsed["status"], json!(403));
+    }
+
+    #[test]
     fn failure_diagnostic_preserves_saved_body_metadata_without_inline_body() {
         let shaped = shape_response(
             RuntimeHttpEgressResponse {
@@ -553,7 +693,7 @@ mod tests {
             1024,
         );
 
-        let diagnostic = bounded_failure_diagnostic(&shaped.output, 403);
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
         let parsed: Value =
             serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
         assert_eq!(parsed["status"], json!(403));
@@ -570,7 +710,7 @@ mod tests {
     #[test]
     fn small_failure_diagnostic_is_serialized_untrimmed() {
         let shaped = shape_response(response_with_status(403), 1024);
-        let diagnostic = bounded_failure_diagnostic(&shaped.output, 403);
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
         let parsed: Value =
             serde_json::from_str(&diagnostic).expect("diagnostic must be valid JSON");
         assert_eq!(parsed["status"], json!(403));
