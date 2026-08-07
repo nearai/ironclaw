@@ -648,7 +648,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // a production file. Net effect is a smaller crate than before the
         // fixes, so the ceiling ratchets DOWN rather than being raised. Count
         // read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_115),
+        // 13_115 -> 13_028 (2026-08-07, run-acts-as-invoker follow-up):
+        // `LoopRunContext::acting_user_id` (+16 lines) declares the one
+        // acting-identity ladder both the composition gate raise and the
+        // loop-host resume replay load key their scope-keyed stores by —
+        // hand-synced copies of it had already diverged once. Paid for by
+        // splitting `host/run_context.rs`'s 104-line inline `#[cfg(test)]`
+        // module into its `run_context/tests.rs` sibling, so the ceiling
+        // ratchets DOWN. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_028),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

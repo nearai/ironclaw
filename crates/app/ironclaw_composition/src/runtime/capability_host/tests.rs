@@ -4455,12 +4455,15 @@ mod tests {
             &fallback_user_id,
             raise_invocation_id,
         );
-        // PINNED IDENTITY: under the interim #7157 split, the approval-gate
-        // raise (and therefore the lease) is scoped to the thread OWNER, while
-        // the authorization identity already follows the actor.
+        // PINNED IDENTITY: a run acts as the user who invoked it, so the
+        // approval-gate raise (and therefore the lease) is scoped to the
+        // ACTING user — the invoker sees and approves the gate. This flipped
+        // from the thread owner when the interim #7157 split was unified onto
+        // the actor; this test passed under both derivations, which is the
+        // point: raise and resume moved together.
         assert_eq!(
-            raise_scope.user_id, owner_user_id,
-            "the approval-gate scope deliberately follows the thread owner (interim split)"
+            raise_scope.user_id, actor_user_id,
+            "the approval-gate scope follows the acting user"
         );
         let approval_requests = runtime_surfaces.approval_requests_for_test();
         let raise_record = approval_requests
@@ -4474,9 +4477,10 @@ mod tests {
             .invocation_fingerprint
             .clone()
             .expect("the raise fingerprints the invocation");
-        // Scope isolation: the OTHER candidate identity must not see the gate.
+        // Scope isolation: the OTHER candidate identity (the thread owner)
+        // must not see the gate.
         let mut other_scope = raise_scope.clone();
-        other_scope.user_id = actor_user_id.clone();
+        other_scope.user_id = owner_user_id.clone();
         assert!(
             approval_requests
                 .get(&other_scope, approval_request_id)

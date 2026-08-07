@@ -23,17 +23,17 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_turns::CapabilityActivityId;
 
+/// The scope the resume-side replay-payload load is keyed by. MUST derive the
+/// same user as the raise-side save (the synthetic gate raise in
+/// `ironclaw_composition`'s `notification_channels_set`), or an approved
+/// resume finds no payload and strands: both sides delegate to
+/// [`LoopRunContext::acting_user_id`] — a run acts as the user who invoked it.
 fn resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &ironclaw_host_api::ids::UserId,
 ) -> ironclaw_host_api::resource::ResourceScope {
     let mut scope = run_context.scope.to_resource_scope();
-    scope.user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
+    scope.user_id = run_context.acting_user_id(fallback_user_id);
     scope
 }
 
