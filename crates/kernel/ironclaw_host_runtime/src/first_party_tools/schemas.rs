@@ -79,20 +79,24 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["parse", "stringify", "query", "validate"],
+                    "enum": ["parse", "stringify", "query", "validate", "length", "last", "slice", "aggregate"],
                     "description": "JSON operation to perform"
                 },
                 "data": { "description": "JSON string or JSON value to process" },
                 "file_path": {
                     "type": "string",
                     "maxLength": 4096,
-                    "description": "Scoped JSON file below /workspace to read for a query; mutually exclusive with data and bounded to 8388608 bytes"
+                    "description": "Scoped JSON file below /workspace to read for query or collection operations; mutually exclusive with data and bounded to 8388608 bytes"
                 },
                 "path": {
                     "type": "string",
                     "maxLength": 4096,
-                    "description": "Dot/bracket query path with an optional JSONPath-style $ root, including $, $[1][0], $.nodes[2].data[15][0], [1][0], or nodes[2].data[15][0]"
-                }
+                    "description": "Restricted dot/bracket traversal path with an optional $ root, including $, $[1][0], $.nodes[2].data[15][0], [1][0], or nodes[2].data[15][0]. Wildcards, negative indices, slices, filters, recursive descent, expressions, and functions are not supported; use length, last, slice, or aggregate operations instead."
+                },
+                "start": { "type": "integer", "minimum": 0, "description": "Inclusive array start index for slice" },
+                "end": { "type": "integer", "minimum": 0, "description": "Exclusive array end index for slice; at most 4096 items may be returned" },
+                "function": { "type": "string", "enum": ["sum", "average", "min", "max"], "description": "Bounded numeric aggregate: integer-only input computes exactly (sum, min, max) and average rounds its exact sum once; input mixing integers and decimals computes in floating point" },
+                "value_index": { "type": "integer", "minimum": 0, "description": "Optional numeric index to select from each array row before aggregation" }
             },
             "oneOf": [
                 {
@@ -120,6 +124,54 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "title": "query a scoped workspace JSON file",
                     "properties": { "operation": { "const": "query" } },
                     "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "get inline JSON collection length",
+                    "properties": { "operation": { "const": "length" } },
+                    "required": ["operation", "data", "path"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "get workspace JSON collection length",
+                    "properties": { "operation": { "const": "length" } },
+                    "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "get last inline JSON array item",
+                    "properties": { "operation": { "const": "last" } },
+                    "required": ["operation", "data", "path"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "get last workspace JSON array item",
+                    "properties": { "operation": { "const": "last" } },
+                    "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "slice an inline JSON array",
+                    "properties": { "operation": { "const": "slice" } },
+                    "required": ["operation", "data", "path", "start", "end"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "slice a workspace JSON array",
+                    "properties": { "operation": { "const": "slice" } },
+                    "required": ["operation", "file_path", "path", "start", "end"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "aggregate an inline JSON numeric array",
+                    "properties": { "operation": { "const": "aggregate" } },
+                    "required": ["operation", "data", "path", "function"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "aggregate a workspace JSON numeric array",
+                    "properties": { "operation": { "const": "aggregate" } },
+                    "required": ["operation", "file_path", "path", "function"],
                     "not": { "required": ["data"] }
                 },
                 {
@@ -1036,7 +1088,20 @@ mod tests {
         let schema = resolve_builtin_input_schema_ref("schemas/builtin/json.input.v1.json")
             .expect("JSON schema is registered");
         let branches = schema["oneOf"].as_array().expect("operation alternatives");
-        assert_eq!(branches.len(), 5);
+        assert_eq!(branches.len(), 13);
+        assert_eq!(
+            schema["properties"]["operation"]["enum"],
+            serde_json::json!([
+                "parse",
+                "stringify",
+                "query",
+                "validate",
+                "length",
+                "last",
+                "slice",
+                "aggregate"
+            ])
+        );
         assert!(branches.iter().any(|branch| {
             branch["properties"]["operation"]["const"] == "query"
                 && branch["required"] == serde_json::json!(["operation", "data", "path"])
@@ -1059,6 +1124,23 @@ mod tests {
                 .as_str()
                 .is_some_and(|description| description.contains("$.nodes"))
         );
+        assert_eq!(schema["properties"]["start"]["minimum"], 0);
+        assert_eq!(schema["properties"]["end"]["minimum"], 0);
+        assert_eq!(schema["properties"]["value_index"]["minimum"], 0);
+        assert_eq!(
+            schema["properties"]["function"]["enum"],
+            serde_json::json!(["sum", "average", "min", "max"])
+        );
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "slice"
+                && branch["required"]
+                    == serde_json::json!(["operation", "file_path", "path", "start", "end"])
+        }));
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "aggregate"
+                && branch["required"]
+                    == serde_json::json!(["operation", "data", "path", "function"])
+        }));
     }
 
     #[test]

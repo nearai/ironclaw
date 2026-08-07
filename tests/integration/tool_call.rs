@@ -504,6 +504,48 @@ async fn run_invalid_json_query() -> RebornIntegrationHarness {
     h
 }
 
+async fn run_json_collection_analysis() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .with_real_egress_response_bodies([transcript_json_fixture()])
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http.save",
+                json!({"url": HTTP_TOOL_URL, "save_to": "/workspace/source.json"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "last",
+                    "file_path": "/workspace/source.json",
+                    "path": "$.nodes[2].data"
+                }),
+            ),
+            RebornScriptedReply::text("selected"),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "aggregate",
+                    "data": {"prices": [[1, 10.0], [2, 20.0], [3, 30.0]]},
+                    "path": "prices",
+                    "function": "average",
+                    "value_index": 1
+                }),
+            ),
+            RebornScriptedReply::text("analyzed"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("select the last saved JSON row")
+        .await
+        .expect("file-backed collection turn completes");
+    h.submit_turn("average the inline JSON price rows")
+        .await
+        .expect("aggregate turn completes");
+    h
+}
+
 async fn run_json_schema_disclosure() -> RebornIntegrationHarness {
     let h = RebornIntegrationHarness::test_default()
         .with_real_egress_pipeline()
@@ -526,7 +568,16 @@ fn assert_json_schema_disclosure(h: &RebornIntegrationHarness) {
         .expect("JSON capability reaches the model");
     assert_eq!(
         definition.parameters["properties"]["operation"]["enum"],
-        json!(["parse", "stringify", "query", "validate"])
+        json!([
+            "parse",
+            "stringify",
+            "query",
+            "validate",
+            "length",
+            "last",
+            "slice",
+            "aggregate"
+        ])
     );
     assert!(
         definition.parameters["properties"]["file_path"]["description"]
@@ -537,7 +588,13 @@ fn assert_json_schema_disclosure(h: &RebornIntegrationHarness) {
         definition.parameters["properties"]["path"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("$.nodes")),
-        "model-visible schema must advertise optional JSONPath-style roots"
+        "model-visible schema must advertise optional root markers"
+    );
+    assert!(
+        definition.parameters["properties"]["path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("not supported")),
+        "model-visible schema must distinguish traversal paths from full JSONPath"
     );
     assert!(
         definition.parameters["oneOf"]
@@ -591,6 +648,21 @@ async fn invalid_json_is_recoverable() {
     h.assert_tool_error_summary_contains("JSON input is not valid JSON")
         .await
         .expect("invalid JSON is explained to the model with an actionable safe summary");
+}
+
+/// Bounded collection operations work for both scoped files and inline rows.
+#[tokio::test]
+async fn json_runs_bounded_collection_operations() {
+    let h = run_json_collection_analysis().await;
+    h.assert_tool_result_contains("value-15")
+        .await
+        .expect("last selects the final item from the scoped JSON array");
+    h.assert_tool_result_contains(r#""function":"average""#)
+        .await
+        .expect("aggregate reports the selected numeric operation");
+    h.assert_tool_result_contains(r#""value":20.0"#)
+        .await
+        .expect("aggregate selects and averages the numeric row values");
 }
 
 /// The model-visible schema advertises operations and file-backed JSONPath queries.
