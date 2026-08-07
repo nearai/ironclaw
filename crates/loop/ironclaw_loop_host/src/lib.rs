@@ -23,10 +23,10 @@ mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
 mod cancellation_port;
-mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
+mod capability_surface_policy;
 mod compaction_task;
 mod context_shadow;
 mod context_window_cache;
@@ -61,6 +61,7 @@ mod token_estimator;
 mod tool_disclosure;
 mod tool_disclosure_mode;
 mod tool_disclosure_port;
+mod tool_search;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -76,9 +77,6 @@ pub use cancellation_port::{
     RunCancellationObservationKind, RunStateLoopCancellationPort,
     verify_product_live_cancellation_probe,
 };
-pub use capability_allow_set::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-};
 pub use capability_port::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
     DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
@@ -87,9 +85,9 @@ pub use capability_port::{
     loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
-    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
-    PerSurfaceCapabilityDenyDecorator,
+    CapabilitySurfacePolicyFilter, CapabilitySurfaceVisibleFilter,
 };
+pub use capability_surface_policy::{CapabilityResolveError, CapabilitySurfaceProfileResolver};
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
     active_task_compaction_prompt_id, default_compaction_prompt_id,
@@ -1435,11 +1433,19 @@ where
             let capability_ids = if let Some(view) = request.capability_view.as_ref() {
                 view.visible_capability_ids.clone()
             } else if let Some(capabilities) = self.capabilities.as_ref() {
-                capabilities
-                    .tool_definitions()?
-                    .into_iter()
-                    .map(|definition| definition.capability_id)
-                    .collect()
+                match capabilities.tool_definitions() {
+                    Ok(definitions) => definitions
+                        .into_iter()
+                        .map(|definition| definition.capability_id)
+                        .collect(),
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            "prompt diagnostics could not capture capability ids"
+                        );
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -1468,8 +1474,7 @@ where
         let diagnostic_model = diagnostic_requested_model.as_ref().map(|requested_model| {
             let effective_model = diagnostic_initial_effective_model
                 .as_ref()
-                .map(|model| model.as_str().to_string())
-                .unwrap_or_else(|| model_profile_id.as_str().to_string());
+                .map(|model| model.as_str().to_string());
             (requested_model.clone(), effective_model)
         });
         let diagnostic_started_at = Utc::now();
@@ -1595,17 +1600,15 @@ where
                     failure_summary: error.safe_summary.as_str().to_string(),
                 },
             };
-            let effective_model = diagnostic_effective_model
-                .or_else(|| {
-                    self.gateway
-                        .diagnostic_effective_model(
-                            &model_profile_id,
-                            request.fallback_index,
-                            self.run_context.resolved_model_route.as_ref(),
-                        )
-                        .map(ProviderModelId::into_inner)
-                })
-                .unwrap_or_else(|| model_profile_id.as_str().to_string());
+            let effective_model = diagnostic_effective_model.or_else(|| {
+                self.gateway
+                    .diagnostic_effective_model(
+                        &model_profile_id,
+                        request.fallback_index,
+                        self.run_context.resolved_model_route.as_ref(),
+                    )
+                    .map(ProviderModelId::into_inner)
+            });
             sink.record_model_call(HostManagedModelCallDiagnosticCapture::Completed {
                 diagnostic: HostManagedModelCallDiagnostic {
                     call_id,
@@ -2112,7 +2115,7 @@ impl BufferedPromptDiagnosticSink {
                 })
                 .await
                 {
-                    tracing::warn!(%error, "diagnostic worker failed");
+                    tracing::debug!(%error, "diagnostic worker failed");
                 }
             }
         });
@@ -2172,7 +2175,7 @@ pub struct HostManagedModelCallDiagnostic {
     pub context: LoopRunContext,
     pub iteration: u32,
     pub requested_model: String,
-    pub effective_model: String,
+    pub effective_model: Option<String>,
     pub started_at: DateTime<Utc>,
 }
 
@@ -3183,7 +3186,7 @@ mod tests {
                 context,
                 iteration: 1,
                 requested_model: "interactive_model".to_string(),
-                effective_model: "provider-model".to_string(),
+                effective_model: Some("provider-model".to_string()),
                 started_at: now,
             },
             completed_at: now,

@@ -64,6 +64,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         cancellation_factory: false,        // :3407 hardcoded None
         skill_context_source: true,         // :2917-2929 standalone_filesystem_skill_context_source
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        prompt_diagnostic_sink: true, // process-local bounded inspector store
         reply_attachment_intent_port: true, // shared production outbound-state store
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: true, // steering/follow-up host input queue — always wired (InMemory or Filesystem)
@@ -153,6 +154,7 @@ fn mask(
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
+        "prompt_diagnostic_sink" => shape.prompt_diagnostic_sink = from.prompt_diagnostic_sink,
         "reply_attachment_intent_port" => {
             shape.reply_attachment_intent_port = from.reply_attachment_intent_port
         }

@@ -40,6 +40,7 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    open_reborn_v2_page,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_first_run_server,  # noqa: F401 - imported fixture
@@ -436,8 +437,7 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
 ):
     """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
     marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
-    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
-    async with httpx.AsyncClient(headers=headers) as client:
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
         submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
         assistant = await _wait_for_assistant_message(
@@ -453,11 +453,13 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
     )
     page = await context.new_page()
     try:
-        await page.goto(
-            f"{reborn_v2_server}/chat/{thread_id}"
-            f"?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        await open_reborn_v2_page(
+            page,
+            reborn_v2_server,
+            path=f"/chat/{thread_id}?debug=true",
+            ready_selector=SEL_V2["inspector_prompt_content"],
         )
-        prompt = page.locator("[data-testid='inspector-prompt-content']")
+        prompt = page.locator(SEL_V2["inspector_prompt_content"])
         await expect(prompt).to_be_visible(timeout=30000)
         await expect(prompt.get_by_text("Estimated prompt tokens", exact=True)).to_be_visible()
         await expect(prompt.get_by_text("mock-model", exact=True).first).to_be_visible()
@@ -500,15 +502,23 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(activity.get_by_label("Previous turn")).to_be_disabled()
         await expect(activity.get_by_label("Next turn")).to_be_disabled()
 
-        await page.locator("[data-testid='inspector-tab-stats']").click()
-        stats = page.locator("[data-testid='inspector-stats-content']")
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        stats = page.locator(SEL_V2["inspector_stats_content"])
         await expect(stats).to_be_visible()
-        await expect(stats.get_by_text("Model calls", exact=True).locator("..")).to_contain_text(
-            "1"
+        model_calls = (
+            stats.get_by_text("Model calls", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
         )
-        await expect(stats.get_by_text("Input tokens", exact=True).locator("..")).to_contain_text(
-            "10"
+        await expect(model_calls).to_have_text("1")
+        input_tokens = (
+            stats.get_by_text("Input tokens", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
         )
+        await expect(input_tokens).to_have_text("10")
         await expect(stats.get_by_text("Output tokens", exact=True).locator("..")).not_to_contain_text(
             "Unavailable"
         )

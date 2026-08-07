@@ -400,7 +400,7 @@ All 4 launch flavors (`SubagentFlavorId::{General, Explorer, Coder, Planner}`, `
 
 **(a) Prompt — already file-sourced.** `.../subagent/directions/{general,explorer,coder,planner}.md` via `include_str!()` (`directions/mod.rs:22-25`). No change.
 
-**(b) Capability allow/deny — reuses existing machinery.** `SubagentCapabilitySurfaceResolver::resolve` (`.../subagent/capability_surface.rs:30-46`) computes `intersect_allow_sets(base, flavor_allowlist)`; deny layered outermost by `CapabilitySurfaceDenyFilter` (`ironclaw_loop_host/src/capability_surface_filter.rs:174-195`). Nothing new.
+**(b) Capability attenuation — reuses existing machinery.** `SubagentCapabilitySurfaceResolver::resolve` (`.../subagent/capability_surface.rs`) narrows the base host-API `CapabilitySurfacePolicy` to the flavor allowlist. Global and run-profile exclusions are folded into that same resolved value before the runner shares it with enforcement and disclosure.
 
 **(c) Budget — the one real gap, currently family-wide.** `SUBAGENT_ITERATION_LIMIT = 16` (`.../families/subagent.rs:9`) baked into `DefaultBudgetStrategy` (`:37-41`). **Ruling:** add `iteration_limit: u32` to `SubagentFlavor` (default 16), read at `material_for_run` — family default stays fallback (**P3.2**).
 
