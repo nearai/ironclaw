@@ -2,20 +2,24 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import {
-  INSPECTOR_HEALTH,
-  INSPECTOR_PREFERENCES_KEY,
   INSPECTOR_RUN_HISTORY_KEY,
   MAX_INSPECTOR_ACTIVITY_ENTRIES,
-  healthForInspectorStatus,
-  inspectorDebugEnabled,
-  inspectorViewportMode,
-  latestInspectorRunId,
   reduceInspectorActivity,
-  readInspectorPreferences,
   rememberInspectorRun,
+} from "./inspector-activity";
+import {
+  INSPECTOR_HEALTH,
+  INSPECTOR_PREFERENCES_KEY,
+  healthForInspectorStatus,
+  inspectorViewportMode,
+  readInspectorPreferences,
   shouldAcceptInspectorCursor,
   writeInspectorPreferences,
 } from "./inspector-state";
+import {
+  inspectorDebugEnabled,
+  latestInspectorRunId,
+} from "./inspector-shell";
 
 function storage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));

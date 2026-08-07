@@ -2,14 +2,16 @@ import React from "react";
 
 import { cn } from "../../../utils/cn";
 import {
+  reduceInspectorActivity,
+  rememberInspectorRun,
+  type InspectorActivityRow,
+} from "./inspector-activity";
+import {
   INSPECTOR_HEALTH,
   INSPECTOR_TABS,
   inspectorViewportMode,
-  reduceInspectorActivity,
   readInspectorPreferences,
-  rememberInspectorRun,
   writeInspectorPreferences,
-  type InspectorActivityRow,
   type InspectorPreferences,
   type InspectorTab,
 } from "./inspector-state";

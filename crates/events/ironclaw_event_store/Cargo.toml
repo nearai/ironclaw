@@ -38,5 +38,10 @@ webpki-roots = "1.0"
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
+# The Postgres contract leg provisions a private database per test through
+# the shared `test-support` provisioner (`postgres_isolation`); the crate
+# edge already exists as a normal dependency — this entry only turns the
+# dev-only feature on for this crate's tests.
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0", features = ["test-support"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }

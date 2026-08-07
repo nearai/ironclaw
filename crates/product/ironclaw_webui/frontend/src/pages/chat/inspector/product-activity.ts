@@ -8,7 +8,7 @@ export interface ProductInspectorActivity {
   summary: string;
 }
 
-interface PublishProductInspectorActivity {
+export interface PublishProductInspectorActivity {
   threadId: unknown;
   runId: unknown;
   kind: string;

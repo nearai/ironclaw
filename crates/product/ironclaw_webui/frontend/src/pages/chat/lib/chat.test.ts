@@ -11,7 +11,7 @@ import { messageBelongsToActiveRun } from "./message-types";
 import {
   inspectorDebugEnabled,
   latestInspectorRunId,
-} from "../inspector/inspector-state";
+} from "../inspector/inspector-shell";
 
 function chatSourceForTest() {
   return componentSourceForTest(
@@ -155,6 +155,7 @@ function renderChat({
     useChatCommands: () => [],
     matchCommand: () => null,
     useInterfacePreferences: () => ({ showChatLogsShortcut }),
+    useLocation: () => ({ search: "" }),
     useT: () => (key) => key,
     ...contextOverrides,
   };

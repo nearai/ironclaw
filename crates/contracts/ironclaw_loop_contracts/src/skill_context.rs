@@ -32,7 +32,7 @@
 //! version is a deterministic SHA-256 content digest of all entry data. The digest verifies
 //! snapshot consistency, not producer authenticity; host trust decisions remain authoritative.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, fmt};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,57 @@ pub enum SkillContextError {
     /// An internal error that cannot be attributed to trust, visibility, or budget validation.
     #[error("skill context: internal error")]
     Internal,
+}
+
+/// Validated model-visible skill name.
+///
+/// Skill names are bounded identifiers: they start with an ASCII alphanumeric
+/// character, contain only ASCII alphanumeric characters plus `.`, `_`, or
+/// `-`, and are at most 64 bytes long.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillName(String);
+
+impl SkillName {
+    pub fn new(value: impl Into<String>) -> Result<Self, SkillContextError> {
+        let value = value.into();
+        validate_model_visible_skill_name(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for SkillName {
+    type Error = SkillContextError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<SkillName> for String {
+    fn from(value: SkillName) -> Self {
+        value.into_inner()
+    }
+}
+
+impl AsRef<str> for SkillName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SkillName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -849,6 +900,19 @@ fn feed_digest_field(digest: &mut Sha256, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_name_enforces_model_visible_identifier_grammar() {
+        let name = SkillName::new("workspace-search.v2").expect("valid skill name");
+        assert_eq!(name.as_str(), "workspace-search.v2");
+        assert_eq!(
+            serde_json::from_str::<SkillName>("\"workspace-search.v2\"")
+                .expect("skill name deserializes"),
+            name
+        );
+        assert!(SkillName::new("invalid skill").is_err());
+        assert!(SkillName::new("-invalid-prefix").is_err());
+    }
 
     #[test]
     fn context_byte_accumulator_reports_arithmetic_overflow() {

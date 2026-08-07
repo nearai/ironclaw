@@ -216,6 +216,17 @@ impl TraceRemoteRequestFailure {
         }
     }
 
+    /// A 2xx whose body is not the expected receipt. `Submission` rather than
+    /// `HttpRejection`: the transport succeeded, the payload did not.
+    pub(crate) fn response_invalid(operation: &'static str, detail: &'static str) -> Self {
+        Self {
+            status: None,
+            kind: TraceQueueTelemetryFailureKind::Submission,
+            message: format!("{operation}: {detail}"),
+            source: None,
+        }
+    }
+
     pub(crate) fn auth_rejection(&self) -> bool {
         matches!(
             self.status,
@@ -436,6 +447,17 @@ pub(crate) async fn trace_upload_issuer_claim_bearer_token(
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
         };
+        // Expired entries were filtered on read but never removed, so the map
+        // grew one live-or-stale *bearer token* per user subject for the
+        // lifetime of the process (#7144). Sweeping on write keeps the secret
+        // retention bounded by what is actually usable, and the hard cap bounds
+        // the rest the way `CREDIT_VIEW_CACHE_MAX_SCOPES` bounds its cache —
+        // these entries are pure memoization and re-mint on demand.
+        let now = Utc::now();
+        cache.retain(|_, cached| cached.refresh_after > now);
+        if cache.len() >= TRACE_UPLOAD_CLAIM_CACHE_MAX_ENTRIES && !cache.contains_key(&cache_key) {
+            cache.clear();
+        }
         cache.insert(
             cache_key,
             CachedTraceUploadClaim {
@@ -446,6 +468,9 @@ pub(crate) async fn trace_upload_issuer_claim_bearer_token(
     }
     Ok(claim.access_token)
 }
+
+/// Hard cap on the upload-claim cache, mirroring `CREDIT_VIEW_CACHE_MAX_SCOPES`.
+const TRACE_UPLOAD_CLAIM_CACHE_MAX_ENTRIES: usize = 4096;
 
 pub(crate) fn trace_upload_cached_claim(cache_key: &str, now: DateTime<Utc>) -> Option<String> {
     let cache = match TRACE_UPLOAD_CLAIM_CACHE.lock() {
@@ -662,7 +687,7 @@ pub(crate) fn build_trace_upload_claim_http_error(
 /// Returns the bearer credential to present to the upload-claim issuer.
 ///
 /// - `TraceUploadAuthMode::DeviceKey`: self-signs a short-lived workload JWT
-///   with the standaloneice keypair for the tenant.  The context must carry a
+///   with the standalone device keypair for the tenant.  The context must carry a
 ///   `scope_dir`.
 /// - `TraceUploadAuthMode::WorkloadTokenEnv`: reads the workload token from
 ///   the environment variable named in the policy (existing behavior, byte-for-byte

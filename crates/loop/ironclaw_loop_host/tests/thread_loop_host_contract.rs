@@ -32,7 +32,7 @@ use ironclaw_loop_contracts::{
     ModelProfileId, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
     PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
     ProviderToolCallReplay, ProviderToolDefinition, RunProfileResolutionRequest,
-    RunProfileResolver, SkillTrustLevel, SkillVisibility, ToolObservationDetail,
+    RunProfileResolver, SkillName, SkillTrustLevel, SkillVisibility, ToolObservationDetail,
     ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
@@ -44,7 +44,7 @@ use ironclaw_loop_host::{
     HostManagedPromptDiagnosticCapture, HostManagedPromptDiagnosticSink,
     HostManagedToolResultContent, HostSkillContextBuildError, HostSkillContextCandidate,
     HostSkillContextSource, IdentityApplicability, IdentityBudget, IdentityFileName,
-    LoopAttachmentReadError, LoopAttachmentReadPort, PromptContextTokenBudget,
+    LoopAttachmentReadError, LoopAttachmentReadPort, PromptContextTokenBudget, ProviderModelId,
     SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
     ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
@@ -228,9 +228,9 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
 }
 
 #[tokio::test]
-async fn model_port_records_resolved_prompt_at_the_host_boundary() {
+async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boundary() {
     let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
-    let gateway = Arc::new(RecordingGateway::reply_with_usage(
+    let gateway = Arc::new(RecordingGateway::reply_with_usage_and_fallback(
         "model says hi",
         LoopModelUsage {
             input_tokens: 21,
@@ -238,6 +238,7 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
             cache_read_input_tokens: 5,
             cache_creation_input_tokens: 3,
         },
+        2,
     ));
     let sink = Arc::new(RecordingPromptDiagnosticSink::default());
     let messages = user_model_messages(&fixture);
@@ -258,7 +259,7 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
             Some(ironclaw_loop_contracts::LoopPromptDiagnosticMetadata {
                 identity_message_count: 0,
                 instruction_snippet_count: 2,
-                active_skills: vec!["workspace-search".to_string()],
+                active_skills: vec![SkillName::new("workspace-search").expect("skill name")],
             }),
         )
         .expect("prompt grant");
@@ -277,7 +278,7 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
         messages,
         surface_version: None,
         model_preference: None,
-        fallback_index: 0,
+        fallback_index: 2,
         iteration: 7,
         capability_view: Some(LoopModelCapabilityView {
             visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
@@ -290,9 +291,15 @@ async fn model_port_records_resolved_prompt_at_the_host_boundary() {
     assert_eq!(captures.len(), 1);
     assert_eq!(captures[0].messages[0].content, "diagnostic prompt body");
     assert_eq!(captures[0].instruction_snippet_count, 2);
-    assert_eq!(captures[0].active_skills, ["workspace-search"]);
+    assert_eq!(captures[0].active_skills[0].as_str(), "workspace-search");
     assert_eq!(captures[0].capability_ids[0].as_str(), "filesystem.read");
-    assert_eq!(captures[0].effective_model, "provider-model");
+    assert_eq!(
+        captures[0]
+            .effective_model
+            .as_ref()
+            .map(ProviderModelId::as_str),
+        Some("fallback-provider-model")
+    );
     assert_eq!(captures[0].context_limit, 64_000);
     drop(captures);
     let model_calls = sink.model_calls.lock().expect("model calls");
@@ -400,6 +407,47 @@ async fn model_port_keeps_omitted_usage_unavailable() {
     assert_eq!(model_calls.len(), 2);
     assert_eq!(model_calls[0].call_id, model_calls[1].call_id);
     assert_eq!(model_calls[1].usage, None);
+}
+
+#[tokio::test]
+async fn model_port_records_full_capability_surface_when_request_has_no_view() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+    let capability_id = CapabilityId::new("demo.full_surface").expect("capability");
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let sink = Arc::new(RecordingPromptDiagnosticSink::default());
+
+    ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_capability_port(Arc::new(StaticToolDefinitionPort::new(vec![
+        provider_tool_definition(capability_id.clone(), "demo__full_surface"),
+    ])))
+    .with_prompt_diagnostic_sink(sink.clone())
+    .stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages,
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        iteration: 0,
+        capability_view: None,
+    })
+    .await
+    .expect("model response");
+
+    let captures = sink.captures.lock().expect("captures");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].capability_ids, vec![capability_id]);
+    assert_eq!(
+        gateway.tool_definition_calls()[0][0].name.as_str(),
+        "demo__full_surface"
+    );
 }
 
 #[tokio::test]
@@ -6077,13 +6125,18 @@ impl RecordingGateway {
         }
     }
 
-    fn reply_with_usage(content: &str, usage: LoopModelUsage) -> Self {
+    fn reply_with_usage_and_fallback(
+        content: &str,
+        usage: LoopModelUsage,
+        fallback_index: u32,
+    ) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
             tool_definition_calls: Mutex::new(Vec::new()),
             response: Ok(
                 HostManagedModelResponse::assistant_reply(content.to_string())
                     .with_usage(usage)
+                    .with_effective_fallback_index(fallback_index)
                     .with_diagnostic_effective_model("provider-model-from-response"),
             ),
         }
@@ -6183,9 +6236,15 @@ impl HostManagedModelGateway for RecordingGateway {
     fn diagnostic_effective_model(
         &self,
         _model_profile_id: &ModelProfileId,
+        fallback_index: u32,
         _resolved_model_route: Option<&ironclaw_loop_host::HostManagedModelRouteSnapshot>,
-    ) -> Option<String> {
-        Some("provider-model".to_string())
+    ) -> Option<ProviderModelId> {
+        ProviderModelId::new(if fallback_index == 0 {
+            "provider-model"
+        } else {
+            "fallback-provider-model"
+        })
+        .ok()
     }
 
     async fn stream_model(

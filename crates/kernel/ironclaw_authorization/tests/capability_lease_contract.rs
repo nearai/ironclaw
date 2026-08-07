@@ -985,7 +985,7 @@ async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
 }
 
 /// Regression test for the systemic finding tracked in
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`:
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`:
 /// `CapabilityLeaseStore` must enforce tenant isolation through
 /// the [`ScopedFilesystem`] mount permission boundary, not by hand-rolling
 /// `/engine/tenants/<tenant_id>/users/<user_id>/...` prefixes inside its
@@ -1065,7 +1065,7 @@ async fn filesystem_capability_lease_store_isolates_two_tenants_with_same_user_p
 
 /// Defense-in-depth regression for the tenant-isolation indexed
 /// projection (see
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
 /// every `CapabilityLeaseStore` lease write decorates its
 /// `Entry` with a `tenant_id` projection so an admin-tier query can
 /// filter explicitly by tenant and a path-rewriting bug surfaces as a

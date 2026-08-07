@@ -15,7 +15,7 @@
 //! `LibSql*` / `Postgres*` impls that spoke SQL directly were removed during
 //! the `src/db/` dissolution pass — see the design-doc entry "Legacy
 //! per-backend store cleanup" in
-//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//! `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 //!
 //! KNOWN LIMITATION (PR #3171 review #39): replay filtering currently stops
 //! at project / mission / thread / process scope. The `ResourceScope` carries
@@ -608,7 +608,7 @@ mod postgres_backed {
                 return Err(RebornEventStoreError::RemotePostgresClearTextDisabled);
             }
             tracing::warn!(
-                target = "ironclaw::reborn::event_store::postgres",
+                target: "ironclaw::reborn::event_store::postgres",
                 "remote Reborn Postgres cleartext connection explicitly allowed; use only on a trusted private network"
             );
             Manager::from_config(pg_config, NoTls, manager_config)

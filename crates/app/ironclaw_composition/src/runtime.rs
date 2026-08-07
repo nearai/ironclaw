@@ -407,12 +407,14 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
-// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
-// below, so the imports carry the same gate. Without it, any build that
-// compiles this crate as a *dependency* without `test-support` — e.g. the
-// PR clippy lane when the changed-package set is `{ironclaw,
-// ironclaw_config}` — sees three unused imports and fails `-D
-// warnings`. See #7119.
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors below,
+// so the imports carry the same gate. Without it, any build that compiles this
+// crate as a *dependency* with `test-support` off — e.g. `cargo clippy -p
+// ironclaw --lib --bins`, where the dev-dependency that would have unified the
+// feature on is not in the selected set — sees three unused imports and fails
+// `-D warnings`. See #7119; the "Check production-target lints (workspace, no
+// dev-dependency features)" step in code_style.yml keeps that shape linted so
+// the class cannot come back invisibly.
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 #[cfg(any(test, feature = "test-support"))]
@@ -552,7 +554,7 @@ pub struct RebornRuntime {
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
-    pub(crate) diagnostic_store: Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore>,
+    pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -3629,8 +3631,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
-    let diagnostic_store =
+    let diagnostic_store_impl =
         Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
+    let prompt_diagnostic_sink = Arc::new(
+        ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+            diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+            ironclaw_loop_host::DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY,
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+    )
+        as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),
@@ -3644,8 +3656,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
-        prompt_diagnostic_sink: Some(Arc::clone(&diagnostic_store)
-            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>),
+        prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone

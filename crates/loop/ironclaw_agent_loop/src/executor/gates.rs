@@ -21,7 +21,7 @@ use super::{
 };
 
 /// Enforce [`GateOutcome::validate_for_gate_kind`] before a stage honors a
-/// strategy outcome (§5a.1, docs/plans/2026-07-03-loop-failure-matrix.md): a
+/// strategy outcome (§5a.1, docs/internal/plans/2026-07-03-loop-failure-matrix.md): a
 /// `SkipAndContinue` on an Approval / AwaitDependentRun / ExternalTool gate is
 /// a strategy-contract violation, and silently skipping the gated call would
 /// mask a driver bug behind a normal completion. The invalid outcome is

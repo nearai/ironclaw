@@ -19,7 +19,7 @@ adding a browser test, use the `reborn_v2_*` fixtures — see
 
 > **Tier B note:** the v1 legacy `ironclaw` gateway binary
 > (`ironclaw-legacy`, formerly built by the `ironclaw_binary` fixture) was
-> **deleted** under Tier B (`docs/plans/2026-07-02-reborn-internal-module-refactor.md`
+> **deleted** under Tier B (`docs/internal/plans/2026-07-02-reborn-internal-module-refactor.md`
 > §8). The eight browser scenarios that drove only the legacy gateway
 > (`test_connection`, `test_chat`, `test_html_injection`, `test_skills`,
 > `test_sse_reconnect`, `test_tool_approval`, `test_dom_resource_limits`,

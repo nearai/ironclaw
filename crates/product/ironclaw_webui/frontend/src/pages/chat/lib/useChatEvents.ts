@@ -26,7 +26,7 @@ import {
   STREAM_FAILURE_ID_PREFIX,
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
-import { publishProductInspectorActivity } from "../inspector/product-activity";
+import { publishProductInspectorActivity } from "../inspector/product-activity-publisher";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
