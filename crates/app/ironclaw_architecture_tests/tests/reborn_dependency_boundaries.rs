@@ -632,12 +632,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
         ("ironclaw_host_api", 18_784),
-        // 14_479 -> 13_850 (2026-08-05, #7157): downward re-capture after the
+        // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
-        // delivery model. Count read from this test's own banked-slack
-        // failure message.
-        ("ironclaw_loop_contracts", 13_850),
+        // delivery model. The final count includes 96 prompt-inspection lines
+        // and 3 model-accounting lines subsequently merged from main; #7157
+        // remains a net 229-line reduction against that main baseline.
+        ("ironclaw_loop_contracts", 13_949),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
