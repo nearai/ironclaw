@@ -16,10 +16,13 @@ write:   WebUI handler -> ProductSurface::invoke -> capability descriptor
 
 The owning crates are:
 
-- `ironclaw_assistant`: product DTOs, `ProductView`, command/capability
-  descriptors, and product orchestration.
-- `ironclaw_host_api`: the `ProductSurface` contract, caller binding, and
-  shared host-facing error vocabulary.
+- `ironclaw_assistant`: product DTOs, the concrete `ProductView` and
+  command/capability descriptor instances, and product orchestration.
+- `ironclaw_product_contracts`: the `ProductSurface` contract, the
+  `ProductView`/`ProductSurfaceCommandDescriptor`/`ProductCapabilityDescriptor`
+  types, and the `ProductSurfaceCaller`/`BoundProductSurface` caller binding.
+- `ironclaw_host_api`: shared host-facing error vocabulary
+  (`ProductAdapterError`).
 - `ironclaw_webui`: route descriptors, handlers, gateway/listener/auth, and
   the Vite frontend under `frontend/`.
 - `ironclaw_composition`: production assembly and dependency wiring.
@@ -32,7 +35,7 @@ Run the graph status check once. If it is missing or stale, use targeted
 
 ```bash
 bash scripts/codebase-graph.sh status
-rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/product/ironclaw_assistant crates/contracts/ironclaw_host_api crates/product/ironclaw_webui
+rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/product/ironclaw_assistant crates/contracts/ironclaw_product_contracts crates/product/ironclaw_webui
 rg -n "descriptor|webui_v2_routes|ProductSurface" crates/product/ironclaw_webui/src/webui_v2
 ```
 

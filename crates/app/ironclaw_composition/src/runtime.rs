@@ -17,7 +17,7 @@
 //! They never name the underlying `TurnCoordinator`, `SessionThreadService`,
 //! `LoopExitApplier`, `HostManagedModelGateway`, etc. directly. That is the
 //! property that satisfies the "narrow Reborn public surface" requirement
-//! pinned by `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
+//! pinned by `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -49,6 +49,7 @@ use ironclaw_host_api::turn::{
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
@@ -61,11 +62,11 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
-    CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
-    HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
+    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_loop_host::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -407,12 +408,14 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
-// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
-// below, so the imports carry the same gate. Without it, any build that
-// compiles this crate as a *dependency* without `test-support` — e.g. the
-// PR clippy lane when the changed-package set is `{ironclaw,
-// ironclaw_config}` — sees three unused imports and fails `-D
-// warnings`. See #7119.
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors below,
+// so the imports carry the same gate. Without it, any build that compiles this
+// crate as a *dependency* with `test-support` off — e.g. `cargo clippy -p
+// ironclaw --lib --bins`, where the dev-dependency that would have unified the
+// feature on is not in the selected set — sees three unused imports and fails
+// `-D warnings`. See #7119; the "Check production-target lints (workspace, no
+// dev-dependency features)" step in code_style.yml keeps that shape linted so
+// the class cannot come back invisibly.
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 #[cfg(any(test, feature = "test-support"))]
@@ -552,6 +555,7 @@ pub struct RebornRuntime {
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
+    pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -3628,6 +3632,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
+    let prompt_diagnostic_sink = Arc::new(
+        ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+            diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+            ironclaw_loop_host::DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY,
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+    )
+        as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),
@@ -3641,6 +3657,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
+        prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone
@@ -4208,6 +4225,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         scoped_filesystem,
         admin_secret_provisioner,
         project_service,
+        diagnostic_store,
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
@@ -4480,6 +4498,7 @@ fn optional_nonzero_u32_env(
 fn skill_activation_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
+    activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
@@ -4495,6 +4514,7 @@ fn skill_activation_selector_config(
         selection_mode: ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
+        activation_strategy,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4504,9 +4524,18 @@ fn skill_activation_selector_config(
 /// (one-line skill listing; bodies load on `builtin.skill_activate`);
 /// `full` restores the legacy inject-bodies-by-score behavior.
 fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> {
-    match std::env::var(SKILL_INJECTION_MODE_ENV_KEY) {
+    skill_injection_mode_from_env_value(std::env::var(SKILL_INJECTION_MODE_ENV_KEY))
+}
+
+/// The decision itself, split from the lookup so every branch is testable. `remove_var` is not an
+/// option: these tests run in-process and in parallel, so unsetting the key races every other test
+/// reading it.
+fn skill_injection_mode_from_env_value(
+    value: Result<String, std::env::VarError>,
+) -> Result<SkillInjectionMode, RebornRuntimeError> {
+    match value {
         Ok(value) => skill_injection_mode_from(&value),
-        Err(std::env::VarError::NotPresent) => Ok(SkillInjectionMode::Listing),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_INJECTION_MODE),
         Err(error) => Err(RebornRuntimeError::InvalidArgument {
             reason: format!("could not read {SKILL_INJECTION_MODE_ENV_KEY}: {error}"),
         }),
@@ -4514,6 +4543,48 @@ fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> 
 }
 
 const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
+
+/// Binding for the `skill.activation.v1` profile.
+const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
+
+/// Default stays `CriteriaOnly` — behavior-preserving.
+///
+/// `name_and_description` is the opt-in (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`):
+/// a skill matches on name and description, not only `activation.keywords`/`tags`/`patterns`. On
+/// nearai/benchmarks#287, 0 of 30 agent-authored skills carried an `activation` block, so under
+/// criteria scoring they never auto-activate.
+///
+/// A floor-score strategy (`always_available`) was tried and REMOVED: listing membership is decided
+/// by visibility, not selection, so the floor only reordered a listing the model already saw.
+const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
+    ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
+
+/// Resolve the activation binding from the env, failing closed on an unknown id.
+fn skill_activation_env()
+-> Result<ironclaw_skills::activation_strategy::ActivationStrategy, RebornRuntimeError> {
+    match std::env::var(SKILL_ACTIVATION_ENV_KEY) {
+        Ok(value) => ironclaw_skills::activation_strategy::ActivationStrategy::parse(&value)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("{SKILL_ACTIVATION_ENV_KEY}: {error}"),
+            }),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_ACTIVATION),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {SKILL_ACTIVATION_ENV_KEY}: {error}"),
+        }),
+    }
+}
+
+/// Default skill-injection mode. `Listing` shows a one-line menu and loads a body only on `$name`
+/// or `builtin.skill_activate`; `Full` injects scored bodies.
+///
+/// On the 31-task subset in nearai/benchmarks#287 (`deepseek-v4-flash`), `Listing` leaves skills
+/// nearly inert -- `skill_list` called in 30/30 runs, `skill_activate` in 3/30, a body read in
+/// 0/30 -- and scores 79.8% against 78.5% for no skills at all, where `Full` scores 85.6%.
+///
+/// **Left at `Listing` anyway**: three `local_dev_*` tests drive a mock expecting the listing
+/// candidate and HANG under `Full`, so flipping the product default needs those updated first. Opt
+/// in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
+const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Listing;
 
 fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -4554,6 +4625,7 @@ fn filesystem_skill_context_source(
     let selector_config = skill_activation_selector_config(
         regex_skill_activation_enabled,
         skill_injection_mode_env()?,
+        skill_activation_env()?,
     );
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
@@ -4681,8 +4753,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 

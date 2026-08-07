@@ -71,6 +71,7 @@ export function useChatEvents({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  runTrackingRef,
   noteConnectionInterruptedRunId = noop,
   connectionContextForRunFailure = emptyConnectionContext,
   onStreamError = noop,
@@ -80,23 +81,31 @@ export function useChatEvents({
   if (typeof t !== "function") {
     throw new TypeError("useChatEvents requires a translation function");
   }
-  // Track which runIds we've already settled so that SSE replays
-  // (reconnect with `last-event-id`, repeated snapshots) don't trigger
-  // duplicate timeline refetches. A run settles on ANY terminal status,
-  // not only success — every terminal run reloads the timeline so tool
-  // input/output previews are recovered from the durable record even when
-  // the run failed, was cancelled, or needs recovery.
-  const settledRunsRef = React.useRef(new Set());
-  // Last `run_status.run_id` we've observed, persisted across event frames.
-  // Used to reject stale terminal statuses after a locally resolved gate
-  // resumes a newer active run.
-  const latestRunIdRef = React.useRef(null);
-  const promptRunIdRef = React.useRef(null);
 
   return React.useCallback(
     (envelope) => {
       const { type, frame } = envelope || {};
       if (!type || !frame) return;
+
+      // Per-thread run bookkeeping, owned and reset by `useChat` (see
+      // `lib/run-tracking-state.ts`). Read from the ref on every event rather
+      // than closing over the slots, so a thread switch that swaps in fresh
+      // state cannot be observed through a stale binding:
+      //
+      //   settledRuns — run ids already settled, so SSE replays (reconnect
+      //     with last-event-id, repeated snapshots) settle each run once.
+      //     A run settles on ANY terminal status, not only success; every
+      //     terminal run reloads the timeline so tool input/output previews
+      //     are recovered from the durable record.
+      //   latestRunId — last `run_status.run_id` seen, used to reject stale
+      //     terminal statuses after a locally resolved gate resumed a newer
+      //     run, and to scope capability frames that omit a run id.
+      //   promptRunId — run id whose gate prompt is on screen.
+      const {
+        settledRuns: settledRunsRef,
+        latestRunId: latestRunIdRef,
+        promptRunId: promptRunIdRef,
+      } = runTrackingRef.current;
 
       switch (type) {
         case "accepted": {
@@ -312,6 +321,7 @@ export function useChatEvents({
       activeRunRef,
       locallyResolvedGatesRef,
       toolActivityStateRef,
+      runTrackingRef,
       noteConnectionInterruptedRunId,
       connectionContextForRunFailure,
       onRunSettled,

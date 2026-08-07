@@ -4,7 +4,7 @@
 //! `crate::webui_v2::webui_v2_routes()` returns an
 //! [`IngressRouteDescriptor`] per route, each carrying a
 //! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 30/60 in
-//! the current beta). The v2 crate's CLAUDE.md explicitly designates
+//! the current beta). The v2 crate's CONTRACT.md explicitly designates
 //! enforcement of these policies as a host-composition responsibility;
 //! this module is that enforcement.
 //!
@@ -266,7 +266,7 @@ fn request_counter_key(
         RateLimitScope::PerCaller => {
             let Some(caller) = request.extensions().get::<ProductSurfaceCaller>() else {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_rate_limit",
+                    target: "ironclaw::reborn::webui_rate_limit",
                     route_id = %route.route_id,
                     "per-caller rate-limit reached without an authenticated caller — \
                      auth middleware must run first",
@@ -279,7 +279,7 @@ fn request_counter_key(
         RateLimitScope::PerIp => {
             let Some(connect_info) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_rate_limit",
+                    target: "ironclaw::reborn::webui_rate_limit",
                     route_id = %route.route_id,
                     "per-ip rate-limit reached without host-provided ConnectInfo — \
                      host ingress must inject transport peer addresses",
@@ -291,7 +291,7 @@ fn request_counter_key(
         RateLimitScope::Global => "global".to_string(),
         RateLimitScope::PerTenant => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_rate_limit",
+                target: "ironclaw::reborn::webui_rate_limit",
                 route_id = %route.route_id,
                 scope = ?scope,
                 "unsupported rate-limit scope reached runtime after composition",
@@ -412,7 +412,7 @@ pub(crate) async fn enforce_rate_limit(
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_rate_limit",
+                    target: "ironclaw::reborn::webui_rate_limit",
                     "rate-limit LRU mutex poisoned — recovering",
                 );
                 poisoned.into_inner()
@@ -495,7 +495,7 @@ fn refund_charge(
         Ok(guard) => guard,
         Err(poisoned) => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_rate_limit",
+                target: "ironclaw::reborn::webui_rate_limit",
                 "rate-limit LRU mutex poisoned during refund — recovering",
             );
             poisoned.into_inner()

@@ -290,9 +290,12 @@ pub enum Filter {
         hi: IndexValue,
     },
     /// Full-text search on a text-valued indexed `key`. Requires the index
-    /// to be `IndexKind::Fts`. `query` is a free-form search string; each
-    /// backend translates to its native query language (FTS5 MATCH on
-    /// libSQL, `plainto_tsquery` on PostgreSQL).
+    /// to be `IndexKind::Fts`. `query` is plain user text, never backend query
+    /// language: punctuation separates terms, common English function words
+    /// (mirroring PostgreSQL's fixed `english` stop list) do not become
+    /// required matches, and words such as `AND`/`OR`/`NOT` cannot become
+    /// operators. Each backend translates those semantics to its native query
+    /// language (FTS5 on libSQL, `plainto_tsquery` on PostgreSQL).
     Fts {
         key: IndexKey,
         query: String,
@@ -314,6 +317,171 @@ pub enum Filter {
     },
     And(Vec<Filter>),
     Or(Vec<Filter>),
+}
+
+/// Normalize a plain-text FTS query into the required content terms shared by
+/// the in-memory and libSQL backends. Function words are dropped using the
+/// same fixed `english` stop list PostgreSQL's `plainto_tsquery` uses
+/// (`shared/english.stop`), so the three backends agree on which words become
+/// required matches. (Stemming is backend-specific: PostgreSQL stems via its
+/// `english` configuration while FTS5 matches literal terms; the shared
+/// contract covers punctuation, stop words, and operator safety, not
+/// stemming.)
+///
+/// Keeping this parser outside the libSQL translator is important: the
+/// reference backend and the shipping embedded backend must agree on whether
+/// a query is empty and which terms are required. The returned strings contain
+/// only Unicode alphanumeric characters, so the libSQL backend can quote every
+/// term as an FTS5 literal without exposing caller text as FTS syntax.
+pub(crate) fn plain_fts_terms(query: &str) -> Vec<String> {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .filter(|term| !is_plain_fts_stop_word(term))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// English function words dropped by PostgreSQL's fixed `english` text-search
+/// configuration, mirrored verbatim from PostgreSQL's
+/// `src/backend/snowball/stopwords/english.stop`. Using the canonical list
+/// instead of a hand-curated subset keeps in-memory/libSQL required-term
+/// semantics identical to `plainto_tsquery('english', ...)`. The single-letter
+/// `s`/`t` and `don` entries are contraction remnants (`it's`, `don't`) that
+/// the PostgreSQL lexer and our alphanumeric splitter both surface as
+/// standalone tokens.
+const PLAIN_FTS_ENGLISH_STOP_WORDS: &[&str] = &[
+    "a",
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "by",
+    "can",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "don",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hers",
+    "herself",
+    "him",
+    "himself",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "itself",
+    "just",
+    "me",
+    "more",
+    "most",
+    "my",
+    "myself",
+    "no",
+    "nor",
+    "not",
+    "now",
+    "of",
+    "off",
+    "on",
+    "once",
+    "only",
+    "or",
+    "other",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "s",
+    "same",
+    "she",
+    "should",
+    "so",
+    "some",
+    "such",
+    "t",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "to",
+    "too",
+    "under",
+    "until",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+];
+
+fn is_plain_fts_stop_word(term: &str) -> bool {
+    PLAIN_FTS_ENGLISH_STOP_WORDS.contains(&term.to_ascii_lowercase().as_str())
 }
 
 /// Pagination cursor for [`list_dir`](crate::RootFilesystem::list_dir) and
@@ -576,6 +744,55 @@ mod tests {
     fn index_value_orders_within_variant() {
         assert!(IndexValue::I64(1) < IndexValue::I64(2));
         assert!(IndexValue::Text("a".into()) < IndexValue::Text("b".into()));
+    }
+
+    #[test]
+    fn plain_fts_terms_make_natural_language_backend_safe() {
+        assert_eq!(
+            plain_fts_terms("What is the launch-code-plum-42?"),
+            ["launch", "code", "plum", "42"]
+        );
+        assert_eq!(plain_fts_terms("launch AND code"), ["launch", "code"]);
+        assert_eq!(plain_fts_terms("launch OR code"), ["launch", "code"]);
+        assert_eq!(plain_fts_terms("launch NOT code"), ["launch", "code"]);
+        assert_eq!(plain_fts_terms("héllo, wörld!"), ["héllo", "wörld"]);
+        assert!(plain_fts_terms("?! AND the").is_empty());
+        // PostgreSQL's `english` stop list is the canonical set: words on it are
+        // dropped as standalone queries, so libSQL required terms match
+        // `plainto_tsquery('english', ...)` exactly.
+        assert_eq!(
+            plain_fts_terms("please tell me the launch code"),
+            ["please", "tell", "launch", "code"]
+        );
+        assert_eq!(plain_fts_terms("i would have told you"), ["would", "told"]);
+        assert!(plain_fts_terms("can't").is_empty()); // can + t, both stop words
+        assert!(plain_fts_terms("it's").is_empty()); // it + s, both stop words
+    }
+
+    #[test]
+    fn plain_fts_terms_drops_every_english_stop_word() {
+        // Exhaustive pin of the shared stop-word vocabulary: the in-memory and
+        // libSQL backends both depend on this list, and PostgreSQL's
+        // `plainto_tsquery('english', ...)` drops exactly these words. A typo or
+        // omitted entry silently changes recall semantics on every backend.
+        for word in PLAIN_FTS_ENGLISH_STOP_WORDS {
+            assert!(
+                plain_fts_terms(word).is_empty(),
+                "stop word {word:?} must be dropped"
+            );
+            assert!(
+                plain_fts_terms(&word.to_uppercase()).is_empty(),
+                "stop word {word:?} must be dropped case-insensitively"
+            );
+        }
+        // Words the list deliberately does not drop (PostgreSQL requires them):
+        // these must survive normalization so recall cannot silently require
+        // fewer terms than the reference backend.
+        for word in ["please", "tell", "would", "could", "launch", "staging"] {
+            assert_eq!(plain_fts_terms(word), [word]);
+        }
+        // A query made only of stop words has no searchable terms.
+        assert!(plain_fts_terms("and the of to").is_empty());
     }
 
     #[test]

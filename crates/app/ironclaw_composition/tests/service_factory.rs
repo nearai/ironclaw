@@ -26,6 +26,7 @@ use ironclaw_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, GrantConstraints},
@@ -46,8 +47,8 @@ use ironclaw_host_api::{
     },
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
+    RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind,
+    VisibleCapabilityRequest,
 };
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_secrets::SecretMaterial;

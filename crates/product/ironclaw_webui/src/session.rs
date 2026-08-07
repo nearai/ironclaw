@@ -126,7 +126,7 @@ impl WebuiAuthenticator for SessionAuthenticator {
             Ok(None) => return None,
             Err(error) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::webui_ingress::session",
+                    target: "ironclaw::reborn::webui_ingress::session",
                     error = %error,
                     "session store lookup failed; treating bearer as unauthenticated. \
                      Operators: this is a backend/infra fault, not an auth miss — \
@@ -137,7 +137,7 @@ impl WebuiAuthenticator for SessionAuthenticator {
         };
         if record.is_expired(Utc::now()) {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_ingress::session",
+                target: "ironclaw::reborn::webui_ingress::session",
                 user = %record.user_id,
                 session_id = %record.session_id,
                 "rejecting expired session",

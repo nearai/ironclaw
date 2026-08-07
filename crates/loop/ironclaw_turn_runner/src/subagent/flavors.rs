@@ -410,7 +410,7 @@ mod tests {
     //   flavor.tool_allowlist
     //     -> RebornSubagentPromptMaterialSource::material_for_run (production)
     //     -> SubagentCapabilitySurfaceResolver (production)
-    //     -> CapabilitySurfaceProfileFilter (the real runtime LoopCapabilityPort
+    //     -> CapabilitySurfacePolicyFilter (the real runtime LoopCapabilityPort
     //        wrapper that enforces visibility + invocation denial).
     //
     // They assert the *effective* runtime surface, not just that the static
@@ -423,6 +423,7 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
+        use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
         use ironclaw_host_api::{
             ids::CapabilityId,
             resolution::{Resolution, ResolutionBatch},
@@ -435,7 +436,7 @@ mod tests {
             VisibleCapabilitySurface, resolution,
         };
         use ironclaw_loop_host::{
-            CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+            CapabilityResolveError, CapabilitySurfacePolicyFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
@@ -517,21 +518,21 @@ mod tests {
         }
 
         /// Inner runtime capability port standing in for the host surface. The
-        /// production `CapabilitySurfaceProfileFilter` wraps a port like this and
+        /// production `CapabilitySurfacePolicyFilter` wraps a port like this and
         /// narrows it to the per-flavor allowlist.
         #[derive(Default)]
         struct HostSurfaceSpy {
             invoked: Mutex<Vec<String>>,
         }
 
-        struct StaticProfileResolver(CapabilityAllowSet);
+        struct StaticProfileResolver(CapabilitySurfacePolicy);
 
         #[async_trait]
         impl CapabilitySurfaceProfileResolver for StaticProfileResolver {
             async fn resolve(
                 &self,
                 _run_context: &ironclaw_loop_contracts::LoopRunContext,
-            ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+            ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
                 Ok(self.0.clone())
             }
         }
@@ -606,24 +607,24 @@ mod tests {
             }
         }
 
-        /// Build the production `CapabilitySurfaceProfileFilter` for a flavor by
+        /// Build the production `CapabilitySurfacePolicyFilter` for a flavor by
         /// driving the real material source + surface resolver, exactly as a
         /// subagent spawn does, then return both the filter and the inner spy so
         /// callers can assert which capabilities actually reached the host.
         async fn filter_for_flavor(
             flavor: SubagentFlavorId,
         ) -> (
-            ironclaw_loop_host::CapabilitySurfaceProfileFilter,
+            ironclaw_loop_host::CapabilitySurfacePolicyFilter,
             Arc<HostSurfaceSpy>,
         ) {
-            filter_for_flavor_with_base(flavor, CapabilityAllowSet::All).await
+            filter_for_flavor_with_base(flavor, CapabilitySurfacePolicy::allow_all()).await
         }
 
         async fn filter_for_flavor_with_base(
             flavor: SubagentFlavorId,
-            base_allow_set: CapabilityAllowSet,
+            base_policy: CapabilitySurfacePolicy,
         ) -> (
-            ironclaw_loop_host::CapabilitySurfaceProfileFilter,
+            ironclaw_loop_host::CapabilitySurfacePolicyFilter,
             Arc<HostSurfaceSpy>,
         ) {
             let mut context = test_run_context("caller-level-attenuation");
@@ -639,15 +640,15 @@ mod tests {
                     flavor,
                 ));
             let resolver = SubagentCapabilitySurfaceResolver::new(
-                Arc::new(StaticProfileResolver(base_allow_set)),
+                Arc::new(StaticProfileResolver(base_policy)),
                 source,
             );
             let spy = Arc::new(HostSurfaceSpy::default());
-            let allow_set = resolver
+            let policy = resolver
                 .resolve(&context)
                 .await
                 .expect("production resolver builds the subagent allowlist");
-            let filter = CapabilitySurfaceProfileFilter::new(spy.clone(), Arc::new(allow_set));
+            let filter = CapabilitySurfacePolicyFilter::new(spy.clone(), Arc::new(policy));
             (filter, spy)
         }
 
@@ -668,7 +669,7 @@ mod tests {
         }
 
         async fn visible_ids(
-            filter: &ironclaw_loop_host::CapabilitySurfaceProfileFilter,
+            filter: &ironclaw_loop_host::CapabilitySurfacePolicyFilter,
         ) -> Vec<String> {
             let mut ids = filter
                 .visible_capabilities(VisibleCapabilityRequest)
@@ -683,7 +684,7 @@ mod tests {
         }
 
         fn definition_ids(
-            filter: &ironclaw_loop_host::CapabilitySurfaceProfileFilter,
+            filter: &ironclaw_loop_host::CapabilitySurfacePolicyFilter,
         ) -> Vec<String> {
             let mut ids = filter
                 .tool_definitions()
@@ -799,7 +800,7 @@ mod tests {
         async fn subagent_surface_intersects_outer_profile_surface() {
             let (filter, spy) = filter_for_flavor_with_base(
                 SubagentFlavorId::Coder,
-                CapabilityAllowSet::allowlist([
+                CapabilitySurfacePolicy::allow_only([
                     cap("builtin.read_file"),
                     cap("builtin.shell"),
                     cap("builtin.http"),
@@ -836,8 +837,10 @@ mod tests {
         #[tokio::test]
         async fn non_subagent_surface_preserves_outer_profile_surface() {
             let context = test_run_context("caller-level-non-subagent");
-            let base_allow_set =
-                CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);
+            let base_policy = CapabilitySurfacePolicy::allow_only([
+                cap("builtin.read_file"),
+                cap("builtin.http"),
+            ]);
             let source: Arc<dyn SubagentPromptMaterialSource> =
                 Arc::new(RebornSubagentPromptMaterialSource::new(
                     ProcessRuntimeSystem::in_memory_ephemeral()
@@ -846,7 +849,7 @@ mod tests {
                     SubagentFlavorId::Coder,
                 ));
             let resolver = SubagentCapabilitySurfaceResolver::new(
-                Arc::new(StaticProfileResolver(base_allow_set.clone())),
+                Arc::new(StaticProfileResolver(base_policy.clone())),
                 source,
             );
 
@@ -855,7 +858,7 @@ mod tests {
                 .await
                 .expect("non-subagent should preserve the base capability surface");
 
-            assert_eq!(resolved, base_allow_set);
+            assert_eq!(resolved, base_policy);
         }
 
         #[tokio::test]
