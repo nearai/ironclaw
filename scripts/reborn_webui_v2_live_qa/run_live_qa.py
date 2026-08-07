@@ -3599,7 +3599,7 @@ def _trigger_run_slack_send_evidence(
         if marker not in text:
             continue
         evidence["marker_send_count"] = int(evidence["marker_send_count"]) + 1
-        input_channel = str(input_summary.get("channel") or "")
+        input_channel = str(input_summary.get("conversation") or "")
         if input_channel != expected_channel_id:
             evidence["wrong_channel_marker_send_count"] = (
                 int(evidence["wrong_channel_marker_send_count"]) + 1
@@ -3608,10 +3608,13 @@ def _trigger_run_slack_send_evidence(
         evidence["expected_channel_marker_send_count"] = (
             int(evidence["expected_channel_marker_send_count"]) + 1
         )
+        message_ref = output_preview.get("message_ref")
         if (
             status == "completed"
-            and output_preview.get("ok") is True
-            and str(output_preview.get("channel") or "") == expected_channel_id
+            and isinstance(message_ref, dict)
+            and str(message_ref.get("conversation") or "")
+            == expected_channel_id
+            and bool(message_ref.get("message_id"))
         ):
             evidence["expected_channel_marker_ok_count"] = (
                 int(evidence["expected_channel_marker_ok_count"]) + 1
@@ -4255,12 +4258,15 @@ def _current_turn_capability_evidence(
             and capability_id in wanted
             and isinstance(input_summary, dict)
         ):
-            # Persist only the routing argument needed for exact-conversation
-            # assertions, never message text or other model-supplied content.
-            channel = input_summary.get("channel")
-            input_arguments_by_invocation[invocation_id] = (
-                {"channel": channel} if isinstance(channel, str) else {}
-            )
+            # Persist only non-content arguments used by exact contract
+            # assertions, never message text, query text, or other
+            # model-supplied content.
+            safe_arguments = {
+                field: value
+                for field in ("conversation", "sort")
+                if isinstance((value := input_summary.get(field)), str)
+            }
+            input_arguments_by_invocation[invocation_id] = safe_arguments
 
     terminal_events: dict[str, tuple[str, str, int]] = {}
     for raw_seq, raw_payload in event_rows:
@@ -7772,20 +7778,21 @@ async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResul
 
 
 async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
-    """Error-honesty probe: a failing Slack read must surface the exact
-    Slack error code, not a paraphrase.
+    """Error-honesty probe: a failing Slack read must surface the canonical
+    messaging error code, not a paraphrase.
 
-    Pins host error-code erasure: the Slack tool host collapses Slack API
-    error codes (here ``channel_not_found`` for the guaranteed-nonexistent
-    conversation C0CANARYNOPE) into a generic failure string, so neither the
-    agent nor the user ever sees the real cause. Red until the
-    structured-error fix lands; no seeding required.
+    Pins standardized error preservation: Slack's vendor-specific
+    ``channel_not_found`` is normalized to ``messaging.unknown_conversation``
+    for the guaranteed-nonexistent conversation C0CANARYNOPE. That stable
+    code must survive the host boundary to the agent and user. No seeding is
+    required.
     """
     case_name = "qa_10e_slack_error_honesty"
     started = time.monotonic()
     suffix = str(int(time.time() * 1000))
     answer_marker = f"REBORN_QA_10E_ERROR_HONESTY_{suffix}"
-    details: dict[str, object] = {"expected_error_code": "channel_not_found"}
+    expected_error_code = "messaging.unknown_conversation"
+    details: dict[str, object] = {"expected_error_code": expected_error_code}
     try:
         chat, reply_text = await _slack_correctness_chat_reply(
             ctx,
@@ -7793,8 +7800,8 @@ async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
             started=started,
             prompt=(
                 "Try to read the message history of the Slack conversation "
-                "with ID C0CANARYNOPE and tell me the exact error code the "
-                "Slack tool reported, verbatim. Include the exact marker "
+                "with ID C0CANARYNOPE and tell me the exact canonical error "
+                "code the Slack tool reported, verbatim. Include the exact marker "
                 f"{answer_marker} in your answer."
             ),
             answer_marker=answer_marker,
@@ -7805,10 +7812,10 @@ async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
         if not chat.success:
             return chat
         details.update(chat.details)
-        if "channel_not_found" not in reply_text.lower():
+        if expected_error_code not in reply_text.lower():
             raise AssertionError(
-                "the exact Slack error code was erased before reaching the "
-                "user: reply did not contain channel_not_found"
+                "the canonical Slack error code was erased before reaching the "
+                f"user: reply did not contain {expected_error_code}"
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
@@ -7873,7 +7880,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
                 "slack.send_message",
             ),
             expected_capability_arguments={
-                "slack.get_conversation_info": {"channel": channel_id}
+                "slack.get_conversation_info": {"conversation": channel_id}
             },
         )
         if not chat.success:
@@ -8092,6 +8099,10 @@ async def case_qa_10g_slack_last_message_sent_global(
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.search_messages",
+            expected_capability_arguments={
+                "slack.search_messages": {"sort": "timestamp"}
+            },
         )
         if not chat.success:
             return chat

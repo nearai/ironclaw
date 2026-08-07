@@ -22,7 +22,7 @@ shares this one implementation instead of reimplementing it.
 ## Public surface
 
 - `RebornServices` — the `ProductSurface` implementation (517 items, 19
-  sub-owners; the charter map in `CLAUDE.md` is pinned by
+  sub-owners; the charter map in `AGENTS.md` is pinned by
   `tests/reborn_services_module_charter.rs`).
 - `DefaultProductSurface`, `InboundTurnService`, `ConversationBindingService`,
   `IdempotencyLedger`/`ProductInboundAction`, `ProductCommandAdmissionService`.
@@ -69,7 +69,7 @@ shares this one implementation instead of reimplementing it.
 - Admission is a durability decision, never an authority one; approval/auth
   interactions are strictly redacted and routed through canonical resolution
   ports (`ApprovalResolutionPort`, `AuthFlowManager`, `TurnCoordinator`).
-- `CLAUDE.md` here is **gate-pinned** (the `reborn_services` module-charter
+- `AGENTS.md` here is **gate-pinned** (the `reborn_services` module-charter
   map) — edit only with `cargo test -p ironclaw_assistant` green.
 
 ## Tests
@@ -82,6 +82,6 @@ cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hol
 
 ## See also
 
-Crate spec + charter map: `CLAUDE.md` (gate-pinned) · working rules:
-`AGENTS.md` · family rules: `crates/product/AGENTS.md` · design record:
+Working rules + charter map: `AGENTS.md` (gate-pinned) · family rules:
+`crates/product/AGENTS.md` · design record:
 `docs/reborn/target-architecture/families/product.md` (§6.9.1).

@@ -175,7 +175,7 @@ fn assert_driver_allowlist(driver: &str, allowed: &[&str]) {
 /// than its docs claimed": the scan used a flat `read_dir`, so the word "every"
 /// held only while `src/` stayed flat. A later `src/postgres/pool.rs` — exactly
 /// where a driver mention would go — would have been skipped, and a skipped file
-/// is indistinguishable from a clean one. `crates/ironclaw_event_store/src`
+/// is indistinguishable from a clean one. `crates/events/ironclaw_event_store/src`
 /// is flat today, so this was latent rather than live; it is fixed here so the
 /// doc sentence is true by construction rather than by luck.
 #[test]

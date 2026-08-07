@@ -199,6 +199,27 @@ test("activity reducer replaces local lifecycle hints with authoritative diagnos
   assert.equal(rows.find((row) => row.kind === ActivityKind.TurnStarted)?.sequence, 1);
 });
 
+test("activity reducer retains prompt preparation for every loop iteration", () => {
+  const rows = reduceInspectorActivity(
+    {
+      stream_id: "stream-prompts",
+      activity: [
+        { sequence: 1, event: activity("prompt_prepared") },
+        { sequence: 2, event: activity("model_call_started", { model_call_id: "call-1" }) },
+        { sequence: 3, event: activity("model_call_completed", { model_call_id: "call-1" }) },
+        { sequence: 4, event: activity("prompt_prepared") },
+        { sequence: 5, event: activity("model_call_started", { model_call_id: "call-2" }) },
+      ],
+    },
+    [],
+  );
+
+  assert.deepEqual(
+    rows.filter((row) => row.kind === ActivityKind.PromptPrepared).map((row) => row.sequence),
+    [1, 4],
+  );
+});
+
 test("run navigation history is thread-scoped, deduplicated, and bounded", () => {
   const memory = storage();
   assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-1"]);

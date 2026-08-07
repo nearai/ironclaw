@@ -127,7 +127,6 @@ function stableLifecycleKey(event: InspectorActivityEvent): string | null {
   if (event.activity_id) return `${event.kind}:tool:${event.activity_id}`;
   if (
     event.kind === ActivityKind.TurnStarted
-    || event.kind === ActivityKind.PromptPrepared
     || event.kind === ActivityKind.FinalResponseCompleted
   ) {
     return event.kind;

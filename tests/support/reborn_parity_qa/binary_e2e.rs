@@ -908,6 +908,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: Some(Arc::new(
                 ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
             )
@@ -1626,6 +1627,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelRespons
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         effective_fallback_index: Some(0),
+        diagnostic_effective_model: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)

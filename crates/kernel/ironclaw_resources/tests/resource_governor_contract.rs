@@ -1723,7 +1723,7 @@ async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_app
 /// Mirrors `ironclaw_approvals`'s
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend`
 /// regression
-/// (crates/ironclaw_approvals/tests/run_state_contract.rs:1027-1048) for
+/// (crates/kernel/ironclaw_approvals/tests/approval_store_contract.rs:533) for
 /// the resources crate's CAS snapshot stores.
 #[tokio::test]
 async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {
@@ -1831,7 +1831,7 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
 /// Backend wrapper that races *every* versioned `put` against a watched
 /// path, ported verbatim (mechanics) from `ironclaw_secrets`'s
 /// `AlwaysRacingBackend`
-/// (crates/ironclaw_secrets/src/resource_store.rs:2085-2127) for the PR
+/// (crates/substrates/ironclaw_secrets/src/secret_store.rs:2244) for the PR
 /// #5234 review follow-up (Medium): no resource-caller test in this crate
 /// drove a *persistent* `FilesystemError::VersionMismatch` through
 /// `ResourceGovernorStore`/`BudgetGateStore` to pin

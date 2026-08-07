@@ -126,7 +126,12 @@ function PromptShell({
   const anyTruncated = prompt.components_truncated
     || prompt.reconstructed_prompt.truncated
     || prompt.active_skills_truncated
-    || prompt.components.some((component) => component.content.truncated);
+    || prompt.active_skills.some((skill) => skill.truncated)
+    || prompt.requested_model?.truncated === true
+    || prompt.effective_model?.truncated === true
+    || prompt.components.some(
+      (component) => component.label.truncated || component.content.truncated,
+    );
   return (
     <div className="space-y-4 p-4" data-testid="inspector-prompt-content">
       <div className="grid grid-cols-2 gap-3">
@@ -555,8 +560,8 @@ function StatsShell({ snapshot }: { snapshot: Record<string, unknown> | null }) 
           <p className="mt-2 text-[var(--v2-text-muted)]">No model breakdown available.</p>
         ) : (
           <dl className="mt-2 space-y-1.5">
-            {stats.calls_per_model.map((entry) => (
-              <div key={entry.model.content} className="flex justify-between gap-3">
+            {stats.calls_per_model.map((entry, index) => (
+              <div key={index} className="flex justify-between gap-3">
                 <dt className="min-w-0 truncate text-[var(--v2-text-muted)]">{entry.model.content}</dt>
                 <dd>{entry.calls.toLocaleString()}</dd>
               </div>

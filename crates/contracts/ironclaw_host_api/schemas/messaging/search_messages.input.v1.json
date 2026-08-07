@@ -9,6 +9,11 @@
       "minLength": 1,
       "description": "Search query text."
     },
+    "sort": {
+      "type": "string",
+      "enum": ["relevance", "timestamp"],
+      "description": "Result ordering. Omit or use relevance for vendor-ranked matches; timestamp returns newest matches first."
+    },
     "limit": {
       "type": "integer",
       "minimum": 1,
