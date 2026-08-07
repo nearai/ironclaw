@@ -206,7 +206,8 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
     RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornNotificationChannel, RebornNotificationChannelsResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
@@ -215,21 +216,21 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
     RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProductCommandInfo, RebornProductCommandListResponse,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
+    RebornOutboundDeliveryTargetSummary, RebornProductCommandInfo,
+    RebornProductCommandListResponse, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetNotificationChannelsRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
+    SettingsToolPermissionState,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -244,18 +245,20 @@ pub use operator_config_views::{
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
 };
 pub use outbound_delivery_capability_surface::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
-    OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-    OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
-    OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
+    NOTIFICATION_CHANNELS_SET_MAX_ITEMS, NotificationChannelsSetInput,
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION,
+    OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_DESCRIPTION,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_PROVIDER_TOOL_NAME, OutboundDeliveryCapabilityInputError,
     OutboundDeliveryTargetsListInput, list_outbound_delivery_targets_for_model,
-    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
-    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
-    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
-    set_outbound_delivery_target_for_model,
+    notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
+    outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
+    parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
+    set_notification_channels_for_model,
 };
 pub use outbound_preferences::RebornOutboundPreferencesService;
-pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
+pub use outbound_views::{NOTIFICATION_CHANNELS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -303,9 +306,6 @@ pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY: ProductCapabilityDescr
 pub const OPERATOR_SETUP_RUN_CAPABILITY_ID: &str = "builtin.operator_setup_run";
 pub const OPERATOR_SETUP_RUN_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_SETUP_RUN_CAPABILITY_ID);
-pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
-pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
-    ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
 pub const LLM_PROVIDER_UPSERT_CAPABILITY_ID: &str = "builtin.llm_provider_upsert";
 pub const LLM_PROVIDER_UPSERT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_PROVIDER_UPSERT_CAPABILITY_ID);
@@ -436,6 +436,16 @@ pub const TRACE_HOLD_AUTHORIZE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse,
 > = ProductSurfaceCommandDescriptor::new(TRACE_HOLD_AUTHORIZE_COMMAND_ID);
+/// WebUI-facing full-replace notification-channels write. See
+/// `outbound_views::RebornServices::set_notification_channels`'s doc comment
+/// for why this is a product command (webui-only, no approval gate) rather
+/// than a composition-registered capability like the sibling model-callable
+/// `builtin.notification_channels_set` tool.
+pub const NOTIFICATION_CHANNELS_SET_COMMAND_ID: &str = "outbound.notification_channels_set";
+pub const NOTIFICATION_CHANNELS_SET_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornSetNotificationChannelsRequest,
+    RebornNotificationChannelsResponse,
+> = ProductSurfaceCommandDescriptor::new(NOTIFICATION_CHANNELS_SET_COMMAND_ID);
 pub const OPERATOR_CONFIG_SET_KEY_COMMAND_ID: &str = "operator.config.set_key";
 pub const OPERATOR_CONFIG_SET_KEY_COMMAND: ProductSurfaceCommandDescriptor<
     RebornOperatorConfigSetProductRequest,
@@ -821,29 +831,6 @@ impl SkillsProductService for UnsupportedSkillsProductService {}
 
 #[async_trait]
 pub trait OutboundPreferencesProductService: Send + Sync {
-    /// Return the authenticated caller's scoped outbound preferences.
-    ///
-    /// Real implementations must scope stored preferences by the caller's
-    /// tenant/user identity. The Phase 1 unsupported implementation returns an
-    /// empty projection so read callers can treat "not configured yet" as a
-    /// stable state while mutation and target inventory remain fail-closed.
-    async fn get_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
-
-    /// Persist the caller's scoped outbound delivery preferences.
-    ///
-    /// Implementations must scope writes by the caller's tenant/user identity.
-    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductService`
-    /// by default, which keeps Phase 1 mutation attempts fail-closed with a
-    /// non-retryable service-unavailable response until a real service is wired.
-    async fn set_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
-
     /// List delivery targets available to the authenticated caller.
     ///
     /// Implementations must scope target inventory by the caller's tenant/user
@@ -855,6 +842,41 @@ pub trait OutboundPreferencesProductService: Send + Sync {
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError>;
+
+    /// Persist the caller's scoped notification-channel target list — a full
+    /// replace of the current set (spec §7). An empty list means notifications
+    /// stay in the web app only.
+    ///
+    /// Implementations must scope writes by the caller's tenant/user identity,
+    /// validate each id through the caller-scoped target registry, dedup
+    /// preserving order, and cap at `NOTIFICATION_TARGETS_CAP`. Defaults to a
+    /// non-retryable service-unavailable response so the pre-existing
+    /// implementors of this trait that predate notification channels do not
+    /// need to opt in explicitly.
+    async fn set_notification_channels(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let _ = (caller, request);
+        Err(outbound_preferences_unavailable())
+    }
+
+    /// Return the authenticated caller's scoped notification-channel targets,
+    /// resolved to channel options. Stored ids that no longer resolve are
+    /// omitted rather than erroring (see
+    /// [`RebornNotificationChannelsResponse`]).
+    ///
+    /// Implementations must scope reads by the caller's tenant/user identity.
+    /// Defaults to an empty projection, so "not configured yet" is a stable
+    /// read state.
+    async fn get_notification_channels(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let _ = caller;
+        Ok(RebornNotificationChannelsResponse::default())
+    }
 }
 
 #[derive(Debug)]
@@ -868,26 +890,26 @@ impl UnsupportedOutboundPreferencesProductService {
 
 #[async_trait]
 impl OutboundPreferencesProductService for UnsupportedOutboundPreferencesProductService {
-    async fn get_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        Ok(RebornOutboundPreferencesResponse::default())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        Err(outbound_preferences_unavailable())
-    }
-
     async fn list_outbound_delivery_targets(
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Err(outbound_preferences_unavailable())
+    }
+
+    async fn set_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn get_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        Ok(RebornNotificationChannelsResponse::default())
     }
 }
 
@@ -3942,14 +3964,14 @@ where
                 let response = self.build_automations_view(caller, request).await?;
                 views::view_page(response)
             }
-            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
-                views::parse_empty_view_params(query.params)?;
-                let response = self.build_outbound_preferences_view(caller).await?;
-                views::view_page(response)
-            }
             id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_outbound_delivery_targets_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == NOTIFICATION_CHANNELS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_notification_channels_view(caller).await?;
                 views::view_page(response)
             }
             id if id == TRACE_CREDITS_VIEW.id => {

@@ -2,62 +2,73 @@ use chrono::{Datelike, TimeZone};
 
 use super::*;
 
-/// Duplicate-delivery contract: the stored trigger prompt is replayed to a
-/// fresh model at fire time, so the description must teach that each
-/// fire's final reply is delivered by the host (otherwise the fired model
-/// both calls a messaging capability and emits a final reply, delivering
-/// the result twice), while messaging-as-task automations ("send Firat a
-/// joke every morning") stay expressible with recipients pinned at
-/// creation time instead of guessed at fire time.
+/// Delivery is now a step the *prompt* owns, not a stored routing field: a
+/// routine's fire delivers externally only by calling
+/// `builtin__outbound_deliver` itself. The description must therefore teach
+/// (a) the prompt is the whole task, written for a memory-less future run,
+/// (b) any wanted delivery is an explicit prompt step naming its destination,
+/// picked while the user is present, and (c) a fire that makes no delivery
+/// call delivers nothing externally — its reply only lands in the routine's
+/// own run thread. It must NOT resurrect the retired `delivery_target_id`
+/// input, which no longer exists on this capability.
 #[test]
-fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery() {
-    assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains(
-            "If delivery_target_id is set, never put a send, post, or deliver-results step"
-        ),
-        "trigger_create description must front-load the no-duplicate-delivery rule: {TRIGGER_CREATE_DESCRIPTION}"
-    );
-    assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains("delivered automatically"),
-        "trigger_create description must state host-owned result delivery: {TRIGGER_CREATE_DESCRIPTION}"
-    );
+fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_target() {
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
-        "trigger_create description must say the prompt is the task, not routing: {TRIGGER_CREATE_DESCRIPTION}"
+        "trigger_create description must say the prompt is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("no memory of this conversation"),
+        "trigger_create description must say the fire has no memory of this conversation: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
-            .contains("Do not tell the prompt to send results back to the requesting user"),
-        "trigger_create description must forbid result self-delivery phrasing in the stored prompt: {TRIGGER_CREATE_DESCRIPTION}"
+            .contains("write that as an explicit step in the prompt naming the destination"),
+        "trigger_create description must make delivery an explicit prompt step: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains("resolved while the user is present"),
-        "trigger_create description must require creation-time recipient pinning: {TRIGGER_CREATE_DESCRIPTION}"
-    );
-    // Laundering guard: a live QA fire executed a duplicate user-identity
-    // send because the creating model set delivery_target_id AND pinned
-    // the requester's own DM into the prompt as if it were a third-party
-    // recipient. The description must say receiving results is routing,
-    // never a prompt step — pinned conversation id or not.
-    assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains("delivery routing, not a task step"),
-        "trigger_create description must frame 'send me the result' as routing: {TRIGGER_CREATE_DESCRIPTION}"
+        TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_deliver"),
+        "trigger_create description must name the delivery tool the prompt should call: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains("even one with a pinned conversation id"),
-        "trigger_create description must forbid laundering a self-send behind a pinned id: {TRIGGER_CREATE_DESCRIPTION}"
-    );
-    assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains("pass delivery_target_id with an id from")
-            && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
-        "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
+        TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list")
+            && TRIGGER_CREATE_DESCRIPTION.contains("while the user is present"),
+        "trigger_create description must require destinations be picked at creation time: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
-            .contains("inherits the current source run's authorized delivery route")
-            && TRIGGER_CREATE_DESCRIPTION.contains("only when no source route exists")
-            && TRIGGER_CREATE_DESCRIPTION.contains("never prompt parsing"),
-        "trigger_create description must explain trusted source-route inheritance and fallback: {TRIGGER_CREATE_DESCRIPTION}"
+            .contains("a fire that makes no delivery call delivers nothing externally"),
+        "trigger_create description must state the no-call/no-delivery rule: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    // The source-channel default (the agreed routing UX): a bare "send me X"
+    // asked from a channel conversation means that channel — the description
+    // must state the default so the model pins the origin channel's target
+    // rather than leaving bare requests destination-less.
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("default to the channel this conversation is on"),
+        "trigger_create description must pin the source-channel default: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    // The retired stored-target field: a create call carrying it is now a
+    // rejected unexpected field, so the description must never advertise it.
+    assert!(
+        !TRIGGER_CREATE_DESCRIPTION.contains("delivery_target_id"),
+        "trigger_create description must not advertise the retired stored delivery target: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+}
+
+#[test]
+fn trigger_resume_description_requires_explicit_lifecycle_intent() {
+    let manifest = manifests()
+        .expect("trigger manifests")
+        .into_iter()
+        .find(|manifest| manifest.id.as_str() == TRIGGER_RESUME_CAPABILITY_ID)
+        .expect("trigger resume manifest");
+    assert!(
+        manifest
+            .description
+            .contains("explicitly asks to resume or enable"),
+        "checking for duplicates or ensuring exactly one routine must stay read-only: {}",
+        manifest.description
     );
 }
 
@@ -329,13 +340,11 @@ fn trigger_output_includes_active_hold_when_present() {
 // caller" rule. The guard runs before input parsing, so the mutation-denial
 // cases pass an empty body deliberately.
 
-use std::sync::Mutex;
-
 use ironclaw_host_api::{
     ids::{InvocationId, ProductKind, RoutineId, RunId, UserId},
     invocation::InvocationOrigin,
 };
-use ironclaw_triggers::{InMemoryTriggerRepository, TriggerDeliveryTargetId};
+use ironclaw_triggers::InMemoryTriggerRepository;
 
 const MUTATION_CAPABILITIES: &[&str] = &[
     TRIGGER_CREATE_CAPABILITY_ID,
@@ -482,97 +491,67 @@ async fn scheduled_origin_may_still_list_routines() {
     );
 }
 
-// -- delivery-target precedence: explicit wins, implicit not consulted ------
-
-/// A create hook that always accepts an explicit target and records whether the
-/// implicit (source-run) resolver was consulted. The implicit path returns a
-/// DIFFERENT id so a precedence regression would be observable in the persisted
-/// record, not merely in the "was it called" flag.
-#[derive(Default)]
-struct ExplicitWinsCreateHook {
-    implicit_consulted: Arc<Mutex<bool>>,
-    validated_targets: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl TriggerCreateHook for ExplicitWinsCreateHook {
-    async fn resolve_implicit_delivery_target(
-        &self,
-        _scope: &ResourceScope,
-        _run_id: Option<RunId>,
-    ) -> Result<Option<TriggerDeliveryTargetId>, TriggerError> {
-        *self.implicit_consulted.lock().expect("implicit lock") = true;
-        Ok(Some(
-            ironclaw_triggers::parse_trigger_delivery_target_id("implicit-source-target")
-                .expect("implicit target"),
-        ))
-    }
-
-    async fn validate_delivery_target(
-        &self,
-        _scope: &ResourceScope,
-        target: &TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        self.validated_targets
-            .lock()
-            .expect("validated lock")
-            .push(target.as_str().to_string());
-        Ok(())
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
+// -- retired stored delivery target -----------------------------------------
 
 #[tokio::test]
-async fn explicit_delivery_target_wins_over_source_run_context() {
-    // Both inputs present: an explicit `delivery_target_id` AND a source run
-    // context (`run_id`/origin). The explicit target must win, and the implicit
-    // source-run resolver must never be consulted (the precedence rule the
-    // `resolve_delivery_target` default encodes, exercised through `dispatch`).
-    let hook = Arc::new(ExplicitWinsCreateHook::default());
-    let handler = origin_test_handler(hook.clone());
-    let scope = ResourceScope::local_default(
-        UserId::new("explicit-target-user").expect("user"),
-        InvocationId::new(),
-    )
-    .expect("scope");
-    let mut request = FirstPartyCapabilityRequest::request_for_test(
-        CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
-        scope,
+async fn trigger_create_rejects_the_retired_delivery_target_id_input() {
+    // Routines no longer carry a stored delivery route: delivery is a step the
+    // prompt performs by calling `builtin__outbound_deliver`. A create call
+    // that still passes the retired field must be refused as an unexpected
+    // field (never silently accepted-and-ignored, which would leave the caller
+    // believing a route was sealed), and nothing may be persisted.
+    let handler = origin_test_handler(Arc::new(NoopTriggerCreateHook));
+    let run_id = RunId::new();
+    let error = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(run_id)),
+        TRIGGER_CREATE_CAPABILITY_ID,
         json!({
-            "name": "explicit-wins",
+            "name": "retired-target-field",
             "prompt": "deliver here",
             "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
-            "delivery_target_id": "explicit-chosen-target",
+            "delivery_target_id": "slack:personal-dm:T123:user-a",
         }),
-        None,
-    );
-    let run_id = RunId::new();
-    request.run_id = Some(run_id);
-    request.origin = Some(InvocationOrigin::LoopRun(run_id));
+    )
+    .await
+    .expect_err("a create carrying the retired stored-target field must be refused");
 
-    let result = handler
-        .dispatch(request)
-        .await
-        .expect("explicit-target create succeeds");
+    match error {
+        FirstPartyCapabilityError::Dispatch {
+            kind,
+            detail: Some(detail),
+            ..
+        } => {
+            assert_eq!(
+                kind,
+                RuntimeDispatchErrorKind::InputEncode,
+                "the retired field must fail input validation, not dispatch"
+            );
+            let ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput { issues } =
+                *detail
+            else {
+                panic!("expected an invalid-input detail, got {detail:?}");
+            };
+            assert!(
+                issues.iter().any(|issue| issue.path == "unexpected_field"
+                    && issue.code == DispatchInputIssueCode::UnexpectedField),
+                "expected an unexpected_field issue for delivery_target_id, got {issues:?}"
+            );
+        }
+        other => panic!("expected an invalid-input dispatch error, got {other:?}"),
+    }
 
+    let listed = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(run_id)),
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+    )
+    .await
+    .expect("list after the rejected create");
     assert_eq!(
-        result.output["trigger"]["delivery_target_id"],
-        json!("explicit-chosen-target"),
-        "the explicit delivery target must be persisted, not the implicit source target",
-    );
-    assert!(
-        !*hook.implicit_consulted.lock().expect("implicit lock"),
-        "the implicit source-run resolver must not be consulted when an explicit target is given",
-    );
-    assert_eq!(
-        hook.validated_targets
-            .lock()
-            .expect("validated lock")
-            .as_slice(),
-        &["explicit-chosen-target".to_string()],
-        "only the explicit target is validated",
+        listed.output["triggers"],
+        json!([]),
+        "a rejected create must persist nothing"
     );
 }

@@ -32,7 +32,7 @@ use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
-use ironclaw_outbound::{OutboundError, RunFinalReplyDestination};
+use ironclaw_outbound::OutboundError;
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::channel_host::GenericChannelHostAssembly;
@@ -273,9 +273,7 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            destination: RunFinalReplyDestination::External {
-                reply_target_binding_ref,
-            },
+            destination: reply_target_binding_ref,
             owner: OutboundDeliveryTargetOwner::new(
                 self.deps.identity.tenant_id.clone(),
                 owner_user,
@@ -319,9 +317,7 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            destination: RunFinalReplyDestination::External {
-                reply_target_binding_ref,
-            },
+            destination: reply_target_binding_ref,
             // The owner is the record's provisioned user (the resolved
             // resource), never echoed from the caller.
             owner: OutboundDeliveryTargetOwner::new(

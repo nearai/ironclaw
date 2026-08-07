@@ -87,10 +87,6 @@ exempt_capabilities = [
     # the tenant/user approval settings scope.
     "builtin.operator_config_set_tool_permission",
     # This API-only capability is reachable only from an authenticated user's
-    # explicit delivery-preferences save gesture. Its handler repeats
-    # actor/scope matching and writes only that user's final-reply target.
-    "builtin.outbound_preferences_set",
-    # This API-only capability is reachable only from an authenticated user's
     # explicit settings toggle. Its handler repeats actor/scope matching and
     # writes only the in-process learned-skill selector flag.
     "builtin.skill_auto_activate_learned_set",
@@ -273,12 +269,6 @@ mounts = "ambient"
 network = "default"
 
 [[grants]]
-capability = "builtin.outbound_preferences_set"
-effects = ["dispatch_capability", "external_write"]
-mounts = "ambient"
-network = "default"
-
-[[grants]]
 capability = "builtin.skill_list"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "skill_management"
@@ -345,7 +335,7 @@ mounts = "ambient"
 network = "default"
 
 [[grants]]
-capability = "builtin.outbound_delivery_target_route_current"
+capability = "builtin.outbound_deliver"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"
@@ -387,7 +377,7 @@ mounts = "ambient"
 network = "dev_wildcard"
 
 [[grants]]
-capability = "builtin.outbound_delivery_target_set"
+capability = "builtin.notification_channels_set"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"

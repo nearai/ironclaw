@@ -1,0 +1,101 @@
+{
+  "model_name": "recorded-qa-routine_bare_send_me_webui",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "total_cost_usd": "0"
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every morning at 9 in UTC, send me a one-line status of my workspace. Do not run it now."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every morning at 9 in UTC, send me a one-line status of my workspace. Do not run",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_351971fc93f147e086e6ac5f",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          },
+          {
+            "id": "call_5e2aa3346ad04419a129fad8",
+            "name": "builtin__list_dir",
+            "arguments": {
+              "max_depth": 2,
+              "path": "/workspace"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every morning at 9 in UTC, send me a one-line status of my workspace. Do not run",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_9772da4ceb9043e1a86dca44",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "name": "Morning workspace status",
+              "prompt": "Check the workspace at /workspace — list all files and directories, check memory documents, and note anything noteworthy (new files, changed files, open tasks). Summarize everything as a single-line status message. Do not deliver externally.",
+              "schedule": {
+                "expression": "0 9 * * *",
+                "kind": "cron",
+                "timezone": "UTC"
+              }
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_351971fc93f147e086e6ac5f",
+          "name": "builtin__outbound_delivery_targets_list",
+          "content": "{\"detail\":{\"byte_len\":661,\"kind\":\"result_reference\",\"preview\":\"{\\\"targets\\\":[{\\\"capabilities\\\":{\\\"auth_prompts\\\":false,\\\"final_replies\\\":true,\\\"gate_prompts\\\":false},\\\"target\\\":{\\\"channel\\\":\\\"email\\\",\\\"description\\\":\\\"QA trace email inbox\\\",\\\"display_name\\\":\\\"Email\\\",\\\"target_id\\\":\\\"email:qa-trace-inbox\\\"}},{\\\"capabilities\\\":{\\\"auth_prompts\\\":false,\\\"final_replies\\\":true,\\\"gate_prompts\\\":false},\\\"target\\\":{\\\"channel\\\":\\\"slack\\\",\\\"description\\\":\\\"QA trace Slack direct message\\\",\\\"display_name\\\":\\\"Slack DM\\\",\\\"target_id\\\":\\\"slack:qa-trace-dm\\\"}},{\\\"capabilities\\\":{\\\"auth_prompts\\\":false,\\\"final_replies\\\":true,\\\"gate_prompts\\\":false},\\\"target\\\":{\\\"channel\\\":\\\"telegram\\\",\\\"description\\\":\\\"QA trace Telegram direct message\\\",\\\"display_name\\\":\\\"Telegram DM\\\",\\\"target_id\\\":\\\"telegram:qa-trace-dm\\\"}}]}\",\"result_ref\":\"result:e9b0d305-0907-49d5-a5d0-88e66705d4c7.ffa768aa-6513-4d7e-a714-ee66e15e1375\",\"total_bytes\":661},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+        },
+        {
+          "tool_call_id": "call_5e2aa3346ad04419a129fad8",
+          "name": "builtin__list_dir",
+          "content": "{\"detail\":{\"byte_len\":62,\"kind\":\"result_reference\",\"preview\":\"{\\\"count\\\":0,\\\"entries\\\":[],\\\"path\\\":\\\"/workspace\\\",\\\"truncated\\\":false}\",\"result_ref\":\"result:e9b0d305-0907-49d5-a5d0-88e66705d4c7.01242965-3950-4d1e-b761-d3523a9953b3\",\"total_bytes\":62},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every morning at 9 in UTC, send me a one-line status of my workspace. Do not run",
+        "min_message_count": 7
+      },
+      "response": {
+        "type": "text",
+        "content": "Done. Every day at **09:00 UTC**, this routine will fire and report a single-line status of your workspace. It won't deliver externally — the result will be recorded in the routine's own run thread (accessible from the web app).\n\nYou can manage it via the triggers dashboard or ask me to pause/resume/remove it anytime.",
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_9772da4ceb9043e1a86dca44",
+          "name": "builtin__trigger_create",
+          "content": "{\"detail\":{\"byte_len\":438,\"kind\":\"result_reference\",\"preview\":\"{\\\"trigger\\\":{\\\"agent_id\\\":\\\"qa-trace-agent\\\",\\\"created_at\\\":\\\"2026-08-06T14:35:00.815399Z\\\",\\\"has_active_fire\\\":false,\\\"is_active\\\":true,\\\"is_enabled\\\":true,\\\"last_run_at\\\":null,\\\"last_status\\\":null,\\\"name\\\":\\\"Morning workspace status\\\",\\\"next_run_at\\\":\\\"2026-08-07T09:00:00Z\\\",\\\"project_id\\\":null,\\\"recent_runs\\\":[],\\\"schedule\\\":{\\\"expression\\\":\\\"0 9 * * *\\\",\\\"kind\\\":\\\"cron\\\",\\\"timezone\\\":\\\"UTC\\\"},\\\"source\\\":\\\"schedule\\\",\\\"state\\\":\\\"scheduled\\\",\\\"trigger_id\\\":\\\"01KZBQZFAFAC74CD0H2JW5WRYM\\\"}}\",\"result_ref\":\"result:e9b0d305-0907-49d5-a5d0-88e66705d4c7.634d6d9c-71a1-4e0f-852c-dd638f687b43\",\"total_bytes\":438},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+        }
+      ]
+    }
+  ]
+}
