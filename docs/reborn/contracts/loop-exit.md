@@ -95,9 +95,9 @@ and the rejected run is not retryable. The explanation directs the user to
 start a new run and the operator to inspect checkpoint storage and run-profile
 compatibility.
 
-This contract is pinned by
-`turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/loop/ironclaw_turn_runner/tests/loop_driver_host.rs`:
+This contract is pinned by the checkpoint-rejection coverage in
+`crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs` (the former
+`loop_driver_host` integration-test target moved into the module):
 
 ```bash
 cargo test -p ironclaw_turn_runner --test loop_driver_host \

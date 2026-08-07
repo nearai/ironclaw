@@ -84,7 +84,7 @@ class GuidanceGateTests(unittest.TestCase):
         self.write("AGENTS.md", "Start at [the family](crates/core/AGENTS.md).\n")
         self.write("CLAUDE.md", "Read `docs/guide.md` and `crates/core/ironclaw_alpha/README.md`.\n")
         self.symlink("crates/core/CLAUDE.md", "AGENTS.md")
-        self.write("docs/guide.md", "not scanned, only referenced\n")
+        self.write("docs/guide.md", "scanned like every docs/ page\n")
         self.write(
             ".claude/rules/alpha.md",
             '---\npaths:\n  - "crates/**/*.rs"\n---\n# Alpha rule\n',
@@ -150,6 +150,7 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
+            mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
             mock.patch.object(
                 GATE,
                 "ALIAS_REAL_FILE_EXCEPTIONS",
@@ -539,6 +540,7 @@ class GuidanceGateTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
+                mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
                 mock.patch.object(GATE, "KNOWN_MISSING", ()),
                 mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
                 contextlib.redirect_stderr(stderr),
@@ -561,6 +563,138 @@ class GuidanceGateTests(unittest.TestCase):
         code, output = self.run_gate()
         self.assertEqual(code, 1)
         self.assertIn("unterminated ``` fence", output)
+
+    # -- the docs/ surface -------------------------------------------------
+    def test_docs_page_with_dangling_backticked_path_fails(self) -> None:
+        """A published page naming a dead repo path is the drift class that
+        motivated extending the scan (#7317)."""
+        self.build_fixture()
+        self.write(
+            "docs/api/responses.mdx",
+            "See `crates/core/ironclaw_gone/src/lib.rs` for details.\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("crates/core/ironclaw_gone/src/lib.rs", output)
+
+    def test_docs_markdown_links_are_not_references(self) -> None:
+        """Mintlify link targets are site routes, not repo paths — the link
+        extractor is off for docs/ so neither form below is a claim."""
+        self.build_fixture()
+        self.write(
+            "docs/using/cli.mdx",
+            "Read [the CLI guide](/using/cli) and [service](service).\n"
+            "Also [a relative page](../capabilities/configuration).\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_docs_mdx_comment_marker_suppresses_one_reference(self) -> None:
+        """`{/* check-guidance: path-ok */}` is the MDX form of the marker;
+        it vouches for the one reference immediately before it and no other."""
+        self.build_fixture()
+        self.write(
+            "docs/extensions/building.mdx",
+            "The retired `crates/core/ironclaw_gone/src/lib.rs` "
+            "{/* check-guidance: path-ok */} is an example; "
+            "`crates/core/ironclaw_also_gone/` is still checked.\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertNotIn("ironclaw_gone/src/lib.rs", output)
+        self.assertIn("crates/core/ironclaw_also_gone/", output)
+
+    def test_docs_mdx_multiline_comment_hides_its_content(self) -> None:
+        """Paths inside a multi-line MDX comment block (the doc-fact marker
+        shape) are not references."""
+        self.build_fixture()
+        self.write(
+            "docs/api/policy.mdx",
+            "Real prose with `crates/core/ironclaw_alpha/README.md`.\n"
+            "{/* doc-fact:example\n"
+            "`crates/core/ironclaw_gone/src/lib.rs`\n"
+            "*/}\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_docs_zh_mirror_is_discovered(self) -> None:
+        """The zh/ locale tree carries the same backticked repo paths as the
+        English pages and is scanned the same way."""
+        self.build_fixture()
+        self.write(
+            "docs/zh/index.md",
+            "参见 `crates/core/ironclaw_gone/src/lib.rs`。\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("docs/zh/index.md", output)
+
+    def test_docs_historical_archives_are_excluded_but_contracts_are_not(self) -> None:
+        """Dated archives describe the tree as it stood when written — they
+        are excluded as classes. The living contract corpus under
+        docs/reborn/contracts/ is scanned."""
+        self.build_fixture()
+        self.write(
+            "docs/internal/plans/2026-01-01-old-plan.md",
+            "We will edit `crates/core/ironclaw_gone/src/lib.rs`.\n",
+        )
+        self.write(
+            "docs/reborn/target-architecture/CHECKLIST.md",
+            "Milestone: `crates/core/ironclaw_gone/src/lib.rs`.\n",
+        )
+        self.write(
+            "docs/reborn/contracts/example.md",
+            "Pinned by `crates/core/ironclaw_gone/tests/contract.rs`.\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertNotIn("2026-01-01-old-plan.md", output)
+        self.assertNotIn("CHECKLIST.md", output)
+        self.assertIn("docs/reborn/contracts/example.md", output)
+        self.assertIn("crates/core/ironclaw_gone/tests/contract.rs", output)
+
+    def test_docs_unterminated_fence_refuses(self) -> None:
+        self.build_fixture()
+        self.write(
+            "docs/broken.mdx",
+            "Prose.\n```bash\nnever closed\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("unterminated ``` fence", output)
+
+    def test_docs_floor_refuses_when_docs_branch_breaks(self) -> None:
+        """The aggregate floors sit below the guidance-only remainder, so the
+        docs surface silently falling out of discovery needs its own refusal."""
+        self.build_fixture()
+        listing = self.root / "tracked-files.txt"
+        listing.write_text(
+            "\n".join(t for t in self.tracked() if t != "tracked-files.txt") + "\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
+            mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
+            mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
+            mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
+            mock.patch.object(GATE, "MIN_DOCS_FILES", 5),
+            mock.patch.object(
+                GATE, "ALIAS_REAL_FILE_EXCEPTIONS", dict(self.ROOT_ALIAS_EXCEPTION)
+            ),
+            mock.patch.object(GATE, "KNOWN_MISSING", ()),
+            mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
+            contextlib.redirect_stderr(stderr),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            crate_tree.reset_inventory_cache()
+            code = GATE.main(
+                ["--repo-root", str(self.root), "--tracked-files", str(listing)]
+            )
+        crate_tree.reset_inventory_cache()
+        self.assertEqual(code, 1)
+        self.assertIn("docs branch of discovery broke", stderr.getvalue())
 
     def test_missing_tracked_files_override_refuses(self) -> None:
         stderr = io.StringIO()

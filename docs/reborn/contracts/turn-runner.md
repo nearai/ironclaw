@@ -58,10 +58,10 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
   exception to model-final-word handling; product projection must not invoke a
   failure-explainer model or manufacture an assistant transcript message.
 
-The canonical caller regression is
-`turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/loop/ironclaw_turn_runner/tests/loop_driver_host.rs`, also mapped into
-`scripts/reborn-e2e-rust.sh architecture`.
+The canonical caller regression is the checkpoint-rejection coverage in
+`crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs` (the former
+`loop_driver_host` integration-test target moved into the module), also
+mapped into `scripts/reborn-e2e-rust.sh architecture`.
 
 ---
 
