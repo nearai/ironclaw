@@ -219,7 +219,7 @@ pub enum CoordinatedDeliveryOutcome {
     /// committed, not necessarily a fresh read — never a fabricated
     /// `Delivered`. The case where this call *did* reach the vendor but could
     /// not durably confirm it is
-    /// [`CoordinatedDeliveryOutcome::DeliveredUnrecorded`], not this variant.
+    /// [`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`], not this variant.
     ExistingDeliveryUnconfirmed {
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
@@ -244,7 +244,7 @@ pub enum CoordinatedDeliveryOutcome {
     /// send genuinely happened here, so consumers must not treat this as a
     /// reason to resend. It is deliberately success-shaped rather than an
     /// error: the message already reached the vendor.
-    DeliveredUnrecorded {
+    DeliveredUnconfirmed {
         attempt: OutboundDeliveryAttempt,
         /// The resolved target conversation the parts were sent to.
         conversation: ExternalConversationRef,
@@ -778,7 +778,7 @@ impl DeliveryCoordinator {
                             // `Sending` is the last state this call is
                             // certain committed; recovery reconciles the row
                             // from there.
-                            return Ok(CoordinatedDeliveryOutcome::DeliveredUnrecorded {
+                            return Ok(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
                                 attempt,
                                 conversation,
                                 vendor_message_refs: sent_refs,

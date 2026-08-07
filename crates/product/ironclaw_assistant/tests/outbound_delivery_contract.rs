@@ -1337,7 +1337,7 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
 /// would confirm it fails (e.g. a backend outage right after vendor egress).
 /// The coordinator must not report `Delivered` in that case — this repo's
 /// stated invariant is that only a durable `Delivered` row confirms success
-/// — so it reports `DeliveredUnrecorded`, the weaker success-shaped outcome
+/// — so it reports `DeliveredUnconfirmed`, the weaker success-shaped outcome
 /// that still carries the real vendor message refs it just obtained. It must
 /// not report `ExistingDeliveryUnconfirmed`: that variant is the claim-loss
 /// case, where no vendor egress happened on this call and there are no refs
@@ -1379,7 +1379,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         .await
         .expect("delivery drives even when the terminal write fails");
 
-    let CoordinatedDeliveryOutcome::DeliveredUnrecorded {
+    let CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
         conversation,
         vendor_message_refs,
         ..

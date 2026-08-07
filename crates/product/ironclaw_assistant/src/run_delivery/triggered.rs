@@ -855,7 +855,7 @@ fn classify_triggered_delivery_outcome(
         // The vendor refs are dropped here: no triggered consumer acts on
         // refs from an unconfirmed send. `Sending` is the last durably
         // committed state.
-        CoordinatedDeliveryOutcome::DeliveredUnrecorded { .. } => {
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => {
             Err(TriggeredNotificationFailure::DeliveryUnconfirmed {
                 status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
                 failure_kind: None,
@@ -1135,22 +1135,22 @@ mod outcome_classification_tests {
         // Sent but not durably confirmed: not success, so no gate routes or
         // terminal cleanup are authorized — but it is also not a resend
         // trigger, since the parts did reach the vendor.
-        let delivered_unrecorded =
-            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnrecorded {
+        let delivered_unconfirmed =
+            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
                 attempt: attempt(None),
                 conversation: conversation(),
                 vendor_message_refs: vec!["triggered-unconfirmed-ref".to_string()],
             })
             .expect_err("an unconfirmed send is not success");
         assert!(matches!(
-            &delivered_unrecorded,
+            &delivered_unconfirmed,
             TriggeredNotificationFailure::DeliveryUnconfirmed {
                 status: OutboundDeliveryStatus::Sending,
                 failure_kind: None
             }
         ));
         assert_eq!(
-            triggered_outcome_for_failure(&delivered_unrecorded),
+            triggered_outcome_for_failure(&delivered_unconfirmed),
             TriggeredRunDeliveryOutcomeKind::Failed
         );
 

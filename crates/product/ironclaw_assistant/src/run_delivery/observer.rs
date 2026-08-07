@@ -1361,7 +1361,7 @@ fn classify_observed_delivery_outcome(
         // dropped here: nothing downstream of this classifier consumes refs
         // from an unconfirmed send, and `DeliveryUnconfirmed` carries no slot
         // for them. `Sending` is the last durably committed state.
-        CoordinatedDeliveryOutcome::DeliveredUnrecorded { .. } => {
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => {
             Err(RunDeliveryError::DeliveryUnconfirmed {
                 status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
                 failure_kind: None,
@@ -1705,21 +1705,21 @@ mod outcome_classification_tests {
         // Sent but not durably confirmed: still not success (no route
         // publication), and still no user-facing feedback — the message did
         // reach the vendor, so nothing here should invite a resend.
-        let delivered_unrecorded =
-            classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnrecorded {
+        let delivered_unconfirmed =
+            classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
                 attempt: attempt(None),
                 conversation: conversation(),
                 vendor_message_refs: vec!["vendor-unconfirmed".to_string()],
             })
             .expect_err("an unconfirmed send is not success");
         assert!(matches!(
-            &delivered_unrecorded,
+            &delivered_unconfirmed,
             RunDeliveryError::DeliveryUnconfirmed {
                 status: OutboundDeliveryStatus::Sending,
                 failure_kind: None
             }
         ));
-        assert_eq!(delivery_failure_feedback(&delivered_unrecorded), None);
+        assert_eq!(delivery_failure_feedback(&delivered_unconfirmed), None);
 
         let delivered_conversation = conversation();
         let delivered = classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::Delivered {
