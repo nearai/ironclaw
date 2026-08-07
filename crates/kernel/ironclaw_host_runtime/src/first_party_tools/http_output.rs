@@ -164,9 +164,11 @@ fn scrub_model_diagnostic_controls(diagnostic: String) -> String {
         .collect()
 }
 
-/// The diagnostic string is produced from a `serde_json::Value`, which can
-/// only fail to serialize on lone-surrogate text. Log the cause and fall back
-/// to a fixed verdict payload rather than dropping the failure context.
+/// The diagnostic string is produced from a `serde_json::Value`. Serialization
+/// of a `Value` cannot fail for any string a safe API can produce: escaping
+/// does not revalidate UTF-8 (probed: even an unsafe lone-surrogate string
+/// serializes `Ok`), and all other `Value` variants are infallible to emit.
+/// The fallback is a pure defensive guard for future `Value` shapes.
 fn serialize_diagnostic(output: &Map<String, Value>, status: u16) -> String {
     match serde_json::to_string(output) {
         Ok(diagnostic) => diagnostic,
@@ -682,10 +684,10 @@ mod tests {
     #[test]
     fn failure_diagnostic_falls_back_on_unserializable_output() {
         // Non-object output funnels to the fixed verdict payload; the
-        // fallback shape is part of the contract. (The serde-failure branch in
-        // serialize_diagnostic is unreachable in practice: body_text always
-        // originates from String::from_utf8 and body_base64 from ASCII
-        // base64, so the diagnostic Value never carries lone surrogates.)
+        // fallback shape is part of the contract. (serialize_diagnostic's
+        // serde-failure arm is a pure defensive guard: serde_json serializes
+        // every Value string without revalidating UTF-8, probed empirically,
+        // and no safe API can construct text serde would reject.)
         let diagnostic = bounded_failure_diagnostic(Value::Null, 403);
         assert_eq!(
             diagnostic,
