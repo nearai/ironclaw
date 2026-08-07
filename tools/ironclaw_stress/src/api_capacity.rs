@@ -970,8 +970,15 @@ async fn run_virtual_user_with_identity(
     let mut scripted_samples = Vec::new();
 
     while crate::should_run_operation(target, started, operation_index) {
+        // The op prefix (hot writers: `h{k}-`) is part of the client action
+        // id so concurrent writers never collide on a duplicate-action
+        // conflict even when they share the same user.
+        let op_prefix = identity
+            .as_ref()
+            .map(|identity| identity.op_prefix.as_str())
+            .unwrap_or("");
         let operation_ref = format!(
-            "{operation_namespace}:{}:{}:{}",
+            "{operation_namespace}:{}:{}:{op_prefix}{}",
             user.label, user.index, operation_index
         );
         let (
@@ -1058,8 +1065,12 @@ async fn run_background_user(
     let mut scripted_samples = Vec::new();
 
     for operation_index in 0..args.api_background_operations {
+        let op_prefix = identity
+            .as_ref()
+            .map(|identity| identity.op_prefix.as_str())
+            .unwrap_or("");
         let operation_ref = format!(
-            "{operation_namespace}:background:{}:{}:{}",
+            "{operation_namespace}:background:{}:{}:{op_prefix}{}",
             user.label, user.index, operation_index
         );
         let (
