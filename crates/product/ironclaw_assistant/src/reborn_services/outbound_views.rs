@@ -3,7 +3,7 @@
 //! in a same-named "views" file split, since both sides of the WebUI-facing
 //! notification-channels surface delegate directly to
 //! `OutboundPreferencesProductService` with no transformation of their own —
-//! see `crates/ironclaw_webui/src/webui_v2/handlers.rs`'s
+//! see `crates/product/ironclaw_webui/src/webui_v2/handlers.rs`'s
 //! `get_notification_channels` / `set_notification_channels`).
 
 use ironclaw_product_contracts::views::RebornViewProvider;

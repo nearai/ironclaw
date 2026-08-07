@@ -704,7 +704,7 @@ Rules — kept short on purpose:
   over the creator's notification-channel set (`run_delivery_contract.rs`).
   There are no per-purpose preference-target slots any more — the resolution
   engine reads no stored preference at all
-  (`crates/ironclaw_outbound/src/resolution_engine.rs`).
+  (`crates/domains/ironclaw_outbound/src/resolution_engine.rs`).
 - [x] OUT-3 An attempt is persisted (`Prepared`→`Sending`) before vendor
   egress. — `coordinator_persists_sending_before_the_adapter_delivers` (the
   scripted adapter reads the durable attempt DURING deliver and sees
@@ -815,7 +815,7 @@ Rules — kept short on purpose:
   `model_delivery_is_policy_class`
   (`crates/product/ironclaw_assistant/tests/outbound_delivery_contract.rs`) pins the
   intent-class routing; `ModelChannelDeliveryEvidence.provider_message_refs`
-  (`crates/ironclaw_outbound/src/model_channel_delivery.rs`) is the only
+  (`crates/domains/ironclaw_outbound/src/model_channel_delivery.rs`) is the only
   success shape the tool port can return — no "queued"/"accepted" variant
   exists to construct one; end to end,
   `webui_send_me_on_slack_delivers_via_bot_with_evidence`,

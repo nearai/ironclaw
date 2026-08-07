@@ -26,7 +26,7 @@ pub const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List destinations 
 /// The service (`ironclaw_outbound::NOTIFICATION_TARGETS_CAP`) is the
 /// authoritative enforcement point — a caller that bypasses this advisory
 /// schema bound still gets rejected there.
-pub const NOTIFICATION_CHANNELS_SET_MAX_ITEMS: usize = 8;
+pub const NOTIFICATION_CHANNELS_SET_MAX_ITEMS: usize = ironclaw_outbound::NOTIFICATION_TARGETS_CAP;
 
 pub const OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID: &str =
     "builtin.notification_channels_set";

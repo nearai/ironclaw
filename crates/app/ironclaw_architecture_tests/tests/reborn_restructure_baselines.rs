@@ -123,7 +123,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// notification-channel capability split and delivery wiring preserve their
 /// mediated owners. Measured on the merged tree; the manifest ceiling and
 /// observed value move with this record so the increase is explicit.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_692;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_432;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

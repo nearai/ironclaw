@@ -74,7 +74,7 @@ pub(super) fn outbound_delivery_capabilities(
             capability_leases,
             // `outbound_preference_write_requires_approval` is derived from the
             // `ExternalWrite` effect kind generically
-            // (`local_dev_effects_require_approval`), not from any single
+            // (`effects_require_approval`), not from any single
             // capability's identity — it gates every `ExternalWrite`
             // outbound-preference mutation under this synthetic provider.
             requires_approval: outbound_preference_write_requires_approval,

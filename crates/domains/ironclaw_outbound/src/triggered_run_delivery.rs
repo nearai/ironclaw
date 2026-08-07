@@ -1,14 +1,17 @@
 //! Delivery outcome records for trigger-fired runs.
 //!
-//! When a trigger fires and submits a run, the delivery driver attempts to
-//! resolve the creator's personal communication preference and send the run
-//! result to their configured personal delivery target. This module holds the
-//! outcome record and its in-memory store.
+//! When a trigger fires and submits a run, the notifier watches it and fans
+//! out the notices it produces — an approval gate, an expired credential, a
+//! failure — to the creator's configured **notification channels**. It does
+//! NOT push the run's result: a fire's answer lives in its own run thread,
+//! and putting it on a channel is the model's explicit
+//! `builtin.outbound_deliver` call. This module holds the outcome record for
+//! that watch-and-notify pass, and its in-memory store.
 //!
 //! Design constraints:
-//! - Resolution-stage failures (e.g. no default configured) must NOT produce
-//!   delivery-attempt rows — those rows are for attempts that reach the
-//!   transport layer. Instead we write a lightweight outcome record here.
+//! - Resolution-stage failures (e.g. no notification channels configured) must
+//!   NOT produce delivery-attempt rows — those rows are for attempts that reach
+//!   the transport layer. Instead we write a lightweight outcome record here.
 //! - Authoritative terminal state: owners propagate record failures into their
 //!   managed task lifecycle instead of reporting an unpersisted completion.
 //! - Personal scope only: non-personal triggers fail closed with `Denied`.
@@ -110,8 +113,10 @@ pub struct TriggeredFireFailureDeliveryRequest {
 /// its typed turn vocabulary.
 #[async_trait::async_trait]
 pub trait TriggeredRunDelivery: Send + Sync {
-    /// Watch the submitted run and deliver its outputs to the creator's
-    /// resolved target, recording the terminal outcome in the store.
+    /// Watch the submitted run and fan its notices — approval gates, expired
+    /// credentials, failures — out to the creator's notification channels,
+    /// recording the terminal outcome in the store. The run's own result is
+    /// never pushed here.
     async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest);
 
     /// Notify configured channels that a fire permanently failed before run

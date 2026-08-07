@@ -5,7 +5,7 @@
 //! ModelDelivery-class push uses.
 //!
 //! Mirrors two existing seams rather than inventing new ones:
-//! - `ironclaw_product::run_delivery::observer`'s FinalReply delivery
+//! - `crate::run_delivery::observer`'s FinalReply delivery
 //!   construction (`OutboundPolicyService::new` plus a per-call reply-target
 //!   authority, `CoordinatedDeliveryRequest` shape).
 //! - the same-origin run lookup pattern composition used for trigger-create
@@ -46,13 +46,13 @@ const TRACE_TARGET: &str = "ironclaw::reborn::model_channel_delivery";
 
 /// FIFO bound on the number of distinct runs the per-run cap ledger tracks
 /// (mirrors `HINT_SEEN_CAP` / `DELIVERED_RUNS_CAP` in
-/// `ironclaw_product::run_delivery`). An evicted run's counter resets to
+/// `crate::run_delivery`). An evicted run's counter resets to
 /// zero if it somehow reappears — harmless: it just means one run, already
 /// long finished, gets a fresh budget.
 const MODEL_DELIVERY_TRACKED_RUNS_CAP: usize = 256;
 
 /// Handles [`CoordinatedModelChannelDelivery`] needs, mirroring exactly the
-/// subset of `ironclaw_product::run_delivery::RunDeliveryServices` fields its
+/// subset of `crate::run_delivery::RunDeliveryServices` fields its
 /// `OutboundPolicyService` construction threads for FinalReply deliveries,
 /// plus the Task 2 port's own registry/run-state/target-resolver
 /// dependencies.
@@ -123,7 +123,7 @@ impl CoordinatedModelChannelDelivery {
     /// Reserve one delivery slot for `run_id` against the per-run cap
     /// (spec §5): FIFO-bounded to [`MODEL_DELIVERY_TRACKED_RUNS_CAP`] distinct
     /// runs, mirroring `HintSeenSet`'s eviction pattern
-    /// (`ironclaw_product::run_delivery`). Callers must only call this after
+    /// (`crate::run_delivery`). Callers must only call this after
     /// content, target, and same-origin checks already passed.
     fn reserve_delivery_slot(&self, run_id: RunId) -> Result<(), ModelChannelDeliveryError> {
         let mut guard = self
@@ -355,7 +355,7 @@ impl ModelChannelDelivery for CoordinatedModelChannelDelivery {
 /// Reply-target authority for one delivery attempt: trusts only the exact
 /// target this port already resolved and same-origin-checked. Mirrors
 /// `ObservedReplyTargetAuthority`'s snapshot-equality validation
-/// (`ironclaw_product::run_delivery::observer`) rather than reusing it
+/// (`crate::run_delivery::observer`) rather than reusing it
 /// directly (that type is private to its owning module).
 struct ExpectedTargetAuthority {
     scope: TurnScope,
@@ -433,7 +433,7 @@ impl ModelChannelDelivery for DeferredModelChannelDelivery {
 /// live final-reply path — there is no inbound envelope carrying the
 /// destination conversation. The conversation is decoded from the target's
 /// vendor binding ref through the same [`PreferenceTargetCodec`] port the
-/// triggered-delivery driver uses (`ironclaw_product::run_delivery::triggered`),
+/// triggered-delivery driver uses (`crate::run_delivery::triggered`),
 /// which is the only place vendor knowledge enters this path. Codecs are
 /// tried in registration order; the first that decodes the ref owns it.
 ///
@@ -443,11 +443,25 @@ impl ModelChannelDelivery for DeferredModelChannelDelivery {
 /// single enforcement point for that, and reports `ChannelUnavailable`.
 pub struct CodecChannelTargetResolver {
     codecs: Vec<Arc<dyn PreferenceTargetCodec>>,
+    /// Names the delivery path in the resolution-failure reason, so one shared
+    /// implementation still produces a diagnostic that says which caller could
+    /// not resolve its target.
+    context_label: &'static str,
 }
 
 impl CodecChannelTargetResolver {
     pub fn new(codecs: Vec<Arc<dyn PreferenceTargetCodec>>) -> Self {
-        Self { codecs }
+        Self::with_context_label(codecs, "explicit delivery")
+    }
+
+    pub fn with_context_label(
+        codecs: Vec<Arc<dyn PreferenceTargetCodec>>,
+        context_label: &'static str,
+    ) -> Self {
+        Self {
+            codecs,
+            context_label,
+        }
     }
 }
 
@@ -474,14 +488,17 @@ impl ProductOutboundTargetResolver for CodecChannelTargetResolver {
             });
         }
         Err(ProductSurfaceFailure::BindingResolutionFailed {
-            reason: "explicit delivery: no registered channel codec decodes the target binding"
-                .to_string(),
+            reason: format!(
+                "{}: no registered channel codec decodes the binding ref '{}'",
+                self.context_label,
+                target.target().as_str()
+            ),
         })
     }
 }
 
 /// This port never subscribes to projection replay; deny unconditionally,
-/// mirroring `AllowNoProjectionAccess` in `ironclaw_product::run_delivery`.
+/// mirroring `AllowNoProjectionAccess` in `crate::run_delivery`.
 struct DenyProjectionAccess;
 
 #[async_trait]

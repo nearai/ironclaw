@@ -2092,3 +2092,139 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
     );
     assert_eq!(adapter.deliver_calls(), 0);
 }
+
+/// A codec whose DM verdict is configurable, so the DM rule can be driven
+/// through the REAL resolver rather than a double that pre-decides it.
+struct ConfigurableDmCodec {
+    direct_message: bool,
+}
+
+impl ironclaw_extension_contracts::preference_target::PreferenceTargetCodec
+    for ConfigurableDmCodec
+{
+    fn conversation_for_target(
+        &self,
+        target: &ReplyTargetBindingRef,
+    ) -> Option<ExternalConversationRef> {
+        let conversation = target.as_str().strip_prefix("reply:dm-codec:")?;
+        ExternalConversationRef::new(None::<&str>, conversation, None, None).ok()
+    }
+
+    fn is_personal_direct_message(&self, _target: &ReplyTargetBindingRef) -> bool {
+        self.direct_message
+    }
+
+    fn direct_message_actor_for_target(&self, _target: &ReplyTargetBindingRef) -> Option<String> {
+        None
+    }
+
+    fn encode_shared_conversation_target(
+        &self,
+        _request: ironclaw_extension_contracts::preference_target::PreferenceTargetEncodeRequest<
+            '_,
+        >,
+    ) -> Option<ReplyTargetBindingRef> {
+        None
+    }
+
+    fn encode_personal_direct_message_target(
+        &self,
+        _request: ironclaw_extension_contracts::preference_target::PreferenceTargetEncodeRequest<
+            '_,
+        >,
+        _external_actor_id: &str,
+    ) -> Option<ReplyTargetBindingRef> {
+        None
+    }
+}
+
+/// The OAuth DM rule, driven through the production resolver.
+///
+/// `coordinator_require_direct_message_rejects_non_dm_target_without_egress`
+/// above pins the coordinator's half with a double that decides the verdict
+/// itself, so it cannot catch a resolver that stops consulting
+/// `is_personal_direct_message`. The vendor codecs pin the predicate in
+/// isolation. Nothing joined the two — the wiring that actually enforces
+/// "an OAuth authorization URL only ever lands in a personal DM" was
+/// unguarded, and it is now the single enforcement point for both the
+/// notifier and `builtin.outbound_deliver`.
+#[tokio::test]
+async fn codec_resolver_enforces_the_dm_rule_from_the_codec_verdict() {
+    for (direct_message, expect_delivery) in [(false, false), (true, true)] {
+        let scope = scope();
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+        let validator = FakeReplyTargetBindingValidator::default();
+        validator.allow(
+            ReplyTargetBindingRef::new("reply:dm-codec:conv-dm").expect("valid binding ref"),
+        );
+        let preferences = FakePreferenceRepository::default();
+        seed_preference(&preferences, &scope);
+        let policy = configured_policy(&store, &validator);
+        let adapter = Arc::new(ScriptedChannelAdapter::new(
+            Arc::clone(&store),
+            scope.clone(),
+            vec![Ok(DeliveryReport {
+                parts: vec![sent("ts-dm")],
+            })],
+        ));
+        let coordinator = coordinator_over(&store, &adapter);
+        let resolver = ironclaw_assistant::CodecChannelTargetResolver::new(vec![Arc::new(
+            ConfigurableDmCodec { direct_message },
+        )]);
+
+        let thread_scope = project_thread_scope();
+        let mut delivery = delivery_request(scope.clone());
+        delivery.resolution_request.intent =
+            CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                event_kind: RunNotificationEventKind::AuthRequired,
+                origin: RunNotificationOrigin::RunScopedTarget {
+                    target: ReplyTargetBindingRef::new("reply:dm-codec:conv-dm")
+                        .expect("valid binding ref"),
+                },
+            });
+        let request = CoordinatedDeliveryRequest {
+            intent: DeliveryIntent::AuthPrompt,
+            delivery,
+            parts: vec![
+                ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                    "https://example.test/oauth?code=secret".to_string(),
+                ),
+            ],
+            attachments: Vec::new(),
+            thread_anchor: None,
+            require_direct_message_target: true,
+            extension_id: "vendorx",
+            thread_scope: &thread_scope,
+        };
+
+        let outcome = coordinator
+            .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
+            .await;
+
+        if expect_delivery {
+            outcome.expect("a personal DM target must accept the authorization URL");
+            assert_eq!(
+                adapter.deliver_calls(),
+                1,
+                "a DM target must reach the vendor adapter"
+            );
+        } else {
+            let error = outcome.expect_err("a non-DM target must reject the authorization URL");
+            assert!(
+                matches!(
+                    error,
+                    CoordinatedDeliveryError::Workflow(
+                        ProductSurfaceFailure::OutboundTargetNotDirectMessage
+                    )
+                ),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(
+                adapter.deliver_calls(),
+                0,
+                "an OAuth URL must never reach a vendor adapter for a non-DM target"
+            );
+        }
+    }
+}

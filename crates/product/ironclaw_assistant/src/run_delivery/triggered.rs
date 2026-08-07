@@ -22,7 +22,6 @@ use ironclaw_outbound::{
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
     TriggeredFireFailureDeliveryRequest, TriggeredRunDelivery, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
-    ValidatedReplyTargetBinding,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
@@ -42,7 +41,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryIntent,
 };
-use crate::{ProductOutboundTargetResolver, ProductSurfaceFailure};
+use crate::model_channel_delivery::CodecChannelTargetResolver;
 use ironclaw_extension_contracts::preference_target::{
     ActivePreferenceTargetCodecs, PreferenceTargetCodec,
 };
@@ -154,7 +153,9 @@ struct TriggeredNotificationContext<'a> {
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
     run_id: TurnRunId,
-    authority: &'a TriggeredReplyTargetAuthority<'a>,
+    authority: &'a TriggeredReplyTargetAuthority,
+    /// Shared codec-scan resolver: decodes the binding and enforces the DM rule.
+    target_resolver: &'a CodecChannelTargetResolver,
 }
 
 /// Typed failure classification for a single notification delivery attempt.
@@ -444,8 +445,11 @@ async fn notify_pre_submit_failure(
     let authority = TriggeredReplyTargetAuthority {
         scope: scope.clone(),
         actor: actor.clone(),
-        codecs: &codecs,
     };
+    let target_resolver = CodecChannelTargetResolver::with_context_label(
+        codecs.to_vec(),
+        "background run notification",
+    );
     let text = format!(
         "{}{}",
         prompts::BACKGROUND_RUN_FAILED_MESSAGE,
@@ -457,6 +461,7 @@ async fn notify_pre_submit_failure(
         thread_scope: &thread_scope,
         actor: &actor,
         authority: &authority,
+        target_resolver: &target_resolver,
         failure_ref: &failure_ref,
         text: &text,
     };
@@ -478,7 +483,9 @@ struct PreSubmitFailureDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
-    authority: &'a TriggeredReplyTargetAuthority<'a>,
+    authority: &'a TriggeredReplyTargetAuthority,
+    /// Shared codec-scan resolver: decodes the binding and enforces the DM rule.
+    target_resolver: &'a CodecChannelTargetResolver,
     failure_ref: &'a ProjectionUpdateRef,
     text: &'a str,
 }
@@ -669,14 +676,18 @@ async fn notify_background_run(
         let authority = TriggeredReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),
-            codecs: &target_codecs,
         };
+        let target_resolver = CodecChannelTargetResolver::with_context_label(
+            target_codecs.to_vec(),
+            "background run notification",
+        );
         let notification_context = TriggeredNotificationContext {
             scope: &scope,
             thread_scope: &thread_scope,
             actor: &actor,
             run_id,
             authority: &authority,
+            target_resolver: &target_resolver,
         };
 
         let mut delivered_for_gate_route: Vec<DeliveredChannelMessage> = Vec::new();
@@ -1096,7 +1107,7 @@ async fn deliver_pre_submit_failure_to_target(
         .coordinator
         .deliver(
             &outbound_policy,
-            context.authority,
+            context.target_resolver,
             context.services.project_filesystem.as_ref(),
             CoordinatedDeliveryRequest {
                 intent: DeliveryIntent::BackgroundRunNotice,
@@ -1162,7 +1173,7 @@ async fn deliver_notification_to_target(
         .coordinator
         .deliver(
             &outbound_policy,
-            context.authority,
+            context.target_resolver,
             services.project_filesystem.as_ref(),
             CoordinatedDeliveryRequest {
                 intent: notification.intent,
@@ -1232,18 +1243,20 @@ async fn record_triggered_run_outcome(
 }
 
 /// Reply-target authority for background-run notifications: trusts the target
-/// the notifier resolved from the creator's own notification-channel catalog
-/// (scope and actor must match), decodes it through whichever registered
-/// vendor codec owns its grammar, and enforces the DM requirement against the
-/// send-time binding.
-struct TriggeredReplyTargetAuthority<'a> {
+/// the notifier resolved from the creator's own notification-channel catalog,
+/// requiring scope and actor to match.
+///
+/// Decoding the binding and enforcing the OAuth DM rule is deliberately NOT
+/// here: that is [`CodecChannelTargetResolver`], the single implementation
+/// both this path and the explicit `builtin.outbound_deliver` path share. A
+/// second copy of that scan is how the two drift.
+struct TriggeredReplyTargetAuthority {
     scope: TurnScope,
     actor: TurnActor,
-    codecs: &'a [Arc<dyn PreferenceTargetCodec>],
 }
 
 #[async_trait]
-impl ReplyTargetBindingValidator for TriggeredReplyTargetAuthority<'_> {
+impl ReplyTargetBindingValidator for TriggeredReplyTargetAuthority {
     async fn validate_reply_target(
         &self,
         request: ReplyTargetValidationRequest,
@@ -1252,37 +1265,5 @@ impl ReplyTargetBindingValidator for TriggeredReplyTargetAuthority<'_> {
             return Err(OutboundError::AccessDenied);
         }
         Ok(ReplyTargetBindingClaim::new(request.candidate.target))
-    }
-}
-
-#[async_trait]
-impl ProductOutboundTargetResolver for TriggeredReplyTargetAuthority<'_> {
-    async fn resolve_product_outbound_target_metadata(
-        &self,
-        target: &ValidatedReplyTargetBinding,
-        require_direct_message: bool,
-    ) -> Result<crate::VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
-        for codec in self.codecs {
-            let Some(external_conversation_ref) = codec.conversation_for_target(target.target())
-            else {
-                continue;
-            };
-            // Single enforcement point for the OAuth DM rule, checked against
-            // the binding resolved NOW (at send time) — race-free against a
-            // stale catalog snapshot.
-            if require_direct_message && !codec.is_personal_direct_message(target.target()) {
-                return Err(ProductSurfaceFailure::OutboundTargetNotDirectMessage);
-            }
-            return Ok(crate::VerifiedProductOutboundTargetMetadata {
-                external_conversation_ref,
-                external_actor_ref: None,
-            });
-        }
-        Err(ProductSurfaceFailure::BindingResolutionFailed {
-            reason: format!(
-                "background run notification: no registered channel codec decodes the binding ref '{}'",
-                target.target().as_str()
-            ),
-        })
     }
 }

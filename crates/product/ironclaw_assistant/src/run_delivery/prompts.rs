@@ -31,12 +31,12 @@ pub(crate) const OAUTH_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app 
 /// failure detail itself stays in the run history — a notification channel is
 /// a shared surface and carries no diagnostics.
 pub(crate) const BACKGROUND_RUN_FAILED_MESSAGE: &str =
-    "A routine run failed - open the IronClaw app for details.";
+    "A routine run failed — open the Ironclaw web app for details.";
 /// Redacted stand-in for an OAuth auth prompt on a notification channel that
 /// is NOT a personal DM: the authorization URL is a bearer-grade secret and
 /// must never land in a shared conversation.
 pub(crate) const BACKGROUND_RUN_REAUTH_MESSAGE: &str =
-    "A routine needs re-authorization - open the IronClaw app to continue.";
+    "A routine needs re-authorization — open the Ironclaw web app to continue.";
 pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =

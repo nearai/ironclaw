@@ -5,13 +5,13 @@
 //! over 1,500 lines needs either an owning tracking issue or a decomposition;
 //! this is the decomposition).
 //!
-//! `outbound_delivery` and this module are SIBLING children of `local_dev`
-//! (not ancestor/descendant), so — unlike `ironclaw_product`'s
+//! `outbound_delivery` and this module are SIBLING children of `capability_host`
+//! (not ancestor/descendant), so — unlike `ironclaw_assistant`'s
 //! `outbound_preferences::notification_channels` split, which reaches its
 //! parent's private items for free through Rust's ancestor-visibility rule —
 //! every helper and type this module shares with `outbound_delivery` had to be
 //! widened to `pub(super)` on that side (visible to their common parent
-//! `local_dev` and all its descendants, which includes this module). Those
+//! `capability_host` and all its descendants, which includes this module). Those
 //! shared items (`ApprovedDispatchLease`, `ApprovedResumeDecision`,
 //! `OutboundDeliveryApprovalSettingsDecision`, `write_completed_result`) still
 //! live in `outbound_delivery.rs` and carry their own doc-comments; only the
