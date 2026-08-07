@@ -6,10 +6,10 @@ use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPushCandidate,
-    OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
+    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
+    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -101,6 +101,21 @@ pub trait OutboundStateStorePort: Send + Sync {
         &self,
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError>;
+
+    /// Load one attempt by its durable id under the exact caller scope.
+    /// Implementations should use the point-addressed row; the default keeps
+    /// lightweight test doubles source-compatible.
+    async fn load_delivery_attempt(
+        &self,
+        scope: TurnScope,
+        delivery_id: OutboundDeliveryId,
+    ) -> Result<Option<OutboundDeliveryAttempt>, OutboundError> {
+        Ok(self
+            .list_delivery_attempts(scope)
+            .await?
+            .into_iter()
+            .find(|attempt| attempt.delivery_id == delivery_id))
+    }
 
     async fn list_delivery_attempts(
         &self,

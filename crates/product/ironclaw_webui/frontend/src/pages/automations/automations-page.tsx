@@ -68,6 +68,15 @@ export function AutomationsPage() {
               {t("automations.error.loadFailed")}
             </div>
           )}
+          {!automationsState.error && automationsState.summaryError &&
+          (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+            >
+              {t("automations.error.loadFailed")}
+            </div>
+          )}
           {showErrorOnly
             ? null
             : (

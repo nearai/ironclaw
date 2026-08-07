@@ -157,17 +157,18 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/outbound_deliver.output.v1.json" => json!({
             "type": "object",
             "properties": {
-                "delivered": { "type": "boolean", "const": true },
+                "delivered": { "type": "boolean" },
+                "provider_confirmed": { "type": "boolean" },
                 "target_id": { "type": "string" },
                 "channel": { "type": "string" },
                 "display_name": { "type": "string" },
                 "provider_message_refs": {
                     "type": "array",
-                    "minItems": 1,
                     "items": { "type": "string" }
-                }
+                },
+                "durably_recorded": { "type": "boolean" }
             },
-            "required": ["delivered", "target_id", "channel", "display_name", "provider_message_refs"],
+            "required": ["delivered", "provider_confirmed", "target_id", "channel", "display_name", "provider_message_refs", "durably_recorded"],
             "additionalProperties": false
         }),
         "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({

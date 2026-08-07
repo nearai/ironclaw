@@ -20,9 +20,13 @@ The stable ownership split is:
 - WASM/MCP/scripts/first-party adapters: concrete execution lanes.
 - `ironclaw_extensions`: declarative manifests and installation records only.
 
-Verify the current call path with targeted symbol search before editing it:
+Verify the current call path with the codebase knowledge graph before editing
+it: check graph freshness, search the capability owners, and trace inbound and
+outbound calls. Then verify the graph result against live code with targeted
+symbol search (or use that search directly when the graph is unavailable):
 
 ```bash
+bash scripts/codebase-graph.sh status
 rg -n "CapabilityHost|RuntimeAdapter|dispatch|invoke|resume|Obligation" \
   crates
 ```

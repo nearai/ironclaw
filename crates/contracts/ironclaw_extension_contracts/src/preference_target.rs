@@ -70,7 +70,6 @@ pub trait PreferenceTargetCodec: Send + Sync {
 
 /// Live view of the channel extensions whose preference-target codecs are
 /// currently active.
-///
 /// Read at every use, never captured. A long-lived consumer (the background-run
 /// notifier is the motivating one) outlives many activation cycles: an
 /// extension activated after that consumer was built must still be able to
@@ -83,6 +82,7 @@ pub trait ActivePreferenceTargetCodecs: Send + Sync {
 }
 
 /// A fixed codec set: compositions with one static channel, and tests.
+#[cfg(any(test, feature = "test-support"))]
 impl ActivePreferenceTargetCodecs for Vec<std::sync::Arc<dyn PreferenceTargetCodec>> {
     fn active_preference_target_codecs(&self) -> Vec<std::sync::Arc<dyn PreferenceTargetCodec>> {
         self.clone()

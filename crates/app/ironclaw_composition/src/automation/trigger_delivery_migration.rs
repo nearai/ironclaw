@@ -10,16 +10,10 @@
 //! act on — the prompt — and then clears the legacy field so the pass is a
 //! no-op on every subsequent boot.
 //!
-//! Runs from composition boot after the outbound delivery-target registry
-//! exists and before the trigger poller starts; a failure is logged loud and
-//! never blocks boot (the fire path already ignores stored targets). A
-//! registry/upsert failure retries next boot; the one case that does NOT
-//! self-heal is prompt-cap overflow — the record keeps its route and prompt
-//! untouched, with a loud warn naming the trigger, until an operator shortens
-//! the prompt (spec §8 amendment: clearing the column with no replacement
-//! step was falsified as strictly worse).
-
-use std::sync::Arc;
+//! Runs from composition boot before the trigger poller starts. Boot fails
+//! closed while a valid legacy route cannot be represented in the prompt:
+//! the fire path no longer reads the retired field, so starting the poller
+//! with an unmigrated row would silently discard user routing intent.
 
 use ironclaw_host_api::ids::TenantId;
 use ironclaw_triggers::{MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord, TriggerRepository};
@@ -49,16 +43,16 @@ use crate::outbound::{
 ///   costs nothing, so the asymmetry decides it: write the step.
 ///   `builtin.outbound_deliver` takes the id directly, so it stays actionable
 ///   and fails loudly at fire time if the destination really did go away;
-/// * registry lookup fails outright → record left for a later boot;
-/// * prompt would exceed [`MAX_TRIGGER_PROMPT_BYTES`] → record left untouched,
-///   route intact (see [`migrate_one`]);
+/// * registry lookup fails outright → migrate by id without a display name;
+/// * prompt would exceed [`MAX_TRIGGER_PROMPT_BYTES`] → fail boot closed while
+///   leaving the record untouched;
 /// * no stored target → untouched (not even rewritten).
 ///
 /// Idempotent: after a pass every migrated record has `delivery_target: None`,
 /// so a second pass finds nothing to do and appends nothing.
 pub(crate) async fn migrate_trigger_delivery_targets(
     repository: &dyn TriggerRepository,
-    registry: &MutableOutboundDeliveryTargetRegistry,
+    registry: Option<&MutableOutboundDeliveryTargetRegistry>,
     tenant_id: &TenantId,
 ) -> Result<usize, TriggerError> {
     let records = repository.list_triggers(tenant_id.clone()).await?;
@@ -74,55 +68,55 @@ pub(crate) async fn migrate_trigger_delivery_targets(
     Ok(migrated)
 }
 
-/// Migrate a single record. `Ok(false)` means the record was deliberately left
-/// alone, route intact, for a later boot or for an operator to resolve —
-/// clearing it would destroy the only copy of the user's routing intent, and
-/// that loss is irreversible while leaving the id costs nothing.
-///
-/// Two skip cases:
-/// * the registry lookup failed outright (transport-shaped), so we learned
-///   nothing about the target;
-/// * appending the step would push the prompt past
-///   [`MAX_TRIGGER_PROMPT_BYTES`]. Clearing there would be the worst of both
-///   worlds: the route is gone AND no instruction replaced it. The record stays
-///   as-is and the warn names the trigger so an operator can shorten the prompt.
+/// Migrate one record through an atomic compare-and-clear write. A CAS miss
+/// re-reads and retries from the current row so boot-time migration cannot
+/// overwrite a concurrent prompt edit.
 async fn migrate_one(
     repository: &dyn TriggerRepository,
-    registry: &MutableOutboundDeliveryTargetRegistry,
+    registry: Option<&MutableOutboundDeliveryTargetRegistry>,
     mut record: TriggerRecord,
 ) -> Result<bool, TriggerError> {
-    let Some(target) = record.delivery_target.clone() else {
-        return Ok(false);
-    };
-    let display_name = match resolve_display_name(registry, &record, target.as_str()).await {
-        Ok(display_name) => display_name,
-        Err(ResolveFailure::Unavailable) => return Ok(false),
-    };
-    if display_name.is_none() {
-        tracing::warn!(
-            target: "ironclaw::reborn::trigger_delivery_migration",
-            trigger_id = %record.trigger_id,
-            "stored delivery target did not resolve; migrating it by id without a destination name"
-        );
+    const MAX_CAS_RETRIES: usize = 5;
+    for _ in 0..MAX_CAS_RETRIES {
+        let Some(target) = record.delivery_target.clone() else {
+            return Ok(false);
+        };
+        let display_name = resolve_display_name(registry, &record, target.as_str()).await;
+        if display_name.is_none() {
+            tracing::warn!(
+                target: "ironclaw::reborn::trigger_delivery_migration",
+                trigger_id = %record.trigger_id,
+                "stored delivery target did not resolve; migrating it by id without a destination name"
+            );
+        }
+        let step = delivery_step(display_name.as_deref(), target.as_str());
+        if record.prompt.len() + step.len() > MAX_TRIGGER_PROMPT_BYTES {
+            return Err(TriggerError::InvalidRecord {
+                kind: ironclaw_triggers::TriggerRecordValidationKind::PromptTooLong,
+                reason: format!(
+                    "routine {} cannot preserve its legacy delivery target within the {}-byte prompt limit; shorten the prompt before starting the trigger poller",
+                    record.trigger_id, MAX_TRIGGER_PROMPT_BYTES
+                ),
+            });
+        }
+        let migrated_prompt = format!("{}{}", record.prompt, step);
+        if repository
+            .migrate_legacy_delivery_target(&record, migrated_prompt)
+            .await?
+        {
+            return Ok(true);
+        }
+        record = repository
+            .get_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await?
+            .ok_or(TriggerError::NotFound)?;
     }
-    let step = delivery_step(display_name.as_deref(), target.as_str());
-    if record.prompt.len() + step.len() > MAX_TRIGGER_PROMPT_BYTES {
-        tracing::warn!(
-            target: "ironclaw::reborn::trigger_delivery_migration",
-            trigger_id = %record.trigger_id,
-            tenant_id = %record.tenant_id.as_str(),
-            trigger_name = %record.name,
-            prompt_bytes = record.prompt.len(),
-            step_bytes = step.len(),
-            max_prompt_bytes = MAX_TRIGGER_PROMPT_BYTES,
-            "routine prompt has no room for its delivery step; leaving the stored target in place rather than dropping the route — shorten the prompt and reboot"
-        );
-        return Ok(false);
-    }
-    record.prompt.push_str(&step);
-    record.delivery_target = None;
-    repository.upsert_trigger(record).await?;
-    Ok(true)
+    Err(TriggerError::Backend {
+        reason: format!(
+            "legacy delivery-target migration for trigger {} exceeded bounded CAS retries",
+            record.trigger_id
+        ),
+    })
 }
 
 /// The instruction that replaces the stored route. `display_name` is omitted
@@ -135,21 +129,14 @@ fn delivery_step(display_name: Option<&str>, target_id: &str) -> String {
     )
 }
 
-/// A registry lookup that could not be completed. Distinct from "resolved to
-/// nothing": an unavailable registry must not be read as "the target is gone".
-enum ResolveFailure {
-    Unavailable,
-}
-
 async fn resolve_display_name(
-    registry: &MutableOutboundDeliveryTargetRegistry,
+    registry: Option<&MutableOutboundDeliveryTargetRegistry>,
     record: &TriggerRecord,
     target_id: &str,
-) -> Result<Option<String>, ResolveFailure> {
+) -> Option<String> {
+    let registry = registry?;
     let Ok(target_id) = OutboundDeliveryTargetId::new(target_id) else {
-        // A stored id the current type rejects can never resolve; treat it as
-        // gone rather than retrying it on every boot forever.
-        return Ok(None);
+        return None;
     };
     let caller =
         OutboundDeliveryTargetScope::new(record.tenant_id.clone(), record.creator_user_id.clone());
@@ -157,40 +144,35 @@ async fn resolve_display_name(
         .resolve_outbound_delivery_target(&caller, &target_id)
         .await
     {
-        Ok(entry) => Ok(entry.map(|entry| entry.summary.display_name.as_str().to_string())),
+        Ok(entry) => entry.map(|entry| entry.summary.display_name.as_str().to_string()),
         Err(error) => {
             tracing::warn!(
                 target: "ironclaw::reborn::trigger_delivery_migration",
                 trigger_id = %record.trigger_id,
                 %error,
-                "outbound delivery target lookup failed; leaving the stored target for a later boot"
+                "outbound delivery target lookup failed; migrating the stored target by id"
             );
-            Err(ResolveFailure::Unavailable)
+            None
         }
     }
 }
 
-/// Boot entry point: run the migration, logging loud on failure instead of
-/// aborting composition.
+/// Boot entry point. Any unmigratable legacy route aborts composition before
+/// the poller can fire it without delivery.
 pub(crate) async fn migrate_trigger_delivery_targets_at_boot(
-    repository: &Arc<dyn TriggerRepository>,
-    registry: &MutableOutboundDeliveryTargetRegistry,
+    repository: &dyn TriggerRepository,
+    registry: Option<&MutableOutboundDeliveryTargetRegistry>,
     tenant_id: &TenantId,
-) {
-    match migrate_trigger_delivery_targets(repository.as_ref(), registry, tenant_id).await {
-        Ok(0) => {}
-        Ok(migrated) => tracing::debug!(
+) -> Result<(), TriggerError> {
+    let migrated = migrate_trigger_delivery_targets(repository, registry, tenant_id).await?;
+    if migrated > 0 {
+        tracing::debug!(
             target: "ironclaw::reborn::trigger_delivery_migration",
             migrated,
             "migrated stored trigger delivery targets into their routine prompts"
-        ),
-        Err(error) => tracing::error!(
-            target: "ironclaw::reborn::trigger_delivery_migration",
-            %error,
-            "stored trigger delivery-target migration failed"
-        ),
-        // silent-ok: migration retries next boot, fire path ignores stored targets
+        );
     }
+    Ok(())
 }
 
 #[cfg(test)]

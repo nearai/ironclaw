@@ -131,6 +131,15 @@ export function NotificationChannelsPanel({ channelsState }) {
 
         {/* ── Checkbox rows ────────────────────────────────────────── */}
         <div className="flex flex-col gap-3">
+          {channelsState.error &&
+          (
+            <div
+              role="alert"
+              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3.5 text-sm text-red-200"
+            >
+              {t("automations.error.loadFailed")}
+            </div>
+          )}
           {rows.map((row) => {
             const isSelected = draftIds.has(row.target_id);
             const isUnavailable = row.status === "unavailable";
@@ -175,7 +184,7 @@ export function NotificationChannelsPanel({ channelsState }) {
             );
           })}
 
-          {rows.length === 0 &&
+          {!channelsState.error && rows.length === 0 &&
           (
             <div
               className="rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"

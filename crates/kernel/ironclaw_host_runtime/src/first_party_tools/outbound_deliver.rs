@@ -69,7 +69,10 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         let input: OutboundDeliverInput =
-            serde_json::from_value(request.input).map_err(|_| super::input_error())?;
+            serde_json::from_value(request.input).map_err(|error| {
+                tracing::debug!(%error, "outbound delivery input failed schema decoding");
+                super::input_error()
+            })?;
         let run_id = request.run_id.ok_or_else(|| {
             FirstPartyCapabilityError::with_safe_summary(
                 RuntimeDispatchErrorKind::OperationFailed,
@@ -91,9 +94,13 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
             .await
             .map_err(map_delivery_error)?;
         let display_name = evidence.target.display_name.to_string();
+        let provider_confirmed = !evidence.provider_message_refs.is_empty();
+        let summary =
+            delivered_summary(&display_name, provider_confirmed, evidence.durably_recorded);
         Ok(FirstPartyCapabilityResult::new(
             json!({
-                "delivered": true,
+                "delivered": provider_confirmed,
+                "provider_confirmed": provider_confirmed,
                 "target_id": evidence.target.target_id.as_str(),
                 "channel": evidence.target.channel.as_str(),
                 "display_name": evidence.target.display_name.as_str(),
@@ -103,8 +110,8 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
             ResourceUsage::default(),
         )
         .with_display_preview(Some(CapabilityDisplayOutputPreview {
-            output_summary: Some(delivered_summary(&display_name, evidence.durably_recorded)),
-            output_preview: delivered_summary(&display_name, evidence.durably_recorded),
+            output_summary: Some(summary.clone()),
+            output_preview: summary,
             output_kind: "text".to_string(),
             subtitle: None,
             truncated: false,
@@ -114,8 +121,14 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
 
 /// `durably_recorded: false` means the provider accepted the send but the
 /// confirmation row did not commit — delivered, with the weaker claim shown.
-fn delivered_summary(display_name: &str, durably_recorded: bool) -> String {
-    if durably_recorded {
+fn delivered_summary(
+    display_name: &str,
+    provider_confirmed: bool,
+    durably_recorded: bool,
+) -> String {
+    if !provider_confirmed {
+        format!("Delivery to {display_name} is unverified (provider supplied no message reference)")
+    } else if durably_recorded {
         format!("Delivered to {display_name}")
     } else {
         format!("Delivered to {display_name} (confirmation record pending)")
@@ -330,6 +343,8 @@ mod tests {
         assert_eq!(result.output["channel"], json!("slack"));
         assert_eq!(result.output["display_name"], json!("Team Updates"));
         assert_eq!(result.output["provider_message_refs"], json!(["1721.045"]));
+        assert_eq!(result.output["provider_confirmed"], json!(true));
+        assert_eq!(result.output["durably_recorded"], json!(true));
 
         let preview = result
             .display_preview
@@ -346,6 +361,65 @@ mod tests {
         assert_eq!(seen[0].authenticated_actor_user_id, actor());
         assert_eq!(seen[0].content, "hello team");
         assert_eq!(seen[0].target_id.as_str(), "slack:C123");
+    }
+
+    #[tokio::test]
+    async fn provider_send_without_message_ref_is_reported_as_unverified() {
+        let evidence = ModelChannelDeliveryEvidence {
+            target: sample_target(),
+            provider_message_refs: Vec::new(),
+            durably_recorded: true,
+        };
+        let handler = OutboundDeliverHandler {
+            delivery: Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence))),
+        };
+
+        let result = handler
+            .dispatch(sample_request(
+                json!({"target_id": "slack:C123", "content": "hello team"}),
+                Some(RunId::new()),
+                Some(actor()),
+            ))
+            .await
+            .expect("the uncertain send is a model-visible outcome, not a retryable error");
+
+        assert_eq!(result.output["delivered"], json!(false));
+        assert_eq!(result.output["provider_confirmed"], json!(false));
+        assert_eq!(result.output["provider_message_refs"], json!([]));
+        assert_eq!(result.output["durably_recorded"], json!(true));
+        assert_eq!(
+            result.display_preview.unwrap().output_summary.as_deref(),
+            Some("Delivery to Team Updates is unverified (provider supplied no message reference)")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_confirmed_send_with_pending_terminal_record_exposes_weaker_evidence() {
+        let evidence = ModelChannelDeliveryEvidence {
+            target: sample_target(),
+            provider_message_refs: vec!["1721.046".to_string()],
+            durably_recorded: false,
+        };
+        let handler = OutboundDeliverHandler {
+            delivery: Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence))),
+        };
+
+        let result = handler
+            .dispatch(sample_request(
+                json!({"target_id": "slack:C123", "content": "hello team"}),
+                Some(RunId::new()),
+                Some(actor()),
+            ))
+            .await
+            .expect("provider evidence prevents a duplicate retry");
+
+        assert_eq!(result.output["delivered"], json!(true));
+        assert_eq!(result.output["provider_confirmed"], json!(true));
+        assert_eq!(result.output["durably_recorded"], json!(false));
+        assert_eq!(
+            result.display_preview.unwrap().output_summary.as_deref(),
+            Some("Delivered to Team Updates (confirmation record pending)")
+        );
     }
 
     #[tokio::test]

@@ -250,14 +250,22 @@ export function useAutomations(includeCompleted = false) {
     summary,
     schedulerEnabled,
     isLoading: query.isLoading,
-    isRefreshing: query.isFetching,
+    // A manual refresh updates both the visible list and the background
+    // completed-inclusive summary. Keep the UI in its refreshing state until
+    // neither request can still change what the page presents.
+    isRefreshing: query.isFetching || completedSummaryQuery.isFetching,
     isFilterTransition: query.isPlaceholderData,
     isMutating:
       pauseMutation.isPending ||
       resumeMutation.isPending ||
       renameMutation.isPending ||
       deleteMutation.isPending,
-    error: query.error || completedSummaryQuery.error || null,
+    // The completed-inclusive request is deliberately non-blocking. Its
+    // failure may leave summary counts stale, but must not turn a successful
+    // primary list load into a page-level failure.
+    error: query.error || null,
+    summaryError:
+      includeCompleted ? null : completedSummaryQuery.error || null,
     pauseAutomation: pauseMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
     renameAutomation: renameMutation.mutate,

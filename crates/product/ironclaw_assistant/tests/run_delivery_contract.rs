@@ -46,10 +46,12 @@ use ironclaw_host_api::{
     path::ScopedPath,
 };
 use ironclaw_outbound::{
-    CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, DeliveryTargetCapabilities, OutboundError,
-    OutboundStateStore, OutboundStateStorePort, TriggeredFireFailureDeliveryRequest,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
+    CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, DeliveryDefaultScope,
+    DeliveryTargetCapabilities, OutboundError, OutboundStateStore, OutboundStateStorePort,
+    TriggeredFireFailureDeliveryRequest, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
@@ -1998,6 +2000,16 @@ fn build_triggered_harness_with_initial_codecs(
     catalog: Vec<TestNotificationTarget>,
     initially_active: Vec<TestNotificationTarget>,
 ) -> TriggeredHarness {
+    build_triggered_harness_with_preferences(states, auth_url, catalog, initially_active, None)
+}
+
+fn build_triggered_harness_with_preferences(
+    states: Vec<ScriptedRunState>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+    initially_active: Vec<TestNotificationTarget>,
+    communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
+) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -2028,7 +2040,8 @@ fn build_triggered_harness_with_initial_codecs(
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
-        communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        communication_preferences: communication_preferences
+            .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog { targets: catalog })
             as Arc<dyn OutboundDeliveryTargetProvider>,
@@ -2067,6 +2080,25 @@ fn build_triggered_harness_with_initial_codecs(
         delivery_store,
         turns,
         threads,
+    }
+}
+
+struct LoadFailingCommunicationPreferences;
+
+#[async_trait]
+impl CommunicationPreferenceRepository for LoadFailingCommunicationPreferences {
+    async fn load_communication_preference(
+        &self,
+        _key: CommunicationPreferenceKey,
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn write_communication_preference(
+        &self,
+        _request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+        Err(OutboundError::Backend)
     }
 }
 
@@ -2534,6 +2566,30 @@ async fn triggered_empty_notification_set_delivers_nothing() {
         .await
         .expect("attempts");
     assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+}
+
+#[tokio::test]
+async fn triggered_notification_preference_read_failure_is_not_reported_as_no_configuration() {
+    let harness = build_triggered_harness_with_preferences(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        Some(Arc::new(LoadFailingCommunicationPreferences)),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed,
+        "a storage outage must stay distinguishable from an intentionally empty channel set"
+    );
+    assert!(harness.adapter.texts().is_empty(), "nothing was resolved");
 }
 
 /// Regression: the notifier reads the ACTIVE codec set at every fire.

@@ -378,6 +378,42 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(())
     }
 
+    async fn migrate_legacy_delivery_target(
+        &self,
+        expected: &TriggerRecord,
+        migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        let mut migrated = expected.clone();
+        migrated.prompt = migrated_prompt;
+        migrated.delivery_target = None;
+        migrated.validate()?;
+        let Some(expected_target) = expected.delivery_target.as_ref() else {
+            return Ok(false);
+        };
+        let conn = self.write_connection().await?;
+        let updated = conn
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET prompt = ?1, delivery_target = NULL
+                     WHERE tenant_id = ?2
+                       AND trigger_id = ?3
+                       AND prompt = ?4
+                       AND delivery_target = ?5"
+                ),
+                params![
+                    migrated.prompt,
+                    expected.tenant_id.as_str(),
+                    expected.trigger_id.to_string(),
+                    expected.prompt.as_str(),
+                    expected_target.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("migrate legacy trigger delivery target", error))?;
+        Ok(updated == 1)
+    }
+
     async fn get_trigger(
         &self,
         tenant_id: TenantId,

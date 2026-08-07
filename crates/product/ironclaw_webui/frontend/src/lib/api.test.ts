@@ -1,6 +1,6 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { afterEach, test } from "vitest";
 
 import {
   attachmentUrl,
@@ -20,6 +20,14 @@ import {
   setNotificationChannels,
   setupExtension,
 } from "./api";
+
+const originalFetch = globalThis.fetch;
+const originalSessionStorage = globalThis.sessionStorage;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  globalThis.sessionStorage = originalSessionStorage;
+});
 
 function withCryptoGlobal(replacement, run) {
   const prior = Object.getOwnPropertyDescriptor(globalThis, "crypto");

@@ -3,7 +3,10 @@ use ironclaw_product_contracts::lifecycle_service::{
 };
 use std::{sync::Arc, time::Duration};
 
-use crate::{LifecycleProductAction, LifecycleProductPayload, OutboundPreferencesProductService};
+use crate::{
+    LifecycleProductAction, LifecycleProductPayload, OutboundPreferencesProductService,
+    RebornOutboundDeliveryTargetStatus,
+};
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
@@ -148,7 +151,13 @@ async fn fetch_communication_context(
     };
 
     let notification_channels = match notifications_result {
-        Ok(response) => NotificationChannelsState::Known(response.channels.len()),
+        Ok(response) => NotificationChannelsState::Known(
+            response
+                .channels
+                .iter()
+                .filter(|channel| channel.status == RebornOutboundDeliveryTargetStatus::Available)
+                .count(),
+        ),
         Err(error) => {
             tracing::debug!(
                 error = %error,
@@ -312,6 +321,24 @@ mod tests {
                 RebornNotificationChannel {
                     target_id: RebornOutboundDeliveryTargetId::new("target-2").unwrap(),
                     status: RebornOutboundDeliveryTargetStatus::Available,
+                    option: None,
+                },
+            ],
+        })
+    );
+
+    fake_notification_channels_service!(
+        MixedNotificationChannelsService,
+        Ok(RebornNotificationChannelsResponse {
+            channels: vec![
+                RebornNotificationChannel {
+                    target_id: RebornOutboundDeliveryTargetId::new("target-live").unwrap(),
+                    status: RebornOutboundDeliveryTargetStatus::Available,
+                    option: None,
+                },
+                RebornNotificationChannel {
+                    target_id: RebornOutboundDeliveryTargetId::new("target-stale").unwrap(),
+                    status: RebornOutboundDeliveryTargetStatus::Unavailable,
                     option: None,
                 },
             ],
@@ -590,6 +617,22 @@ mod tests {
             ctx.notification_channels,
             NotificationChannelsState::Known(2),
             "notification-channel count must reflect the resolved channel list length"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_notification_channels_do_not_count_as_deliverable() {
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(MixedNotificationChannelsService));
+        let ctx = provider
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
+            .await
+            .expect("context");
+        assert_eq!(
+            ctx.notification_channels,
+            NotificationChannelsState::Known(1),
+            "model guidance must count only channels that can currently receive a notification"
         );
     }
 

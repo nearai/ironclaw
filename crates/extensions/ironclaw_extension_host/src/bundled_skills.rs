@@ -697,7 +697,7 @@ mod tests {
     /// advisor must teach the Reborn capability surface instead.
     ///
     /// Delivery is explicit-prompt-step-only now (`builtin__outbound_deliver`,
-    /// per `crates/ironclaw_turns/prompts/delivery.md`): the skill must not
+    /// per `crates/contracts/ironclaw_loop_contracts/prompts/delivery.md`): the skill must not
     /// resurrect the retired `delivery_target_id` routing field or claim
     /// external delivery happens automatically to a stored target.
     #[test]

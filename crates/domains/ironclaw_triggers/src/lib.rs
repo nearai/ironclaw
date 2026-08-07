@@ -1046,6 +1046,24 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
 pub trait TriggerRepository: Send + Sync {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError>;
 
+    /// Atomically replace a legacy routed trigger's prompt and clear its
+    /// retired delivery target, but only while both values still match the
+    /// record observed by the migration.
+    ///
+    /// The migration deliberately updates only these two columns. Scheduler,
+    /// run, and lifecycle fields may change concurrently and must never be
+    /// overwritten by a boot-time read-modify-write.
+    async fn migrate_legacy_delivery_target(
+        &self,
+        _expected: &TriggerRecord,
+        _migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "legacy delivery-target migration is not implemented by this repository"
+                .to_string(),
+        })
+    }
+
     async fn get_trigger(
         &self,
         tenant_id: TenantId,

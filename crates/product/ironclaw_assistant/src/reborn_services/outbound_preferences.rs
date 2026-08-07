@@ -107,8 +107,14 @@ fn target_scope(caller: &ProductSurfaceCaller) -> OutboundDeliveryTargetScope {
 fn reborn_target_id_from_outbound(
     target_id: &OutboundDeliveryTargetId,
 ) -> Result<RebornOutboundDeliveryTargetId, ProductSurfaceError> {
-    RebornOutboundDeliveryTargetId::new(target_id.as_str())
-        .map_err(|_| outbound_target_projection_error())
+    RebornOutboundDeliveryTargetId::new(target_id.as_str()).map_err(|error| {
+        tracing::error!(
+            target_id = %target_id,
+            %error,
+            "outbound target id failed wire projection"
+        );
+        outbound_target_projection_error()
+    })
 }
 
 fn reborn_summary_from_outbound(

@@ -1127,7 +1127,7 @@ fn set_notification_channels_descriptor() -> IngressRouteDescriptor {
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS,
         mutation_policy(
-            body_limit_kib(4),
+            body_limit_kib(8),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,

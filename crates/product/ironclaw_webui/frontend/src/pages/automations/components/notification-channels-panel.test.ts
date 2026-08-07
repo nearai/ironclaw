@@ -20,6 +20,7 @@ const COPY = {
     "Couldn't save your notification channels. Please try again.",
   "automations.notificationChannels.pill.ready": "Ready",
   "automations.notificationChannels.pill.unavailable": "Unavailable",
+  "automations.error.loadFailed": "Unable to load automations",
 };
 
 function sourceForTest() {
@@ -148,7 +149,7 @@ function mergeRows(targets, channels) {
   return { rows, selected };
 }
 
-function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, saveError = null } = {}) {
+function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, error = null, saveError = null } = {}) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -237,6 +238,7 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
           selectedIds: selected,
           isLoading,
           isSaving,
+          error,
           saveError,
           saveNotificationChannels,
         },
@@ -244,6 +246,17 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
     },
   };
 }
+
+test("NotificationChannelsPanel shows a load error instead of claiming there are no channels", () => {
+  const harness = createHarness({ error: new Error("catalog unavailable") });
+  const rendered = harness.render();
+  const scalars = collectScalars(rendered);
+  assert.ok(scalars.includes("Unable to load automations"));
+  assert.ok(
+    !scalars.includes("No connected channels yet."),
+    "a backend outage must not look like a truthful empty catalog"
+  );
+});
 
 test("NotificationChannelsPanel renders one checkbox row per channel, checked to match the stored set", () => {
   const harness = createHarness();

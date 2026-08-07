@@ -1219,10 +1219,9 @@ pub(super) async fn build_backend_production(
     // codecs, and the run-state source. Left unbound when this composition
     // path built no coordinator: with no channel egress transport there is
     // nothing to deliver through, and the tool stays fail-closed.
-    if let (Some(coordinator), Some(model_delivery_project_filesystem)) = (
-        channel_host_wiring.delivery_coordinator.as_ref(),
-        model_delivery_project_filesystem(&stores.filesystem, &runtime_workspace_mounts),
-    ) {
+    if let Some(coordinator) = channel_host_wiring.delivery_coordinator.as_ref() {
+        let model_delivery_project_filesystem =
+            model_delivery_project_filesystem(&stores.filesystem, &runtime_workspace_mounts);
         let target_codecs = channel_extension_bindings
             .iter()
             .filter_map(|binding| binding.preference_target_codec.clone())
@@ -1461,13 +1460,47 @@ pub(super) async fn build_postgres_production(
 fn model_delivery_project_filesystem(
     filesystem: &Arc<CompositeRootFilesystem>,
     workspace_mounts: &crate::runtime_mounts::WorkspaceMountPolicy,
-) -> Option<Arc<dyn ironclaw_assistant::ProjectFilesystemReader>> {
-    let inbound_filesystem =
-        crate::runtime_mounts::read_write_workspace_filesystem(filesystem, workspace_mounts)?;
-    Some(Arc::new(
-        ironclaw_assistant::ProjectScopedFilesystemReader::with_max_read_bytes(
-            inbound_filesystem,
-            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+) -> Arc<dyn ironclaw_assistant::ProjectFilesystemReader> {
+    match crate::runtime_mounts::read_write_workspace_filesystem(filesystem, workspace_mounts) {
+        Some(inbound_filesystem) => Arc::new(
+            ironclaw_assistant::ProjectScopedFilesystemReader::with_max_read_bytes(
+                inbound_filesystem,
+                ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+            ),
         ),
-    ))
+        None => Arc::new(EmptyModelDeliveryProjectFilesystem),
+    }
+}
+
+/// Empty project view used only when composition has no read-write workspace
+/// mount. Explicit model deliveries never carry attachments, so absence of a
+/// workspace must not disable otherwise healthy channel egress.
+struct EmptyModelDeliveryProjectFilesystem;
+
+#[async_trait::async_trait]
+impl ironclaw_assistant::ProjectFilesystemReader for EmptyModelDeliveryProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ironclaw_assistant::ProjectFsEntry>, ironclaw_assistant::ProjectFsError> {
+        Err(ironclaw_assistant::ProjectFsError::NotFound)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<ironclaw_host_api::attachment::WorkspaceFile, ironclaw_assistant::ProjectFsError>
+    {
+        Err(ironclaw_assistant::ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<ironclaw_assistant::ProjectFsStat, ironclaw_assistant::ProjectFsError> {
+        Err(ironclaw_assistant::ProjectFsError::NotFound)
+    }
 }

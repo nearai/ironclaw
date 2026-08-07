@@ -399,14 +399,17 @@ async fn notify_pre_submit_failure(
         mission_id: None,
     };
     let codecs = target_codecs.active_preference_target_codecs();
-    let targets = resolve_notification_targets(
+    let Ok(targets) = resolve_notification_targets(
         services,
         &codecs,
         &scope.tenant_id,
         &creator_user_id,
         failure_ref.as_str(),
     )
-    .await;
+    .await
+    else {
+        return;
+    };
     if targets.is_empty() {
         return;
     }
@@ -501,14 +504,22 @@ async fn notify_background_run(
 
     // Resolve the creator's notification channels ONCE, at fire time.
     let run_ref = run_id.to_string();
-    let targets = resolve_notification_targets(
+    let targets = match resolve_notification_targets(
         services,
         &target_codecs,
         &scope.tenant_id,
         &creator_user_id,
         &run_ref,
     )
-    .await;
+    .await
+    {
+        Ok(targets) => targets,
+        Err(_error) => {
+            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
+    };
 
     // With no notification channels configured the notifier has nothing to do
     // for ANY arm: it must not deliver, and it must not touch the run either.
@@ -629,7 +640,6 @@ async fn notify_background_run(
         // failures: only the recorded outcome distinguishes "denied" from
         // "failed", and last-writer-wins would lose the permanent signal.
         let mut any_denied = false;
-        let mut last_failure: Option<TriggeredNotificationFailure> = None;
         for notification in &plan.notifications {
             for target in targets
                 .iter()
@@ -665,7 +675,6 @@ async fn notify_background_run(
                         if matches!(failure, TriggeredNotificationFailure::Denied) {
                             any_denied = true;
                         }
-                        last_failure = Some(failure);
                     }
                 }
             }
@@ -696,7 +705,6 @@ async fn notify_background_run(
             } else {
                 TriggeredRunDeliveryOutcomeKind::Failed
             };
-            let _ = last_failure;
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
@@ -736,7 +744,7 @@ async fn resolve_notification_targets(
     tenant_id: &TenantId,
     creator_user_id: &UserId,
     notification_ref: &str,
-) -> Vec<NotificationTarget> {
+) -> Result<Vec<NotificationTarget>, OutboundError> {
     let key = CommunicationPreferenceKey {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), creator_user_id.clone()),
     };
@@ -762,7 +770,7 @@ async fn resolve_notification_targets(
                     %error,
                     "background run notification: notification-channel read failed"
                 );
-                return Vec::new();
+                return Err(error);
             }
         };
     for (target_id, error) in &resolution.skipped {
@@ -820,7 +828,7 @@ async fn resolve_notification_targets(
             direct_message,
         });
     }
-    targets
+    Ok(targets)
 }
 
 /// Build the notification plan for a background run's actionable state.

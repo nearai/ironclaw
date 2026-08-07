@@ -96,10 +96,9 @@ impl CommunicationPreferenceVersion {
 }
 
 /// Ceiling on stored notification targets per preference record (spec §7).
-/// Enforced by the product-side writer (`ironclaw_assistant`'s
-/// `set_notification_channels` dedups and rejects oversized sets before any
-/// registry or backend I/O), not by `Deserialize` — a legacy or
-/// already-oversized row must still load so it can be corrected.
+/// Enforced at the repository write seam, not by `Deserialize` — a legacy or
+/// already-oversized row must still load so it can be corrected. The product
+/// writer also rejects oversized requests before registry/backend I/O.
 pub const NOTIFICATION_TARGETS_CAP: usize = 8;
 
 /// Durable scoped communication defaults owned by outbound policy.

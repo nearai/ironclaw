@@ -779,6 +779,24 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         })
     );
 
+    let delivered_unconfirmed = classify_delivery_outcome(
+        target.clone(),
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+            attempt: sample_attempt(),
+            conversation: ExternalConversationRef::new(None, "conv-1", None, None).expect("conv"),
+            vendor_message_refs: vec!["ref-unconfirmed".to_string()],
+        },
+    );
+    assert_eq!(
+        delivered_unconfirmed,
+        Ok(ModelChannelDeliveryEvidence {
+            target: target.clone(),
+            provider_message_refs: vec!["ref-unconfirmed".to_string()],
+            durably_recorded: false,
+        }),
+        "provider evidence must survive while the failed terminal write stays explicit"
+    );
+
     let rejected = classify_delivery_outcome(
         target.clone(),
         CoordinatedDeliveryOutcome::Rejected {

@@ -41,11 +41,12 @@ use ironclaw_loop_contracts::{
 
 use super::outbound_delivery::{
     ApprovedDispatchLease, ApprovedResumeDecision, OutboundDeliveryApprovalSettingsDecision,
-    approval_denied, approval_fingerprint, approval_gate_ref, approval_lease_outcome,
-    approval_request_matches_capability, approval_store_error, caller_for_run, input_error,
-    invocation_id_from_resume_token, invocation_replay_input, outbound_delivery_outcome,
-    outbound_delivery_synthetic_grantee, replay_payload_store_error, resource_scope_for_run,
-    resume_token_from_invocation_id, settings_scope_for_run, write_completed_result,
+    OutboundPreferenceOperation, approval_denied, approval_fingerprint, approval_gate_ref,
+    approval_lease_outcome, approval_request_matches_capability, approval_store_error,
+    caller_for_run, input_error, invocation_id_from_resume_token, invocation_replay_input,
+    outbound_delivery_outcome, outbound_delivery_synthetic_grantee, replay_payload_store_error,
+    resource_scope_for_run, resume_token_from_invocation_id, settings_scope_for_run,
+    write_completed_result,
 };
 use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_assistant::{
@@ -165,7 +166,12 @@ impl SyntheticCapabilityHandler for NotificationChannelsSetHandler {
             Ok(response) => response,
             // See `outbound_delivery_outcome`: recoverable service errors are
             // model-visible failures, not terminal host errors.
-            Err(error) => return outbound_delivery_outcome(error),
+            Err(error) => {
+                return outbound_delivery_outcome(
+                    OutboundPreferenceOperation::SetNotificationChannels,
+                    error,
+                );
+            }
         };
         if let Some(approved_lease) = approved_lease {
             match self

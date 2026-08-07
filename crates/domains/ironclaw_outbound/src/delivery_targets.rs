@@ -216,9 +216,7 @@ pub trait OutboundDeliveryTargetProvider: Send + Sync {
             .list_outbound_delivery_targets(scope)
             .await?
             .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies && entry.destination.as_str() == target.as_str()
-            }))
+            .find(|entry| entry.capabilities.final_replies && entry.destination == *target))
     }
 }
 

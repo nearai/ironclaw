@@ -121,7 +121,12 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
                 // maps to a run-ending `HostUnavailable { stage: Capability }`.
                 // Only a genuine internal bug stays terminal. See
                 // `outbound_delivery_outcome`.
-                Err(error) => return outbound_delivery_outcome(error),
+                Err(error) => {
+                    return outbound_delivery_outcome(
+                        OutboundPreferenceOperation::ListTargets,
+                        error,
+                    );
+                }
             };
         let count = response.targets.len();
         let output = serde_json::to_value(response).map_err(|error| {
@@ -385,46 +390,97 @@ pub(super) fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentL
 /// recoverable arm into a terminal `HostUnavailable` (Invariant 2).
 ///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
+#[derive(Clone, Copy)]
+pub(super) enum OutboundPreferenceOperation {
+    ListTargets,
+    SetNotificationChannels,
+}
+
+impl OutboundPreferenceOperation {
+    fn invalid_request_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => "invalid outbound delivery request",
+            Self::SetNotificationChannels => "invalid notification channel request",
+        }
+    }
+
+    fn denied_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => "not permitted to change the outbound delivery target",
+            Self::SetNotificationChannels => "not permitted to change notification channels",
+        }
+    }
+
+    fn conflict_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => "outbound delivery target operation conflicted",
+            Self::SetNotificationChannels => "notification channel operation conflicted",
+        }
+    }
+
+    fn rate_limited_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => "outbound delivery target operation rate limited",
+            Self::SetNotificationChannels => "notification channel operation rate limited",
+        }
+    }
+
+    fn unavailable_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => "outbound delivery service temporarily unavailable",
+            Self::SetNotificationChannels => "notification channel service temporarily unavailable",
+        }
+    }
+
+    fn internal_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => "outbound delivery target operation failed",
+            Self::SetNotificationChannels => "notification channel operation failed",
+        }
+    }
+}
+
 pub(super) fn outbound_delivery_outcome(
+    operation: OutboundPreferenceOperation,
     error: ProductSurfaceError,
 ) -> Result<Resolution, AgentLoopHostError> {
     match error.code {
         ProductSurfaceErrorCode::InvalidRequest | ProductSurfaceErrorCode::NotFound => {
             Ok(resolution::failed(
                 FailureKind::InputEncode,
-                "invalid outbound delivery request".to_string(),
+                operation.invalid_request_summary().to_string(),
                 ironclaw_loop_contracts::CapabilityFailureDetail::Diagnostic {
                     text: String::new(),
                 },
             ))
         }
         ProductSurfaceErrorCode::Unauthenticated | ProductSurfaceErrorCode::Forbidden => {
-            approval_denied("not permitted to change the outbound delivery target")
+            approval_denied(operation.denied_summary())
         }
         ProductSurfaceErrorCode::Conflict => Ok(resolution::failed(
             FailureKind::OperationFailed,
-            "outbound delivery target operation conflicted".to_string(),
+            operation.conflict_summary().to_string(),
             ironclaw_loop_contracts::CapabilityFailureDetail::Diagnostic {
                 text: String::new(),
             },
         )),
         ProductSurfaceErrorCode::RateLimited => Ok(resolution::failed(
             FailureKind::Resource,
-            "outbound delivery target operation rate limited".to_string(),
+            operation.rate_limited_summary().to_string(),
             ironclaw_loop_contracts::CapabilityFailureDetail::Diagnostic {
                 text: String::new(),
             },
         )),
         ProductSurfaceErrorCode::Unavailable => Ok(resolution::failed(
             FailureKind::Unavailable,
-            "outbound delivery service temporarily unavailable".to_string(),
+            operation.unavailable_summary().to_string(),
             ironclaw_loop_contracts::CapabilityFailureDetail::Diagnostic {
                 text: String::new(),
             },
         )),
         ProductSurfaceErrorCode::Internal => Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
-            "outbound delivery target operation failed",
+            operation.internal_summary(),
         )),
     }
 }
@@ -536,9 +592,11 @@ mod tests {
 
     #[test]
     fn invalid_request_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome =
-            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::InvalidRequest))
-                .expect("invalid request must be a model-visible failure, not terminal");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::InvalidRequest),
+        )
+        .expect("invalid request must be a model-visible failure, not terminal");
         assert_recoverable_failure(
             &outcome,
             ironclaw_host_api::result_meta::FailureKind::InputEncode,
@@ -548,9 +606,25 @@ mod tests {
     }
 
     #[test]
+    fn notification_channel_failure_names_the_operation_the_model_can_correct() {
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::SetNotificationChannels,
+            service_error(ProductSurfaceErrorCode::InvalidRequest),
+        )
+        .expect("notification-channel validation stays model-visible");
+        assert_eq!(
+            recoverable_summary(&outcome),
+            "invalid notification channel request"
+        );
+    }
+
+    #[test]
     fn not_found_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::NotFound))
-            .expect("not found must be a model-visible failure, not terminal");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::NotFound),
+        )
+        .expect("not found must be a model-visible failure, not terminal");
         assert_recoverable_failure(
             &outcome,
             ironclaw_host_api::result_meta::FailureKind::InputEncode,
@@ -559,9 +633,11 @@ mod tests {
 
     #[test]
     fn unauthenticated_is_a_recoverable_denial_not_terminal() {
-        let outcome =
-            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unauthenticated))
-                .expect("unauthenticated must be a model-visible denial, not terminal");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::Unauthenticated),
+        )
+        .expect("unauthenticated must be a model-visible denial, not terminal");
         assert!(matches!(outcome, Resolution::Denied(_)));
         LoopSafeSummary::new(recoverable_summary(&outcome))
             .expect("safe summary must satisfy the loop validator");
@@ -569,15 +645,21 @@ mod tests {
 
     #[test]
     fn forbidden_is_a_recoverable_denial_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Forbidden))
-            .expect("forbidden must be a model-visible denial, not terminal");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::Forbidden),
+        )
+        .expect("forbidden must be a model-visible denial, not terminal");
         assert!(matches!(outcome, Resolution::Denied(_)));
     }
 
     #[test]
     fn conflict_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Conflict))
-            .expect("conflict must be a model-visible failure, not terminal");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::Conflict),
+        )
+        .expect("conflict must be a model-visible failure, not terminal");
         assert_recoverable_failure(
             &outcome,
             ironclaw_host_api::result_meta::FailureKind::OperationFailed,
@@ -586,9 +668,11 @@ mod tests {
 
     #[test]
     fn rate_limited_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome =
-            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::RateLimited))
-                .expect("rate limited must be a model-visible failure, not terminal");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::RateLimited),
+        )
+        .expect("rate limited must be a model-visible failure, not terminal");
         assert_recoverable_failure(
             &outcome,
             ironclaw_host_api::result_meta::FailureKind::Resource,
@@ -597,9 +681,11 @@ mod tests {
 
     #[test]
     fn unavailable_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome =
-            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unavailable))
-                .expect("transient unavailability must not kill the run");
+        let outcome = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::Unavailable),
+        )
+        .expect("transient unavailability must not kill the run");
         assert_recoverable_failure(
             &outcome,
             ironclaw_host_api::result_meta::FailureKind::Unavailable,
@@ -608,8 +694,11 @@ mod tests {
 
     #[test]
     fn internal_service_error_stays_terminal() {
-        let error = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Internal))
-            .expect_err("internal bugs must stay terminal");
+        let error = outbound_delivery_outcome(
+            OutboundPreferenceOperation::ListTargets,
+            service_error(ProductSurfaceErrorCode::Internal),
+        )
+        .expect_err("internal bugs must stay terminal");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
     }
@@ -629,8 +718,11 @@ mod tests {
             ProductSurfaceErrorCode::RateLimited,
             ProductSurfaceErrorCode::Unavailable,
         ] {
-            let outcome = outbound_delivery_outcome(service_error(code))
-                .unwrap_or_else(|_| panic!("{code:?} must be recoverable"));
+            let outcome = outbound_delivery_outcome(
+                OutboundPreferenceOperation::ListTargets,
+                service_error(code),
+            )
+            .unwrap_or_else(|_| panic!("{code:?} must be recoverable"));
             let summary = recoverable_summary(&outcome);
             assert!(
                 !summary.contains("slack/<channel>"),

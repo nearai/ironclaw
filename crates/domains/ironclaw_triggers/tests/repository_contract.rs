@@ -287,6 +287,61 @@ async fn assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(
     assert_eq!(fetched, record);
 }
 
+async fn assert_legacy_delivery_migration_is_compare_and_clear(repo: &impl TriggerRepository) {
+    let mut original = sample_record(
+        TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+        tenant("tenant-a"),
+        ts(1_704_067_260),
+    );
+    original.delivery_target = Some(
+        TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
+    );
+    repo.upsert_trigger(original.clone())
+        .await
+        .expect("insert legacy trigger");
+
+    let mut concurrently_edited = original.clone();
+    concurrently_edited.prompt = "use the newly edited prompt".to_string();
+    repo.upsert_trigger(concurrently_edited.clone())
+        .await
+        .expect("concurrent prompt edit");
+
+    assert!(
+        !repo
+            .migrate_legacy_delivery_target(&original, "stale migration".to_string())
+            .await
+            .expect("stale migration compare"),
+        "a stale migration must not overwrite a concurrent edit"
+    );
+    let after_stale = repo
+        .get_trigger(original.tenant_id.clone(), original.trigger_id)
+        .await
+        .expect("read after stale migration")
+        .expect("trigger remains");
+    assert_eq!(after_stale.prompt, concurrently_edited.prompt);
+    assert_eq!(after_stale.delivery_target, original.delivery_target);
+
+    assert!(
+        repo.migrate_legacy_delivery_target(
+            &after_stale,
+            "use the newly edited prompt\n\nDeliver the result to Slack.".to_string(),
+        )
+        .await
+        .expect("fresh migration compare"),
+        "a current migration must update exactly once"
+    );
+    let migrated = repo
+        .get_trigger(original.tenant_id, original.trigger_id)
+        .await
+        .expect("read migrated trigger")
+        .expect("migrated trigger remains");
+    assert_eq!(
+        migrated.prompt,
+        "use the newly edited prompt\n\nDeliver the result to Slack."
+    );
+    assert_eq!(migrated.delivery_target, None);
+}
+
 async fn assert_round_trip_preserves_null_optional_scope_fields(repo: &impl TriggerRepository) {
     let mut record = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
@@ -1226,6 +1281,9 @@ async fn libsql_repository_contract_parity() {
     assert_round_trip_and_scoped_isolation(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
+    assert_legacy_delivery_migration_is_compare_and_clear(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
     assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
@@ -1360,6 +1418,9 @@ async fn postgres_repository_contract_parity() {
     let repo = PostgresTriggerRepository::new(pool.clone());
     repo.run_migrations().await.expect("run migrations");
     assert_round_trip_and_scoped_isolation(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_legacy_delivery_migration_is_compare_and_clear(&repo).await;
 
     clear_postgres_triggers(&pool).await;
     assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(&repo).await;

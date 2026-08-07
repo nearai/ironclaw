@@ -18,6 +18,7 @@ use ironclaw_triggers::{
     TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
+use std::sync::Arc;
 
 const TENANT: &str = "migration-tenant";
 const USER: &str = "migration-user";
@@ -120,7 +121,7 @@ async fn resolvable_target_becomes_a_prompt_step_and_is_cleared() {
     repository.upsert_trigger(record).await.expect("seed");
     let registry = registry_with_target();
 
-    let migrated = migrate_trigger_delivery_targets(&repository, &registry, &tenant())
+    let migrated = migrate_trigger_delivery_targets(&repository, Some(&registry), &tenant())
         .await
         .expect("migration runs");
     assert_eq!(migrated, 1, "one stored target must be migrated");
@@ -141,7 +142,7 @@ async fn resolvable_target_becomes_a_prompt_step_and_is_cleared() {
 
     // Idempotency: a second boot must find nothing and must not append the
     // step twice.
-    let again = migrate_trigger_delivery_targets(&repository, &registry, &tenant())
+    let again = migrate_trigger_delivery_targets(&repository, Some(&registry), &tenant())
         .await
         .expect("second migration runs");
     assert_eq!(again, 0, "a migrated record must not be migrated again");
@@ -170,7 +171,7 @@ async fn target_that_does_not_resolve_is_migrated_by_id_not_dropped() {
     // nothing rather than the registry being empty.
     let registry = registry_with_target();
 
-    let migrated = migrate_trigger_delivery_targets(&repository, &registry, &tenant())
+    let migrated = migrate_trigger_delivery_targets(&repository, Some(&registry), &tenant())
         .await
         .expect("migration runs");
     assert_eq!(migrated, 1, "the routine is migrated away from the column");
@@ -201,7 +202,7 @@ async fn target_that_does_not_resolve_is_migrated_by_id_not_dropped() {
 /// The record is left exactly as found so an operator can shorten the
 /// prompt and reboot.
 #[tokio::test]
-async fn prompt_with_no_room_for_the_step_keeps_its_route_untouched() {
+async fn prompt_with_no_room_for_the_step_fails_closed_and_keeps_its_route() {
     let repository = InMemoryTriggerRepository::default();
     let mut record = record_with_target(Some(TARGET_ID));
     // One byte short of the cap, so any appended step overflows.
@@ -210,14 +211,17 @@ async fn prompt_with_no_room_for_the_step_keeps_its_route_untouched() {
     let seeded = record.clone();
     repository.upsert_trigger(record).await.expect("seed");
 
-    let migrated =
-        migrate_trigger_delivery_targets(&repository, &registry_with_target(), &tenant())
+    let error =
+        migrate_trigger_delivery_targets(&repository, Some(&registry_with_target()), &tenant())
             .await
-            .expect("migration runs");
-    assert_eq!(
-        migrated, 0,
-        "a routine that cannot hold its step is not migrated"
-    );
+            .expect_err("poller boot must fail closed while the route cannot be represented");
+    assert!(matches!(
+        error,
+        TriggerError::InvalidRecord {
+            kind: ironclaw_triggers::TriggerRecordValidationKind::PromptTooLong,
+            ..
+        }
+    ));
 
     let stored = read_back(&repository, trigger_id).await;
     assert_eq!(
@@ -242,7 +246,7 @@ async fn record_without_a_stored_target_is_left_untouched() {
         .expect("seed");
 
     let migrated =
-        migrate_trigger_delivery_targets(&repository, &registry_with_target(), &tenant())
+        migrate_trigger_delivery_targets(&repository, Some(&registry_with_target()), &tenant())
             .await
             .expect("migration runs");
     assert_eq!(migrated, 0, "nothing to migrate");
@@ -254,7 +258,7 @@ async fn record_without_a_stored_target_is_left_untouched() {
 }
 
 #[tokio::test]
-async fn unavailable_registry_leaves_the_stored_target_for_a_later_boot() {
+async fn unavailable_registry_migrates_by_id_without_losing_the_route() {
     let repository = InMemoryTriggerRepository::default();
     let record = record_with_target(Some(TARGET_ID));
     let trigger_id = record.trigger_id;
@@ -264,16 +268,69 @@ async fn unavailable_registry_leaves_the_stored_target_for_a_later_boot() {
         .register_provider("failing", Arc::new(FailingProvider))
         .expect("register provider");
 
-    let migrated = migrate_trigger_delivery_targets(&repository, &registry, &tenant())
+    let migrated = migrate_trigger_delivery_targets(&repository, Some(&registry), &tenant())
         .await
         .expect("migration runs");
-    assert_eq!(migrated, 0, "a failed lookup must not count as migrated");
+    assert_eq!(migrated, 1, "the target id is sufficient for migration");
 
     let stored = read_back(&repository, trigger_id).await;
-    assert_eq!(stored.prompt, PROMPT, "no step may be invented");
+    assert!(
+        stored.prompt.contains(TARGET_ID),
+        "the actionable target id must survive the unavailable lookup"
+    );
+    assert!(stored.delivery_target.is_none());
+}
+
+#[tokio::test]
+async fn migration_runs_without_a_delivery_registry_and_preserves_the_target_id() {
+    let repository = InMemoryTriggerRepository::default();
+    let record = record_with_target(Some(TARGET_ID));
+    let trigger_id = record.trigger_id;
+    repository.upsert_trigger(record).await.expect("seed");
+
+    let migrated = migrate_trigger_delivery_targets(&repository, None, &tenant())
+        .await
+        .expect("id-only migration runs without a registry");
+    assert_eq!(migrated, 1);
+    let stored = read_back(&repository, trigger_id).await;
+    assert!(stored.prompt.contains(TARGET_ID));
+    assert!(stored.delivery_target.is_none());
+}
+
+#[tokio::test]
+async fn migration_compare_and_clear_does_not_overwrite_a_concurrent_prompt_edit() {
+    let repository = InMemoryTriggerRepository::default();
+    let expected = record_with_target(Some(TARGET_ID));
+    let trigger_id = expected.trigger_id;
+    repository
+        .upsert_trigger(expected.clone())
+        .await
+        .expect("seed expected row");
+
+    let mut concurrently_edited = expected.clone();
+    concurrently_edited.prompt = "operator edited the routine while booting".to_string();
+    repository
+        .upsert_trigger(concurrently_edited.clone())
+        .await
+        .expect("persist concurrent edit");
+
+    assert!(
+        !repository
+            .migrate_legacy_delivery_target(
+                &expected,
+                format!(
+                    "{}{}",
+                    expected.prompt,
+                    delivery_step(Some(DISPLAY_NAME), TARGET_ID)
+                ),
+            )
+            .await
+            .expect("CAS reports a clean miss"),
+        "a stale migration snapshot must not win"
+    );
     assert_eq!(
-        stored.delivery_target.as_ref().map(|id| id.as_str()),
-        Some(TARGET_ID),
-        "an unavailable registry must not destroy the stored routing intent"
+        read_back(&repository, trigger_id).await,
+        concurrently_edited,
+        "the concurrent prompt and legacy target must remain untouched"
     );
 }

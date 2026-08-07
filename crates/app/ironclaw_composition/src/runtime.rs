@@ -3910,17 +3910,20 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     // Forward-migrate pre-removal routines that still carry a stored delivery
     // target: rewrite the route into the routine's prompt (the only place a
-    // fire can still act on it) and clear the field. Runs after the outbound
-    // target registry exists — the migration resolves each stored id through
-    // it — and before the poller starts, so no fire observes a half-migrated
-    // record. Idempotent, so every later boot is a no-op.
-    if let Some(registry) = outbound_delivery_target_registry.as_ref() {
+    // fire can still act on it) and clear the field. Run immediately before an
+    // enabled poller starts. Target metadata enriches the prompt when its
+    // registry is available; the durable target id remains actionable without
+    // it. Idempotent, so every later enabled boot is a no-op.
+    if trigger_poller.enabled {
         crate::automation::trigger_delivery_migration::migrate_trigger_delivery_targets_at_boot(
-            &trigger_repository,
-            registry,
+            trigger_repository.as_ref(),
+            outbound_delivery_target_registry.as_deref(),
             &thread_scope.tenant_id,
         )
-        .await;
+        .await
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("stored trigger delivery-target migration failed: {error}"),
+        })?;
     }
 
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support

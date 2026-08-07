@@ -1082,6 +1082,25 @@ where
         Err(OutboundError::Backend)
     }
 
+    async fn load_delivery_attempt(
+        &self,
+        scope: TurnScope,
+        delivery_id: OutboundDeliveryId,
+    ) -> Result<Option<OutboundDeliveryAttempt>, OutboundError> {
+        let resource_scope = scope.to_resource_scope();
+        let path = delivery_path(&delivery_id)?;
+        let Some(attempt) = self
+            .get_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !scope_matches(&attempt.scope, &scope) || attempt.delivery_id != delivery_id {
+            return Ok(None);
+        }
+        Ok(Some(attempt))
+    }
+
     async fn list_delivery_attempts(
         &self,
         scope: TurnScope,

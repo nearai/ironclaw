@@ -378,6 +378,7 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     communication_preference_update_inserts_absent_record(&store).await;
     communication_preference_stale_version_conflicts_without_writing(&store).await;
     communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
+    communication_preference_write_rejects_oversized_notification_set(&store).await;
     notification_targets_round_trip_and_default_empty(&backend).await;
     outbound_state_store_rejects_communication_preference_put_cas_conflict(&backend).await;
     outbound_state_store_rejects_communication_preference_update_cas_conflict(&backend).await;
@@ -391,6 +392,84 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     coordinator_delivery_lifecycle_round_trips(&store).await;
     recovery_transition_never_clobbers_delivered(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
+}
+
+async fn communication_preference_write_rejects_oversized_notification_set<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
+{
+    let tenant_id = TenantId::new("tenant-outbound-notification-cap").unwrap();
+    let user_id = UserId::new("user-outbound-notification-cap").unwrap();
+    let key = CommunicationPreferenceKey::personal(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::personal(tenant_id, user_id.clone()),
+        legacy_notification_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        notification_targets: (0..=NOTIFICATION_TARGETS_CAP)
+            .map(|index| {
+                OutboundDeliveryTargetId::new(format!("target:notification-cap-{index}")).unwrap()
+            })
+            .collect(),
+        updated_at: now(),
+        updated_by: user_id,
+    };
+
+    assert!(matches!(
+        store.put_communication_preference(record).await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+    assert!(
+        store
+            .load_communication_preference(key)
+            .await
+            .unwrap()
+            .is_none(),
+        "an over-cap record must not be partially persisted"
+    );
+}
+
+#[tokio::test]
+async fn delivery_attempt_point_read_returns_only_the_exact_scoped_row() {
+    let store = build_outbound_store_for_backend(Arc::new(InMemoryBackend::new()));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id,
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            target: reply_ref("reply-point-read"),
+            kind: OutboundPushKind::ModelDelivery,
+            projection_ref: ProjectionUpdateRef::new("projection:point-read").unwrap(),
+            requires_reply_target_revalidation: true,
+        },
+        status: OutboundDeliveryStatus::Delivered,
+        attempted_at: now(),
+        failure_kind: None,
+    };
+    store
+        .record_delivery_attempt(attempt.clone())
+        .await
+        .expect("persist point-read attempt");
+
+    assert_eq!(
+        store
+            .load_delivery_attempt(scope, delivery_id)
+            .await
+            .expect("point read"),
+        Some(attempt)
+    );
+    assert!(
+        store
+            .load_delivery_attempt(sibling_turn_scope(), delivery_id)
+            .await
+            .expect("scope mismatch remains non-enumerating")
+            .is_none()
+    );
 }
 
 #[tokio::test]

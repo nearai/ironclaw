@@ -807,11 +807,9 @@ impl DeliveryCoordinator {
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let existing = self
             .store
-            .list_delivery_attempts(requested.scope.clone())
+            .load_delivery_attempt(requested.scope.clone(), requested.delivery_id)
             .await
             .map_err(CoordinatedDeliveryError::Outbound)?
-            .into_iter()
-            .find(|attempt| attempt.delivery_id == requested.delivery_id)
             .ok_or(CoordinatedDeliveryError::Outbound(
                 ironclaw_outbound::OutboundError::DeliveryNotFound,
             ))?;
