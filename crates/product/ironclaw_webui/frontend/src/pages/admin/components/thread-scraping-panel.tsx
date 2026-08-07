@@ -34,7 +34,7 @@ export function ThreadScrapingPanel({ userId }) {
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [isLoadingArtifact, setIsLoadingArtifact] = React.useState(false);
   const [downloadingRunId, setDownloadingRunId] = React.useState("");
-  const [error, setError] = React.useState("");
+  const [errorKey, setErrorKey] = React.useState("");
   const artifactRequestRef = React.useRef(0);
   const loadMoreAbortRef = React.useRef(null);
 
@@ -50,7 +50,7 @@ export function ThreadScrapingPanel({ userId }) {
     setIsLoading(true);
     setIsLoadingMore(false);
     setIsLoadingArtifact(false);
-    setError("");
+    setErrorKey("");
     fetchThreadScrapeThreads(userId, { limit: 100, signal: controller.signal })
       .then((response) => {
         if (controller.signal.aborted) return;
@@ -59,7 +59,7 @@ export function ThreadScrapingPanel({ userId }) {
       })
       .catch((requestError) => {
         if (!controller.signal.aborted && requestError?.name !== "AbortError") {
-          setError(t("admin.threadScraping.loadFailed"));
+          setErrorKey("admin.threadScraping.loadFailed");
         }
       })
       .finally(() => {
@@ -71,7 +71,7 @@ export function ThreadScrapingPanel({ userId }) {
       loadMoreAbortRef.current?.abort();
       loadMoreAbortRef.current = null;
     };
-    // `t` only supplies a fallback error message; locale changes must not reset
+    // Error keys are translated during render; locale changes must not reset
     // the selected thread or restart the request.
   }, [userId]);
 
@@ -80,14 +80,14 @@ export function ThreadScrapingPanel({ userId }) {
     artifactRequestRef.current = requestId;
     setSelectedThreadId(threadId);
     setArtifact(null);
-    setError("");
+    setErrorKey("");
     setIsLoadingArtifact(true);
     try {
       const response = await fetchThreadScrapeArtifact(userId, threadId);
       if (artifactRequestRef.current === requestId) setArtifact(response);
     } catch {
       if (artifactRequestRef.current === requestId) {
-        setError(t("admin.threadScraping.loadFailed"));
+        setErrorKey("admin.threadScraping.loadFailed");
       }
     } finally {
       if (artifactRequestRef.current === requestId) setIsLoadingArtifact(false);
@@ -100,7 +100,7 @@ export function ThreadScrapingPanel({ userId }) {
     const controller = new AbortController();
     loadMoreAbortRef.current = controller;
     setIsLoadingMore(true);
-    setError("");
+    setErrorKey("");
     try {
       const response = await fetchThreadScrapeThreads(userId, {
         limit: 100,
@@ -116,7 +116,7 @@ export function ThreadScrapingPanel({ userId }) {
       setNextCursor(response?.next_cursor ?? null);
     } catch (requestError) {
       if (!controller.signal.aborted && requestError?.name !== "AbortError") {
-        setError(t("admin.threadScraping.loadFailed"));
+        setErrorKey("admin.threadScraping.loadFailed");
       }
     } finally {
       if (loadMoreAbortRef.current === controller) {
@@ -129,12 +129,12 @@ export function ThreadScrapingPanel({ userId }) {
   const downloadRun = async (runId) => {
     if (!selectedThreadId || !runId || downloadingRunId) return;
     setDownloadingRunId(runId);
-    setError("");
+    setErrorKey("");
     try {
       const runArtifact = await fetchThreadScrapeRunArtifact(userId, selectedThreadId, runId);
       saveArtifact(runArtifact, artifactFilename("run", runId));
     } catch {
-      setError(t("admin.threadScraping.downloadFailed"));
+      setErrorKey("admin.threadScraping.downloadFailed");
     } finally {
       setDownloadingRunId("");
     }
@@ -166,7 +166,7 @@ export function ThreadScrapingPanel({ userId }) {
         )}
       </div>
 
-      {error && <p className="mt-4 text-sm text-red-200" role="alert">{error}</p>}
+      {errorKey && <p className="mt-4 text-sm text-red-200" role="alert">{t(errorKey)}</p>}
       {isLoading && <p className="mt-4 text-sm text-iron-300">{t("common.loading")}</p>}
       {!isLoading && threads.length === 0 && (
         <p className="mt-4 text-sm text-iron-300">{t("admin.threadScraping.empty")}</p>

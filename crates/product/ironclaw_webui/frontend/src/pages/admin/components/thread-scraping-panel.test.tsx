@@ -430,6 +430,39 @@ test("thread scraping never renders raw request errors", async () => {
   }
 });
 
+test("pending errors use the active locale when they settle", async () => {
+  const pendingThreads = deferred<Record<string, unknown>>();
+  requests.fetchThreads.mockReturnValue(pendingThreads.promise);
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <LanguageSwitchingPanel />
+        </I18nProvider>,
+      );
+    });
+    const languageButton = container.querySelector<HTMLButtonElement>('[data-testid="switch-language"]');
+    assert.ok(languageButton);
+    await act(async () => languageButton.click());
+    await act(async () => pendingThreads.reject(new Error("sensitive delayed details")));
+
+    const alert = container.querySelector('[role="alert"]');
+    assert.equal(alert?.textContent, "Thread-Scraping fehlgeschlagen.");
+    assert.doesNotMatch(container.textContent ?? "", /sensitive delayed details/);
+    assert.equal(requests.fetchThreads.mock.calls.length, 1);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
+
 test("switching locales preserves the loaded thread and artifact", async () => {
   requests.fetchThreads.mockResolvedValue({
     threads: [{ thread_id: "thread-one", title: "One" }],
