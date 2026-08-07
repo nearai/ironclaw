@@ -1332,6 +1332,7 @@ mod tests {
                 content_parts: Vec::new(),
                 reasoning: None,
                 reasoning_details: None,
+                tool_references: Vec::new(),
             },
         ];
 

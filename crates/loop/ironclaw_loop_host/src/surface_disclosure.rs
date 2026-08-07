@@ -44,6 +44,14 @@ impl LoopCapabilityPort for HostSurfaceDisclosurePort {
         Ok(definitions)
     }
 
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let mut definitions = self.inner.deferred_tool_definitions()?;
+        for definition in &mut definitions {
+            self.disclosure.apply_to_tool_definition(definition);
+        }
+        Ok(definitions)
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

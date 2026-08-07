@@ -186,6 +186,9 @@ pub struct ChatMessage {
     /// exact encrypted/redacted/summary replay rather than plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_details: Option<ReasoningDetails>,
+    /// Provider-neutral references loaded by a deferred-tool discovery result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_references: Vec<String>,
 }
 
 impl ChatMessage {
@@ -200,6 +203,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_references: Vec::new(),
         }
     }
 
@@ -214,6 +218,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_references: Vec::new(),
         }
     }
 
@@ -230,6 +235,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_references: Vec::new(),
         }
     }
 
@@ -244,6 +250,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_references: Vec::new(),
         }
     }
 
@@ -265,6 +272,7 @@ impl ChatMessage {
             },
             reasoning: None,
             reasoning_details: None,
+            tool_references: Vec::new(),
         }
     }
 
@@ -315,7 +323,14 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_references: Vec::new(),
         }
+    }
+
+    /// Attach references to deferred tools disclosed by this result.
+    pub fn with_tool_references(mut self, references: Vec<String>) -> Self {
+        self.tool_references = references;
+        self
     }
 }
 
@@ -571,6 +586,8 @@ pub struct ToolResult {
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    /// Authorized definitions hidden from the initially rendered tool surface.
+    pub deferred_tools: Vec<ToolDefinition>,
     /// Optional per-request model override.
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
@@ -588,6 +605,7 @@ impl ToolCompletionRequest {
         Self {
             messages,
             tools,
+            deferred_tools: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
@@ -610,6 +628,7 @@ impl ToolCompletionRequest {
         Self {
             messages,
             tools,
+            deferred_tools: Vec::new(),
             model,
             max_tokens,
             temperature,
@@ -729,6 +748,13 @@ pub trait LlmProvider: Send + Sync {
     /// is a provider identity.
     fn provider_id(&self) -> String {
         "unknown".to_string()
+    }
+
+    /// Whether the provider keeps deferred definitions in a stable wire array
+    /// and loads them through transcript `tool_reference` blocks for `model`.
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        let _ = model;
+        false
     }
 
     /// Get the model name.

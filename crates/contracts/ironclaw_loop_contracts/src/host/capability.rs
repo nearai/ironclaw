@@ -548,6 +548,11 @@ pub trait LoopCapabilityPort: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Authorized definitions hidden by progressive disclosure.
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        Ok(Vec::new())
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

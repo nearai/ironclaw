@@ -181,6 +181,10 @@ impl LlmProvider for CachedProvider {
         self.inner.provider_id()
     }
 
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        self.inner.supports_deferred_tool_loading(model)
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -595,6 +599,7 @@ mod tests {
         let req = ToolCompletionRequest {
             messages: vec![ChatMessage::user("use tool")],
             tools: vec![],
+            deferred_tools: vec![],
             model: None,
             max_tokens: None,
             temperature: None,

@@ -184,6 +184,25 @@ impl CapabilityCatalog {
             })
     }
 
+    pub(crate) fn deferred_definitions(
+        &self,
+        initial: &ActiveSet,
+        allow_set: &CapabilityAllowSet,
+    ) -> Vec<ProviderToolDefinition> {
+        if !initial.deferred {
+            return Vec::new();
+        }
+        let initial_names: HashSet<&str> = initial
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        self.effective_entries(allow_set)
+            .filter(|entry| !initial_names.contains(entry.definition.name.as_str()))
+            .map(|entry| entry.definition.clone())
+            .collect()
+    }
+
     fn entry_by_name(&self, name: &str) -> Option<&CatalogEntry> {
         self.entries
             .binary_search_by(|entry| entry.definition.name.as_str().cmp(name))

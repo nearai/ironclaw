@@ -99,6 +99,16 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         Ok(definitions)
     }
 
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let mut definitions = self.inner.deferred_tool_definitions()?;
+        definitions.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        Ok(definitions)
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,
@@ -220,6 +230,16 @@ impl CapabilitySurfaceDenyFilter {
 impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
+        definitions.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        Ok(definitions)
+    }
+
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let mut definitions = self.inner.deferred_tool_definitions()?;
         definitions.retain(|definition| {
             provider_capability_permitted(&definition.capability_id, |capability_id| {
                 self.permits(capability_id)
@@ -370,6 +390,19 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             return self.inner.tool_definitions();
         }
         let mut definitions = self.inner.tool_definitions()?;
+        definitions.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        Ok(definitions)
+    }
+
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        if matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
+            return self.inner.deferred_tool_definitions();
+        }
+        let mut definitions = self.inner.deferred_tool_definitions()?;
         definitions.retain(|definition| {
             provider_capability_permitted(&definition.capability_id, |capability_id| {
                 self.permits(capability_id)

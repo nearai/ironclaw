@@ -238,6 +238,10 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.deferred_tool_definitions()
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

@@ -273,6 +273,146 @@ async fn gateway_records_prompt_cache_break_on_tool_capable_path_when_tool_surfa
     );
 }
 
+#[traced_test]
+#[tokio::test]
+async fn native_deferred_promotion_keeps_tool_cache_signature_stable() {
+    let provider = Arc::new(
+        ToolAwareProvider::tool_response_sequence(vec![
+            tool_stop_reply_with_cache_read("ok one", 200_000),
+            tool_stop_reply_with_cache_read("ok two", 50_000),
+        ])
+        .with_native_deferred_tools(),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let request = model_request(interactive_model());
+    let run_id = request.run_id;
+    gateway
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_hidden_resolvable_tool_surface()),
+        )
+        .await
+        .unwrap();
+
+    let mut promoted = GatewayCapabilityPort::with_hidden_resolvable_tool_surface();
+    promoted
+        .definitions
+        .push(promoted.deferred_definitions[0].clone());
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway
+        .stream_model_with_capabilities(request, Arc::new(promoted))
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].deferred_tools[0].name, "demo__hidden");
+    assert_eq!(requests[1].deferred_tools[0].name, "demo__hidden");
+    assert!(
+        logs_contain("tool_definitions_changed=false"),
+        "native deferred promotion must preserve the tool cache signature"
+    );
+}
+
+#[tokio::test]
+async fn gateway_replays_search_reference_then_calls_promoted_deferred_tool() {
+    let provider = Arc::new(
+        ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_hidden".to_string(),
+            name: "demo__hidden".to_string(),
+            arguments: serde_json::json!({"message":"hidden"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }])
+        .with_native_deferred_tools(),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let search_output = serde_json::json!({
+        "query": "hidden",
+        "results": [{"name": "demo__hidden", "description": "Hidden input"}]
+    });
+    let preview = serde_json::to_string(&search_output).unwrap();
+    let observation = serde_json::json!({
+        "schema_version": 1,
+        "status": "success",
+        "summary": "tool_search returned catalog matches",
+        "detail": {
+            "kind": "result_reference",
+            "result_ref": "result:tool-search",
+            "byte_len": preview.len(),
+            "preview": preview
+        },
+        "trust": "untrusted_tool_output"
+    });
+    let envelope = ToolResultReferenceEnvelope::with_model_observation(
+        "result:tool-search",
+        ToolResultSafeSummary::new("one matching tool").unwrap(),
+        observation,
+    )
+    .unwrap();
+    let provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_search".to_string(),
+        provider_tool_name: provider_name("tool_search"),
+        capability_id: CapabilityId::new("builtin.tool_search").unwrap(),
+        arguments: serde_json::json!({"query":"hidden"}),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::to_string(&envelope).unwrap(),
+        content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333339").unwrap(),
+        tool_result_provider_call: Some(provider_call),
+        tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
+    }];
+    let mut capabilities = GatewayCapabilityPort::with_hidden_resolvable_tool_surface();
+    capabilities
+        .definitions
+        .push(capabilities.deferred_definitions[0].clone());
+    let capabilities = Arc::new(capabilities);
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let search_result = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("call_search"))
+        .expect("replayed tool_search result");
+    assert_eq!(search_result.tool_references, vec!["demo__hidden"]);
+    drop(requests);
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected promoted capability call");
+    };
+    assert_eq!(
+        calls[0].capability_id,
+        CapabilityId::new("demo.hidden").unwrap()
+    );
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn gateway_honors_caller_requested_model_route_over_profile_default() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
@@ -626,14 +766,17 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 
 #[tokio::test]
 async fn gateway_allows_unadvertised_tool_call_when_capability_port_resolves_it() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_hidden".to_string(),
-        name: "demo__hidden".to_string(),
-        arguments: serde_json::json!({"message":"hidden"}),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
+    let provider = Arc::new(
+        ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_hidden".to_string(),
+            name: "demo__hidden".to_string(),
+            arguments: serde_json::json!({"message":"hidden"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }])
+        .with_native_deferred_tools(),
+    );
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
@@ -657,6 +800,15 @@ async fn gateway_allows_unadvertised_tool_call_when_capability_port_resolves_it(
             .collect::<Vec<_>>(),
         vec!["demo__echo"],
         "hidden resolvable tool must not be advertised"
+    );
+    assert_eq!(
+        tool_requests[0]
+            .deferred_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["demo__hidden"],
+        "native provider must receive the hidden definition as deferred"
     );
     drop(tool_requests);
 
@@ -4539,6 +4691,7 @@ struct ToolAwareProvider {
     streaming_tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     plain_response: Mutex<Option<CompletionResponse>>,
     tool_responses: Mutex<VecDeque<ToolCompletionResponse>>,
+    native_deferred_tools: bool,
 }
 
 impl ToolAwareProvider {
@@ -4557,6 +4710,7 @@ impl ToolAwareProvider {
                 cache_creation_input_tokens: 0,
             })),
             tool_responses: Mutex::new(VecDeque::new()),
+            native_deferred_tools: false,
         }
     }
 
@@ -4616,12 +4770,22 @@ impl ToolAwareProvider {
             streaming_tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(None),
             tool_responses: Mutex::new(responses.into()),
+            native_deferred_tools: false,
         }
+    }
+
+    fn with_native_deferred_tools(mut self) -> Self {
+        self.native_deferred_tools = true;
+        self
     }
 }
 
 #[async_trait]
 impl LlmProvider for ToolAwareProvider {
+    fn supports_deferred_tool_loading(&self, _model: &str) -> bool {
+        self.native_deferred_tools
+    }
+
     fn model_name(&self) -> &str {
         "tool-aware-provider"
     }
@@ -4671,6 +4835,7 @@ impl LlmProvider for ToolAwareProvider {
 #[derive(Default)]
 struct GatewayCapabilityPort {
     definitions: Vec<ProviderToolDefinition>,
+    deferred_definitions: Vec<ProviderToolDefinition>,
     resolvable_definitions: Vec<ProviderToolDefinition>,
     registered: Mutex<Vec<ProviderToolCall>>,
     validation_error: Option<AgentLoopHostErrorKind>,
@@ -4697,6 +4862,7 @@ impl GatewayCapabilityPort {
         Self {
             resolvable_definitions: definitions.clone(),
             definitions,
+            deferred_definitions: Vec::new(),
             registered: Mutex::new(Vec::new()),
             validation_error: None,
             registration_error: None,
@@ -4723,6 +4889,7 @@ impl GatewayCapabilityPort {
         Self {
             resolvable_definitions: definitions.clone(),
             definitions,
+            deferred_definitions: Vec::new(),
             registered: Mutex::new(Vec::new()),
             validation_error: None,
             registration_error: None,
@@ -4752,7 +4919,7 @@ impl GatewayCapabilityPort {
 
     fn with_hidden_resolvable_tool_surface() -> Self {
         let mut port = Self::with_tool_surface();
-        port.resolvable_definitions.push(ProviderToolDefinition {
+        let hidden = ProviderToolDefinition {
             capability_id: CapabilityId::new("demo.hidden").unwrap(),
             name: provider_name("demo__hidden"),
             description: "Hidden input".to_string(),
@@ -4763,7 +4930,9 @@ impl GatewayCapabilityPort {
                     "message": { "type": "string" }
                 }
             }),
-        });
+        };
+        port.deferred_definitions.push(hidden.clone());
+        port.resolvable_definitions.push(hidden);
         port
     }
 
@@ -4784,6 +4953,7 @@ impl GatewayCapabilityPort {
         Self {
             resolvable_definitions: definitions.clone(),
             definitions,
+            deferred_definitions: Vec::new(),
             registered: Mutex::new(Vec::new()),
             validation_error: None,
             registration_error: None,
@@ -4820,6 +4990,12 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
     ) -> Result<Vec<ProviderToolDefinition>, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(self.definitions.clone())
+    }
+
+    fn deferred_tool_definitions(
+        &self,
+    ) -> Result<Vec<ProviderToolDefinition>, ironclaw_loop_contracts::AgentLoopHostError> {
+        Ok(self.deferred_definitions.clone())
     }
 
     fn provider_tool_call_capability_ids(

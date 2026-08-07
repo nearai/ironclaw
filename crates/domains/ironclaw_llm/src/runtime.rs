@@ -185,6 +185,10 @@ impl LlmProvider for SwappableLlmProvider {
         self.current().provider_id()
     }
 
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        self.current().supports_deferred_tool_loading(model)
+    }
+
     fn model_name(&self) -> &str {
         read(&self.state).model_name
     }

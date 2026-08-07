@@ -414,6 +414,14 @@ impl LlmProvider for FailoverProvider {
         "failover".to_string()
     }
 
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        !self.providers.is_empty()
+            && self
+                .providers
+                .iter()
+                .all(|provider| provider.supports_deferred_tool_loading(model))
+    }
+
     fn model_name(&self) -> &str {
         self.providers[self.last_used.load(Ordering::Relaxed)].model_name()
     }

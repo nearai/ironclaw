@@ -229,6 +229,22 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         Ok(state.active.definitions.clone())
     }
 
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let state = self.turn_state()?;
+        let Some(state) = state.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let initial = select_active_set(
+            &state.catalog,
+            &PromotedSet::default(),
+            self.caps,
+            &self.allow_set,
+        );
+        Ok(state
+            .catalog
+            .deferred_definitions(&initial, &self.allow_set))
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

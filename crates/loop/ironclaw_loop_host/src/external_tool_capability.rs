@@ -244,6 +244,10 @@ impl ExternalToolCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for ExternalToolCapabilityPort {
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.deferred_tool_definitions()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner_tool_definitions()?;
         let surface = self.surface.lock().map_err(|_| surface_lock_error())?;

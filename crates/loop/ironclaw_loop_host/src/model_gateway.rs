@@ -1340,6 +1340,9 @@ where
         let tool_definitions = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?;
+        let deferred_tool_definitions = capabilities
+            .deferred_tool_definitions()
+            .map_err(map_capability_host_error)?;
         if tracing::enabled!(tracing::Level::DEBUG) {
             let tool_name_sample = tool_definitions
                 .iter()
@@ -1361,20 +1364,61 @@ where
                 "reborn tool surface shadow measurement"
             );
         }
-        if !tool_definitions.is_empty() {
+        if !tool_definitions.is_empty() || !deferred_tool_definitions.is_empty() {
+            let effective_model = completion
+                .model
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| provider.active_model_name());
+            let use_native_deferred_tools =
+                provider.supports_deferred_tool_loading(&effective_model);
             let unavailable_capability_guard =
                 unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
-            let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
-            let llm_tool_definitions = tool_definitions
+            let deferred_name_set = deferred_tool_definitions
+                .iter()
+                .map(|definition| definition.name.as_str().to_string())
+                .collect::<std::collections::HashSet<_>>();
+            let active_name_set = tool_definitions
+                .iter()
+                .map(|definition| definition.name.as_str().to_string())
+                .collect::<std::collections::HashSet<_>>();
+            let mut recovery_tool_names = Vec::with_capacity(
+                tool_definitions
+                    .len()
+                    .saturating_add(deferred_tool_definitions.len()),
+            );
+            let mut llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
-                    recovery_tool_names.push(definition.name.as_str().to_string());
+                    if !deferred_name_set.contains(definition.name.as_str()) {
+                        recovery_tool_names.push(definition.name.as_str().to_string());
+                    }
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            recovery_tool_names.extend(
+                deferred_tool_definitions
+                    .iter()
+                    .map(|definition| definition.name.as_str().to_string()),
+            );
+            if !use_native_deferred_tools {
+                llm_tool_definitions.extend(
+                    deferred_tool_definitions
+                        .iter()
+                        .filter(|definition| !active_name_set.contains(definition.name.as_str()))
+                        .cloned()
+                        .map(provider_tool_definition_to_llm),
+                );
+            }
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
-            let tool_request =
+            let mut tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
+            if use_native_deferred_tools {
+                tool_request.deferred_tools = deferred_tool_definitions
+                    .into_iter()
+                    .map(provider_tool_definition_to_llm)
+                    .collect();
+            }
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
@@ -2622,14 +2666,54 @@ fn provider_tool_roundtrip_messages(
             provider_results
                 .into_iter()
                 .map(|(provider_call, summary)| {
+                    let tool_references = tool_references_for_result(&provider_call, &summary);
                     ChatMessage::tool_result(
                         provider_call.provider_call_id,
                         provider_call.provider_tool_name.into_string(),
                         summary,
                     )
+                    .with_tool_references(tool_references)
                 }),
         )
         .collect()
+}
+
+fn tool_references_for_result(
+    provider_call: &ProviderToolCallReferenceEnvelope,
+    content: &str,
+) -> Vec<String> {
+    match provider_call.provider_tool_name.as_str() {
+        "tool_search" => tool_search_results(content)
+            .into_iter()
+            .flatten()
+            .filter_map(|result| {
+                result
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect(),
+        "tool_describe" | "tool_call" | "capability_info" => provider_call
+            .arguments
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn tool_search_results(content: &str) -> Option<Vec<serde_json::Value>> {
+    let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    if let Some(results) = value.get("results").and_then(serde_json::Value::as_array) {
+        return Some(results.clone());
+    }
+    let preview = value.get("detail")?.get("preview")?.as_str()?;
+    serde_json::from_str::<serde_json::Value>(preview)
+        .ok()?
+        .get("results")?
+        .as_array()
+        .cloned()
 }
 
 fn provider_tool_call_from_reference(

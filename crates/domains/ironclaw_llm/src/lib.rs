@@ -453,11 +453,8 @@ fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    const DEFAULT_MAX_TOKENS: u32 = 8192;
-
     // Route to OAuth provider when an OAuth token is present and no real API
-    // key was provided. When both are set, the API key takes priority (standard
-    // x-api-key auth via rig-core).
+    // key was provided. When both are set, the API key takes priority.
     let api_key_is_placeholder = config
         .api_key
         .as_ref()
@@ -469,49 +466,14 @@ fn create_anthropic_from_registry(
             base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
             "Using Anthropic OAuth API"
         );
-        let provider = anthropic_oauth::AnthropicOAuthProvider::new(config)?;
+        let provider = anthropic_oauth::AnthropicProvider::new(config)?;
         return Ok(Arc::new(provider));
     }
 
-    use crate::config::CacheRetention;
-    use rig::providers::anthropic;
-
-    let api_key = config
-        .api_key
-        .as_ref()
-        .map(|k| k.expose_secret().to_string())
-        .ok_or_else(|| LlmError::AuthFailed {
-            provider: config.provider_id.clone(),
-        })?;
-
-    // Build with the proxy-aware client (same as the OpenAI-compatible path) so
-    // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
-    // proxy for live chat too — not just model discovery. Remote hosts keep
-    // default proxy behavior.
-    let mut builder =
-        anthropic::Client::builder()
-            .api_key(&api_key)
-            .http_client(provider_http_client(
-                &config.provider_id,
-                &config.base_url,
-                request_timeout_secs,
-            )?);
-    if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
-    }
-    let client: anthropic::Client = builder.build().map_err(|e| LlmError::RequestFailed {
-        provider: config.provider_id.clone(),
-        reason: format!("Failed to create Anthropic client: {e}"),
-    })?;
-
-    let cache_retention = config.cache_retention;
-
-    let model = client.completion_model(&config.model);
-
-    if cache_retention != CacheRetention::None {
+    if config.cache_retention != crate::config::CacheRetention::None {
         tracing::debug!(
             model = %config.model,
-            retention = %cache_retention,
+            retention = %config.cache_retention,
             "Anthropic automatic prompt caching enabled"
         );
     }
@@ -523,37 +485,8 @@ fn create_anthropic_from_registry(
         "Using Anthropic provider"
     );
 
-    // Anthropic model discovery: `GET {base}/v1/models` with `x-api-key` +
-    // `anthropic-version` (the SDK appends `/v1` itself for completions, so we
-    // add it explicitly here only for the discovery URL).
-    let anthropic_base = if config.base_url.is_empty() {
-        "https://api.anthropic.com".to_string()
-    } else {
-        config.base_url.trim_end_matches('/').to_string()
-    };
-    let discovery_base = if anthropic_base.ends_with("/v1") || anthropic_base.contains("/v1/") {
-        anthropic_base
-    } else {
-        format!("{anthropic_base}/v1")
-    };
-    let models_endpoint = rig_adapter::ModelsEndpoint {
-        provider_id: config.provider_id.clone(),
-        url: format!("{discovery_base}/models"),
-        auth: rig_adapter::ModelsAuth::AnthropicKey {
-            api_key,
-            version: "2023-06-01".to_string(),
-        },
-        shape: rig_adapter::ModelsShape::OpenAiData,
-        extra_headers: reqwest::header::HeaderMap::new(),
-    };
-
     Ok(Arc::new(
-        RigAdapter::new(model, &config.model)
-            .with_provider_id(config.provider_id.clone())
-            .with_cache_retention(cache_retention)
-            .with_default_max_tokens(DEFAULT_MAX_TOKENS)
-            .with_unsupported_params(config.unsupported_params.clone())
-            .with_model_listing(models_endpoint),
+        anthropic_oauth::AnthropicProvider::new_with_api_key(config, request_timeout_secs)?,
     ))
 }
 
@@ -1872,7 +1805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rig_registry_factories_keep_streaming_on_the_buffered_fallback() {
+    async fn registry_factories_use_their_configured_streaming_path() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1920,9 +1853,9 @@ mod tests {
                 .expect("request body is UTF-8 JSON")
         }
 
-        for (protocol, provider_id) in [
-            (ProviderProtocol::OpenAiCompletions, "openai"),
-            (ProviderProtocol::Anthropic, "anthropic"),
+        for (protocol, provider_id, expected_stream) in [
+            (ProviderProtocol::OpenAiCompletions, "openai", None),
+            (ProviderProtocol::Anthropic, "anthropic", Some(true)),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
@@ -1954,10 +1887,10 @@ mod tests {
                 .expect("loopback server task");
             let body: serde_json::Value =
                 serde_json::from_str(&body).expect("request body is valid JSON");
-            assert_ne!(
+            assert_eq!(
                 body.get("stream").and_then(serde_json::Value::as_bool),
-                Some(true),
-                "{provider_id} must not use rig-core streaming until terminal events are observable"
+                expected_stream,
+                "{provider_id} must use its configured streaming implementation"
             );
             assert!(receiver.try_recv().is_err());
         }

@@ -1158,6 +1158,10 @@ impl SubagentSpawnCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.deferred_tool_definitions()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         if !definitions

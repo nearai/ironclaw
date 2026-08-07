@@ -125,6 +125,10 @@ impl LlmProvider for TokenRefreshingProvider {
         self.inner.provider_id()
     }
 
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        self.inner.supports_deferred_tool_loading(model)
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }

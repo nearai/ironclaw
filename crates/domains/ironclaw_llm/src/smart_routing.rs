@@ -900,6 +900,10 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.provider_id()
     }
 
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        self.primary.supports_deferred_tool_loading(model)
+    }
+
     fn model_name(&self) -> &str {
         self.primary.model_name()
     }
