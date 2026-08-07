@@ -54,8 +54,11 @@ Root cause, in two parts:
   PR (refinement 2); the release-time checks are a backstop, not the
   primary defense.
 - **Human-curated changelog** (`docs/changelog.mdx`), one `<Update>` entry
-  per stable release, written at the Monday cut and enforced by the cut
-  script.
+  per stable release, landed on `main` **before** the Monday cut so the
+  candidate branch inherits it, and enforced by the cut script. Writing the
+  entry only on the frozen release branch would satisfy that week's gate and
+  then vanish: the branch is never merged back, so the next candidate — cut
+  from `main` — would ship a changelog missing the previous release.
 
 ## 3. Architecture — three layers
 
@@ -79,29 +82,54 @@ registry; request policy → `ironclaw_openai_compat`), never in a generic
 doc-checking engine that would re-encode the truth as strings and drift
 itself.
 
+**Gate reachability.** The affected-area planner
+(`scripts/ci/reborn_pr_test_plan.py`) historically classified `docs/` as
+having no Rust test surface, which the doc-fact tests falsify: a docs-only
+PR would have selected zero crate tests and merged green, deferring the
+failure to the next full run on someone else's change. The planner now
+routes docs changes to the crates whose tests read them — any published-tree
+docs change selects `ironclaw_extension_registry` (its sweep walks the whole
+published tree), `docs/using/cli.mdx` additionally selects `ironclaw`, and
+`docs/api/responses.mdx` additionally selects `ironclaw_openai_compat`.
+Fenced trees (`docs/internal/`, `docs/reborn/`, drafts) keep the prose
+classification: no cargo test reads them, and check-guidance covers their
+path claims independently.
+
 ### 3.2 Release-time (the cut and publish chain)
 
 - **Changelog gate** — `scripts/ci/cut_ironclaw_release.py::
   ensure_stable_changelog_entry`: a stable (non-rc) tag is refused when the
-  candidate commit's `docs/changelog.mdx` lacks the release's `vX.Y.Z`
-  entry. Rc cuts exempt (hotfix flow unimpeded).
+  candidate commit's `docs/changelog.mdx` lacks the release's
+  `description="vX.Y.Z"` entry — an exact attribute match, so an rc-labeled
+  entry (`description="vX.Y.Z-rc.1"`) cannot satisfy the stable gate by
+  substring. Rc cuts exempt (hotfix flow unimpeded).
 - **`publish-docs-live`** — job in `.github/workflows/ironclaw-release.yml`
   after `host`, prerelease-guarded, force-updates `refs/heads/docs-live` to
   the released commit via the refs API (bootstraps the branch on first
   run). Forced by design: successive stable tags need not be
-  ancestor-related; the branch is a pointer, not a history. Pinned in
-  `ws12_workflow_contracts.py` `REQUIRED_MARKERS` so cargo-dist
-  regeneration cannot silently drop it.
+  ancestor-related; the branch is a pointer, not a history. Two guards keep
+  the pointer honest: the prerelease check, and a newest-stable-tag check —
+  the job moves the branch only when the workflow's own tag is the highest
+  stable `ironclaw-v*` tag, so re-running an older release's workflow (a
+  routine move after a flaky artifact upload) cannot silently revert the
+  live site. Pinned in `ws12_workflow_contracts.py` `REQUIRED_MARKERS` so
+  cargo-dist regeneration cannot silently drop either the job or the guard.
 
 ### 3.3 Human checklist
 
-`docs/internal/weekly-release-strategy.md`: Monday cut writes the changelog
-entry on the release branch; Wednesday promotion verifies the deployed site
+`docs/internal/weekly-release-strategy.md`: the changelog entry lands on
+`main` before the Monday cut (see §2 — the candidate inherits it and every
+later candidate keeps it); Wednesday promotion verifies the deployed site
 reflects the release (the changelog page is the probe); the "Docs
 publication" section holds the Mintlify dashboard configuration, the
-branch-protection recommendation for `docs-live`, and the emergency manual
-repoint command. The dashboard repoint is the one out-of-repo configuration
-this pipeline cannot verify from CI; the post-promotion check is the
+branch-protection shape for `docs-live` (restrict who can push, but allow
+force pushes for the Actions actor — protection that blocks force pushes
+breaks the automation it guards), the emergency manual repoint command, and
+the **docs-hotfix recipe**: when a live page is wrong mid-week, publish a
+commit whose tree is the released tag plus the docs fix and repoint
+`docs-live` at it — never at `main`, which would republish unreleased
+behavior. The dashboard repoint is the one out-of-repo configuration this
+pipeline cannot verify from CI; the post-promotion check is the
 compensating control.
 
 ## 4. What is enforced where
@@ -157,10 +185,25 @@ compensating control.
 - **Historical archives**: excluded as classes, not seeded as debt — dated
   plans and ADRs describe the tree as it stood; forcing them current would
   rewrite history, and 705 of 709 pre-exclusion dangles sat there.
+- **Docs-only PRs skipping the cargo gates**: closed by the planner routing
+  in §3.1 — without it the doc-fact tests only ran on full-scope events, so
+  the PRs most likely to break them merged green and the failure landed on
+  an unrelated change.
+- **Changelog history loss**: closed by writing the entry on `main` before
+  the cut (§2); the gate alone cannot catch it because each cut only checks
+  its own version.
+- **Workflow re-run reverting the site**: closed by the newest-stable-tag
+  guard in `publish-docs-live` (§3.2).
+- **Branch protection breaking the forced update**: the runbook's
+  protection recommendation spells out the force-push allowance; protection
+  configured without it would 422 the repoint.
 - **cargo-dist regeneration dropping the docs-live job**: `REQUIRED_MARKERS`
   fails Code Style.
 - **Dashboard repoint is invisible to CI**: weekly-checklist observable
   (changelog probe) is the compensating control.
+- **A wrong page live mid-week**: the runbook's docs-hotfix recipe (§3.3)
+  fixes the live site without waiting for the next stable release and
+  without republishing `main`.
 - **First `docs-live` publication predating the drift fixes**: the branch
   publishes the *tagged* tree, so the fixes go live at the first stable
   release cut after #7375 merged.
