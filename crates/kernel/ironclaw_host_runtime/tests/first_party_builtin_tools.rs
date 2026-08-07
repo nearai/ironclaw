@@ -4474,8 +4474,9 @@ async fn builtin_http_surfaces_http_error_status_as_failed_outcome() {
     assert_eq!(egress.requests().len(), 1);
     // The failure carries usage like the sibling dispatch paths: egress bytes
     // from the request body flow into the governor even for failed calls.
-    // (wall_clock_ms is pinned at the classify_status unit seam; the governor
-    // only reconciles egress/process fields for failed invocations.)
+    // (wall_clock_ms is pinned at the classify_status unit seam instead of
+    // here because integration-tier wall-clock is timing-dependent; the
+    // governor records the full failed-call usage, wall_clock_ms included.)
     let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
     let usage = governor.usage_for(&tenant_account);
     assert_eq!(

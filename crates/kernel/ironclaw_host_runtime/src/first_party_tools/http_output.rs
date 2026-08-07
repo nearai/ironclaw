@@ -90,8 +90,7 @@ pub(super) fn is_error_status(status: u16) -> bool {
 /// model-visible, recoverable `OperationFailed` outcomes carrying the bounded,
 /// sanitized response as diagnostic context. Informational, successful, and
 /// redirect responses stay inspectable successful results; redirects are
-/// returned, never followed. Drawn deliberately at 400 so rate-limit and
-/// overload responses (429/503) are never reported as success.
+/// returned, never followed. Boundary rationale: see [`is_error_status`].
 pub(super) fn classify_status(
     shaped: HttpDispatchOutput,
     status: u16,
@@ -652,6 +651,26 @@ mod tests {
             0,
             "trimmed base64 must stay multiple-of-4 aligned"
         );
+    }
+
+    #[test]
+    fn failure_diagnostic_falls_back_when_fit_cannot_reach_budget() {
+        // The post-fit safety valve: an untrimmable oversized key (nothing
+        // fit_output_to_budget trims) must never produce an over-budget
+        // diagnostic — the fixed verdict payload is returned instead.
+        let mut output = Map::new();
+        output.insert("status".to_string(), json!(403));
+        output.insert(
+            "huge_untrimmed".to_string(),
+            Value::String("x".repeat(64 * 1024)),
+        );
+        let diagnostic = bounded_failure_diagnostic(Value::Object(output), 403);
+        assert!(
+            diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "diagnostic must never exceed the budget, got {} bytes",
+            diagnostic.len()
+        );
+        assert_eq!(diagnostic, fallback_diagnostic(403));
     }
 
     #[test]
