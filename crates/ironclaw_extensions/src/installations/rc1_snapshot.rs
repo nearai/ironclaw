@@ -273,7 +273,7 @@ impl ExtensionInstallationStore {
         if wire.resolved.is_some() {
             return wire.into_manifest_record();
         }
-        let raw_toml = normalize_rc1_capability_declarations(wire.raw_toml)?;
+        let raw_toml = normalize_rc1_manifest(wire.raw_toml)?;
         ExtensionManifestRecord::from_toml_with_root_binding(
             raw_toml,
             wire.source.into_manifest_source(),
@@ -330,51 +330,82 @@ impl ExtensionInstallationStore {
     }
 }
 
-/// Translate the capability declaration shape shipped by rc1 into the host
-/// API section required by 1.1. This compatibility transform is deliberately
-/// confined to rc1 snapshot import; ordinary discovery and installation keep
-/// rejecting top-level capability declarations.
-fn normalize_rc1_capability_declarations(
-    raw_toml: String,
-) -> Result<String, ExtensionInstallationError> {
+/// Translate manifest values shipped by rc1 into their 1.1 equivalents. This
+/// compatibility transform is deliberately confined to rc1 snapshot import;
+/// ordinary discovery and installation keep rejecting retired wire values.
+fn normalize_rc1_manifest(raw_toml: String) -> Result<String, ExtensionInstallationError> {
     let mut document: toml::Value = toml::from_str(&raw_toml)
         .map_err(|error| invalid_installation_error(format!("parse rc1 manifest: {error}")))?;
     let root = document
         .as_table_mut()
         .ok_or_else(|| invalid_installation_error("rc1 manifest root must be a TOML table"))?;
-    let Some(capabilities) = root.remove("capabilities") else {
-        return Ok(raw_toml);
-    };
-    if root.contains_key("capability_provider") {
-        return Err(invalid_installation_error(
-            "rc1 manifest has both top-level capabilities and a capability_provider section",
-        ));
+    let mut changed = false;
+
+    if let Some(capabilities) = root.remove("capabilities") {
+        if root.contains_key("capability_provider") {
+            return Err(invalid_installation_error(
+                "rc1 manifest has both top-level capabilities and a capability_provider section",
+            ));
+        }
+
+        let host_apis = root
+            .entry("host_api".to_string())
+            .or_insert_with(|| toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| invalid_installation_error("rc1 manifest host_api must be an array"))?;
+        let mut host_api = toml::value::Table::new();
+        host_api.insert(
+            "id".to_string(),
+            toml::Value::String(crate::CAPABILITY_PROVIDER_HOST_API_ID.to_string()),
+        );
+        host_api.insert(
+            "section".to_string(),
+            toml::Value::String(crate::CAPABILITY_PROVIDER_SECTION.to_string()),
+        );
+        host_apis.push(toml::Value::Table(host_api));
+
+        let mut tools = toml::value::Table::new();
+        tools.insert("capabilities".to_string(), capabilities);
+        let mut capability_provider = toml::value::Table::new();
+        capability_provider.insert("tools".to_string(), toml::Value::Table(tools));
+        root.insert(
+            "capability_provider".to_string(),
+            toml::Value::Table(capability_provider),
+        );
+        changed = true;
     }
 
-    let host_apis = root
-        .entry("host_api".to_string())
-        .or_insert_with(|| toml::Value::Array(Vec::new()))
-        .as_array_mut()
-        .ok_or_else(|| invalid_installation_error("rc1 manifest host_api must be an array"))?;
-    let mut host_api = toml::value::Table::new();
-    host_api.insert(
-        "id".to_string(),
-        toml::Value::String(crate::CAPABILITY_PROVIDER_HOST_API_ID.to_string()),
-    );
-    host_api.insert(
-        "section".to_string(),
-        toml::Value::String(crate::CAPABILITY_PROVIDER_SECTION.to_string()),
-    );
-    host_apis.push(toml::Value::Table(host_api));
+    if let Some(host_ingress) = root
+        .get_mut("product_adapter")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|product_adapter| product_adapter.get_mut("inbound"))
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|inbound| inbound.get_mut("host_ingress"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        for route in host_ingress {
+            let Some(effect_path_type) = route
+                .as_table_mut()
+                .and_then(|route| route.get_mut("descriptor"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|descriptor| descriptor.get_mut("policy"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|policy| policy.get_mut("effect_path"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|effect_path| effect_path.get_mut("type"))
+            else {
+                continue;
+            };
+            if effect_path_type.as_str() == Some("product_workflow") {
+                *effect_path_type = toml::Value::String("product_surface".to_string());
+                changed = true;
+            }
+        }
+    }
 
-    let mut tools = toml::value::Table::new();
-    tools.insert("capabilities".to_string(), capabilities);
-    let mut capability_provider = toml::value::Table::new();
-    capability_provider.insert("tools".to_string(), toml::Value::Table(tools));
-    root.insert(
-        "capability_provider".to_string(),
-        toml::Value::Table(capability_provider),
-    );
+    if !changed {
+        return Ok(raw_toml);
+    }
 
     toml::to_string(&document)
         .map_err(|error| invalid_installation_error(format!("serialize rc1 manifest: {error}")))
