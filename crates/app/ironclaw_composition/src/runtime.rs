@@ -3653,8 +3653,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
         //
-        // Follow the lander's mount policy so reads address the caller subtree
-        // selected by `serve`, but give the reader independent read-only authority.
+        // Follow the lander's mount policy with independent read-only authority.
         attachment_read_port: crate::runtime_mounts::read_only_workspace_filesystem(
             &services.extension_filesystem,
             &services.workspace_mounts,
