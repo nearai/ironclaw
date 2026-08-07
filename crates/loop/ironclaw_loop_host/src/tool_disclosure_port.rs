@@ -445,7 +445,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
             .collect();
-        let mut state = self.refresh_turn_state(surface.version.clone())?;
+        let mut state = self.refresh_turn_state(&surface)?;
         let Some(state) = state.as_mut() else {
             surface.callable_capability_ids = Some(callable_capability_ids);
             return Ok(surface);
@@ -563,36 +563,41 @@ impl ToolDisclosureCapabilityPort {
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
-        let guard = self.lock_turn_state()?;
-        let current_turn = guard
+        let mut guard = self.lock_turn_state()?;
+        let stale_turn = guard
             .as_ref()
-            .is_some_and(|state| state.turn_id == self.run_context.turn_id);
-        if current_turn {
-            return Ok(guard);
+            .is_some_and(|state| state.turn_id != self.run_context.turn_id);
+        if stale_turn {
+            *guard = None;
         }
-        drop(guard);
-        self.rebuild_turn_state(None)
+        Ok(guard)
     }
 
     fn refresh_turn_state(
         &self,
-        surface_version: CapabilitySurfaceVersion,
+        surface: &VisibleCapabilitySurface,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
         let guard = self.lock_turn_state()?;
         let current_surface = guard.as_ref().is_some_and(|state| {
             state.turn_id == self.run_context.turn_id
-                && state.surface_version.as_ref() == Some(&surface_version)
+                && state.surface_version.as_ref() == Some(&surface.version)
         });
         if current_surface {
             return Ok(guard);
         }
         drop(guard);
-        self.rebuild_turn_state(Some(surface_version))
+        let authorized_capability_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.clone())
+            .collect();
+        self.rebuild_turn_state(surface.version.clone(), authorized_capability_ids)
     }
 
     fn rebuild_turn_state(
         &self,
-        surface_version: Option<CapabilitySurfaceVersion>,
+        surface_version: CapabilitySurfaceVersion,
+        authorized_capability_ids: BTreeSet<CapabilityId>,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
         // The visible-surface version commits to full descriptor metadata,
         // including schemas. Bridge calls reuse the state until the owning
@@ -602,7 +607,7 @@ impl ToolDisclosureCapabilityPort {
         let definitions = self.inner.tool_definitions()?;
         let authorized_definitions: Vec<_> = definitions
             .into_iter()
-            .filter(|definition| self.policy.permits_capability_id(&definition.capability_id))
+            .filter(|definition| authorized_capability_ids.contains(&definition.capability_id))
             .collect();
         let fingerprint = definitions_fingerprint(&authorized_definitions);
         let mut guard = self.lock_turn_state()?;
@@ -617,7 +622,7 @@ impl ToolDisclosureCapabilityPort {
             .as_ref()
             .map(|state| {
                 state.turn_id != self.run_context.turn_id
-                    || state.surface_version != surface_version
+                    || state.surface_version.as_ref() != Some(&surface_version)
                     || state.definitions_fingerprint != fingerprint
             })
             .unwrap_or(true);
@@ -637,21 +642,15 @@ impl ToolDisclosureCapabilityPort {
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
-            let (previous_surface_version, disclosed_names, search_ranks) = guard
+            let (disclosed_names, search_ranks) = guard
                 .take()
                 .filter(|_| same_turn)
-                .map(|state| {
-                    (
-                        state.surface_version,
-                        state.disclosed_names,
-                        state.search_ranks,
-                    )
-                })
-                .unwrap_or((None, BTreeSet::new(), BTreeMap::new()));
+                .map(|state| (state.disclosed_names, state.search_ranks))
+                .unwrap_or((BTreeSet::new(), BTreeMap::new()));
             *guard = Some(ToolDisclosureTurnState {
                 turn_id: self.run_context.turn_id,
                 definitions_fingerprint: fingerprint,
-                surface_version: surface_version.or(previous_surface_version),
+                surface_version: Some(surface_version),
                 catalog,
                 search_index,
                 active,
@@ -1488,6 +1487,7 @@ mod tests {
     struct MutableDefinitionsPort {
         definitions: Mutex<Vec<ProviderToolDefinition>>,
         surface_version: Mutex<CapabilitySurfaceVersion>,
+        visible_capability_ids: Option<BTreeSet<CapabilityId>>,
         tool_definition_reads: std::sync::atomic::AtomicUsize,
     }
 
@@ -1521,6 +1521,11 @@ mod tests {
                     .clone(),
                 descriptors: definitions
                     .into_iter()
+                    .filter(|definition| {
+                        self.visible_capability_ids
+                            .as_ref()
+                            .is_none_or(|visible| visible.contains(&definition.capability_id))
+                    })
                     .map(|definition| CapabilityDescriptorView {
                         capability_id: definition.capability_id,
                         provider: None,
@@ -1711,6 +1716,7 @@ mod tests {
                 CapabilitySurfaceVersion::new("surface:initial")
                     .expect("valid initial surface version"),
             ),
+            visible_capability_ids: None,
             tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
         });
         let port = disclosure_port(
@@ -1766,6 +1772,71 @@ mod tests {
         );
         assert!(state.disclosed_names.contains("fixture__lookup"));
         assert_eq!(state.search_ranks["fixture__lookup"], 2);
+    }
+
+    #[tokio::test]
+    async fn complete_policy_qualified_surface_limits_disclosure_catalog_and_search_index() {
+        let visible_ids: BTreeSet<_> = (0..6)
+            .map(|index| {
+                CapabilityId::new(format!("fixture.visible_{index}"))
+                    .expect("valid visible capability id")
+            })
+            .collect();
+        let mut definitions: Vec<_> = visible_ids
+            .iter()
+            .enumerate()
+            .map(|(index, capability_id)| {
+                provider_definition(
+                    capability_id.as_str(),
+                    &format!("visible_tool_{index}"),
+                    "Visible operation",
+                )
+            })
+            .collect();
+        definitions.push(provider_definition(
+            "fixture.policy_excluded",
+            "policy_excluded_tool",
+            "Forbidden runtime effect approval vocabulary",
+        ));
+        let inner = Arc::new(MutableDefinitionsPort {
+            definitions: Mutex::new(definitions),
+            surface_version: Mutex::new(
+                CapabilitySurfaceVersion::new("surface:complete-policy")
+                    .expect("valid surface version"),
+            ),
+            visible_capability_ids: Some(visible_ids),
+            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let port = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("complete policy-qualified surface builds turn state");
+
+        let guard = port.lock_turn_state().expect("turn state lock");
+        let state = guard.as_ref().expect("turn state exists");
+        assert!(
+            state
+                .catalog
+                .definition_by_capability_id(
+                    &CapabilityId::new("fixture.policy_excluded")
+                        .expect("valid excluded capability id")
+                )
+                .is_none(),
+            "a capability excluded by non-ID policy dimensions must not enter the disclosure catalog"
+        );
+        assert!(
+            state
+                .search_index
+                .search("forbidden runtime effect approval vocabulary", 5)
+                .names
+                .is_empty(),
+            "excluded capability metadata must not affect or appear in deferred-tool search"
+        );
     }
 
     struct TestWriter;

@@ -39,6 +39,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::extension_surface::BUNDLED_EXTENSION_CAPABILITY_IDS;
@@ -423,6 +424,46 @@ async fn empty_policy_advertises_no_tools() {
         .assert_network_egress_count(0)
         .await
         .expect("an empty surface performs no capability side effects");
+}
+
+/// The disclosure catalog must consume the complete policy-qualified visible
+/// surface, not rebuild a broader corpus by checking capability IDs alone.
+/// An empty runtime dimension therefore hides host-runtime tools and must not
+/// synthesize discovery bridges for their excluded metadata, even though every
+/// capability ID remains permitted. Host-synthetic core tools are outside that
+/// runtime catalog and remain governed by their owning surface.
+#[tokio::test]
+async fn runtime_excluded_policy_advertises_no_runtime_tools_or_disclosure_bridges() {
+    let mut policy = CapabilitySurfacePolicy::allow_all();
+    policy.allowed_runtimes.clear();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_capability_surface_policy_for_bridged_test(policy)
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("runtime-excluded bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("answer without tools")
+        .await
+        .expect("text-only turn completes");
+
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("a runtime-excluded policy advertises no host-runtime tools");
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_excludes(bridge)
+            .await
+            .expect("runtime-excluded metadata must not synthesize a disclosure bridge");
+    }
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("a runtime-excluded surface performs no capability side effects");
 }
 
 /// #5647 trust boundary: the bridge-id exemption must not widen access to
