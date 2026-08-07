@@ -179,7 +179,17 @@ where
 #[derive(Default)]
 pub struct Rc1To11ExtensionReports {
     pub installations: Option<ExtensionInstallationMigrationReport>,
-    pub channel_state: Option<ironclaw_extension_host::Rc1ChannelStateMigrationReport>,
+    pub channel_state: Option<Rc1To11ChannelStateMigrationOutcome>,
+}
+
+/// Verified result of the rc1 Slack/Telegram extension-state migration.
+///
+/// The operator skip is deliberately distinct from an absent report: it lets
+/// the release-pair marker state that this domain was omitted without
+/// fabricating success counts or deleting the retained rc1 authority.
+pub enum Rc1To11ChannelStateMigrationOutcome {
+    Completed(ironclaw_extension_host::Rc1ChannelStateMigrationReport),
+    SkippedByOperator,
 }
 
 /// In-progress rc1 -> 1.1 migration barrier.
@@ -622,7 +632,7 @@ fn redacted_core_report(
     channels: &ChannelRootMigrationReport,
     oauth: &ironclaw_auth::OAuthProviderAliasMigrationReport,
     installations: Option<&ExtensionInstallationMigrationReport>,
-    extension_state: Option<&ironclaw_extension_host::Rc1ChannelStateMigrationReport>,
+    extension_state: Option<&Rc1To11ChannelStateMigrationOutcome>,
     workspace: Option<&LegacyWorkspaceMigrationReport>,
 ) -> Value {
     let thread_scopes = threads
@@ -741,7 +751,11 @@ fn redacted_core_report(
             }),
         );
     }
-    if let (Value::Object(domains), Some(extension_state)) = (&mut report, extension_state) {
+    if let (
+        Value::Object(domains),
+        Some(Rc1To11ChannelStateMigrationOutcome::Completed(extension_state)),
+    ) = (&mut report, extension_state)
+    {
         let extension_state_scopes = extension_state
             .scopes
             .iter()
@@ -790,6 +804,18 @@ fn redacted_core_report(
                 .proof_code_pairing_rows_unchanged,
             "scopes": extension_state_scopes,
         }));
+    }
+    if let (Value::Object(domains), Some(Rc1To11ChannelStateMigrationOutcome::SkippedByOperator)) =
+        (&mut report, extension_state)
+    {
+        domains.insert(
+            "channel_extension_state".to_string(),
+            json!({
+                "status": "skipped_by_operator",
+                "counts_available": false,
+                "source_retained": true,
+            }),
+        );
     }
     report
 }

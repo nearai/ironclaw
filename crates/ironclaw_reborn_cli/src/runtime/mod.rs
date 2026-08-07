@@ -724,6 +724,13 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_legacy_workspace_snapshot(snapshot);
     }
+    if caller == RuntimeInputCaller::Serve
+        && parse_rc1_channel_state_migration_override(std::env::var(
+            "IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION",
+        ))?
+    {
+        services_input = services_input.with_rc1_channel_state_migration_skipped_by_operator();
+    }
     if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
@@ -1174,6 +1181,23 @@ fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
     }
 }
 
+fn parse_rc1_channel_state_migration_override(
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<bool> {
+    const NAME: &str = "IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION";
+    match raw {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => anyhow::bail!("{NAME} must be one of 1, true, 0, false"),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NAME} contains non-UTF-8 bytes")
+        }
+    }
+}
+
 fn local_runtime_workspace_root(profile: RebornProfile) -> anyhow::Result<PathBuf> {
     optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")?
         .map(Ok)
@@ -1570,8 +1594,9 @@ mod tests {
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
+        no_assistant_text_message, parse_rc1_channel_state_migration_override,
+        protect_reborn_log_filter, resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -1622,6 +1647,30 @@ mod tests {
                 .to_string()
                 .contains("must inject the first-party package inventory"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rc1_channel_state_migration_override_is_explicit_and_fail_loud() {
+        assert!(
+            !parse_rc1_channel_state_migration_override(Err(std::env::VarError::NotPresent))
+                .expect("unset override keeps fail-closed migration enabled")
+        );
+        assert!(
+            parse_rc1_channel_state_migration_override(Ok(" TRUE ".to_string()))
+                .expect("explicit true enables the emergency override")
+        );
+        assert!(
+            !parse_rc1_channel_state_migration_override(Ok("0".to_string()))
+                .expect("explicit false keeps migration enabled")
+        );
+
+        let error = parse_rc1_channel_state_migration_override(Ok("".to_string()))
+            .expect_err("blank override must not silently skip or run migration");
+        assert!(
+            error
+                .to_string()
+                .contains("IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION must be one of")
         );
     }
 

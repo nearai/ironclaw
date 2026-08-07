@@ -361,6 +361,7 @@ pub(super) async fn build_backend_production(
         default_system_prompt_path,
         workspace_root,
         legacy_workspace_snapshot,
+        skip_rc1_channel_state_migration,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
@@ -960,23 +961,33 @@ pub(super) async fn build_backend_production(
             reason: format!("admin configuration service could not be built: {error}"),
         })?,
     );
-    let legacy_channel_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
-    let extension_state_migration = match ironclaw_extension_host::migrate_all_rc1_channel_state(
-        legacy_channel_filesystem,
-        Arc::clone(&extension_installation_store),
-        Arc::clone(&secret_store),
-        Arc::clone(&admin_configuration),
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(error) => {
-            release_migration.fail_and_log().await;
-            return Err(crate::RebornCompositionError::InvalidConfig {
-                reason: format!("channel extension-state startup migration failed: {error}"),
+    let extension_state_migration = if skip_rc1_channel_state_migration {
+        tracing::warn!(
+            override_env = "IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION",
+            source_rows_retained = true,
+            "skipping rc1 Slack/Telegram extension-state startup migration by explicit operator override; channel credentials, setup, identities, routes, and DM targets must be reconfigured"
+        );
+        ironclaw_release_migration::Rc1To11ChannelStateMigrationOutcome::SkippedByOperator
+    } else {
+        let legacy_channel_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+        let report = match ironclaw_extension_host::migrate_all_rc1_channel_state(
+            legacy_channel_filesystem,
+            Arc::clone(&extension_installation_store),
+            Arc::clone(&secret_store),
+            Arc::clone(&admin_configuration),
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                release_migration.fail_and_log().await;
+                return Err(crate::RebornCompositionError::InvalidConfig {
+                    reason: format!("channel extension-state startup migration failed: {error}"),
+                }
+                .into());
             }
-            .into());
-        }
+        };
+        ironclaw_release_migration::Rc1To11ChannelStateMigrationOutcome::Completed(report)
     };
     release_migration
         .complete(ironclaw_release_migration::Rc1To11ExtensionReports {

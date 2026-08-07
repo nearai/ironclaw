@@ -23,6 +23,62 @@ fn absent_extension_domains_are_not_reported_as_completed() {
     assert!(report.get("workspace_artifacts").is_none());
 }
 
+#[test]
+fn operator_skipped_channel_state_is_recorded_without_false_success_counts() {
+    let channel_state = Rc1To11ChannelStateMigrationOutcome::SkippedByOperator;
+    let report = redacted_core_report(
+        &ironclaw_processes::LegacyProcessMigrationReport::default(),
+        &ironclaw_threads::ThreadStartupMigrationReport::default(),
+        &ChannelRootMigrationReport::default(),
+        &ironclaw_auth::OAuthProviderAliasMigrationReport::default(),
+        None,
+        Some(&channel_state),
+        None,
+    );
+    let channel_state = report
+        .get("channel_extension_state")
+        .expect("operator skip must remain visible in release completion evidence");
+
+    assert_eq!(
+        channel_state.get("status"),
+        Some(&json!("skipped_by_operator"))
+    );
+    assert_eq!(channel_state.get("counts_available"), Some(&json!(false)));
+    assert_eq!(channel_state.get("source_retained"), Some(&json!(true)));
+    assert!(
+        channel_state.get("migrated").is_none(),
+        "an omitted migration must not publish fabricated success counts"
+    );
+}
+
+#[test]
+fn completed_channel_state_keeps_verified_count_evidence() {
+    let channel_state = Rc1To11ChannelStateMigrationOutcome::Completed(
+        ironclaw_extension_host::Rc1ChannelStateMigrationReport {
+            configuration_values: 2,
+            identities: 3,
+            ..Default::default()
+        },
+    );
+    let report = redacted_core_report(
+        &ironclaw_processes::LegacyProcessMigrationReport::default(),
+        &ironclaw_threads::ThreadStartupMigrationReport::default(),
+        &ChannelRootMigrationReport::default(),
+        &ironclaw_auth::OAuthProviderAliasMigrationReport::default(),
+        None,
+        Some(&channel_state),
+        None,
+    );
+    let channel_state = report
+        .get("channel_extension_state")
+        .expect("completed channel migration remains reported");
+
+    assert_eq!(channel_state.get("migrated"), Some(&json!(5)));
+    assert_eq!(channel_state.get("configuration_values"), Some(&json!(2)));
+    assert_eq!(channel_state.get("identities"), Some(&json!(3)));
+    assert!(channel_state.get("status").is_none());
+}
+
 #[tokio::test]
 async fn release_lifecycle_accepts_another_pair_without_rc1_branching() {
     const TEST_PAIR: ReleasePair = ReleasePair {

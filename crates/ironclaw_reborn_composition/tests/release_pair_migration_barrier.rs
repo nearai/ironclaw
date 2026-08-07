@@ -12,6 +12,9 @@ fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
     let channel_migration = flattened
         .find("migrate_all_rc1_channel_state")
         .expect("channel state migration remains in production startup");
+    let operator_skip = flattened
+        .find("Rc1To11ChannelStateMigrationOutcome::SkippedByOperator")
+        .expect("the explicit operator skip remains typed and visible");
     let completion = flattened
         .find("release_migration .complete(")
         .expect("release-pair completion barrier remains in production startup");
@@ -21,6 +24,14 @@ fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
     assert!(
         migration_begin < channel_migration && channel_migration < completion,
         "the typed migration session must cover channel-state migration through completion"
+    );
+    assert!(
+        migration_begin < operator_skip && operator_skip < completion,
+        "the operator skip decision must be recorded inside the typed migration session"
+    );
+    assert!(
+        flattened[..completion].contains("skip_rc1_channel_state_migration"),
+        "startup must make the channel-state decision before publishing completion"
     );
     assert!(
         completion < first_worker,

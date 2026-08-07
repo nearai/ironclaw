@@ -24,6 +24,7 @@ pub(super) async fn build_production_shaped(
         memory_binding_policy,
         memory_provider_connection,
         legacy_workspace_snapshot,
+        skip_rc1_channel_state_migration,
         ..
     } = input;
     let owner_id = deployment.owner_id.clone();
@@ -93,6 +94,7 @@ pub(super) async fn build_production_shaped(
         default_system_prompt_path: None,
         workspace_root: None,
         legacy_workspace_snapshot,
+        skip_rc1_channel_state_migration,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
@@ -369,6 +371,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) default_system_prompt_path: Option<PathBuf>,
     pub(super) workspace_root: Option<PathBuf>,
     pub(super) legacy_workspace_snapshot: Option<PathBuf>,
+    pub(super) skip_rc1_channel_state_migration: bool,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     #[cfg(any(test, feature = "test-support"))]

@@ -159,6 +159,12 @@ verifies file hashes, retains the source, and fails rather than guessing on
 conflicts or shared-workspace ownership. See
 `docs/internal/rc1-to-1.1-startup-migration.md` for the exact handoff.
 
+If malformed rc1 Slack/Telegram extension state blocks the upgrade and the
+operator accepts reconfiguring those channels, the same runbook documents the
+narrow `IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION=true` emergency
+override. It does not skip threads, routines, artifacts, extension
+installations, or other release-pair domains.
+
 The image includes `sqlite3` and `psql` for terminal inspection from Railway
 shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for
 `IRONCLAW_REBORN_POSTGRES_URL` deployments.

@@ -229,6 +229,10 @@ pub struct RebornHostBindings {
     /// release-pair barrier. `None` is the normal path; discovery is never
     /// guessed because rc1 shared ownership can be ambiguous.
     pub(crate) legacy_workspace_snapshot: Option<PathBuf>,
+    /// Explicit emergency override for an unrecoverably malformed rc1
+    /// Slack/Telegram extension-state authority. Core, installation, OAuth,
+    /// thread, routine, and workspace migrations remain enabled.
+    pub(crate) skip_rc1_channel_state_migration: bool,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -540,6 +544,15 @@ impl RebornHostBindings {
 
     pub fn with_legacy_workspace_snapshot(mut self, source: PathBuf) -> Self {
         self.legacy_workspace_snapshot = Some(source);
+        self
+    }
+
+    /// Omit only the rc1 Slack/Telegram extension-state import.
+    ///
+    /// This is a data-loss-accepting operator action: the old rows remain
+    /// available for recovery, but 1.1 channel setup must be reconfigured.
+    pub fn with_rc1_channel_state_migration_skipped_by_operator(mut self) -> Self {
+        self.skip_rc1_channel_state_migration = true;
         self
     }
 
@@ -941,6 +954,7 @@ impl RebornHostBindings {
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
             legacy_workspace_snapshot: None,
+            skip_rc1_channel_state_migration: false,
         }
     }
 
@@ -1298,5 +1312,14 @@ mod tests {
             .with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
+    }
+
+    #[test]
+    fn rc1_channel_state_migration_skip_requires_explicit_builder() {
+        let default_input = RebornHostBindings::disabled("test-owner");
+        assert!(!default_input.skip_rc1_channel_state_migration);
+
+        let skipped_input = default_input.with_rc1_channel_state_migration_skipped_by_operator();
+        assert!(skipped_input.skip_rc1_channel_state_migration);
     }
 }
