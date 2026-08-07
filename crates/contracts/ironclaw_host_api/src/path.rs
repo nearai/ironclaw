@@ -74,7 +74,7 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/secrets",
     "/events",
     // Consumer-store roots (migrated to `ScopedFilesystem` per
-    // `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+    // `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
     "/processes",
     "/authorization",
     "/outbound",

@@ -4,7 +4,7 @@
 //! content out of durable events and drops all state at process restart.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
 use ironclaw_host_api::{
@@ -303,7 +303,7 @@ fn touch<T: PartialEq>(order: &mut VecDeque<T>, value: T) {
 #[derive(Debug)]
 pub struct InMemoryDiagnosticStore {
     limits: DiagnosticStoreLimits,
-    state: Mutex<DiagnosticStoreState>,
+    state: RwLock<DiagnosticStoreState>,
 }
 
 impl InMemoryDiagnosticStore {
@@ -311,7 +311,7 @@ impl InMemoryDiagnosticStore {
         let limits = limits.validate()?;
         Ok(Self {
             limits,
-            state: Mutex::new(DiagnosticStoreState::default()),
+            state: RwLock::new(DiagnosticStoreState::default()),
         })
     }
 
@@ -408,7 +408,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
         let state = self
             .state
-            .lock()
+            .read()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let Some(run) = state.run(scope) else {
             return Ok(None);
@@ -425,6 +425,34 @@ impl InMemoryDiagnosticStore {
         }))
     }
 
+    pub fn prompt(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        Ok(state.run(scope).and_then(|run| run.prompt.clone()))
+    }
+
+    pub fn tool_execution(
+        &self,
+        scope: &DiagnosticScope,
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        Ok(state.run(scope).and_then(|run| {
+            run.tool_executions
+                .iter()
+                .find(|tool| tool.activity_id == activity_id)
+                .cloned()
+        }))
+    }
+
     pub fn updates_after(
         &self,
         scope: &DiagnosticScope,
@@ -432,7 +460,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
         let state = self
             .state
-            .lock()
+            .read()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let Some(run) = state.run(scope) else {
             return Ok(DiagnosticUpdateBatch {
@@ -476,7 +504,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<DiagnosticSubscription, DiagnosticStoreError> {
         let mut state = self
             .state
-            .lock()
+            .write()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let receiver = state.subscribe(
             scope,
@@ -494,7 +522,7 @@ impl InMemoryDiagnosticStore {
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let mut state = self
             .state
-            .lock()
+            .write()
             .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
         let run = state.run_mut(&scope, self.limits)?;
         let next = run
@@ -528,7 +556,7 @@ impl Default for InMemoryDiagnosticStore {
         let limits = DiagnosticStoreLimits::default();
         Self {
             limits,
-            state: Mutex::new(DiagnosticStoreState::default()),
+            state: RwLock::new(DiagnosticStoreState::default()),
         }
     }
 }
@@ -724,6 +752,18 @@ mod tests {
 
         assert_eq!(limits.validate(), Ok(limits));
         assert_eq!(InMemoryDiagnosticStore::default().limits, limits);
+    }
+
+    #[test]
+    fn inspector_state_allows_concurrent_readers() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let first_reader = store.state.read().expect("first reader");
+        let second_reader = store
+            .state
+            .try_read()
+            .expect("read-only inspector queries must not exclude each other");
+
+        drop((first_reader, second_reader));
     }
 
     #[test]
@@ -1294,7 +1334,7 @@ mod tests {
         assert_eq!(first.recv().await.expect("first update").scope, first_scope);
         assert_eq!(third.recv().await.expect("third update").scope, third_scope);
         assert_eq!(
-            store.state.lock().expect("state").live_updates.len(),
+            store.state.read().expect("state").live_updates.len(),
             limits.max_live_update_scopes
         );
     }
@@ -1417,7 +1457,7 @@ mod tests {
     fn poisoned_state_returns_a_redacted_error() {
         let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = store.state.lock().expect("lock before poison");
+            let _guard = store.state.write().expect("lock before poison");
             panic!("poison store lock");
         }));
         let error = store

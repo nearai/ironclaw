@@ -9,7 +9,7 @@ Output is CANDIDATES, not verdicts: a match is either a true duplicate (unify
 into its owner), a justified mirror (independent wire/domain evolution), or a
 coincidental shape. Judge each pair by reading the definitions before acting.
 See .claude/rules/type-placement.md; judged backlog (2026-07):
-docs/plans/2026-07-02-type-dedup-backlog.md.
+docs/internal/plans/2026-07-02-type-dedup-backlog.md.
 
 Usage: python3 scripts/check-type-duplicates.py [--jaccard 0.6] [--min-items 3]
 """
