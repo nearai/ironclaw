@@ -206,6 +206,8 @@ registerPack("zh-CN", {
   "authGate.authorizing": "正在等待 {provider}…",
   "authGate.expiresAt": "过期时间",
   "authGate.oauthProviderFallback": "该提供商",
+  "authGate.authorizationUnavailable":
+    "IronClaw 无法启动 {provider} 授权。提供方无法访问、尚未配置，或返回了无法使用的授权链接，因此没有可打开的内容。请重试运行，或检查该扩展的设置。",
   "authGate.serviceUnavailable": "服务不可用",
   "authGate.popupBlocked": "授权弹出窗口已被拦截。",
   "authGate.pillAuthorize": "授权",

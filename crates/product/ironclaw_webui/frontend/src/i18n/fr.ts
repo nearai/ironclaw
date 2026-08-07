@@ -206,6 +206,8 @@ registerPack("fr", {
   "authGate.authorizing": "En attente de {provider}…",
   "authGate.expiresAt": "Expire",
   "authGate.oauthProviderFallback": "le fournisseur",
+  "authGate.authorizationUnavailable":
+    "IronClaw n'a pas pu démarrer l'autorisation {provider}. Le fournisseur est injoignable, pas encore configuré, ou a renvoyé un lien d'autorisation inutilisable, il n'y a donc rien à ouvrir. Relancez l'exécution ou vérifiez la configuration de l'extension.",
   "authGate.serviceUnavailable": "Service indisponible",
   "authGate.popupBlocked": "La fenêtre contextuelle d'autorisation a été bloquée.",
   "authGate.pillAuthorize": "Autoriser",

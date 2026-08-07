@@ -111,6 +111,77 @@ function findHandler(node, bodyMarker, seen = new Set()) {
   return null;
 }
 
+// Walks the rendered node tree for the first element carrying `data-testid`.
+function findByTestId(node, testId, seen = new Set()) {
+  if (!node || typeof node !== "object" || seen.has(node)) return null;
+  seen.add(node);
+  if (node.props && node.props["data-testid"] === testId) return node;
+  const children = Array.isArray(node) ? node : Object.values(node);
+  for (const child of children) {
+    const found = findByTestId(child, testId, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The URL-less `oauth_url` state and why it exists are documented once, on
+// `unavailable` in auth-oauth-card.tsx. Keeping the contract quote in one place
+// means a change to the upstream wording cannot leave a stale copy here
+// asserting a permitted wire state that no longer is.
+test("AuthOauthCard renders an unavailable state when the gate carries no authorization url", () => {
+  const { rendered, openCalls, openAuthPopupCalls } = renderCard({
+    gate: defaultGate({ authorizationUrl: null }),
+  });
+
+  assert.match(
+    JSON.stringify(rendered),
+    /authGate\.authorizationUnavailable/,
+    "the card must say up front that authorization cannot be started"
+  );
+
+  const openButton = findByTestId(rendered, "auth-oauth-open");
+  assert.ok(openButton, "the OAuth-specific affordance is still rendered");
+  assert.equal(
+    openButton.props.disabled,
+    true,
+    "a gate with no authorization url must not offer a clickable authorize CTA"
+  );
+  assert.equal(
+    openButton.props.href,
+    undefined,
+    "no href may be offered when there is no authorization url"
+  );
+  assert.equal(openCalls.length, 0, "nothing may open during render");
+  assert.equal(openAuthPopupCalls.length, 0);
+
+  // Asserting on render alone would not prove the CTA is inert — the disabled
+  // prop could be dropped and this test would still pass. Drive the handler the
+  // way a click would and assert nothing navigates.
+  const openAuth = findHandler(rendered, "openAuth");
+  assert.ok(openAuth, "the handler is still wired for the guard to reject");
+  openAuth({ preventDefault() {} });
+  assert.equal(openCalls.length, 0, "a disabled CTA must not open a popup");
+  assert.equal(openAuthPopupCalls.length, 0, "a disabled CTA must not navigate");
+});
+
+// The inverse guard: a gate that CAN be authorized must not be degraded into
+// the unavailable state, or the fix above would break every working OAuth gate.
+test("AuthOauthCard keeps the authorize CTA live when the gate carries a url", () => {
+  const { rendered } = renderCard({ gate: defaultGate() });
+
+  const openButton = findByTestId(rendered, "auth-oauth-open");
+  assert.ok(openButton, "the authorize CTA is rendered");
+  assert.notEqual(
+    openButton.props.disabled,
+    true,
+    "an actionable gate must keep its CTA enabled"
+  );
+  assert.ok(
+    !JSON.stringify(rendered).includes("authGate.authorizationUnavailable"),
+    "an actionable gate must not claim authorization is unavailable"
+  );
+});
+
 test("AuthOauthCard renders a display name, never the raw provider id", () => {
   const { rendered } = renderCard({ gate: defaultGate() });
   const body = JSON.stringify(rendered);

@@ -126,14 +126,39 @@ impl AgentLoopHostErrorKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Qualifies an [`AgentLoopHostErrorKind`] whose user-facing cause is narrower
+/// than the kind itself.
+///
+/// `CredentialUnavailable` is the motivating case: it is the correct *kind* for
+/// three faults — a genuine credential rejection, a deployment with no model
+/// provider configured, and an unreadable saved provider session — because all
+/// three must fail the run fast rather than ride availability backoff. But they
+/// have three different fixes, and the kind alone is what the product
+/// projection keys its user-facing sentence off. A reason kind is how a shared
+/// kind carries a distinct category downstream without inventing a kind whose
+/// only purpose is display.
+///
+/// Adding a variant obliges a routing arm in
+/// `ironclaw_turn_runner::model_failure_mapping::host_stage_failure_category`;
+/// `every_model_stage_reason_kind_routes_to_its_own_category` fails until it
+/// has one.
 pub enum AgentLoopHostErrorReasonKind {
     ModelCreditsExhausted,
+    /// No model provider is configured at all. There is no API key or base URL
+    /// to check, so this must never render as a credential-validity problem.
+    ModelProviderUnconfigured,
+    /// The selected provider's saved session could not be read (missing or
+    /// unreadable session storage). The fix is signing in again, not editing a
+    /// key.
+    ModelProviderSessionUnavailable,
 }
 
 impl AgentLoopHostErrorReasonKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ModelCreditsExhausted => "model_credits_exhausted",
+            Self::ModelProviderUnconfigured => "model_provider_unconfigured",
+            Self::ModelProviderSessionUnavailable => "model_provider_session_unavailable",
         }
     }
 }
@@ -328,5 +353,44 @@ mod tests {
             AgentLoopHostErrorKind::OutputTruncated.failure_kind(),
             FailureKind::OutputTooLarge
         );
+    }
+}
+
+#[cfg(test)]
+mod reason_kind_tests {
+    use super::AgentLoopHostErrorReasonKind as R;
+
+    /// `as_str` is hand-written while serde derives `rename_all = "snake_case"`,
+    /// and `as_str` feeds user-visible `RuntimeEvent` payloads
+    /// (`milestone_events.rs`). Nothing compared the two sources, so a typo in
+    /// one would ship a wrong string with every routing test still green — those
+    /// compare enum variants, not text.
+    ///
+    /// The match is exhaustive on purpose: a new variant fails here until its
+    /// wire string is pinned.
+    #[test]
+    fn reason_kind_as_str_matches_its_serde_wire_string() {
+        for reason in [
+            R::ModelCreditsExhausted,
+            R::ModelProviderUnconfigured,
+            R::ModelProviderSessionUnavailable,
+        ] {
+            let expected = match reason {
+                R::ModelCreditsExhausted => "model_credits_exhausted",
+                R::ModelProviderUnconfigured => "model_provider_unconfigured",
+                R::ModelProviderSessionUnavailable => "model_provider_session_unavailable",
+            };
+            assert_eq!(reason.as_str(), expected, "as_str drifted for {reason:?}");
+
+            let serialized = serde_json::to_string(&reason).expect("reason kind serializes");
+            assert_eq!(
+                serialized,
+                format!("\"{expected}\""),
+                "serde wire string drifted from as_str for {reason:?}"
+            );
+            let round_tripped: R =
+                serde_json::from_str(&serialized).expect("reason kind round-trips");
+            assert_eq!(round_tripped, reason);
+        }
     }
 }

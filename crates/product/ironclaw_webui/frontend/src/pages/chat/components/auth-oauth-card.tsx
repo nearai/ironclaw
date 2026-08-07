@@ -143,6 +143,20 @@ export function AuthOauthCard({ gate, onCancel }) {
   // Popup open and the gate hasn't cleared yet — show the waiting spinner.
   const awaiting = opened && !closedNotice;
 
+  // `oauth_url` deliberately permits an absent authorization URL — see the
+  // challenge-kind contract in `ironclaw_extension_contracts::auth_prompt`:
+  // "When the provider is unavailable or unconfigured, the URL may be absent so
+  // UI can still render an OAuth-specific unavailable state instead of the
+  // generic auth fallback." The backend reaches that state through the
+  // blocked-auth fallback in `ironclaw_auth::product_prompt`, which stamps the
+  // kind from the persisted credential setup when the auth engine could not
+  // mint a challenge (vendor unreachable, DCR failed, client unconfigured).
+  //
+  // This is that state. Rendering a live CTA here instead produced a button
+  // whose only possible outcome was the post-click error below — the user could
+  // not tell a working gate from a broken one without clicking it.
+  const unavailable = !hasHttpsAuthorizationUrl;
+
   return (
     <AuthGateShell
       icon="link"
@@ -164,6 +178,7 @@ export function AuthOauthCard({ gate, onCancel }) {
           data-testid="auth-oauth-open"
           variant="primary"
           loading={awaiting}
+          disabled={unavailable}
           onClick={(event) => {
             event.preventDefault();
             openAuth();
@@ -181,6 +196,15 @@ export function AuthOauthCard({ gate, onCancel }) {
         </Button>
       </div>
 
+      {unavailable &&
+      (
+        <div
+          className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+          role="status"
+        >
+          {t("authGate.authorizationUnavailable", { provider: providerLabel })}
+        </div>
+      )}
       {error &&
       (
         <div

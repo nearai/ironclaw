@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
-    CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
+    CredentialAccountOwnerScope, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
+    CredentialAccountStatus, CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
     select_latest_duplicate_user_reusable_account,
 };
 use async_trait::async_trait;
@@ -264,7 +264,9 @@ enum AccountSelectionPurpose<'a> {
         provider_scopes: &'a [ProviderScope],
     },
     /// OAuth bind — match the owner's existing account regardless of scopes,
-    /// but only within the flow's own `session_id` (see the filter below).
+    /// surface, or session. Accounts live at one address per credential owner,
+    /// so the owner filter is the whole boundary; there is no session or
+    /// surface narrowing left for this arm to apply.
     Binding,
 }
 
@@ -293,18 +295,17 @@ impl ProductAuthRuntimeCredentialAccountSelector {
                             setup,
                             provider_scopes,
                         } => account_has_provider_scopes(account, setup, provider_scopes),
-                        // Bind/update is segmented on disk by surface AND
-                        // session, and the callback updates the account at the
-                        // flow scope's surface/session path. `accounts_for_owner`
-                        // enumerates every surface (and wildcards session when
-                        // the owner session is `None`), so require exact surface
-                        // and session equality here or a reconnect could select —
-                        // and then fail to read/update — an account stored on a
-                        // different surface or session.
-                        AccountSelectionPurpose::Binding => {
-                            account.scope.session_id.as_ref() == lookup.scope.session_id.as_ref()
-                                && account.scope.surface == lookup.scope.surface
-                        }
+                        // Accounts are no longer segmented on disk by surface or
+                        // session — they live at one address per credential
+                        // owner — so a bind can read and update any account the
+                        // owner filter already admitted. The exact surface and
+                        // session equality this arm used to require existed
+                        // solely to avoid selecting a record the callback could
+                        // not then write back to; with one address that hazard
+                        // is gone, and requiring it would instead reject the
+                        // legitimate reconnect of a credential minted on another
+                        // surface.
+                        AccountSelectionPurpose::Binding => true,
                     }
                     && account_visible_from_runtime_scope(account, runtime_scope)
             })
@@ -552,25 +553,24 @@ fn credential_setup_requires_stored_scopes(setup: &RuntimeCredentialAccountSetup
     }
 }
 
+/// Whether the runtime caller owns this account.
+///
+/// Delegates to [`CredentialAccountOwnerScope::matches`] — the single rule for
+/// "who owns a credential" — rather than restating it. This used to be an
+/// independent copy comparing tenant/user/agent/project, which is how it and
+/// the durable owner filter could disagree: a credential minted by the chat
+/// auth gate under one agent was rejected here even after the storage layer
+/// found it, and the caller was told to authorize again. Two copies of an
+/// ownership rule is one copy too many.
+///
+/// Which requester may USE a non-reusable account remains a separate stage
+/// (`VisibilityPolicy::account_visible_to_requester` +
+/// `CredentialAccount::is_authorized_for_requester`).
 fn account_visible_from_runtime_scope(
     account: &CredentialAccount,
     runtime_scope: &AuthProductScope,
 ) -> bool {
-    // Runtime credential accounts are owned at tenant/user/agent/project
-    // granularity. `mission_id`/`thread_id`/`session_id` are transient runtime
-    // sub-scopes and MUST NOT narrow visibility: a credential authorized in one
-    // thread is resolvable from every thread of the same owner. Which requester
-    // may USE a non-reusable account is governed separately by ownership/grant
-    // policy (`VisibilityPolicy::account_visible_to_requester` +
-    // `CredentialAccount::is_authorized_for_requester`), not by the thread it
-    // was authorized in. Re-binding to the thread here is what made Google (and
-    // every other non-`UserReusable`) credential vanish on a new chat thread.
-    let account_resource = &account.scope.resource;
-    let runtime_resource = &runtime_scope.resource;
-    account_resource.tenant_id == runtime_resource.tenant_id
-        && account_resource.user_id == runtime_resource.user_id
-        && account_resource.agent_id == runtime_resource.agent_id
-        && account_resource.project_id == runtime_resource.project_id
+    CredentialAccountOwnerScope::from_scope(runtime_scope).matches(account)
 }
 
 pub fn map_account_error(error: AuthProductError) -> CredentialStageError {

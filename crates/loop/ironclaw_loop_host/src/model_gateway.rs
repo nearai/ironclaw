@@ -80,6 +80,17 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_REASON_KIND: ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
     ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
 
+/// Two more faults share `CredentialUnavailable` with a genuine credential
+/// rejection and must stay distinguishable downstream — the kind is what the
+/// product projection keys "check the API key and base URL" off, and that
+/// advice is false for both of these.
+const MODEL_PROVIDER_UNCONFIGURED_REASON_KIND:
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelProviderUnconfigured;
+const MODEL_PROVIDER_SESSION_UNAVAILABLE_REASON_KIND:
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelProviderSessionUnavailable;
+
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
@@ -2709,6 +2720,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             HostManagedModelErrorKind::CredentialUnavailable,
             "no model provider is configured",
         )
+        .with_reason_kind(MODEL_PROVIDER_UNCONFIGURED_REASON_KIND)
         .safe_with_detail(provider_detail);
     }
     if is_legacy_credit_exhaustion_error(&error) {
@@ -2815,7 +2827,8 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         LlmError::Io(_) => HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             "model provider session storage is unavailable",
-        ),
+        )
+        .with_reason_kind(MODEL_PROVIDER_SESSION_UNAVAILABLE_REASON_KIND),
     }
     .safe_with_detail(provider_detail)
 }
@@ -3074,8 +3087,72 @@ mod tests {
             mapped.kind,
             HostManagedModelErrorKind::CredentialUnavailable
         );
+        // The KIND is right — fail fast, no availability backoff — but kind is
+        // also what the product projection keys its user-facing sentence off,
+        // and `model_credentials_unavailable` renders as "Check the selected
+        // provider's API key and base URL". That advice is actively wrong when
+        // the fault is that NO provider is configured at all: there is no key
+        // and no base URL to check. The reason-kind channel is how a shared
+        // kind carries a distinct user-facing category (credits exhaustion
+        // already rides it), so an unconfigured provider must carry its own.
+        assert_eq!(
+            mapped.reason_kind,
+            Some(MODEL_PROVIDER_UNCONFIGURED_REASON_KIND),
+            "an unconfigured provider must not be reported as a bad API key"
+        );
         let detail = mapped.detail.expect("setup hint travels on detail");
         assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    /// A non-transient IO error on the provider path means the host could not
+    /// read the selected provider's saved session (missing or unreadable
+    /// session file) — a local storage fault whose fix is signing in again,
+    /// not editing an API key. It shared `model_credentials_unavailable` with
+    /// genuine 401s, so a deleted session file told the operator their key was
+    /// invalid and sent them to the wrong settings page.
+    #[test]
+    fn provider_session_storage_faults_are_not_reported_as_invalid_credentials() {
+        let mapped = map_provider_error(LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "provider session file is missing",
+        )));
+
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "a missing session cannot be fixed by retrying, so the fail-fast kind stays"
+        );
+        assert_eq!(
+            mapped.reason_kind,
+            Some(MODEL_PROVIDER_SESSION_UNAVAILABLE_REASON_KIND),
+            "session-storage faults must name their own cause, not a bad API key"
+        );
+    }
+
+    /// The three faults that share `CredentialUnavailable` must stay
+    /// distinguishable downstream. Without this, adding a fourth producer that
+    /// forgets its reason kind silently rejoins the bad-key bucket.
+    #[test]
+    fn credential_unavailable_faults_carry_distinct_reason_kinds() {
+        let bad_key = map_provider_error(LlmError::AuthFailed {
+            provider: "fixture-provider".to_string(),
+        });
+        let unconfigured = map_provider_error(LlmError::RequestFailed {
+            provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
+            reason: "no LLM provider is configured yet".to_string(),
+        });
+        let session = map_provider_error(LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "provider session file is unreadable",
+        )));
+
+        // A genuine credential rejection is the one case the pinned "check your
+        // API key and base URL" sentence actually describes, so it stays the
+        // unqualified member of the kind.
+        assert_eq!(bad_key.reason_kind, None);
+        assert_ne!(unconfigured.reason_kind, bad_key.reason_kind);
+        assert_ne!(session.reason_kind, bad_key.reason_kind);
+        assert_ne!(session.reason_kind, unconfigured.reason_kind);
     }
 
     #[test]

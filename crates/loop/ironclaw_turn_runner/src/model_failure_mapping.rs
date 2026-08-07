@@ -1,10 +1,10 @@
 use ironclaw_agent_loop::executor::HostStage;
 use ironclaw_loop_contracts::{AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 
-use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
 use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY,
+    MODEL_PROVIDER_UNCONFIGURED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
     MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
@@ -21,8 +21,20 @@ pub(crate) fn host_stage_failure_category(
         return None;
     }
 
-    if reason_kind == Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND) {
-        return Some(MODEL_CREDITS_EXHAUSTED_CATEGORY);
+    // A reason kind narrows a kind whose user-facing cause is narrower than the
+    // kind itself, so it wins over the kind table below. Exhaustive on purpose:
+    // a new reason kind must be given a category here, or it silently inherits
+    // the kind's category and the operator is told the wrong cause.
+    if let Some(reason_kind) = reason_kind {
+        return Some(match reason_kind {
+            AgentLoopHostErrorReasonKind::ModelCreditsExhausted => MODEL_CREDITS_EXHAUSTED_CATEGORY,
+            AgentLoopHostErrorReasonKind::ModelProviderUnconfigured => {
+                MODEL_PROVIDER_UNCONFIGURED_CATEGORY
+            }
+            AgentLoopHostErrorReasonKind::ModelProviderSessionUnavailable => {
+                MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY
+            }
+        });
     }
 
     if kind == AgentLoopHostErrorKind::BudgetAccountingFailed {
@@ -162,6 +174,59 @@ mod tests {
                 "non-model stage must not produce model-specific category for {kind:?}"
             );
         }
+    }
+
+    /// `CredentialUnavailable` is shared by three faults with three different
+    /// fixes: a genuine credential rejection (edit the key), a deployment with
+    /// no provider configured (add one), and an unreadable saved provider
+    /// session (sign in again). The reason kind is the only thing separating
+    /// them downstream, so a variant that is not routed here silently rejoins
+    /// the bad-key bucket and the operator is told to check a key that is not
+    /// the problem.
+    ///
+    /// The `expected` match is exhaustive on purpose: a new reason kind fails
+    /// to compile until it is given a category.
+    #[test]
+    fn every_model_stage_reason_kind_routes_to_its_own_category() {
+        use AgentLoopHostErrorReasonKind as R;
+
+        let expected = |reason| match reason {
+            R::ModelCreditsExhausted => MODEL_CREDITS_EXHAUSTED_CATEGORY,
+            R::ModelProviderUnconfigured => MODEL_PROVIDER_UNCONFIGURED_CATEGORY,
+            R::ModelProviderSessionUnavailable => MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY,
+        };
+
+        for reason in [
+            R::ModelCreditsExhausted,
+            R::ModelProviderUnconfigured,
+            R::ModelProviderSessionUnavailable,
+        ] {
+            let category = host_stage_failure_category(
+                HostStage::Model,
+                AgentLoopHostErrorKind::CredentialUnavailable,
+                Some(reason),
+            );
+            assert_eq!(
+                category,
+                Some(expected(reason)),
+                "{reason:?} must name its own cause"
+            );
+            assert!(
+                !crate::retry_disposition::is_auto_retriable_category(expected(reason)),
+                "{reason:?} cannot succeed on an identical retry"
+            );
+        }
+
+        // Unqualified, the shared category is still correct: a genuine
+        // credential rejection is the one fault its pinned sentence describes.
+        assert_eq!(
+            host_stage_failure_category(
+                HostStage::Model,
+                AgentLoopHostErrorKind::CredentialUnavailable,
+                None
+            ),
+            Some(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY)
+        );
     }
 
     #[test]

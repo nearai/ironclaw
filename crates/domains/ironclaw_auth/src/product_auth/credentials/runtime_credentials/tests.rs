@@ -373,35 +373,76 @@ async fn runtime_selection_still_enforces_provider_scope_gate() {
     assert_eq!(error, AuthProductError::CredentialMissing);
 }
 
+/// A reconnect binds the owner's credential whatever surface or session it was
+/// minted on.
+///
+/// This replaces `binding_does_not_cross_session_boundary` and
+/// `binding_does_not_cross_surface_boundary`, which asserted the opposite. Both
+/// justified themselves by accounts being path-segmented on those axes — "the
+/// callback could never write it back". Accounts now live at one address per
+/// credential owner, so the write-back hazard is gone and the old rule only
+/// blocked real reconnects: a credential minted by the chat auth gate
+/// (`Callback`, session-bound) could never be re-bound from the extensions page
+/// (`Web`, no session), leaving a valid credential stuck at "needs setup".
 #[tokio::test]
-async fn binding_does_not_cross_session_boundary() {
-    // session_id is path-segmenting for the bind/update WRITE path: an account
-    // stored under one session must not be bound by a flow targeting a
-    // different (or no) session, or the callback — which updates the account at
-    // the flow scope's session path — could never write it. `accounts_for_owner`
-    // wildcards session when the flow session is `None`, so the bind selection
-    // must re-impose exact session equality.
+async fn binding_crosses_surface_and_session_for_the_same_owner() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
-    let session_scope =
-        owner_auth_scope("alice").with_session_id(crate::AuthSessionId::new("sess-a").unwrap());
-    ConfiguredAccount::new(session_scope, "google")
+    // Minted the way the blocked-turn OAuth gate mints one.
+    let gate_scope = AuthProductScope::new(
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap(),
+        AuthSurface::Callback,
+    )
+    .with_session_id(crate::AuthSessionId::new("sess-a").unwrap());
+    let created = ConfiguredAccount::new(gate_scope, "google")
         .create(&accounts)
         .await;
     let selector = selector_for(accounts);
 
-    // A reconnect carrying NO session must not bind the session-scoped account.
-    let no_session = owner_auth_scope("alice");
-    let error = selector
+    // Reconnected later from a different surface, carrying no session at all.
+    let reconnect = owner_auth_scope("alice");
+    let bound = selector
         .select_configured_account_for_binding(
             CredentialAccountSelectionRequest::new(
-                no_session.clone(),
+                reconnect.clone(),
                 AuthProviderId::new("google").unwrap(),
             )
             .for_extension(ExtensionId::new("google-calendar").unwrap()),
-            no_session,
+            reconnect,
         )
         .await
-        .unwrap_err();
+        .expect("a reconnect must bind the owner's existing credential");
+
+    assert_eq!(bound.id, created.id);
+}
+
+/// The owner boundary, asserted at THIS seam.
+///
+/// The two deleted cross-surface/session cases were the only ones here that
+/// drove `select_configured_account_for_binding` toward a rejection, and their
+/// replacement above asserts only the positive. `binding_scope_owns_account`
+/// and the durable store are pinned elsewhere, but neither covers this
+/// selector, which layers `finalize_selection` and the visibility policy on top
+/// of the owner filter — so a regression in that stack would land here first.
+#[tokio::test]
+async fn binding_never_crosses_the_owner_boundary() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    ConfiguredAccount::new(owner_auth_scope("alice"), "google")
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    let mallory = owner_auth_scope("mallory");
+    let error = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                mallory.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-calendar").unwrap()),
+            mallory,
+        )
+        .await
+        .expect_err("a different user must never bind another user's credential");
 
     assert_eq!(error, AuthProductError::CredentialMissing);
 }
@@ -431,42 +472,6 @@ async fn binding_matches_account_within_same_session() {
         .expect("same-session reconnect must bind the existing account");
 
     assert_eq!(bound.id, created.id);
-}
-
-#[tokio::test]
-async fn binding_does_not_cross_surface_boundary() {
-    // surface is path-segmenting for the bind/update WRITE path exactly like
-    // session: durable account records live under a per-surface path, and the
-    // callback updates the account at the flow scope's surface path.
-    // `accounts_for_owner` enumerates EVERY surface, so the bind selection must
-    // re-impose exact surface equality — otherwise it could select an account
-    // stored on another surface that the callback can never read (a spurious
-    // CredentialMissing that aborts the reconnect).
-    let accounts = Arc::new(InMemoryAuthProductServices::new());
-    let web_scope = AuthProductScope::new(
-        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap(),
-        AuthSurface::Web,
-    );
-    ConfiguredAccount::new(web_scope, "google")
-        .create(&accounts)
-        .await;
-    let selector = selector_for(accounts);
-
-    // A reconnect on the `Api` surface must not bind the `Web`-surface account.
-    let api_scope = owner_auth_scope("alice");
-    let error = selector
-        .select_configured_account_for_binding(
-            CredentialAccountSelectionRequest::new(
-                api_scope.clone(),
-                AuthProviderId::new("google").unwrap(),
-            )
-            .for_extension(ExtensionId::new("google-calendar").unwrap()),
-            api_scope,
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(error, AuthProductError::CredentialMissing);
 }
 
 #[tokio::test]
@@ -1841,5 +1846,67 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
             .handle
             .as_str()
             .starts_with("oauth-refreshed-access")
+    );
+}
+
+/// The in-memory source must enforce project isolation exactly like the durable
+/// one.
+///
+/// The filesystem store narrows by reading only the caller's project root and
+/// the user-level root; the in-memory store has no roots and filters solely
+/// through `CredentialAccountOwnerScope::matches`. When project dropped out of
+/// that predicate the fake stopped isolating projects entirely, which is worse
+/// than a missing test: a fake that is more permissive than production lets
+/// callers depend on an isolation that only production enforces.
+#[tokio::test]
+async fn in_memory_source_isolates_projects_like_the_durable_store() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+
+    let mut project_a =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    project_a.project_id = Some(ironclaw_host_api::ids::ProjectId::new("project-a").unwrap());
+    let created = ConfiguredAccount::new(
+        AuthProductScope::new(project_a.clone(), AuthSurface::Api),
+        "google",
+    )
+    .create(&accounts)
+    .await;
+
+    // A caller in another project must not see it.
+    let mut project_b = project_a.clone();
+    project_b.project_id = Some(ironclaw_host_api::ids::ProjectId::new("project-b").unwrap());
+    project_b.invocation_id = InvocationId::new();
+    let seen_by_b = accounts
+        .accounts_for_owner(&AuthProductScope::new(project_b, AuthSurface::Api))
+        .await
+        .unwrap();
+    assert!(
+        !seen_by_b.iter().any(|account| account.id == created.id),
+        "project B must not see project A's credential through the in-memory source"
+    );
+
+    // Nor may a user-level caller inherit upward out of a project.
+    let mut user_level = project_a.clone();
+    user_level.project_id = None;
+    user_level.invocation_id = InvocationId::new();
+    let seen_by_user = accounts
+        .accounts_for_owner(&AuthProductScope::new(user_level, AuthSurface::Api))
+        .await
+        .unwrap();
+    assert!(
+        !seen_by_user.iter().any(|account| account.id == created.id),
+        "a project sub-credential must not leak to user-level callers"
+    );
+
+    // The owning project still resolves it.
+    let mut same_project = project_a;
+    same_project.invocation_id = InvocationId::new();
+    let seen_by_a = accounts
+        .accounts_for_owner(&AuthProductScope::new(same_project, AuthSurface::Api))
+        .await
+        .unwrap();
+    assert!(
+        seen_by_a.iter().any(|account| account.id == created.id),
+        "the owning project must still resolve its own credential"
     );
 }

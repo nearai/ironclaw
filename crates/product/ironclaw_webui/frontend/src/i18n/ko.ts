@@ -206,6 +206,8 @@ registerPack("ko", {
   "authGate.authorizing": "{provider} 대기 중…",
   "authGate.expiresAt": "만료",
   "authGate.oauthProviderFallback": "공급자",
+  "authGate.authorizationUnavailable":
+    "IronClaw가 {provider} 인증을 시작하지 못했습니다. 공급자에 연결할 수 없거나, 아직 구성되지 않았거나, 사용할 수 없는 인증 링크를 반환하여 열 항목이 없습니다. 실행을 다시 시도하거나 확장 프로그램 설정을 확인하세요.",
   "authGate.serviceUnavailable": "서비스를 사용할 수 없습니다",
   "authGate.popupBlocked": "승인 팝업이 차단되었습니다.",
   "authGate.pillAuthorize": "승인",

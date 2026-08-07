@@ -206,6 +206,8 @@ registerPack("de", {
   "authGate.authorizing": "Warte auf {provider}…",
   "authGate.expiresAt": "Läuft ab",
   "authGate.oauthProviderFallback": "beim Anbieter",
+  "authGate.authorizationUnavailable":
+    "IronClaw konnte die {provider}-Autorisierung nicht starten. Der Anbieter ist nicht erreichbar, noch nicht konfiguriert oder hat einen unbrauchbaren Autorisierungslink geliefert, daher gibt es nichts zu öffnen. Wiederholen Sie den Lauf oder prüfen Sie die Einrichtung der Erweiterung.",
   "authGate.serviceUnavailable": "Dienst nicht verfügbar",
   "authGate.popupBlocked": "Das Autorisierungs-Popup wurde blockiert.",
   "authGate.pillAuthorize": "Autorisieren",

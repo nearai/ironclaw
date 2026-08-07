@@ -14,10 +14,6 @@ use ironclaw_host_api::failure::categories::{
     HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
 };
 
-pub(crate) const MODEL_CREDITS_EXHAUSTED_REASON_KIND:
-    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
-    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
-
 pub(crate) fn host_stage_unavailable_category(reason: &str) -> &'static str {
     let stage = reason
         .split_once(':')

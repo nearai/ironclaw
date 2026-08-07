@@ -306,8 +306,10 @@ fn validate_scoped_update_binding(
     // possibly a thread/mission) that the account — created in an earlier flow
     // — does not share. The old `scope_matches` full-equality compared those
     // transient fields and so rejected every legitimate reconnect, forking a
-    // duplicate account each time. tenant/user/agent/project stay hard-required
-    // via `CredentialAccountOwnerScope`; session_id stays matched; the
+    // duplicate account each time. Ownership is tenant/user plus a project that
+    // inherits downward, via `CredentialAccountOwnerScope` — `agent_id` and
+    // `session_id` are no longer part of it, since a credential belongs to a
+    // user rather than to whichever agent or browser session minted it. The
     // requester-authority check below is unchanged, so an unauthorized
     // requester still cannot bind another owner's account.
     if !crate::binding_scope_owns_account(scope, account) {

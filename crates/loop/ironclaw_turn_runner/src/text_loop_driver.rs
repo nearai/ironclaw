@@ -284,7 +284,6 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, test_run_context,
     };
@@ -417,7 +416,9 @@ mod tests {
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 "safe summary wording is display-only",
             )
-            .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
+            .with_reason_kind(
+                ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted,
+            ),
         );
 
         assert_eq!(
@@ -476,7 +477,9 @@ mod tests {
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 CREDIT_SUMMARY,
             )
-            .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
+            .with_reason_kind(
+                ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted,
+            ),
         );
 
         assert_eq!(

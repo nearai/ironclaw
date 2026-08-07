@@ -26,6 +26,7 @@ use crate::turn::ModelInvalidOutputDetailReason;
 use super::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY, MODEL_PROVIDER_UNCONFIGURED_CATEGORY,
     MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
@@ -316,6 +317,12 @@ pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static st
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
         ),
+        MODEL_PROVIDER_UNCONFIGURED_CATEGORY => Some(
+            "The run failed because no model provider is configured. Add a provider in settings, then try again.",
+        ),
+        MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY => Some(
+            "The run failed because the saved sign-in for the selected model provider could not be read. Sign in to that provider again, then try again.",
+        ),
         MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY => Some(
             "The run stopped because its configured model spend budget was exhausted. Increase the budget or start a new run.",
         ),
@@ -353,6 +360,42 @@ mod tests {
             reborn_failure_summary_for_category(Some("iteration_limit")),
             "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit."
         );
+    }
+
+    /// Three distinct faults reach the user through the `CredentialUnavailable`
+    /// error kind: a genuine credential rejection, a deployment with no model
+    /// provider configured at all, and an unreadable saved provider session.
+    /// They shared one pinned sentence — "Check the selected provider's API key
+    /// and base URL" — which is only true of the first. The other two sent the
+    /// operator to edit a key that was not the problem (and, when nothing is
+    /// configured, does not exist).
+    #[test]
+    fn credential_failure_categories_do_not_share_one_misleading_sentence() {
+        let bad_key = pinned_failure_summary_for_category(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY)
+            .expect("credential category is pinned");
+        let unconfigured =
+            pinned_failure_summary_for_category(MODEL_PROVIDER_UNCONFIGURED_CATEGORY)
+                .expect("unconfigured-provider category is pinned");
+        let session =
+            pinned_failure_summary_for_category(MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY)
+                .expect("session-storage category is pinned");
+
+        assert_ne!(bad_key, unconfigured);
+        assert_ne!(bad_key, session);
+        assert_ne!(unconfigured, session);
+
+        // Only the genuine-rejection sentence may send the operator to the key
+        // and base URL; the other two must not, or the split buys nothing.
+        for (category, summary) in [
+            (MODEL_PROVIDER_UNCONFIGURED_CATEGORY, unconfigured),
+            (MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY, session),
+        ] {
+            let lowered = summary.to_ascii_lowercase();
+            assert!(
+                !lowered.contains("api key") && !lowered.contains("base url"),
+                "{category} must not blame the API key or base URL: {summary}"
+            );
+        }
     }
 
     #[test]

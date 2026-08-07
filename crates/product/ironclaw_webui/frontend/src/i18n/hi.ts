@@ -206,6 +206,8 @@ registerPack("hi", {
   "authGate.authorizing": "{provider} की प्रतीक्षा…",
   "authGate.expiresAt": "समाप्त हो रहा है",
   "authGate.oauthProviderFallback": "प्रदाता",
+  "authGate.authorizationUnavailable":
+    "IronClaw {provider} प्राधिकरण शुरू नहीं कर सका। प्रदाता तक पहुँच नहीं है, वह अभी कॉन्फ़िगर नहीं हुआ है, या उसने अनुपयोगी प्राधिकरण लिंक लौटाया है, इसलिए खोलने के लिए कुछ नहीं है। रन दोबारा चलाएँ, या एक्सटेंशन का सेटअप जाँचें।",
   "authGate.serviceUnavailable": "सेवा उपलब्ध नहीं है",
   "authGate.popupBlocked": "प्राधिकरण पॉपअप अवरुद्ध कर दिया गया।",
   "authGate.pillAuthorize": "अधिकृत करें",

@@ -459,7 +459,6 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 mod tests {
     use super::*;
     use crate::app_loop_family::build_loop_family_registry;
-    use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
         test_run_context,
@@ -699,7 +698,9 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("safe summary wording is display-only")
                 .expect("safe"),
-            reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
+            reason_kind: Some(
+                ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted,
+            ),
             detail: None,
         });
 
@@ -774,7 +775,9 @@ mod tests {
             stage: HostStage::Prompt,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
-            reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
+            reason_kind: Some(
+                ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted,
+            ),
             detail: None,
         });
 

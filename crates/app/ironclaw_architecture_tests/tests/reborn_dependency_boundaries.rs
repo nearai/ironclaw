@@ -627,7 +627,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
-        ("ironclaw_host_api", 18_784),
+        //
+        // Raised 18_784 -> 18_844 by the model-failure category split: two
+        // failure categories (`model_provider_unconfigured`,
+        // `model_provider_session_unavailable`) and their pinned summaries,
+        // splitting three distinct faults that shared one user-facing sentence
+        // telling operators to "check the API key and base URL" — advice that
+        // is false when no provider is configured at all, or when a saved
+        // provider session could not be read. Category constants and their
+        // summary table are this crate's own vocabulary by the module's stated
+        // charter; the classification that chooses between them stays with the
+        // producer in ironclaw_turn_runner. Declarations only.
+        //
+        // Of the 60 lines, ~9 are contract surface; the rest are the doc
+        // comments justifying the split and one inline `mod tests` case. This
+        // ratchet counts every line under `src/`, so a test kept inline per the
+        // file's convention spends contracts budget.
+        ("ironclaw_host_api", 18_844),
         ("ironclaw_loop_contracts", 14_479),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,

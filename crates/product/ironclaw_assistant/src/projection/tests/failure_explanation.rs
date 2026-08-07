@@ -5,7 +5,8 @@ use ironclaw_host_api::failure::categories::{
     HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
     HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
     HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY,
+    MODEL_PROVIDER_UNCONFIGURED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
     MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
@@ -207,6 +208,19 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         (
             MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        // Two faults that shared the sentence above until they were split out.
+        // Both reach the user through the same `CredentialUnavailable` error
+        // kind, so only the reason kind separates them — and "check the API key
+        // and base URL" is false for both: one has no key to check, the other
+        // never got as far as presenting one.
+        (
+            MODEL_PROVIDER_UNCONFIGURED_CATEGORY,
+            "The run failed because no model provider is configured. Add a provider in settings, then try again.",
+        ),
+        (
+            MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY,
+            "The run failed because the saved sign-in for the selected model provider could not be read. Sign in to that provider again, then try again.",
         ),
         (
             MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,

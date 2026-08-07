@@ -16,7 +16,7 @@ mod tests {
     use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
     use ironclaw_host_api::{
         http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
-        ids::{MissionId, SecretHandle, TenantId, ThreadId, UserId},
+        ids::{AgentId, MissionId, SecretHandle, TenantId, ThreadId, UserId},
         resource::ResourceScope,
     };
     use ironclaw_product_contracts::surface::ProductSurfaceCaller;
@@ -247,9 +247,12 @@ mod tests {
     #[tokio::test]
     async fn extension_oauth_start_handler_does_not_bind_across_owner_boundary() {
         // Owner isolation guard for defect A: an account owned by a DIFFERENT
-        // agent must never be bound by this owner's reconnect. tenant/user/
-        // agent/project stay hard-`==` in the owner match, so a cross-owner
-        // account is invisible and the flow starts with no update binding.
+        // USER must never be bound by this owner's reconnect. Ownership is
+        // tenant/user plus a project that inherits downward, so a foreign
+        // owner's account is invisible and the flow starts with no update
+        // binding. (Agent was part of that match until credentials became
+        // tenant+user-owned; the same-user/different-agent case is now a
+        // rebind, asserted in the sibling test below.)
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let state = engine_backed_route_state(
             shared.clone(),
@@ -260,15 +263,20 @@ mod tests {
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
-        // Same tenant/user as the caller, but a different agent_id -> different
-        // owner. Must NOT be bound.
+        // A different user is a different owner, and the only boundary a bind
+        // may never cross. (This used to seed a different `agent_id` and call
+        // that a different owner. Agent is no longer part of a credential's
+        // identity — a user authorizes a vendor once, not once per agent — so
+        // that case now belongs with thread/mission in
+        // `extension_oauth_start_rebinds_account_authorized_in_a_different_thread`,
+        // which asserts it IS rebound rather than forked.)
         let mut other_owner = test_resource_scope();
-        other_owner.agent_id = Some(AgentId::new("agent-other").expect("agent"));
+        other_owner.user_id = UserId::new("user-mallory").expect("user");
         shared
             .create_account(NewCredentialAccount {
                 scope: AuthProductScope::new(other_owner, AuthSurface::Callback),
                 provider: AuthProviderId::new("notion").expect("provider"),
-                label: CredentialAccountLabel::new("other-agent notion").expect("label"),
+                label: CredentialAccountLabel::new("other-user notion").expect("label"),
                 status: CredentialAccountStatus::Configured,
                 ownership: CredentialOwnership::UserReusable,
                 owner_extension: None,
@@ -323,11 +331,17 @@ mod tests {
     async fn extension_oauth_start_rebinds_account_authorized_in_a_different_thread() {
         // #4935 user-visible regression: an account a user authorized in one
         // chat thread/mission must be rebound — not forked — when the OAuth
-        // reconnect starts from a different context. The bind is owner-
-        // granularity (tenant/user/agent/project), so the account's
-        // `thread_id`/`mission_id` are stripped from the match; the old
-        // `scope_matches` full-equality would have missed this account and
-        // forked a duplicate on every reconnect.
+        // reconnect starts from a different context. The bind is
+        // owner-granularity, so the account's `thread_id`/`mission_id` are
+        // stripped from the match; the old `scope_matches` full-equality would
+        // have missed this account and forked a duplicate on every reconnect.
+        //
+        // `agent_id` is now stripped for the same reason: a credential belongs
+        // to a tenant+user, not to whichever agent was running when it was
+        // minted, so the existing account below carries a different agent than
+        // the reconnect and must still be rebound. Only tenant/user (and an
+        // elected project) may refuse a bind — see
+        // `extension_oauth_start_handler_does_not_bind_across_owner_boundary`.
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let state = engine_backed_route_state(
             shared.clone(),
@@ -339,8 +353,10 @@ mod tests {
             .protected
             .layer(axum::Extension(test_caller()));
 
-        // The existing account was authorized in thread-auth-1 / mission-auth-1.
+        // The existing account was authorized in thread-auth-1 / mission-auth-1,
+        // while a different agent was running.
         let mut existing_resource = test_resource_scope();
+        existing_resource.agent_id = Some(AgentId::new("agent-earlier").expect("agent"));
         existing_resource.thread_id = Some(ThreadId::new("thread-auth-1").expect("thread"));
         existing_resource.mission_id = Some(MissionId::new("mission-auth-1").expect("mission"));
         let existing_scope = AuthProductScope::new(existing_resource, AuthSurface::Callback);

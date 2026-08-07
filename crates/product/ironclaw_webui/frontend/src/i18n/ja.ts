@@ -206,6 +206,8 @@ registerPack("ja", {
   "authGate.authorizing": "{provider} を待機中…",
   "authGate.expiresAt": "有効期限",
   "authGate.oauthProviderFallback": "プロバイダー",
+  "authGate.authorizationUnavailable":
+    "IronClaw は {provider} の認証を開始できませんでした。プロバイダーに接続できない、まだ設定されていない、または使用できない認証リンクが返されたため、開くものがありません。実行を再試行するか、拡張機能の設定を確認してください。",
   "authGate.serviceUnavailable": "サービスを利用できません",
   "authGate.popupBlocked": "認証ポップアップがブロックされました。",
   "authGate.pillAuthorize": "承認",

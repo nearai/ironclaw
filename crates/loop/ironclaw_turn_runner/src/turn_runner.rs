@@ -17,6 +17,7 @@ use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY, MODEL_PROVIDER_UNCONFIGURED_CATEGORY,
     MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
@@ -53,6 +54,12 @@ pub(crate) fn sanitized_driver_failure(
         reason_kind,
         MODEL_CREDITS_EXHAUSTED_CATEGORY
             | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+            // Siblings of the credential category, split out so each names its
+            // own fix. They must survive here for the same reason it does: the
+            // generic `driver_failed` fallback would erase the one thing that
+            // makes them worth distinguishing.
+            | MODEL_PROVIDER_UNCONFIGURED_CATEGORY
+            | MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY
             | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
             | TRANSCRIPT_WRITE_FAILED_CATEGORY
@@ -127,8 +134,34 @@ mod tests {
     use super::sanitized_driver_failure;
     use ironclaw_host_api::failure::categories::{
         BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
-        MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY,
+        MODEL_PROVIDER_UNCONFIGURED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     };
+
+    /// Every category the allowlist admits must survive to the durable record.
+    ///
+    /// `model_provider_unconfigured` is exercised end-to-end by the composition
+    /// runtime test — which is what caught this allowlist silently collapsing it
+    /// to `driver_failed`. Its sibling `model_provider_session_unavailable` had
+    /// no coverage at this seam at all, so dropping it from the allowlist would
+    /// reintroduce exactly that bug for session-storage faults with nothing
+    /// failing.
+    #[test]
+    fn allowlisted_provider_categories_survive_to_the_durable_record() {
+        for category in [
+            MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+            MODEL_PROVIDER_UNCONFIGURED_CATEGORY,
+            MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY,
+        ] {
+            let failure = sanitized_driver_failure(category, None)
+                .unwrap_or_else(|| panic!("{category} must produce a sanitized failure"));
+            assert_eq!(
+                failure.category(),
+                category,
+                "{category} must reach the durable record intact, not collapse to driver_failed"
+            );
+        }
+    }
 
     #[test]
     fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {

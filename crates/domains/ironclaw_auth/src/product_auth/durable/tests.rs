@@ -283,6 +283,130 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
     assert_eq!(resolved.scope, created.scope);
 }
 
+/// A credential is owned by tenant+user, never by whichever agent happened to
+/// be running when it was minted.
+///
+/// The account path is built by `product_auth_base_root`, which interpolates
+/// `agent_id` — and unlike `surface`/`session_id`, nothing compensates for a
+/// mismatch: `account_scopes_for_owner` fans out over every surface and session
+/// but takes `agent_id` straight from the owner scope. So an account minted
+/// while agent A was running is invisible to agent B, and the caller is told to
+/// authorize again — an integration that can never converge.
+#[tokio::test]
+async fn credential_is_owned_by_the_user_not_the_agent_that_minted_it() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+
+    // Minted through the blocked-turn gate: `auth_scope_for_blocked_turn` shape
+    // (Callback surface, thread bound), while agent A was running.
+    let mut gate_scope = test_scope();
+    gate_scope.surface = AuthSurface::Callback;
+    gate_scope.resource.agent_id = Some(ironclaw_host_api::ids::AgentId::new("agent-a").unwrap());
+    gate_scope.resource.thread_id = Some(ThreadId::new("thread-gate").unwrap());
+
+    // Resolved later by the runtime while agent B is running.
+    let mut runtime_resource = gate_scope.resource.clone();
+    runtime_resource.agent_id = Some(ironclaw_host_api::ids::AgentId::new("agent-b").unwrap());
+    runtime_resource.thread_id = None;
+    runtime_resource.invocation_id = InvocationId::new();
+
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let access_secret = SecretHandle::new("google-access").unwrap();
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: gate_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service);
+    let resolved = selector
+        .select_unique_configured_runtime_account(
+            runtime_credential_account_selection_request(
+                &runtime_resource,
+                &VendorId::new("google").unwrap(),
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: Vec::new(),
+                },
+                &[],
+                &ExtensionId::new("google-calendar").unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("a credential minted under one agent must resolve under another");
+
+    assert_eq!(resolved.id, created.id);
+    assert_eq!(resolved.access_secret, Some(access_secret));
+}
+
+/// A project-scoped caller inherits the user's credential when the project has
+/// none of its own. Projects hold *sub*-credentials: they may override, but a
+/// project must never silently disconnect every integration the user already
+/// authorized.
+#[tokio::test]
+async fn project_scoped_caller_inherits_the_user_level_credential() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+
+    // Minted with no project bound — the user-level default.
+    let mut user_scope = test_scope();
+    user_scope.resource.project_id = None;
+
+    // Resolved by a caller working inside a project.
+    let mut project_resource = user_scope.resource.clone();
+    project_resource.project_id =
+        Some(ironclaw_host_api::ids::ProjectId::new("project-alpha").unwrap());
+    project_resource.invocation_id = InvocationId::new();
+
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let access_secret = SecretHandle::new("google-access").unwrap();
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: user_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service);
+    let resolved = selector
+        .select_unique_configured_runtime_account(
+            runtime_credential_account_selection_request(
+                &project_resource,
+                &VendorId::new("google").unwrap(),
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: Vec::new(),
+                },
+                &[],
+                &ExtensionId::new("google-calendar").unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("a project caller must inherit the user-level credential");
+
+    assert_eq!(resolved.id, created.id);
+    assert_eq!(resolved.access_secret, Some(access_secret));
+}
+
 #[tokio::test]
 async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
     let filesystem = test_filesystem();
@@ -823,7 +947,7 @@ async fn filesystem_account_record_source_rejects_malformed_scan_records() {
         .unwrap();
 
     let malformed_account_id = crate::CredentialAccountId::new();
-    let malformed_path = super::paths::account_path(&scope, malformed_account_id)
+    let malformed_path = super::paths::account_path(&scope.resource, malformed_account_id)
         .expect("account path derivation must succeed");
     let malformed = ironclaw_filesystem::Entry::bytes(b"{ malformed account json".to_vec())
         .with_content_type(ironclaw_filesystem::ContentType::json());
@@ -2308,7 +2432,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    let path = super::paths::account_path(&scope, account_id)
+    let path = super::paths::account_path(&scope.resource, account_id)
         .expect("account path derivation must succeed");
     let json = serde_json::to_vec(&dummy_account).expect("serialization must succeed");
     use ironclaw_filesystem::{ContentType, Entry};
@@ -3683,7 +3807,7 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    let path = super::paths::account_path(&scope, account_id)
+    let path = super::paths::account_path(&scope.resource, account_id)
         .expect("account path derivation must succeed");
     let json = serde_json::to_vec(&dummy_account).expect("serialization must succeed");
     use ironclaw_filesystem::{ContentType, Entry};
@@ -3916,40 +4040,42 @@ async fn filesystem_complete_manual_token_still_rejects_genuinely_foreign_owner(
     );
 }
 
-// ─── security: enforced isolation axes — session and surface are exact-matched
+// ─── the enforced isolation axis: the credential owner (tenant/user/project).
+// Surface and session are NOT isolation axes — see the two tests below, which
+// replaced four that asserted the opposite. The owner boundary is pinned by the
+// `rejects_genuinely_foreign_owner` cases in this file.
 
+/// Completing a manual-token flow reaches the owner's credential whatever
+/// surface or session either was created on.
+///
+/// Replaces `..._rejects_different_session_id` and
+/// `..._rejects_different_auth_surface`. Both justified themselves by accounts
+/// being path-partitioned on those axes ("a lookup under S2 will not find an
+/// account created under S1"). Accounts now live at one address per credential
+/// owner, so that is no longer true — and the old behavior is what stranded a
+/// valid credential minted on one surface as "needs setup" on every other.
 #[tokio::test]
-async fn filesystem_complete_manual_token_rejects_different_session_id() {
-    // `binding_scope_owns_account` must still reject a credential account whose
-    // `session_id` differs from the flow record's session_id even when every
-    // other ownership axis (tenant/user/agent/project/surface) matches.
-    // This locks the "session is exact-matched" invariant documented in the
-    // `binding_scope_owns_account` docstring.
-    //
-    // This test MUST FAIL before fix #1 (same-session uses scope_matches which
-    // may pass, but here scope_matches would fail on session_id mismatch too —
-    // either way the new binding_scope_owns_account correctly enforces it).
+async fn filesystem_complete_manual_token_crosses_surface_and_session_for_same_owner() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
-    // Account created under session S1.
-    let account_resource = test_scope().resource;
-    let mut account_scope = AuthProductScope::new(account_resource.clone(), AuthSurface::Web);
+    // Account minted the way the blocked-turn gate mints one: Callback surface,
+    // session-bound.
+    let mut account_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Callback);
     account_scope.session_id = Some(AuthSessionId::new("session-s1").unwrap());
 
-    // Flow created under session S2 (same user/agent/project/surface).
+    // Flow arriving later from a different surface and session, same owner.
     let mut flow_resource = test_scope().resource;
-    flow_resource.invocation_id = InvocationId::new(); // different invocation too (realistic)
+    flow_resource.invocation_id = InvocationId::new();
     let mut flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Web);
     flow_scope.session_id = Some(AuthSessionId::new("session-s2").unwrap());
 
     let service = test_service(filesystem, secret_store);
     let expires_at = Utc::now() + Duration::minutes(5);
 
-    // Create the credential account under session S1.
     let account = service
         .create_account(NewCredentialAccount {
-            scope: account_scope.clone(),
+            scope: account_scope,
             provider: google_provider(),
             label: account_label(),
             status: CredentialAccountStatus::Configured,
@@ -3963,16 +4089,9 @@ async fn filesystem_complete_manual_token_rejects_different_session_id() {
         .await
         .unwrap();
 
-    // Create the manual-token flow under session S2.
     let interaction_id = create_manual_token_flow(&service, &flow_scope, expires_at).await;
 
-    // Cross-session completion must be rejected — session is exact-matched.
-    // Note: the durable store partitions account paths by session_id (see
-    // `surface_sessions_root`), so a lookup under S2 will not find an account
-    // created under S1. The observed outcome is `CredentialMissing` rather than
-    // `CrossScopeDenied`; both are secure — the cross-session account is
-    // inaccessible either way.
-    let err = service
+    service
         .complete_manual_token(
             &flow_scope,
             ManualTokenCompletionInput {
@@ -3981,84 +4100,7 @@ async fn filesystem_complete_manual_token_rejects_different_session_id() {
             },
         )
         .await
-        .expect_err("complete_manual_token with different session_id must be rejected");
-
-    assert!(
-        matches!(
-            err,
-            AuthProductError::CredentialMissing | AuthProductError::CrossScopeDenied
-        ),
-        "cross-session completion must return CredentialMissing or CrossScopeDenied \
-         (session_id is an exact-matched axis — different session is never accessible), \
-         got: {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn filesystem_complete_manual_token_rejects_different_auth_surface() {
-    // `binding_scope_owns_account` must still reject a credential account whose
-    // `surface` differs from the flow record's surface even when every other
-    // ownership axis matches and session_id is None on both.
-    // This locks the "surface is exact-matched" invariant.
-    //
-    // Note: because accounts are partitioned by surface in the filesystem path
-    // layout (see `surface_sessions_root`), a cross-surface account lookup via
-    // `read_account(scope, id)` will not find the account at all and will return
-    // `CredentialMissing` rather than `CrossScopeDenied`. Both are acceptable
-    // secure outcomes; this test documents which one actually occurs.
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
-
-    // Account created under AuthSurface::Web.
-    let web_scope = test_scope(); // uses Web surface by default (see test_scope())
-
-    // Flow created under AuthSurface::Cli (same owner, different surface).
-    let cli_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Cli);
-
-    let service = test_service(filesystem, secret_store);
-    let expires_at = Utc::now() + Duration::minutes(5);
-
-    // Create the credential account under Web surface.
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: web_scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: vec![],
-            access_secret: Some(SecretHandle::new("web-access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![],
-        })
-        .await
-        .unwrap();
-
-    // Create the manual-token flow under Cli surface.
-    let interaction_id = create_manual_token_flow(&service, &cli_scope, expires_at).await;
-
-    // Cross-surface completion must be rejected. The filesystem partitions
-    // accounts by surface, so the account is simply not found from the Cli
-    // surface path — CredentialMissing is the observed (secure) outcome.
-    let err = service
-        .complete_manual_token(
-            &cli_scope,
-            ManualTokenCompletionInput {
-                interaction_id,
-                credential_account_id: account.id,
-            },
-        )
-        .await
-        .expect_err("complete_manual_token with different AuthSurface must be rejected");
-
-    assert!(
-        matches!(
-            err,
-            AuthProductError::CredentialMissing | AuthProductError::CrossScopeDenied
-        ),
-        "cross-surface completion must return CredentialMissing or CrossScopeDenied, got: {err:?}"
-    );
+        .expect("the owner's credential must be completable across surface and session");
 }
 
 #[tokio::test]
@@ -4245,200 +4287,6 @@ async fn filesystem_complete_credential_selection_rejects_genuinely_foreign_owne
         AuthProductError::CrossScopeDenied,
         "binding_scope_owns_account must reject a reachable account whose user_id differs \
          from the flow scope's user_id"
-    );
-}
-
-#[tokio::test]
-async fn filesystem_complete_credential_selection_rejects_different_session_id() {
-    // Reviewer A (serrrfirat) parity with `complete_manual_token` session test.
-    // `complete_credential_selection` must reject an attempt to complete a
-    // selection flow whose scope carries session S2 against a credential account
-    // created under session S1.
-    //
-    // GUARD ANALYSIS: `session_id` IS encoded in the on-disk account path (see
-    // `product_auth_root` — the path includes `/sessions/{session_id}` when
-    // `session_id` is Some). An account stored under S1 is therefore NOT
-    // accessible from a read under S2. The durable store returns `None` for the
-    // account lookup → `CredentialMissing`. Both `CredentialMissing` (path
-    // partitioning intercepts before the guard) and `CrossScopeDenied` (the guard
-    // fires) are correct secure outcomes; this test locks which one actually
-    // occurs so it cannot silently regress. The `binding_scope_owns_account`
-    // session exact-match is defense-in-depth for any future code path that
-    // bypasses the path partitioning.
-    use crate::{AuthFlowKind, CredentialSelectionInput};
-
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
-
-    // Account created under session S1.
-    let account_resource = test_scope().resource;
-    let mut account_scope = AuthProductScope::new(account_resource.clone(), AuthSurface::Web);
-    account_scope.session_id = Some(AuthSessionId::new("sel-session-s1").unwrap());
-
-    // Flow created under session S2 (same surface, same owner, different session).
-    let mut flow_resource = test_scope().resource;
-    flow_resource.invocation_id = InvocationId::new(); // realistic fresh invocation
-    let mut flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Web);
-    flow_scope.session_id = Some(AuthSessionId::new("sel-session-s2").unwrap());
-
-    let service = test_service(filesystem, secret_store);
-
-    // Create the credential account under session S1.
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: account_scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: vec![],
-            access_secret: Some(SecretHandle::new("sel-s1-access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![],
-        })
-        .await
-        .unwrap();
-
-    // Create the account-selection flow under session S2.
-    let flow = service
-        .create_flow(NewAuthFlow {
-            requested_scopes: Vec::new(),
-            id: None,
-            scope: flow_scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: google_provider(),
-            requester_extension: None,
-            challenge: AuthChallenge::AccountSelectionRequired {
-                provider: google_provider(),
-                accounts: vec![account.projection()],
-            },
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: None,
-            opaque_state_hash: None,
-            pkce_verifier_hash: None,
-            expires_at: Utc::now() + Duration::minutes(5),
-        })
-        .await
-        .unwrap();
-
-    // Cross-session completion must be rejected.
-    // The disk layout partitions by session_id so the account is not found at
-    // all under S2 → CredentialMissing.  CrossScopeDenied would be returned if
-    // the account were somehow reachable with a mismatched session.  Both are
-    // correct secure outcomes; accepting either documents the actual behavior.
-    let err = service
-        .complete_credential_selection(
-            &flow_scope,
-            CredentialSelectionInput {
-                flow_id: flow.id,
-                credential_account_id: account.id,
-            },
-        )
-        .await
-        .expect_err("complete_credential_selection with different session_id must be rejected");
-
-    assert!(
-        matches!(
-            err,
-            AuthProductError::CredentialMissing | AuthProductError::CrossScopeDenied
-        ),
-        "cross-session credential selection must return CredentialMissing (path-partition \
-         intercepts before the guard) or CrossScopeDenied (guard fires on a reachable \
-         session-mismatched account), got: {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn filesystem_complete_credential_selection_rejects_different_auth_surface() {
-    // Reviewer A (serrrfirat) parity with `complete_manual_token` surface test.
-    // `complete_credential_selection` must reject an attempt to complete a
-    // selection flow whose scope carries surface Cli against a credential account
-    // created under surface Web.
-    //
-    // GUARD ANALYSIS: `surface` IS encoded in the on-disk account path (see
-    // `surface_path_segment` in `paths.rs`). An account stored under Web is NOT
-    // accessible from a read under Cli — `read_account` returns `None` →
-    // `CredentialMissing`. The `binding_scope_owns_account` surface exact-match is
-    // defense-in-depth: if a future refactor bypasses path partitioning the guard
-    // would catch a reachable surface-mismatched account and return
-    // `CrossScopeDenied`. Both outcomes are correct and secure; this test locks
-    // which one occurs so a regression cannot pass silently.
-    use crate::{AuthFlowKind, CredentialSelectionInput};
-
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
-
-    // Account created under AuthSurface::Web (default from test_scope()).
-    let web_scope = test_scope();
-
-    // Flow created under AuthSurface::Cli (same owner, different surface).
-    let cli_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Cli);
-
-    let service = test_service(filesystem, secret_store);
-
-    // Create the credential account under Web surface.
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: web_scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: vec![],
-            access_secret: Some(SecretHandle::new("sel-web-access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![],
-        })
-        .await
-        .unwrap();
-
-    // Create the account-selection flow under Cli surface.
-    let flow = service
-        .create_flow(NewAuthFlow {
-            requested_scopes: Vec::new(),
-            id: None,
-            scope: cli_scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: google_provider(),
-            requester_extension: None,
-            challenge: AuthChallenge::AccountSelectionRequired {
-                provider: google_provider(),
-                accounts: vec![account.projection()],
-            },
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: None,
-            opaque_state_hash: None,
-            pkce_verifier_hash: None,
-            expires_at: Utc::now() + Duration::minutes(5),
-        })
-        .await
-        .unwrap();
-
-    // Cross-surface completion must be rejected.
-    // The filesystem partitions by surface path segment so the account is not
-    // found from Cli → CredentialMissing.  CrossScopeDenied would fire if the
-    // account were somehow reachable with a mismatched surface.
-    let err = service
-        .complete_credential_selection(
-            &cli_scope,
-            CredentialSelectionInput {
-                flow_id: flow.id,
-                credential_account_id: account.id,
-            },
-        )
-        .await
-        .expect_err("complete_credential_selection with different AuthSurface must be rejected");
-
-    assert!(
-        matches!(
-            err,
-            AuthProductError::CredentialMissing | AuthProductError::CrossScopeDenied
-        ),
-        "cross-surface credential selection must return CredentialMissing (path-partition \
-         intercepts before the guard) or CrossScopeDenied (guard fires on a reachable \
-         surface-mismatched account), got: {err:?}"
     );
 }
 
@@ -4797,3 +4645,256 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
     assert_eq!(status(pending.id).await, AuthFlowStatus::Canceled);
 }
 // arch-exempt: large_file, durable auth contract coverage remains centralized, plan #6175
+
+/// Credentials written by any pre-migration layout are still resolvable after
+/// the upgrade, without re-authorizing.
+///
+/// Accounts used to be keyed by agent x project x surface x session; they now
+/// live at one address per credential owner. Anyone who reopens after this
+/// change must find the credentials they already had, so the durable service
+/// copies every legacy record forward on first read.
+///
+/// The record is copied verbatim on purpose: `account.scope` is what locates
+/// the account's secret material, so rewriting it to match the new path would
+/// migrate the record and orphan its tokens.
+#[tokio::test]
+async fn legacy_accounts_from_every_layout_survive_the_migration() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let service = test_service(filesystem, secret_store);
+
+    // One account per pre-migration shape, all owned by the same user.
+    let legacy_shapes: Vec<(&str, AuthProductScope)> = vec![
+        ("gate-callback-with-thread", {
+            let mut scope = AuthProductScope::new(test_scope().resource, AuthSurface::Callback);
+            scope.resource.agent_id =
+                Some(ironclaw_host_api::ids::AgentId::new("agent-a").unwrap());
+            scope.resource.thread_id = Some(ThreadId::new("thread-legacy").unwrap());
+            scope
+        }),
+        ("registry-web", {
+            let mut scope = AuthProductScope::new(test_scope().resource, AuthSurface::Web);
+            scope.resource.agent_id =
+                Some(ironclaw_host_api::ids::AgentId::new("agent-b").unwrap());
+            scope
+        }),
+        ("api-session-scoped", {
+            let mut scope = AuthProductScope::new(test_scope().resource, AuthSurface::Api);
+            scope.session_id = Some(AuthSessionId::new("session-legacy").unwrap());
+            scope
+        }),
+    ];
+
+    let mut expected = Vec::new();
+    for (label, legacy_scope) in &legacy_shapes {
+        // Write straight to the legacy path, bypassing the current writer —
+        // this is what an installation upgrading from the old layout has.
+        let account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: legacy_scope.clone(),
+            provider: google_provider(),
+            label: CredentialAccountLabel::new(*label).unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new(format!("{label}-access")).unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+            provider_identity: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let legacy_path = super::paths::legacy_account_root(legacy_scope)
+            .and_then(|root| super::paths::join_scoped(&root, &format!("{}.json", account.id)))
+            .unwrap();
+        service
+            .write_record(
+                &legacy_scope.resource,
+                &legacy_path,
+                &account,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        expected.push((account.id, account.scope.clone()));
+    }
+
+    // A plain owner read is all it takes — migration runs on first access.
+    let owner_scope = AuthProductScope::credential_owner(&test_scope().resource, AuthSurface::Api);
+    let found = service.accounts_for_owner(&owner_scope).await.unwrap();
+
+    for (id, legacy_scope) in &expected {
+        let migrated = found
+            .iter()
+            .find(|account| account.id == *id)
+            .unwrap_or_else(|| panic!("legacy account {id} was lost by the migration"));
+        assert_eq!(
+            &migrated.scope, legacy_scope,
+            "provenance must survive verbatim or the account's secret material is orphaned"
+        );
+    }
+    assert_eq!(found.len(), expected.len());
+
+    // Idempotent: a second pass must not duplicate or drop anything.
+    let again = service.accounts_for_owner(&owner_scope).await.unwrap();
+    assert_eq!(again.len(), expected.len(), "migration must be idempotent");
+}
+
+/// Migration must not widen a project-scoped credential's reach, and the
+/// resulting layout must not depend on who happens to read first.
+///
+/// The destination used to be derived from the reading caller's scope, so a
+/// legacy project-A credential landed in whichever project root read first —
+/// and since ownership no longer compares project, project B could then select
+/// project A's credential and its secret provenance. The destination is now
+/// derived from each record's own provenance, which is both reader-independent
+/// and what `write_account` uses, so read and write agree.
+#[tokio::test]
+async fn migration_keeps_each_project_credential_in_its_own_root() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let service = test_service(filesystem, secret_store);
+
+    let project_a = ironclaw_host_api::ids::ProjectId::new("project-a").unwrap();
+    let project_b = ironclaw_host_api::ids::ProjectId::new("project-b").unwrap();
+
+    // A legacy credential minted inside project A, under a legacy agent root.
+    let mut legacy_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Callback);
+    legacy_scope.resource.agent_id = Some(ironclaw_host_api::ids::AgentId::new("agent-a").unwrap());
+    legacy_scope.resource.project_id = Some(project_a.clone());
+    let account = CredentialAccount {
+        id: CredentialAccountId::new(),
+        scope: legacy_scope.clone(),
+        provider: google_provider(),
+        label: CredentialAccountLabel::new("project-a google").unwrap(),
+        status: CredentialAccountStatus::Configured,
+        ownership: CredentialOwnership::UserReusable,
+        owner_extension: None,
+        granted_extensions: Vec::new(),
+        access_secret: Some(SecretHandle::new("project-a-access").unwrap()),
+        refresh_secret: None,
+        scopes: Vec::new(),
+        provider_identity: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let legacy_path = super::paths::legacy_account_root(&legacy_scope)
+        .and_then(|root| super::paths::join_scoped(&root, &format!("{}.json", account.id)))
+        .unwrap();
+    service
+        .write_record(
+            &legacy_scope.resource,
+            &legacy_path,
+            &account,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    // Project B reads first, which is what used to decide the destination.
+    let mut b_resource = test_scope().resource;
+    b_resource.project_id = Some(project_b);
+    b_resource.invocation_id = InvocationId::new();
+    let b_scope = AuthProductScope::credential_owner(&b_resource, AuthSurface::Api);
+    let seen_by_b = service.accounts_for_owner(&b_scope).await.unwrap();
+    assert!(
+        !seen_by_b.iter().any(|found| found.id == account.id),
+        "project B must never resolve project A's credential"
+    );
+
+    // Project A still resolves it — migration preserved the narrowing rather
+    // than dropping it.
+    let mut a_resource = test_scope().resource;
+    a_resource.project_id = Some(project_a);
+    a_resource.invocation_id = InvocationId::new();
+    let a_scope = AuthProductScope::credential_owner(&a_resource, AuthSurface::Api);
+    let seen_by_a = service.accounts_for_owner(&a_scope).await.unwrap();
+    assert!(
+        seen_by_a.iter().any(|found| found.id == account.id),
+        "project A must still resolve its own credential after migration"
+    );
+
+    // And a user-level caller does not inherit upward from a project.
+    let user_scope = AuthProductScope::credential_owner(&test_scope().resource, AuthSurface::Api);
+    let seen_by_user = service.accounts_for_owner(&user_scope).await.unwrap();
+    assert!(
+        !seen_by_user.iter().any(|found| found.id == account.id),
+        "a project sub-credential must not leak to user-level callers"
+    );
+}
+
+/// The selection completion path crosses surface and session for one owner,
+/// exactly like its manual-token twin.
+///
+/// The two negative cases this replaces asserted the old exact-match rule. Only
+/// the manual-token twin got an affirmative replacement, leaving the two
+/// completion paths asymmetrically covered — so a regression that rejected here
+/// (or a change that never actually reached this path) would look identical to
+/// green.
+#[tokio::test]
+async fn filesystem_complete_credential_selection_crosses_surface_and_session_for_same_owner() {
+    use crate::{AuthFlowKind, CredentialSelectionInput};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+
+    // Account minted the way the blocked-turn gate mints one.
+    let mut account_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Callback);
+    account_scope.session_id = Some(AuthSessionId::new("session-s1").unwrap());
+
+    // Selection flow arriving from a different surface and session, same owner.
+    let mut flow_resource = test_scope().resource;
+    flow_resource.invocation_id = InvocationId::new();
+    let mut flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Web);
+    flow_scope.session_id = Some(AuthSessionId::new("session-s2").unwrap());
+
+    let service = test_service(filesystem, secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: account_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("sel-cross-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
+            id: None,
+            scope: flow_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            requester_extension: None,
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: google_provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    service
+        .complete_credential_selection(
+            &flow_scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("the owner's credential must be selectable across surface and session");
+}

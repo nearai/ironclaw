@@ -25,7 +25,24 @@ pub const MODEL_CREDITS_EXHAUSTED_CATEGORY: &str = "model_credits_exhausted";
 
 /// Failure category identifier for model provider credential or endpoint configuration failures.
 /// Exposed for cross-crate consumers that project this category to a user-facing message.
+///
+/// Scope note: this is the category for a credential the provider REJECTED — a
+/// key or base URL that is present but wrong. Two sibling faults share its
+/// error kind and must NOT share this category, because its pinned sentence
+/// ("check the API key and base URL") is false for both: see
+/// [`MODEL_PROVIDER_UNCONFIGURED_CATEGORY`] and
+/// [`MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY`].
 pub const MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY: &str = "model_credentials_unavailable";
+
+/// No model provider is configured at all. Distinct from
+/// [`MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY`]: there is no key to check, so the
+/// fix is adding a provider, not correcting one.
+pub const MODEL_PROVIDER_UNCONFIGURED_CATEGORY: &str = "model_provider_unconfigured";
+
+/// The selected provider's saved session could not be read. Distinct from
+/// [`MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY`]: the credential was never
+/// presented to the provider, so the fix is signing in again.
+pub const MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY: &str = "model_provider_session_unavailable";
 
 /// Failure category for an exhausted host-configured model spend budget.
 pub const MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY: &str = "model_spend_budget_exhausted";

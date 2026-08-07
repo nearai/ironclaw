@@ -1,9 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::ids::{
-    AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
-};
+use ironclaw_host_api::ids::{ExtensionId, ProjectId, SecretHandle, TenantId, UserId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 
@@ -531,19 +529,20 @@ pub trait CredentialAccountService: Send + Sync {
     ) -> Result<CredentialRefreshReport, AuthProductError>;
 }
 
-/// Stable credential-account owner fields used by read models that need to
-/// find accounts across transient invocation ids, product surfaces, or runtime
-/// sub-scopes. Missing mission/thread/session ids match both global and
-/// scoped accounts for the owner; present ids match only that exact scope.
+/// Who owns a credential: a tenant + user, optionally narrowed to a project
+/// beneath them.
+///
+/// These are exactly the fields the ownership rule compares — nothing here is
+/// carried for a future reader. `agent_id`, `mission_id`, `thread_id` and
+/// `session_id` were dropped once [`Self::matches`] stopped comparing them and
+/// the migration's legacy walk stopped narrowing by session: they were
+/// populated on every construction and read nowhere, while their doc still
+/// advertised a wildcard rule that no longer existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountOwnerScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
-    pub mission_id: Option<MissionId>,
-    pub thread_id: Option<ThreadId>,
-    pub session_id: Option<crate::AuthSessionId>,
 }
 
 impl CredentialAccountOwnerScope {
@@ -551,32 +550,45 @@ impl CredentialAccountOwnerScope {
         Self {
             tenant_id: scope.resource.tenant_id.clone(),
             user_id: scope.resource.user_id.clone(),
-            agent_id: scope.resource.agent_id.clone(),
             project_id: scope.resource.project_id.clone(),
-            mission_id: scope.resource.mission_id.clone(),
-            thread_id: scope.resource.thread_id.clone(),
-            session_id: scope.session_id.clone(),
         }
     }
 
+    /// A credential belongs to a **tenant + user**, optionally narrowed to a
+    /// project underneath that user. Nothing else owns it.
+    ///
+    /// Tenant and user are hard-required: they are the security boundary, and
+    /// the only one here. `agent_id`, `thread_id`, `mission_id` and
+    /// `session_id` are deliberately NOT compared — a user authorizes a vendor
+    /// once, not once per agent, per browser session, or per screen. Comparing
+    /// them is what made a credential minted by the chat auth gate invisible to
+    /// the extensions registry and the runtime, which reported it as
+    /// "needs setup" forever while the tokens sat valid on disk.
+    ///
+    /// Project **inherits downward, never upward**: a project-scoped caller
+    /// sees its own project's credentials plus the user-level ones it inherits,
+    /// so creating a project cannot silently disconnect every integration. A
+    /// user-level caller sees only user-level credentials, so a project's
+    /// sub-credential never leaks out of that project.
+    ///
+    /// The project comparison lives *here*, in the shared predicate, and not
+    /// only in the durable store's root chain. The filesystem store narrows by
+    /// reading just the relevant roots, but the in-memory store has no roots and
+    /// filters solely through this predicate — so leaving project out made the
+    /// fake strictly more permissive than production, letting a project-scoped
+    /// caller see every other project's credentials. A fake that fails open is
+    /// the one thing this crate's guardrails say it must never be. Comparing it
+    /// here makes both implementations enforce one rule, and leaves the durable
+    /// root chain as narrowing rather than as the only check.
+    ///
+    /// Comparing the record's project is sound because migration aligns
+    /// provenance with placement: a record living in project P's root carries
+    /// provenance project P, and a user-level record carries none.
     pub fn matches(&self, account: &CredentialAccount) -> bool {
         let resource = &account.scope.resource;
         resource.tenant_id == self.tenant_id
             && resource.user_id == self.user_id
-            && resource.agent_id == self.agent_id
-            && resource.project_id == self.project_id
-            && self
-                .mission_id
-                .as_ref()
-                .is_none_or(|mission_id| resource.mission_id.as_ref() == Some(mission_id))
-            && self
-                .thread_id
-                .as_ref()
-                .is_none_or(|thread_id| resource.thread_id.as_ref() == Some(thread_id))
-            && self
-                .session_id
-                .as_ref()
-                .is_none_or(|session_id| account.scope.session_id.as_ref() == Some(session_id))
+            && (resource.project_id == self.project_id || resource.project_id.is_none())
     }
 }
 
@@ -588,30 +600,20 @@ impl CredentialAccountOwnerScope {
 /// per-flow `invocation_id` (and possibly a thread/mission) that the account —
 /// created in an earlier flow — does not share. Comparing those transient
 /// fields (the old `scope_matches` full-equality) rejected every legitimate
-/// reconnect and forked a duplicate account (#4935 defect A). This keeps
-/// tenant/user/agent/project hard-required (via [`CredentialAccountOwnerScope`])
-/// and `session_id` matched (it is path-segmenting), while clearing
-/// `thread_id`/`mission_id` and ignoring `invocation_id` (which
-/// [`CredentialAccountOwnerScope`] does not compare). Requester authorization is
-/// enforced separately by the callers; this is only the owner-boundary check.
+/// reconnect and forked a duplicate account (#4935 defect A). Requester
+/// authorization is enforced separately by the callers; this is only the
+/// owner-boundary check.
 ///
-/// `session_id` and `surface` are compared for **exact** equality (including
-/// `None == None` for session), NOT wildcarded the way
-/// `CredentialAccountOwnerScope::matches` wildcards a `None` owner session for
-/// runtime reads. The bind/update *write* path is segmented on disk by both
-/// `surface` and `session_id` (`product_auth_durable` keys account records by
-/// surface path segment + session), and the update reads the account at the
-/// flow scope's surface/session path — so binding a flow to an account stored
-/// on a different surface (or session) would select a record the callback can
-/// never read or update, and would surface as a spurious `CredentialMissing`
-/// that aborts the reconnect instead of an unbound fresh flow. Require exact
-/// surface and session equality so a cross-surface / cross-session account is
-/// never bound.
+/// This is exactly [`CredentialAccountOwnerScope::matches`] and deliberately
+/// adds nothing to it. It previously also required exact `surface` and
+/// `session_id` equality, justified by accounts being path-segmented on those
+/// axes: binding to an account on another surface would select a record the
+/// callback could not then write back to. Accounts now live at one address per
+/// credential owner, so that hazard is gone and the extra equality only
+/// rejected legitimate reconnects — a credential minted by the chat auth gate
+/// (`Callback`) could never be re-bound from the extensions surface (`Web`).
 pub fn binding_scope_owns_account(scope: &AuthProductScope, account: &CredentialAccount) -> bool {
-    let owner_scope = scope.to_credential_owner();
-    CredentialAccountOwnerScope::from_scope(&owner_scope).matches(account)
-        && account.scope.session_id.as_ref() == owner_scope.session_id.as_ref()
-        && account.scope.surface == owner_scope.surface
+    CredentialAccountOwnerScope::from_scope(&scope.to_credential_owner()).matches(account)
 }
 
 /// Read-only credential-account projection source for account owner queries.
@@ -1142,97 +1144,60 @@ mod tests {
         );
     }
 
-    // Case 2: owner matches and surface matches, but session_id differs.
-    // Exact-match invariant on session_id must reject the binding.
+    /// Binding is an **owner** boundary and nothing more.
+    ///
+    /// This replaces four separate cases that each asserted a cross-surface or
+    /// cross-session bind was rejected. Those axes are no longer part of a
+    /// credential's identity: an account minted by the chat auth gate
+    /// (`Callback`, with a session) and one reconnected from the extensions
+    /// page (`Web`, without) are the same user's credential, and refusing to
+    /// bind them is what stranded a valid credential as "needs setup". Only
+    /// tenant/user/project may reject a bind — pinned by the foreign-owner
+    /// cases in `product_auth::durable::tests`.
     #[test]
-    fn binding_scope_owns_account_returns_false_when_session_differs() {
-        let account_scope =
+    fn binding_crosses_surface_and_session_but_never_the_owner() {
+        let account = make_account(
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Callback)
+                .with_session_id(AuthSessionId::new("session-s1").unwrap()),
+        );
+
+        for flow_scope in [
+            // Same owner, every combination of the axes that used to reject.
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api),
             AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
-                .with_session_id(AuthSessionId::new("session-s1").unwrap());
-        let account = make_account(account_scope);
+                .with_session_id(AuthSessionId::new("session-s2").unwrap()),
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Callback)
+                .with_session_id(AuthSessionId::new("session-s1").unwrap()),
+        ] {
+            assert!(
+                binding_scope_owns_account(&flow_scope, &account),
+                "same owner must bind regardless of surface/session: {:?}",
+                flow_scope.surface
+            );
+        }
 
-        let flow_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
-                .with_session_id(AuthSessionId::new("session-s2").unwrap());
-
+        // The boundary that still holds. Both identifiers are asserted: this is
+        // the test that pins tenant+user as *the* security boundary after four
+        // rejection cases were deleted, so an edit that drops either comparison
+        // must fail here.
+        let mut foreign_user = owner_resource(InvocationId::new());
+        foreign_user.user_id = UserId::new("mallory").unwrap();
         assert!(
-            !binding_scope_owns_account(&flow_scope, &account),
-            "mismatched session_id must return false"
+            !binding_scope_owns_account(
+                &AuthProductScope::new(foreign_user, AuthSurface::Api),
+                &account
+            ),
+            "a different user must never bind another user's credential"
         );
-    }
 
-    // Case 3: owner matches and session matches, but surface differs.
-    // Exact-match invariant on surface must reject the binding.
-    #[test]
-    fn binding_scope_owns_account_returns_false_when_surface_differs() {
-        let session = AuthSessionId::new("ses-xyz").unwrap();
-
-        let account_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
-                .with_session_id(session.clone());
-        let account = make_account(account_scope);
-
-        // Same owner and session, but the flow comes from the Chat surface.
-        let flow_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Chat)
-                .with_session_id(session);
-
+        let mut foreign_tenant = owner_resource(InvocationId::new());
+        foreign_tenant.tenant_id = TenantId::new("tenant-other").unwrap();
         assert!(
-            !binding_scope_owns_account(&flow_scope, &account),
-            "mismatched surface must return false"
-        );
-    }
-
-    // Case 4a: account has Some session, flow scope has None.
-    // session_id is compared with as_ref() equality, so Some(..) != None => false.
-    #[test]
-    fn binding_scope_owns_account_returns_false_when_account_has_session_but_scope_does_not() {
-        let account_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api)
-                .with_session_id(AuthSessionId::new("ses-present").unwrap());
-        let account = make_account(account_scope);
-
-        // Flow scope carries no session_id.
-        let flow_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
-
-        assert!(
-            !binding_scope_owns_account(&flow_scope, &account),
-            "account Some(session) vs scope None must return false"
-        );
-    }
-
-    // Case 4b: flow scope has Some session, account has None.
-    // same as_ref() equality: Some(..) != None => false.
-    #[test]
-    fn binding_scope_owns_account_returns_false_when_scope_has_session_but_account_does_not() {
-        let account_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
-        let account = make_account(account_scope);
-
-        let flow_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api)
-                .with_session_id(AuthSessionId::new("ses-present").unwrap());
-
-        assert!(
-            !binding_scope_owns_account(&flow_scope, &account),
-            "scope Some(session) vs account None must return false"
-        );
-    }
-
-    // Case 4c: both scope and account have None session — None == None => true.
-    #[test]
-    fn binding_scope_owns_account_returns_true_when_both_sessions_are_none() {
-        let account_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
-        let account = make_account(account_scope);
-
-        let flow_scope =
-            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
-
-        assert!(
-            binding_scope_owns_account(&flow_scope, &account),
-            "None session on both sides must return true (None == None)"
+            !binding_scope_owns_account(
+                &AuthProductScope::new(foreign_tenant, AuthSurface::Api),
+                &account
+            ),
+            "a different tenant must never bind another tenant's credential"
         );
     }
 }

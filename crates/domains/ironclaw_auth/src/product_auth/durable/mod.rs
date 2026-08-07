@@ -27,7 +27,9 @@ use ironclaw_host_api::path::VirtualPath;
 
 use self::domain::validate_new_credential_account;
 use self::paths::{
-    account_path, account_root, flow_path, flow_root, fs_error, join_scoped, surface_sessions_root,
+    account_migration_marker_path, account_path, account_root, flow_path, flow_root, fs_error,
+    join_scoped, legacy_account_root, legacy_agents_root, legacy_projects_root,
+    surface_sessions_root,
 };
 
 mod accounts;
@@ -41,7 +43,35 @@ mod provider;
 mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
+/// Bound on legacy agent/project directories walked during migration.
+const MAX_LEGACY_OWNER_DIRS_PER_LEVEL: usize = 1024;
+/// Total directory listings one owner's legacy migration may perform.
+///
+/// The per-level caps above bound each level but not the walk, whose size is
+/// their product: agents x projects x surfaces x sessions. This is the single
+/// budget spent across every level, so a pathological layout costs a bounded
+/// number of round-trips on a read path a user is waiting on rather than the
+/// product of the caps.
+const MAX_LEGACY_MIGRATION_LISTINGS: usize = 4096;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+
+/// Durable evidence that an owner's accounts have been copied out of the
+/// pre-migration roots. Durable rather than process-local so the legacy scan
+/// runs once per owner across restarts instead of once per process.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct AccountMigrationMarker {
+    migrated: usize,
+    /// False when the scan hit its budget and stopped early. Recorded so the
+    /// incompleteness is visible rather than inferred from a missing marker.
+    #[serde(default = "migration_marker_complete_default")]
+    complete: bool,
+}
+
+/// Pre-budget markers predate the `complete` flag and always recorded a scan
+/// that ran to completion.
+fn migration_marker_complete_default() -> bool {
+    true
+}
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
     !crate::is_terminal_status(flow.status)
@@ -429,13 +459,35 @@ where
         .await
     }
 
+    /// Read one account by id, following the same nearest-first chain as
+    /// [`Self::account_scopes_for_owner`].
+    ///
+    /// The fallback is load-bearing, not a convenience: a project caller can
+    /// *select* an inherited user-level account for a bind, and the OAuth
+    /// callback then reads it back by id under the project scope. Checking only
+    /// the project root returned `CredentialMissing` there, so reconnecting an
+    /// inherited credential from inside a project failed with the credential
+    /// sitting readable one root up. The manual-token bound update reads
+    /// through the same path.
     async fn read_account(
         &self,
         scope: &crate::AuthProductScope,
         account_id: CredentialAccountId,
     ) -> Result<Option<(CredentialAccount, RecordVersion)>, AuthProductError> {
-        self.read_record(&scope.resource, &account_path(scope, account_id)?)
-            .await
+        for candidate in
+            Self::account_scopes_for_owner(&CredentialAccountOwnerScope::from_scope(scope))
+        {
+            if let Some(found) = self
+                .read_record(
+                    &candidate.resource,
+                    &account_path(&candidate.resource, account_id)?,
+                )
+                .await?
+            {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
     }
 
     async fn write_account(
@@ -445,7 +497,7 @@ where
     ) -> Result<RecordVersion, AuthProductError> {
         self.write_record(
             &account.scope.resource,
-            &account_path(&account.scope, account.id)?,
+            &account_path(&account.scope.resource, account.id)?,
             account,
             cas,
         )
@@ -486,7 +538,7 @@ where
         scope: &crate::AuthProductScope,
         max_records: Option<usize>,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
-        let root = account_root(scope)?;
+        let root = account_root(&scope.resource)?;
         let entries = match max_records {
             Some(max_records) => {
                 self.filesystem
@@ -529,29 +581,192 @@ where
         Ok(accounts)
     }
 
-    async fn account_scopes_for_owner(
-        &self,
-        owner: &CredentialAccountOwnerScope,
-    ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
-        let resource = ResourceScope {
+    fn owner_resource(owner: &CredentialAccountOwnerScope) -> ResourceScope {
+        ResourceScope {
             tenant_id: owner.tenant_id.clone(),
             user_id: owner.user_id.clone(),
-            agent_id: owner.agent_id.clone(),
+            // Not part of a credential's address — see
+            // `CredentialAccountOwnerScope::matches`.
+            agent_id: None,
             project_id: owner.project_id.clone(),
-            mission_id: owner.mission_id.clone(),
-            thread_id: owner.thread_id.clone(),
+            mission_id: None,
+            thread_id: None,
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        }
+    }
+
+    /// The canonical roots a credential lookup reads, nearest scope first.
+    ///
+    /// At most two: the caller's project (when it has one) and the user-level
+    /// default it inherits from. This replaced a blind fan-out over all seven
+    /// `AuthSurface` variants times every session directory — a scan that
+    /// existed only because the write side chose a partition the read side
+    /// could not predict.
+    fn account_scopes_for_owner(
+        owner: &CredentialAccountOwnerScope,
+    ) -> Vec<crate::AuthProductScope> {
+        let resource = Self::owner_resource(owner);
+        let mut scopes = vec![crate::AuthProductScope::new(
+            resource.clone(),
+            AuthSurface::Api,
+        )];
+        if resource.project_id.is_some() {
+            let mut inherited = resource;
+            inherited.project_id = None;
+            scopes.push(crate::AuthProductScope::new(inherited, AuthSurface::Api));
+        }
+        scopes
+    }
+
+    /// Every pre-migration root an account could be sitting in: agent x project
+    /// x surface x session. Read-only, and used only by the one-shot migration
+    /// — this is the old steady-state read path, kept as the upgrade path.
+    /// Directory names under `root`, or empty when the directory is absent.
+    async fn legacy_child_names(
+        &self,
+        resource: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<Vec<String>, AuthProductError> {
+        let entries = match self
+            .filesystem
+            .list_dir_bounded(
+                resource,
+                root,
+                MAX_LEGACY_OWNER_DIRS_PER_LEVEL.saturating_add(1),
+            )
+            .await
+        {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(fs_error(error)),
         };
+        if entries.len() > MAX_LEGACY_OWNER_DIRS_PER_LEVEL {
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        let mut names = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Every `(agent, project)` prefix the legacy layout could have written
+    /// under for this user, discovered from disk.
+    ///
+    /// The reader's own agent is not enough: the whole point of the change is
+    /// that a credential minted while agent A was running must be found by
+    /// agent B, so the migration enumerates the agent directories instead of
+    /// assuming one. Both are scoped inside this user's mount, so this walks
+    /// one user's records, never another's.
+    async fn legacy_owner_resources(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+        budget: &mut usize,
+    ) -> Result<Vec<ResourceScope>, AuthProductError> {
+        let base = Self::owner_resource(owner);
+        if *budget == 0 {
+            return Ok(Vec::new());
+        }
+        *budget = budget.saturating_sub(1);
+        let mut agents: Vec<Option<String>> = vec![None];
+        agents.extend(
+            self.legacy_child_names(&base, &legacy_agents_root()?)
+                .await?
+                .into_iter()
+                .map(Some),
+        );
+
+        let mut resources = Vec::new();
+        for agent in agents {
+            if *budget == 0 {
+                break;
+            }
+            *budget = budget.saturating_sub(1);
+            let mut projects: Vec<Option<String>> = vec![None];
+            projects.extend(
+                self.legacy_child_names(&base, &legacy_projects_root(agent.as_deref())?)
+                    .await?
+                    .into_iter()
+                    .map(Some),
+            );
+            for project in projects {
+                // silent-ok: a directory name the current validator rejects
+                // cannot have been written by a current writer, so it holds
+                // nothing to migrate — skip it the way every other directory
+                // scan in this file does (see the agent scan in
+                // `list_refresh_candidates`). Aborting instead poisoned the
+                // whole migration: the marker is written only on completion, so
+                // one unparseable directory made every credential read for that
+                // user rescan, fail, and report "needs setup" for credentials
+                // sitting valid on disk — the exact failure this change exists
+                // to remove.
+                let agent_id = match &agent {
+                    Some(agent) => match AgentId::new(agent.clone()) {
+                        Ok(agent_id) => Some(agent_id),
+                        Err(error) => {
+                            tracing::debug!(%error, "skipping unparseable legacy agent directory");
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+                let project_id = match &project {
+                    Some(project) => match ProjectId::new(project.clone()) {
+                        Ok(project_id) => Some(project_id),
+                        Err(error) => {
+                            tracing::debug!(%error, "skipping unparseable legacy project directory");
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+                let mut resource = base.clone();
+                resource.agent_id = agent_id;
+                resource.project_id = project_id;
+                resources.push(resource);
+            }
+        }
+        Ok(resources)
+    }
+
+    async fn legacy_account_scopes_for_owner(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
+        let mut scopes = Vec::new();
+        for resource in self.legacy_owner_resources(owner, budget).await? {
+            if *budget == 0 {
+                break;
+            }
+            scopes.extend(self.legacy_account_scopes_under(resource, budget).await?);
+        }
+        Ok(scopes)
+    }
+
+    async fn legacy_account_scopes_under(
+        &self,
+        resource: ResourceScope,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
         let mut scopes = Vec::new();
         for surface in AuthSurface::ALL {
             scopes.push(crate::AuthProductScope::new(resource.clone(), surface));
-            if let Some(session_id) = &owner.session_id {
-                scopes.push(
-                    crate::AuthProductScope::new(resource.clone(), surface)
-                        .with_session_id(session_id.clone()),
-                );
-                continue;
+            // Always enumerate sessions from disk. This inherited the old
+            // steady-state read logic, which narrowed to the caller's own
+            // session when it had one — correct for a read, wrong for a
+            // one-shot migration: the marker is written afterwards, so a
+            // session-bound first reader (manual-token completion, or a
+            // blocked-turn gate scope) migrated only its own session and then
+            // suppressed the walk forever, stranding every other session's
+            // credentials permanently. That is the failure this change exists
+            // to remove, reintroduced one layer down.
+            if *budget == 0 {
+                break;
             }
+            *budget = budget.saturating_sub(1);
             let sessions_root = surface_sessions_root(&resource, surface)?;
             let mut entries = match self
                 .filesystem
@@ -586,21 +801,208 @@ where
         Ok(scopes)
     }
 
+    /// Copy every account out of the pre-migration roots into the canonical
+    /// one, exactly once per owner.
+    ///
+    /// Copy-forward, never delete: an interrupted run loses nothing and re-runs
+    /// cleanly, and the legacy records stay readable if this needs to be rolled
+    /// back. They become inert — nothing writes to those roots again — and are
+    /// collected separately rather than removed on a read path.
+    ///
+    /// Everything lands at the **user level**, including records that were
+    /// under `/agents/{a}/projects/{p}/`, into the canonical root its OWN
+    /// provenance names — a record minted under project P lands in P's root,
+    /// one minted with no project lands at user level.
+    ///
+    /// Deriving the destination from the reading caller instead (an earlier
+    /// version of this) copied project A's credential into whichever project
+    /// read first, and since ownership no longer compares project, that made it
+    /// selectable there. It also made the resulting layout depend on who
+    /// happened to read first. Provenance is reader-independent and is what
+    /// `write_account` already uses, so read and write agree by construction.
+    async fn migrate_legacy_accounts(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+    ) -> Result<(), AuthProductError> {
+        // The marker lives at the owner's USER-level root, never the reading
+        // caller's project root. One owner gets one marker regardless of who
+        // reads first; keying it on the reader would let a project caller and a
+        // user-level caller each run the full scan.
+        let mut marker_resource = Self::owner_resource(owner);
+        marker_resource.project_id = None;
+        let marker = account_migration_marker_path(&marker_resource)?;
+        if self
+            .filesystem
+            .get(&marker_resource, &marker)
+            .await
+            .map_err(fs_error)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Serialize per owner. Without this, concurrent first reads for one
+        // owner each walk every legacy root: `CasExpectation::Absent` keeps the
+        // records correct, but the duplicated scan is pure cost on a read path
+        // a user is waiting on.
+        let migration_lock = self.lock_for(format!(
+            "account-migration:{}:{}",
+            owner.tenant_id.as_str(),
+            owner.user_id.as_str()
+        ));
+        let _migration_guard = migration_lock.lock().await;
+        // Re-check under the lock: the writer we queued behind may have just
+        // finished the whole migration.
+        if self
+            .filesystem
+            .get(&marker_resource, &marker)
+            .await
+            .map_err(fs_error)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let mut budget = MAX_LEGACY_MIGRATION_LISTINGS;
+        let mut migrated = 0usize;
+        let mut exhausted = false;
+        for legacy_scope in self
+            .legacy_account_scopes_for_owner(owner, &mut budget)
+            .await?
+        {
+            if budget == 0 {
+                exhausted = true;
+                break;
+            }
+            budget = budget.saturating_sub(1);
+            let legacy_root = legacy_account_root(&legacy_scope)?;
+            let entries = match self
+                .filesystem
+                .list_dir_bounded(
+                    &legacy_scope.resource,
+                    &legacy_root,
+                    MAX_OWNER_RECORDS_PER_ROOT.saturating_add(1),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
+            };
+            if entries.len() > MAX_OWNER_RECORDS_PER_ROOT {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            for entry in entries {
+                if !entry.name.ends_with(".json") {
+                    continue;
+                }
+                let legacy_path = join_scoped(&legacy_root, &entry.name)?;
+                let Some(account) = self
+                    .read_account_record_for_scan(&legacy_scope.resource, &legacy_path)
+                    .await?
+                else {
+                    continue;
+                };
+                // The record is copied VERBATIM. Its `scope` is provenance, not
+                // identity: it is what locates the account's secret material
+                // (`secret_store.metadata(&account.scope.resource, ..)`), which
+                // still lives under the agent/project prefix it was written
+                // with. Rewriting the scope to match the new path would move
+                // the record and orphan its tokens.
+                //
+                // The destination is derived from that same provenance, NOT
+                // from the reading caller. Using the caller's scope copied a
+                // project-A credential into whichever project happened to read
+                // first — and since ownership no longer compares project, that
+                // made project A's credential selectable by project B. Deriving
+                // the destination from the record keeps each project's
+                // credentials in its own root, and makes the write-back path
+                // agree with the read path by construction: `write_account`
+                // computes exactly this path from exactly this scope.
+                let canonical_path = account_path(&account.scope.resource, account.id)?;
+                // Create-if-absent: a record already migrated (or written fresh
+                // at the canonical path) always wins over the legacy copy.
+                match self
+                    .write_record(
+                        &account.scope.resource,
+                        &canonical_path,
+                        &account,
+                        CasExpectation::Absent,
+                    )
+                    .await
+                {
+                    Ok(_) => migrated = migrated.saturating_add(1),
+                    Err(AuthProductError::BackendConflict) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        if migrated > 0 {
+            // `debug!`, not `info!`: this runs from `account_records_for_owner`,
+            // which the keepalive sweep calls per owner, so an `info!` here
+            // would fire from a background task and corrupt the REPL/TUI
+            // (CLAUDE.md, "Logging levels matter for REPL/TUI").
+            tracing::debug!(
+                migrated,
+                "migrated credential accounts to the canonical owner path"
+            );
+        }
+        if exhausted {
+            // Converge rather than rescan forever. A layout this large will not
+            // shrink between reads, and repeating the walk would make every
+            // credential read pay it. `warn!` so an operator sees it; the
+            // marker records that the scan was incomplete.
+            tracing::warn!(
+                migrated,
+                "legacy credential migration exceeded its scan budget; \
+                 remaining legacy roots were not migrated"
+            );
+        }
+        self.write_record(
+            &marker_resource,
+            &marker,
+            &AccountMigrationMarker {
+                migrated,
+                complete: !exhausted,
+            },
+            CasExpectation::Any,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn account_records_for_owner(
         &self,
         owner: &CredentialAccountOwnerScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
-        let mut accounts = Vec::new();
-        for scope in self.account_scopes_for_owner(owner).await? {
-            accounts.extend(
-                self.account_records_under_scope_root_with_limit(
+        self.migrate_legacy_accounts(owner).await?;
+        let mut accounts: Vec<CredentialAccount> = Vec::new();
+        // Nearest root wins, PER PROVIDER. The roots are ordered project-then-
+        // user, but order alone is not precedence: merging both roots made a
+        // project override and the user-level default it overrides look like two
+        // candidates for one provider, which resolves as ambiguity (or picks the
+        // most recent) instead of letting the project win. Skipping only the
+        // providers a nearer root already answered keeps inheritance intact for
+        // every other provider — a project that overrides Notion must still
+        // inherit GitHub.
+        let mut answered: std::collections::BTreeSet<crate::AuthProviderId> =
+            std::collections::BTreeSet::new();
+        for scope in Self::account_scopes_for_owner(owner) {
+            let from_root = self
+                .account_records_under_scope_root_with_limit(
                     &scope,
                     Some(MAX_OWNER_RECORDS_PER_ROOT),
                 )
                 .await?
                 .into_iter()
-                .filter(|account| owner.matches(account)),
-            );
+                .filter(|account| owner.matches(account))
+                .filter(|account| !answered.contains(&account.provider))
+                .collect::<Vec<_>>();
+            for account in &from_root {
+                answered.insert(account.provider.clone());
+            }
+            accounts.extend(from_root);
         }
         accounts.sort_by_key(|account| account.id);
         accounts.dedup_by_key(|account| account.id);
@@ -612,9 +1014,10 @@ where
         request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccount, AuthProductError> {
         let owner = CredentialAccountOwnerScope::from_scope(&request.scope);
+        self.migrate_legacy_accounts(&owner).await?;
         let mut saw_configured = false;
         let mut selected = None;
-        for scope in self.account_scopes_for_owner(&owner).await? {
+        for scope in Self::account_scopes_for_owner(&owner) {
             for account in self
                 .account_records_under_scope_root_with_limit(
                     &scope,
@@ -735,109 +1138,23 @@ where
                     continue; // silent-ok: unparseable user directory name; skip
                 };
 
-                // Collect every owner scope for this (tenant, user):
-                //   1. plain (no agent, no project)
-                //   2. for each agent dir: agent-only
-                //   3. for each agent+project dir: agent+project
-                //   4. for each project dir (top-level): project-only
+                // Every owner scope for this (tenant, user): the user
+                // itself, plus one per top-level project directory.
+                //
+                // The agent enumeration this used to do is gone with the
+                // `agent_id` field: a credential is owned by a tenant+user (and
+                // optionally a project), so an agent subtree names no owner the
+                // sweep could refresh. Legacy accounts still sitting under
+                // `/secrets/agents/**` are reached by the migration that
+                // `account_records_for_owner` runs, not by widening this walk.
                 let mut owner_scopes: Vec<CredentialAccountOwnerScope> = Vec::new();
-
-                // 1. Plain user scope.
                 owner_scopes.push(CredentialAccountOwnerScope {
                     tenant_id: tenant_id.clone(),
                     user_id: user_id.clone(),
-                    agent_id: None,
                     project_id: None,
-                    mission_id: None,
-                    thread_id: None,
-                    session_id: None,
                 });
 
-                // 2 + 3. Enumerate /tenants/<t>/users/<u>/secrets/agents/
-                let agents_dir = format!(
-                    "/tenants/{}/users/{}/secrets/agents",
-                    tenant_entry.name, user_entry.name
-                );
-                if let Ok(agents_path) = VirtualPath::new(&agents_dir) {
-                    match root.list_dir(&agents_path).await {
-                        Ok(agent_entries) => {
-                            for agent_entry in agent_entries {
-                                if agent_entry.file_type != FileType::Directory {
-                                    continue;
-                                }
-                                let Ok(agent_id) = AgentId::new(&agent_entry.name) else {
-                                    continue; // silent-ok: unparseable agent dir; skip
-                                };
-                                // 2. Agent-only scope.
-                                owner_scopes.push(CredentialAccountOwnerScope {
-                                    tenant_id: tenant_id.clone(),
-                                    user_id: user_id.clone(),
-                                    agent_id: Some(agent_id.clone()),
-                                    project_id: None,
-                                    mission_id: None,
-                                    thread_id: None,
-                                    session_id: None,
-                                });
-                                // 3. Agent+project scopes.
-                                let agent_projects_dir =
-                                    format!("{}/{}/projects", agents_dir, agent_entry.name);
-                                if let Ok(ap_path) = VirtualPath::new(&agent_projects_dir) {
-                                    match root.list_dir(&ap_path).await {
-                                        Ok(proj_entries) => {
-                                            for proj_entry in proj_entries {
-                                                if proj_entry.file_type != FileType::Directory {
-                                                    continue;
-                                                }
-                                                let Ok(project_id) =
-                                                    ProjectId::new(&proj_entry.name)
-                                                else {
-                                                    continue; // silent-ok: unparseable project dir; skip
-                                                };
-                                                owner_scopes.push(CredentialAccountOwnerScope {
-                                                    tenant_id: tenant_id.clone(),
-                                                    user_id: user_id.clone(),
-                                                    agent_id: Some(agent_id.clone()),
-                                                    project_id: Some(project_id),
-                                                    mission_id: None,
-                                                    thread_id: None,
-                                                    session_id: None,
-                                                });
-                                            }
-                                        }
-                                        Err(
-                                            FilesystemError::NotFound { .. }
-                                            | FilesystemError::Unsupported { .. },
-                                        ) => {}
-                                        Err(error) => {
-                                            tracing::debug!(
-                                                tenant = %tenant_entry.name,
-                                                user = %user_entry.name,
-                                                agent = %agent_entry.name,
-                                                %error,
-                                                "account sweep: failed to list agent/projects dir; skipping"
-                                                // silent-ok: one bad agent subtree must not abort the sweep
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(
-                            FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. },
-                        ) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                tenant = %tenant_entry.name,
-                                user = %user_entry.name,
-                                %error,
-                                "account sweep: failed to list agents dir; skipping"
-                                // silent-ok: one bad user subtree must not abort the sweep
-                            );
-                        }
-                    }
-                }
-
-                // 4. Top-level project-only scopes.
+                // One scope per top-level project directory.
                 // /tenants/<t>/users/<u>/secrets/projects/
                 let projects_dir = format!(
                     "/tenants/{}/users/{}/secrets/projects",
@@ -856,11 +1173,7 @@ where
                                 owner_scopes.push(CredentialAccountOwnerScope {
                                     tenant_id: tenant_id.clone(),
                                     user_id: user_id.clone(),
-                                    agent_id: None,
                                     project_id: Some(project_id),
-                                    mission_id: None,
-                                    thread_id: None,
-                                    session_id: None,
                                 });
                             }
                         }

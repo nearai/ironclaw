@@ -190,13 +190,18 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     // With no LLM gateway compiled in, the stub gateway reports a
     // configuration fault (CredentialUnavailable) that fails the run on
     // first sight — no availability retries — and verifies the final
-    // checkpoint evidence, mapping to a terminal
-    // model_credentials_unavailable failure instead of the pre-PR
-    // RecoveryRequired path that cancelled via the standalone-runtime guard.
+    // checkpoint evidence, instead of the pre-PR RecoveryRequired path that
+    // cancelled via the standalone-runtime guard.
+    //
+    // The category is `model_provider_unconfigured`, not the broader
+    // `model_credentials_unavailable` it used to share: nothing is configured
+    // here, so telling the operator to "check the selected provider's API key
+    // and base URL" named a key that does not exist. The error kind is
+    // unchanged — this is still a fail-fast configuration fault.
     assert_eq!(reply.status, TurnStatus::Failed);
     assert_eq!(
         reply.failure_category.as_deref(),
-        Some("model_credentials_unavailable")
+        Some("model_provider_unconfigured")
     );
     assert_eq!(reply.text, None);
 
@@ -211,7 +216,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(
         second_reply.failure_category.as_deref(),
-        Some("model_credentials_unavailable")
+        Some("model_provider_unconfigured")
     );
     assert_eq!(second_reply.text, None);
 
@@ -687,7 +692,7 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
     let runtime = build_reborn_runtime(input).await.unwrap();
 
     // Submit two sequential turns on two conversations. With the stub gateway
-    // each turn completes (as Failed / model_credentials_unavailable) before the
+    // each turn completes (as Failed / model_provider_unconfigured) before the
     // next is submitted, so the per-user slot is always free and neither
     // submission should be rejected. If the cap was accidentally set to 0 (a
     // misconfiguration the wiring layer could introduce) the store would block
