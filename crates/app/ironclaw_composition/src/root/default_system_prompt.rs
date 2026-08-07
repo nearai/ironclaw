@@ -39,21 +39,42 @@ pub(crate) enum DefaultSystemPromptError {
     },
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct DefaultSystemPromptIdentitySource {
-    storage_root: PathBuf,
-    prompt_path: PathBuf,
+/// Which conditional protocol sections this runtime appends to the resolved
+/// system prompt.
+///
+/// Named fields rather than positional `bool`s: every one of these describes a
+/// capability the prompt is allowed to claim, and a swapped pair would silently
+/// tell the model about a surface it does not have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SystemPromptProtocols {
     /// When true, the progressive tool-disclosure protocol is appended to the
     /// system prompt so the model is told to discover deferred tools via
     /// `tool_search`. Set from the resolved tool-disclosure mode at build time;
     /// off ⇒ the prompt carries the file plus the unconditional self-knowledge
     /// section, and nothing that references the bridge tools.
-    disclosure_protocol_active: bool,
+    pub(crate) disclosure: bool,
     /// When true, the benchmarking-mode protocol is appended, telling the
     /// model no human is available to answer clarifying questions. Set from
     /// the `BENCHMARKING_MODE` env var at build time (see `runtime.rs`); off
     /// by default, so normal product usage is unaffected.
-    benchmarking_mode_active: bool,
+    pub(crate) benchmarking_mode: bool,
+    /// When true, the persistent-memory protocol is appended. Set from whether
+    /// a memory provider is actually bound at build time (see `runtime.rs`).
+    ///
+    /// A `Disabled` memory binding registers no package, so the model's surface
+    /// carries no `ironclaw.memory.*` tools at all. Appending the protocol there
+    /// would tell the model that persistent memory exists and instruct it to
+    /// call tools it cannot see — a false capability claim that produces
+    /// unusable tool calls. Same reasoning as `disclosure`: a protocol that
+    /// names concrete tools must not outlive those tools.
+    pub(crate) memory: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DefaultSystemPromptIdentitySource {
+    storage_root: PathBuf,
+    prompt_path: PathBuf,
+    protocols: SystemPromptProtocols,
     loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
 }
 
@@ -61,15 +82,13 @@ impl DefaultSystemPromptIdentitySource {
     pub(crate) fn try_new(
         storage_root: PathBuf,
         prompt_path: PathBuf,
-        disclosure_protocol_active: bool,
-        benchmarking_mode_active: bool,
+        protocols: SystemPromptProtocols,
     ) -> Result<Self, DefaultSystemPromptError> {
         read_default_system_prompt(&storage_root, &prompt_path)?;
         Ok(Self {
             storage_root,
             prompt_path,
-            disclosure_protocol_active,
-            benchmarking_mode_active,
+            protocols,
             loaded_identity_content: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -80,11 +99,13 @@ impl DefaultSystemPromptIdentitySource {
         // — and so existing installs get them, not just freshly seeded ones.
         let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
         append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
-        append_section(&mut content, MEMORY_PROTOCOL_PROMPT);
-        if self.disclosure_protocol_active {
+        if self.protocols.memory {
+            append_section(&mut content, MEMORY_PROTOCOL_PROMPT);
+        }
+        if self.protocols.disclosure {
             append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
         }
-        if self.benchmarking_mode_active {
+        if self.protocols.benchmarking_mode {
             append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_PROMPT);
         }
         Ok(content)
@@ -350,8 +371,10 @@ mod tests {
         let source = DefaultSystemPromptIdentitySource::try_new(
             storage_root,
             prompt_path.clone(),
-            false,
-            false,
+            SystemPromptProtocols {
+                memory: true,
+                ..SystemPromptProtocols::default()
+            },
         )
         .expect("prompt loads");
         let context = test_run_context().await;
@@ -435,12 +458,18 @@ mod tests {
         let off = DefaultSystemPromptIdentitySource::try_new(
             storage_root.clone(),
             prompt_path.clone(),
-            false,
-            false,
+            SystemPromptProtocols::default(),
         )
         .expect("off source loads");
-        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true, false)
-            .expect("on source loads");
+        let on = DefaultSystemPromptIdentitySource::try_new(
+            storage_root,
+            prompt_path,
+            SystemPromptProtocols {
+                disclosure: true,
+                ..SystemPromptProtocols::default()
+            },
+        )
+        .expect("on source loads");
         let context = test_run_context().await;
 
         async fn resolve_content(
@@ -497,12 +526,18 @@ mod tests {
         let off = DefaultSystemPromptIdentitySource::try_new(
             storage_root.clone(),
             prompt_path.clone(),
-            false,
-            false,
+            SystemPromptProtocols::default(),
         )
         .expect("off source loads");
-        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, true)
-            .expect("on source loads");
+        let on = DefaultSystemPromptIdentitySource::try_new(
+            storage_root,
+            prompt_path,
+            SystemPromptProtocols {
+                benchmarking_mode: true,
+                ..SystemPromptProtocols::default()
+            },
+        )
+        .expect("on source loads");
         let context = test_run_context().await;
 
         async fn resolve_content(
@@ -539,6 +574,78 @@ mod tests {
         assert!(on_content.contains("no one to answer a clarifying question"));
     }
 
+    /// A `Disabled` memory binding registers no memory package, so the model's
+    /// surface carries no `ironclaw.memory.*` tools (pinned end-to-end by
+    /// `group_memory/scenario_disabled_binding_offers_no_memory_tools.rs`).
+    /// The resolved prompt must not claim persistent memory exists or name a
+    /// tool the model cannot call — that is a false capability claim that
+    /// produces unusable tool calls.
+    #[tokio::test]
+    async fn memory_protocol_is_absent_without_a_bound_memory_provider() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
+
+        let unbound = DefaultSystemPromptIdentitySource::try_new(
+            storage_root.clone(),
+            prompt_path.clone(),
+            SystemPromptProtocols::default(),
+        )
+        .expect("unbound source loads");
+        let bound = DefaultSystemPromptIdentitySource::try_new(
+            storage_root,
+            prompt_path,
+            SystemPromptProtocols {
+                memory: true,
+                ..SystemPromptProtocols::default()
+            },
+        )
+        .expect("bound source loads");
+        let context = test_run_context().await;
+
+        async fn resolve_content(
+            source: &DefaultSystemPromptIdentitySource,
+            context: &LoopRunContext,
+        ) -> String {
+            let candidates = source
+                .load_identity_candidates(context, PromptMode::TextOnly)
+                .await
+                .expect("candidates load");
+            source
+                .resolve_identity_message_content(
+                    context,
+                    candidates[0]
+                        .message_ref
+                        .as_ref()
+                        .expect("trusted identity has ref"),
+                )
+                .await
+                .expect("resolve content")
+                .expect("content exists")
+                .content
+        }
+
+        let unbound_content = resolve_content(&unbound, &context).await;
+        let bound_content = resolve_content(&bound, &context).await;
+
+        assert!(
+            !unbound_content.contains("## Persistent Memory"),
+            "a deployment with no bound memory provider must not be told memory exists"
+        );
+        assert!(
+            !unbound_content.contains("ironclaw.memory."),
+            "the unbound prompt must not name a memory tool the model cannot call"
+        );
+        // The bound arm guards the assertions above against passing vacuously
+        // (e.g. if the asset stopped being appended at all).
+        assert!(bound_content.contains("## Persistent Memory"));
+        assert!(bound_content.contains("ironclaw.memory.write"));
+        // Everything else about the prompt is identical: gating adds a section,
+        // it does not rewrite the rest.
+        assert!(bound_content.starts_with(unbound_content.trim_end()));
+    }
+
     #[tokio::test]
     async fn default_system_prompt_reloads_edited_prompt_for_new_candidates() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -548,8 +655,10 @@ mod tests {
         let source = DefaultSystemPromptIdentitySource::try_new(
             storage_root.clone(),
             prompt_path.clone(),
-            false,
-            false,
+            SystemPromptProtocols {
+                memory: true,
+                ..SystemPromptProtocols::default()
+            },
         )
         .expect("prompt loads");
         let context = test_run_context().await;

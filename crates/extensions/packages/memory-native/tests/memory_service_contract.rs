@@ -1306,6 +1306,63 @@ async fn native_read_curated_without_a_document_is_empty_not_an_error() {
     assert!(snippets.is_empty());
 }
 
+/// The memory protocol tells the model to save each durable fact as its own
+/// one-line append, and the curated lane splits `MEMORY.md` on line boundaries
+/// — so two guided saves must land as two lines. The backend append is
+/// byte-exact, so without a service-side terminator "likes tea" then "lives in
+/// Berlin" persists as `likes tealives in Berlin` and both facts are surfaced
+/// to later turns as one corrupted fact.
+#[tokio::test]
+async fn native_consecutive_curated_appends_stay_separate_facts() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    // Deliberately no trailing newline on either entry — this is exactly the
+    // shape the protocol's "one concise self-contained line" produces.
+    for content in ["the user drinks tea", "the user lives in Berlin"] {
+        service
+            .write(
+                invocation.clone(),
+                MemoryServiceWriteRequest {
+                    target: "memory".to_string(),
+                    content: content.to_string(),
+                    append: true,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await
+            .expect("curated append");
+    }
+
+    let snippets = service
+        .read_curated(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "unrelated".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("curated lane read");
+
+    assert_eq!(snippets.len(), 1, "one standing document");
+    let facts: Vec<&str> = snippets[0]
+        .text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        facts,
+        vec!["the user drinks tea", "the user lives in Berlin"],
+        "consecutive appends must stay on their own lines, not run together"
+    );
+}
+
 /// Defense in depth alongside the host gate: a memory-disabled context profile
 /// reads nothing, even on the always-on lane.
 #[tokio::test]

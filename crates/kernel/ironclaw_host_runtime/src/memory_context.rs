@@ -283,22 +283,33 @@ fn admit_curated_lane(
             return Vec::new();
         }
     };
+    // `MEMORY.md` is user-controlled content re-read on every run, so the
+    // admission budget bounds the WORK, not just the output: stop splitting at
+    // `budget + 1` chunks. The one extra chunk is what proves there was more
+    // document than we admitted, which is all `truncated` needs — without it a
+    // large standing document would allocate a `String` and a snippet clone per
+    // ~400 bytes on the retrieve-before-run path and then discard nearly all of
+    // them.
+    let budget = max_snippets.min(MAX_CURATED_SNIPPETS);
+    let split_limit = budget.saturating_add(1);
     // Scope-check BEFORE splitting: another user's standing document must not
     // even be chunked, let alone admitted.
     let mut chunks: Vec<MemoryServiceContextSnippet> = Vec::new();
-    for snippet in raw {
+    'documents: for snippet in raw {
         if !expected.matches(&snippet) {
             tracing::debug!("dropping out-of-scope curated memory document");
             continue;
         }
-        for text in split_curated_text(&snippet.text, CURATED_CHUNK_RAW_BYTES) {
+        for text in split_curated_text(&snippet.text, CURATED_CHUNK_RAW_BYTES, split_limit) {
             chunks.push(MemoryServiceContextSnippet {
                 text,
                 ..snippet.clone()
             });
+            if chunks.len() >= split_limit {
+                break 'documents;
+            }
         }
     }
-    let budget = max_snippets.min(MAX_CURATED_SNIPPETS);
     let truncated = chunks.len() > budget;
     chunks.truncate(budget);
     if truncated && let Some(last) = chunks.last_mut() {
@@ -312,14 +323,25 @@ fn admit_curated_lane(
         .collect()
 }
 
-/// Split a curated standing document into chunks of at most `max_raw_bytes`,
-/// preferring line boundaries so a one-fact-per-line `MEMORY.md` is never cut
-/// mid-fact. A single line longer than the budget becomes its own chunk and is
-/// truncated (with the marker) by the sanitizer. Blank lines are dropped.
-fn split_curated_text(text: &str, max_raw_bytes: usize) -> Vec<String> {
+/// Split a curated standing document into at most `max_chunks` chunks of at
+/// most `max_raw_bytes` each, preferring line boundaries so a one-fact-per-line
+/// `MEMORY.md` is never cut mid-fact. A single line longer than the byte budget
+/// becomes its own chunk and is truncated (with the marker) by the sanitizer.
+/// Blank lines are dropped.
+///
+/// `max_chunks` bounds the work, not just the result: the caller passes its
+/// admission budget plus one, so an arbitrarily large user-controlled document
+/// is never fully materialized just to be discarded.
+fn split_curated_text(text: &str, max_raw_bytes: usize, max_chunks: usize) -> Vec<String> {
     let mut chunks = Vec::new();
+    if max_chunks == 0 {
+        return chunks;
+    }
     let mut current = String::new();
     for line in text.lines() {
+        if chunks.len() >= max_chunks {
+            return chunks;
+        }
         let line = line.trim_end();
         if line.trim().is_empty() {
             continue;
@@ -337,7 +359,7 @@ fn split_curated_text(text: &str, max_raw_bytes: usize) -> Vec<String> {
             chunks.push(std::mem::take(&mut current));
         }
     }
-    if !current.is_empty() {
+    if !current.is_empty() && chunks.len() < max_chunks {
         chunks.push(current);
     }
     chunks
@@ -631,20 +653,25 @@ mod tests {
 
     // --- split_curated_text: line-aligned chunking of the standing document ---
 
+    /// Effectively-uncapped split, for the cases about chunk SHAPE rather than
+    /// the chunk cap (which `split_curated_stops_at_the_chunk_cap` covers).
+    fn split_curated(text: &str, max_raw_bytes: usize) -> Vec<String> {
+        split_curated_text(text, max_raw_bytes, usize::MAX)
+    }
+
     /// A short document is one chunk and keeps every fact, joined by a visible
     /// separator (a raw newline would be stripped as a control character during
     /// sanitization, silently running two facts together).
     #[test]
     fn split_curated_keeps_a_short_document_in_one_chunk() {
-        let chunks = split_curated_text("likes tea\nworks in Berlin\n", CURATED_CHUNK_RAW_BYTES);
+        let chunks = split_curated("likes tea\nworks in Berlin\n", CURATED_CHUNK_RAW_BYTES);
         assert_eq!(chunks, vec!["likes tea; works in Berlin".to_string()]);
     }
 
     /// Blank lines carry no fact and must not consume chunk budget.
     #[test]
     fn split_curated_drops_blank_lines() {
-        let chunks =
-            split_curated_text("likes tea\n\n   \nworks in Berlin", CURATED_CHUNK_RAW_BYTES);
+        let chunks = split_curated("likes tea\n\n   \nworks in Berlin", CURATED_CHUNK_RAW_BYTES);
         assert_eq!(chunks, vec!["likes tea; works in Berlin".to_string()]);
     }
 
@@ -654,7 +681,7 @@ mod tests {
         let lines: Vec<String> = (0..10)
             .map(|index| format!("fact number {index}"))
             .collect();
-        let chunks = split_curated_text(&lines.join("\n"), 40);
+        let chunks = split_curated(&lines.join("\n"), 40);
         assert!(chunks.len() > 1, "document must span several chunks");
         for chunk in &chunks {
             assert!(chunk.len() <= 40, "chunk over budget: {chunk:?}");
@@ -671,9 +698,35 @@ mod tests {
     /// sanitizer truncates it) rather than being dropped.
     #[test]
     fn split_curated_keeps_an_overlong_single_line() {
-        let chunks = split_curated_text(&"a".repeat(1000), CURATED_CHUNK_RAW_BYTES);
+        let chunks = split_curated(&"a".repeat(1000), CURATED_CHUNK_RAW_BYTES);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 1000);
+    }
+
+    /// `MEMORY.md` is user-controlled and re-read every run, so the chunk cap
+    /// has to bound the WORK, not just the admitted output: a document far
+    /// larger than the budget must stop being split at the cap rather than
+    /// being fully materialized and then discarded.
+    #[test]
+    fn split_curated_stops_at_the_chunk_cap() {
+        let lines: Vec<String> = (0..10_000)
+            .map(|index| format!("fact number {index}"))
+            .collect();
+        let chunks = split_curated_text(&lines.join("\n"), 40, 5);
+        assert_eq!(
+            chunks.len(),
+            5,
+            "splitting must stop at the cap instead of chunking the whole document"
+        );
+        // The head of the document survives, so the cap keeps the
+        // highest-priority content rather than an arbitrary window.
+        assert!(chunks[0].starts_with("fact number 0"));
+    }
+
+    /// Degenerate cap: no chunks requested, no work done.
+    #[test]
+    fn split_curated_with_a_zero_cap_yields_nothing() {
+        assert!(split_curated_text("likes tea\nworks in Berlin", 40, 0).is_empty());
     }
 
     // --- sanitize_context_snippet: host-owned scope check (defense in depth) ---

@@ -44,7 +44,8 @@ pub const TOOL_DISCLOSURE_PROTOCOL_PROMPT: &str =
 /// uses.
 pub const SELF_KNOWLEDGE_PROTOCOL_PROMPT: &str = include_str!("../prompts/self_knowledge.md");
 
-/// Persistent-memory protocol, appended to the system prompt unconditionally.
+/// Persistent-memory protocol, appended to the system prompt when a memory
+/// provider is bound.
 ///
 /// Nothing otherwise tells the model *when* a durable user fact is worth
 /// saving, that surfaced memories came from earlier conversations, or how to
@@ -53,6 +54,12 @@ pub const SELF_KNOWLEDGE_PROTOCOL_PROMPT: &str = include_str!("../prompts/self_k
 /// preference, so — like the self-knowledge section — seeding it into the
 /// user-editable file would only reach fresh installs; it is appended in memory
 /// on every resolve instead.
+///
+/// It is NOT unconditional: this text names concrete `ironclaw.memory.*` tools,
+/// and a `Disabled` memory binding registers no memory package, so a deployment
+/// without a bound provider must not be told the tools exist. The composition
+/// root gates it on resolved memory availability, the same way the
+/// tool-disclosure protocol is gated on the bridge tools existing.
 pub const MEMORY_PROTOCOL_PROMPT: &str = include_str!("../prompts/memory_protocol.md");
 
 /// Appended only when benchmarking mode is active.

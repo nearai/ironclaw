@@ -139,7 +139,9 @@ use crate::outbound::{
     OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
     outbound_delivery_synthetic_provider,
 };
-use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::root::default_system_prompt::{
+    DefaultSystemPromptIdentitySource, SystemPromptProtocols,
+};
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
@@ -3588,6 +3590,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         resolved_memory_provider,
         &memory_lifecycle,
     );
+    // Whether this runtime has a bound memory provider at all. The context
+    // adapter exists exactly when a provider was resolved (it self-gates its
+    // individual lanes), so this is the honest "does the model have memory"
+    // answer, and it gates the persistent-memory system-prompt protocol below.
+    let memory_protocol_active = wired_memory_context_service.is_some();
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -3730,8 +3737,17 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     DefaultSystemPromptIdentitySource::try_new(
                         standalone_storage_root,
                         default_system_prompt_path,
-                        resolved_tool_disclosure.is_bridged(),
-                        bool_env_flag("BENCHMARKING_MODE"),
+                        SystemPromptProtocols {
+                            disclosure: resolved_tool_disclosure.is_bridged(),
+                            benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
+                            // A `Disabled` memory binding resolves to no
+                            // provider and registers no package, so the model
+                            // sees no `ironclaw.memory.*` tools. Carry that
+                            // resolved availability into prompt assembly rather
+                            // than claiming a surface the deployment does not
+                            // have.
+                            memory: memory_protocol_active,
+                        },
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
                         reason: error.to_string(),

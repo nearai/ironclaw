@@ -195,16 +195,21 @@ impl NativeMemoryService {
         if request.content.trim().is_empty() {
             return Err(MemoryServiceError::input());
         }
-        if request.append {
+        let written_length = if request.append {
+            // Appended entries are one self-contained line each — that is what
+            // the memory protocol tells the model to write, and what the
+            // curated standing-document lane assumes when it splits `MEMORY.md`
+            // on line boundaries. The backend append is byte-exact, so without
+            // this two correct guided saves ("likes tea", then "lives in
+            // Berlin") persist as the single run-on line `likes tealives in
+            // Berlin` and are surfaced to a later turn as one fact. Terminate
+            // every appended entry with exactly one newline.
+            let entry = format!("{}\n", request.content.trim_end());
             self.backend
-                .append_document_with_backend_options(
-                    &context,
-                    &path,
-                    request.content.as_bytes(),
-                    &options,
-                )
+                .append_document_with_backend_options(&context, &path, entry.as_bytes(), &options)
                 .await
                 .map_err(MemoryServiceError::operation_from)?;
+            entry.len()
         } else {
             self.backend
                 .write_document_with_backend_options(
@@ -215,13 +220,14 @@ impl NativeMemoryService {
                 )
                 .await
                 .map_err(MemoryServiceError::operation_from)?;
-        }
+            request.content.len()
+        };
 
         Ok(MemoryServiceWriteResponse {
             status: MemoryWriteStatus::Written,
             path: resolved_path,
             append: request.append,
-            content_length: request.content.len(),
+            content_length: written_length,
             replacements: None,
             message: None,
         })
