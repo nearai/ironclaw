@@ -31,7 +31,7 @@ import { publishProductInspectorActivity } from "../inspector/product-activity-p
 const noop = () => {};
 const emptyConnectionContext = () => ({});
 const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
-const AMBIGUOUS_RUN_ID = Symbol("ambiguous-run-id");
+const AMBIGUOUS_RUN_ID = Symbol();
 
 function publishCapabilityActivity(threadId, fallbackRunId, activity) {
   const runId = activity?.turn_run_id || fallbackRunId;
@@ -141,10 +141,18 @@ function publishInspectorEnvelope(envelope, threadId, fallbackRunId) {
     return;
   }
   if (type === "projection_snapshot" || type === "projection_update") {
-    for (const item of frame.state?.items || []) {
+    const items = frame.state?.items || [];
+    let batchRunId = null;
+    for (const item of items) {
+      batchRunId = mergeRunIdCandidate(batchRunId, item.run_status?.run_id);
+    }
+    const fallbackActivityRunId = batchRunId === AMBIGUOUS_RUN_ID
+      ? null
+      : batchRunId || fallbackRunId;
+    for (const item of items) {
       if (item.run_status) publishRunStatusActivity(threadId, item.run_status);
       if (item.capability_activity) {
-        publishCapabilityActivity(threadId, item.run_status?.run_id || fallbackRunId, item.capability_activity);
+        publishCapabilityActivity(threadId, fallbackActivityRunId, item.capability_activity);
       }
     }
   }
