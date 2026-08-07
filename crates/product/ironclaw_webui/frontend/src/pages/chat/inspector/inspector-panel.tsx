@@ -1,5 +1,7 @@
 import React from "react";
+import { createPortal } from "react-dom";
 
+import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
 import { ActivityKind } from "./activity-kind";
@@ -35,6 +37,8 @@ const HEALTH_LABEL_KEYS = {
   [INSPECTOR_HEALTH.FORBIDDEN]: "inspector.health.forbidden",
   [INSPECTOR_HEALTH.UNAVAILABLE]: "inspector.health.unavailable",
 };
+
+const PAGE_HEADER_INSPECTOR_ACTION_ID = "page-header-inspector-action";
 
 function useViewportMode(): "mobile" | "overlay" | "sidebar" {
   const [mode, setMode] = React.useState(() =>
@@ -685,7 +689,7 @@ function InspectorPanelCore({
     setSelectedRunId(runId || history.at(-1) || null);
   }, [threadId, runId]);
   const inspector = useInspector({
-    enabled: preferences.open && viewportMode !== "mobile",
+    enabled: true,
     threadId,
     runId: selectedRunId,
   });
@@ -697,34 +701,47 @@ function InspectorPanelCore({
   const setActiveTab = (activeTab: InspectorTab) =>
     updatePreferences({ ...preferences, activeTab });
   const setOpen = (open: boolean) => updatePreferences({ ...preferences, open });
+  const toggleLabel = preferences.open ? t("inspector.closeLabel") : t("inspector.open");
+  const headerTarget = typeof document === "undefined"
+    ? null
+    : document.getElementById(PAGE_HEADER_INSPECTOR_ACTION_ID);
+  const headerToggle = headerTarget
+    ? createPortal(
+        <button
+          type="button"
+          aria-label={toggleLabel}
+          aria-pressed={preferences.open}
+          data-testid="inspector-open"
+          onClick={() => setOpen(!preferences.open)}
+          className={cn(
+            "hidden h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] sm:grid",
+            preferences.open && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]",
+          )}
+          title={toggleLabel}
+        >
+          <Icon name="code" className="h-4 w-4" />
+        </button>,
+        headerTarget,
+      )
+    : null;
 
-  if (viewportMode === "mobile") return null;
-  if (!preferences.open) {
-    return (
-      <button
-        type="button"
-        data-testid="inspector-open"
-        onClick={() => setOpen(true)}
-        className="fixed bottom-5 right-5 z-40 hidden rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-4 py-2 text-xs font-semibold text-[var(--v2-text-strong)] shadow-lg sm:block"
-      >
-        {t("inspector.open")}
-      </button>
-    );
-  }
+  if (viewportMode === "mobile" || !preferences.open) return headerToggle;
 
   const snapshot = inspector.snapshot as Record<string, unknown> | null;
   return (
-    <aside
-      aria-label={t("inspector.panelLabel")}
-      data-testid="inspector-panel"
-      data-layout={viewportMode}
-      className={cn(
-        "flex min-h-0 w-[min(420px,72vw)] flex-col border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface)]",
-        viewportMode === "overlay"
-          ? "fixed inset-y-0 right-0 z-50 shadow-2xl"
-          : "relative shrink-0 shadow-none",
-      )}
-    >
+    <>
+      {headerToggle}
+      <aside
+        aria-label={t("inspector.panelLabel")}
+        data-testid="inspector-panel"
+        data-layout={viewportMode}
+        className={cn(
+          "flex min-h-0 w-[min(420px,72vw)] flex-col border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface)]",
+          viewportMode === "overlay"
+            ? "fixed inset-y-0 right-0 z-50 shadow-2xl"
+            : "relative shrink-0 shadow-none",
+        )}
+      >
       <header className="border-b border-[var(--v2-panel-border)] px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -808,7 +825,8 @@ function InspectorPanelCore({
           />
         )}
       </section>
-    </aside>
+      </aside>
+    </>
   );
 }
 

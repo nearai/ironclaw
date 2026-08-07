@@ -7,8 +7,10 @@ putting verbose diagnostic content into the normal chat event stream.
 
 ## Activation and authorization
 
-- The browser enables the panel only when the chat URL contains
-  `?debug=true`. Ordinary chat routes and layouts remain unchanged otherwise.
+- `?debug=true` enables the inspector for the current browser tab and records
+  that opt-in in `sessionStorage`, so it survives route changes and reloads.
+  `?debug=false` explicitly clears the opt-in. Ordinary chat routes and layouts
+  remain unchanged otherwise.
 - Every inspector HTTP and SSE route requires both an authenticated caller
   with operator configuration authority and a deployment that exposes the
   operator configuration surface. Either missing gate returns `403` before a
@@ -81,6 +83,9 @@ accepted diagnostic-update count, and the last accepted update time. These
 values are tab-session diagnostics, not server accounting. They are bounded in
 `sessionStorage`, retain cursors for at most 32 observed runs, and reject
 duplicate or backwards cursors when a run is revisited or the page reloads.
+Closing the panel or entering the mobile layout hides only its presentation;
+while debug mode remains enabled, the browser continues observing the selected
+run so those UI choices do not create gaps in page-session statistics.
 
 ## Failure behavior
 

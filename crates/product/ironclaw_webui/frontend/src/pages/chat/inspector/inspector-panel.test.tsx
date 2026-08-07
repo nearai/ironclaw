@@ -62,6 +62,8 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   setViewport(1440);
+  const headerAction = document.body.appendChild(document.createElement("span"));
+  headerAction.id = "page-header-inspector-action";
   root = createRoot(document.body.appendChild(document.createElement("div")));
 });
 
@@ -288,7 +290,7 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-test("panel switches tabs, closes, reopens, overlays tablets, and hides on mobile", async () => {
+test("header icon toggles the panel while collection continues when closed or on mobile", async () => {
   await act(async () =>
     root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />),
   );
@@ -309,11 +311,14 @@ test("panel switches tabs, closes, reopens, overlays tablets, and hides on mobil
     document.querySelector<HTMLButtonElement>("[data-testid='inspector-close']")?.click(),
   );
   assert.equal(document.querySelector("[data-testid='inspector-panel']"), null);
-  assert.ok(document.querySelector("[data-testid='inspector-open']"));
-  assert.equal(inspectorCalls.at(-1)?.enabled, false);
+  const headerToggle = document.querySelector<HTMLButtonElement>("[data-testid='inspector-open']");
+  assert.ok(headerToggle);
+  assert.equal(headerToggle.closest("#page-header-inspector-action")?.id, "page-header-inspector-action");
+  assert.equal(headerToggle.getAttribute("aria-pressed"), "false");
+  assert.equal(inspectorCalls.at(-1)?.enabled, true);
 
   await act(async () =>
-    document.querySelector<HTMLButtonElement>("[data-testid='inspector-open']")?.click(),
+    headerToggle.click(),
   );
   assert.equal(
     document.querySelector("[data-testid='inspector-tab-stats']")?.getAttribute("aria-selected"),
@@ -329,5 +334,5 @@ test("panel switches tabs, closes, reopens, overlays tablets, and hides on mobil
 
   await act(async () => setViewport(500));
   assert.equal(document.querySelector("[data-testid='inspector-panel']"), null);
-  assert.equal(inspectorCalls.at(-1)?.enabled, false);
+  assert.equal(inspectorCalls.at(-1)?.enabled, true);
 });
