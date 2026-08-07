@@ -21,6 +21,19 @@ const alignClasses = {
   right: "right-0",
 };
 
+const sizeClasses = {
+  md: {
+    root: "min-w-[9.5rem] text-ui",
+    button: "h-8 px-2.5",
+    option: "px-2.5 py-2",
+  },
+  sm: {
+    root: "min-w-[7.5rem] text-xs",
+    button: "h-8 px-2",
+    option: "px-2 py-1.5 text-xs",
+  },
+};
+
 function createSelectMenuId() {
   nextSelectMenuId += 1;
   return `v2-select-menu-${nextSelectMenuId}`;
@@ -144,6 +157,7 @@ function ToneDot({ tone }) {
 /**
  * @typedef {"neutral" | "positive" | "warning" | "danger" | "info" | "accent"} SelectMenuTone
  * @typedef {"left" | "right"} SelectMenuAlign
+ * @typedef {"md" | "sm"} SelectMenuSize
  * @typedef {{ value: string, label?: string, disabled?: boolean, tone?: SelectMenuTone }} SelectMenuOption
  */
 
@@ -167,6 +181,7 @@ export function SelectMenu({
   menuClassName = "",
   optionClassName = "",
   align = "right",
+  size = "md",
   placeholder = "",
   ...rest
 }) {
@@ -192,6 +207,7 @@ export function SelectMenu({
       : null;
   const effectiveAriaLabel = ariaLabel || ariaLabelProp;
   const effectiveAlign = normalizeAlign(align);
+  const effectiveSize = sizeClasses[size] || sizeClasses.md;
   const hasEnabledOption = firstEnabledIndex(options) >= 0;
   const interactionDisabled = disabled || !hasEnabledOption;
   const optionsKey = optionsIdentity(options);
@@ -289,7 +305,8 @@ export function SelectMenu({
     <div
       ref={rootRef}
       className={cn(
-        "relative inline-block min-w-[9.5rem] text-left font-sans text-ui",
+        "relative inline-block text-left font-sans",
+        effectiveSize.root,
         className
       )}
       {...rootPassthroughProps}
@@ -312,13 +329,14 @@ export function SelectMenu({
           })}
         onKeyDown={handleKeyDown}
         className={cn(
-          "inline-flex h-8 w-full items-center justify-between gap-2 rounded-[8px] border",
-          "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5",
+          "inline-flex w-full items-center justify-between gap-2 rounded-[8px] border",
+          "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
           "text-[var(--v2-text-strong)] shadow-none transition-colors",
           "hover:bg-[var(--v2-surface-muted)]",
           "focus-visible:outline-none focus-visible:ring-2",
           "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
           "disabled:cursor-not-allowed disabled:opacity-60",
+          effectiveSize.button,
           buttonClassName
         )}
       >
@@ -364,7 +382,7 @@ export function SelectMenu({
                 onMouseEnter={() => !option.disabled && setActiveIndex(index)}
                 onClick={() => chooseOption(option)}
                 className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
+                  "flex w-full items-center justify-between gap-3 rounded-[7px]",
                   "text-left text-[var(--v2-text)] transition-colors",
                   "focus-visible:outline-none",
                   "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
@@ -374,6 +392,7 @@ export function SelectMenu({
                     : isSelected
                       ? "bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
                       : "hover:bg-[var(--v2-surface-soft)]",
+                  effectiveSize.option,
                   optionClassName
                 )}
               >
