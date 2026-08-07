@@ -48,16 +48,26 @@ export function NotificationChannelsPanel({ channelsState }) {
     [],
   );
 
-  const isBusy = channelsState.isLoading || channelsState.isSaving;
+  // A failed read is not a truthful empty set. When the notification-channels
+  // GET fails (while the targets GET succeeds) the hook can only yield
+  // channels=[] => selectedIds=[], so every stored channel renders UNCHECKED.
+  // Toggling one row from that state would stage a dirty draft, and Save
+  // posts a FULL REPLACE — silently dropping every stored channel the user
+  // never saw. Editing therefore stays locked until the read actually
+  // succeeded: the tool-evidence UI rule wants backend evidence or an
+  // explicit disabled state, never a guess the user can act on.
+  const hasLoadError = Boolean(channelsState.error);
+  const isEditingLocked =
+    channelsState.isLoading || channelsState.isSaving || hasLoadError;
   const draftKey = React.useMemo(
     () => [...draftIds].sort().join(" "),
     [draftIds],
   );
   const isDirty = draftKey !== storedKey;
-  const canSave = isDirty && !isBusy;
+  const canSave = isDirty && !isEditingLocked;
 
   const toggle = (targetId) => {
-    if (isBusy) return;
+    if (isEditingLocked) return;
     setDraftIds((current) => {
       const next = new Set(current);
       if (next.has(targetId)) {
@@ -131,13 +141,16 @@ export function NotificationChannelsPanel({ channelsState }) {
 
         {/* ── Checkbox rows ────────────────────────────────────────── */}
         <div className="flex flex-col gap-3">
-          {channelsState.error &&
+          {hasLoadError &&
           (
             <div
               role="alert"
               className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3.5 text-sm text-red-200"
             >
-              {t("automations.error.loadFailed")}
+              <div>{t("automations.error.loadFailed")}</div>
+              <div className="mt-1 text-xs leading-5 text-red-200/80">
+                {t("automations.notificationChannels.loadFailedEditingDisabled")}
+              </div>
             </div>
           )}
           {rows.map((row) => {
@@ -160,7 +173,7 @@ export function NotificationChannelsPanel({ channelsState }) {
                 <input
                   type="checkbox"
                   checked={isSelected}
-                  disabled={isBusy}
+                  disabled={isEditingLocked}
                   onChange={() => toggle(row.target_id)}
                   className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
                 />
@@ -184,7 +197,7 @@ export function NotificationChannelsPanel({ channelsState }) {
             );
           })}
 
-          {!channelsState.error && rows.length === 0 &&
+          {!hasLoadError && rows.length === 0 &&
           (
             <div
               className="rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"
@@ -229,8 +242,11 @@ export function NotificationChannelsPanel({ channelsState }) {
         </div>
 
         {/* ── Empty-selection helper (draft, not stored — reflects what
-             the next Save would do) ──────────────────────────────── */}
-        {draftIds.size === 0 &&
+             the next Save would do). Suppressed after a failed read: the
+             draft is then only an artifact of the channels the GET never
+             returned, so "notifications stay in the web app" would be a
+             claim about state the panel does not actually know. ──────── */}
+        {!hasLoadError && draftIds.size === 0 &&
         (
           <div
             className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"

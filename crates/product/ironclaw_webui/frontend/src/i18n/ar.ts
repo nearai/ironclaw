@@ -556,6 +556,8 @@ registerPack("ar", {
   "tools.description.builtin.trigger_resume": "استئناف مشغّل متوقف مؤقتًا ضمن نطاق المستدعي ليعمل وفق جدوله المحفوظ",
   "tools.description.builtin.outbound_delivery_targets_list": "عرض وجهات التسليم الصادرة المتصلة المتاحة للمستدعي الحالي",
   "tools.description.builtin.outbound_deliver": "تسليم المحتوى إلى وجهة صادرة مدرجة (محادثة قناة متصلة) بصفته المساعد",
+  "tools.description.builtin.notification_channels_set":
+    "تحديد القنوات المتصلة التي تتلقى إشعارات عمليات التشغيل في الخلفية — طلبات الموافقة وطلبات تسجيل الدخول وإشعارات فشل التشغيل",
   "tools.description.builtin.extension_search": "البحث في فهرس امتدادات Reborn المحلي حسب الامتداد أو المنتج أو المزوّد أو اسم الخدمة",
   "tools.description.builtin.extension_install": "تثبيت امتداد Reborn تم العثور عليه في حالة دورة حياة local-dev الدائمة",
   "tools.description.builtin.extension_remove": "إزالة امتداد Reborn مثبت من حالة دورة حياة local-dev الدائمة",
@@ -799,6 +801,8 @@ registerPack("ar", {
     "تعذّر حفظ قنوات الإشعارات. يُرجى المحاولة مجددًا.",
   "automations.notificationChannels.pill.ready": "جاهزة",
   "automations.notificationChannels.pill.unavailable": "غير متاحة",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "التعديل معطّل حتى يتم تحميل قنواتك المحفوظة — فالحفظ الآن سيستبدلها بقائمة غير مكتملة.",
   "automations.summary.scheduled": "مجدولة",
   "automations.summary.scheduledDetail": "عمليات الأتمتة المجدولة مرئية لهذا الوكيل.",
   "automations.summary.active": "نشطة",

@@ -1,6 +1,6 @@
 ---
 name: delegation
-version: 0.1.0
+version: 0.1.1
 description: Helps users delegate tasks, break them into steps, set deadlines, and track progress via routines and memory.
 activation:
   keywords:

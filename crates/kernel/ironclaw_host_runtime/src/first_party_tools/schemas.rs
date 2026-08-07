@@ -218,9 +218,13 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "type": "array",
                     "items": { "type": "string" }
                 },
-                "durably_recorded": { "type": "boolean" }
+                "durably_recorded": { "type": "boolean" },
+                "already_delivered": {
+                    "type": "boolean",
+                    "description": "True when the durable ledger proves this exact delivery already completed earlier in the run. The message was NOT resent; provider_message_refs is empty because the ledger row does not retain them."
+                }
             },
-            "required": ["delivered", "provider_confirmed", "target_id", "channel", "display_name", "provider_message_refs", "durably_recorded"],
+            "required": ["delivered", "provider_confirmed", "target_id", "channel", "display_name", "provider_message_refs", "durably_recorded", "already_delivered"],
             "additionalProperties": false
         }),
         "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({

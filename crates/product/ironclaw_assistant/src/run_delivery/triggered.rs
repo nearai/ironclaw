@@ -75,6 +75,21 @@ struct NotificationTarget {
     direct_message: bool,
 }
 
+/// The outcome of resolving a creator's stored notification channels.
+struct ResolvedNotificationTargets {
+    targets: Vec<NotificationTarget>,
+    /// True when at least one stored channel could not be resolved because the
+    /// catalog lookup ERRORED, as opposed to resolving cleanly to "not yours
+    /// any more".
+    ///
+    /// An empty target list means two very different things, and only this
+    /// flag separates them: the user configured no channels (web app is the
+    /// whole surface — a benign, terminal outcome) versus every lookup failed
+    /// in a backend outage (a failure that must not be recorded as if the user
+    /// had opted out).
+    lookup_failed: bool,
+}
+
 /// Which notification targets one message is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetAudience {
@@ -106,6 +121,17 @@ struct TriggeredNotification {
     /// DM; `audience` pre-filters, and this keeps the send-time resolver check
     /// as defense in depth against a stale snapshot.
     require_direct_message_target: bool,
+    /// Distinguishes notices that share an [`RunNotificationEventKind`].
+    ///
+    /// The delivery id is derived from the projection ref, which is derived
+    /// from `(run_id, event_kind)` — and one run can legitimately produce
+    /// SEVERAL `RunBlocked` notices (a re-auth stand-in, an unserviceable-auth
+    /// cancellation, a run-failure notice). Without this discriminator they
+    /// collide on one durable identity, so the second is answered
+    /// `AlreadyDelivered` and silently never sent while still being recorded
+    /// as delivered. `None` keeps the historical id shape for kinds that occur
+    /// at most once per run.
+    notice_discriminator: Option<&'static str>,
 }
 
 /// Everything one actionable run state produces: the messages to fan out,
@@ -399,7 +425,7 @@ async fn notify_pre_submit_failure(
         mission_id: None,
     };
     let codecs = target_codecs.active_preference_target_codecs();
-    let Ok(targets) = resolve_notification_targets(
+    let Ok(resolved) = resolve_notification_targets(
         services,
         &codecs,
         &scope.tenant_id,
@@ -410,6 +436,7 @@ async fn notify_pre_submit_failure(
     else {
         return;
     };
+    let targets = resolved.targets;
     if targets.is_empty() {
         return;
     }
@@ -504,7 +531,7 @@ async fn notify_background_run(
 
     // Resolve the creator's notification channels ONCE, at fire time.
     let run_ref = run_id.to_string();
-    let targets = match resolve_notification_targets(
+    let resolved = match resolve_notification_targets(
         services,
         &target_codecs,
         &scope.tenant_id,
@@ -513,13 +540,17 @@ async fn notify_background_run(
     )
     .await
     {
-        Ok(targets) => targets,
+        Ok(resolved) => resolved,
         Err(_error) => {
             let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
     };
+    let ResolvedNotificationTargets {
+        targets,
+        lookup_failed,
+    } = resolved;
 
     // With no notification channels configured the notifier has nothing to do
     // for ANY arm: it must not deliver, and it must not touch the run either.
@@ -528,6 +559,20 @@ async fn notify_background_run(
     // the user CAN complete there. Short-circuiting here also keeps a fire from
     // holding a watcher open for the full `max_wait` with nothing to say.
     if targets.is_empty() {
+        // An outage that ate every channel is NOT the same durable fact as a
+        // user who configured none. Recording it as `NoDefaultConfigured`
+        // would report a backend failure as the benign web-app-only state —
+        // exactly the conflation the preference-read arm above avoids.
+        if lookup_failed {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                %run_id,
+                "background run resolved no notification channels because every catalog lookup failed"
+            );
+            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
         tracing::debug!(
             target: TRACE_TARGET,
             %run_id,
@@ -744,7 +789,7 @@ async fn resolve_notification_targets(
     tenant_id: &TenantId,
     creator_user_id: &UserId,
     notification_ref: &str,
-) -> Result<Vec<NotificationTarget>, OutboundError> {
+) -> Result<ResolvedNotificationTargets, OutboundError> {
     let key = CommunicationPreferenceKey {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), creator_user_id.clone()),
     };
@@ -828,7 +873,10 @@ async fn resolve_notification_targets(
             direct_message,
         });
     }
-    Ok(targets)
+    Ok(ResolvedNotificationTargets {
+        targets,
+        lookup_failed: !resolution.skipped.is_empty(),
+    })
 }
 
 /// Build the notification plan for a background run's actionable state.
@@ -878,6 +926,7 @@ async fn notification_plan_for_state(
                 .push_str(&prompts::triggered_gate_footer(trigger_label));
             Ok(Some(TriggeredNotificationPlan {
                 notifications: vec![TriggeredNotification {
+                    notice_discriminator: None,
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
                     // Notification channels are personal DMs or picked shared
@@ -931,6 +980,7 @@ async fn notification_plan_for_state(
                     Ok(Some(TriggeredNotificationPlan {
                         notifications: vec![
                             TriggeredNotification {
+                                notice_discriminator: None,
                                 event_kind: RunNotificationEventKind::AuthRequired,
                                 intent: DeliveryIntent::AuthPrompt,
                                 text: prompts::auth_prompt_text(&view, true),
@@ -943,6 +993,7 @@ async fn notification_plan_for_state(
                             TriggeredNotification {
                                 event_kind: RunNotificationEventKind::RunBlocked,
                                 intent: DeliveryIntent::BackgroundRunNotice,
+                                notice_discriminator: Some("reauth"),
                                 text: format!(
                                     "{}{}",
                                     prompts::BACKGROUND_RUN_REAUTH_MESSAGE,
@@ -975,6 +1026,7 @@ async fn notification_plan_for_state(
                         notifications: vec![TriggeredNotification {
                             event_kind: RunNotificationEventKind::RunBlocked,
                             intent: DeliveryIntent::BackgroundRunNotice,
+                            notice_discriminator: Some("auth-unavailable"),
                             text: format!(
                                 "{}{}",
                                 unavailable,
@@ -993,6 +1045,7 @@ async fn notification_plan_for_state(
             notifications: vec![TriggeredNotification {
                 event_kind: RunNotificationEventKind::RunBlocked,
                 intent: DeliveryIntent::BackgroundRunNotice,
+                notice_discriminator: Some("failed"),
                 text: format!(
                     "{}{}",
                     prompts::BACKGROUND_RUN_FAILED_MESSAGE,
@@ -1080,8 +1133,11 @@ async fn deliver_notification_to_target(
         &projection_access_policy,
         context.authority,
     );
-    let projection_id =
-        prompts::run_notification_projection_id(context.run_id, notification.event_kind);
+    let projection_id = prompts::run_notification_projection_id(
+        context.run_id,
+        notification.event_kind,
+        notification.notice_discriminator,
+    );
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;

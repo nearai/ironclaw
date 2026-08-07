@@ -556,6 +556,8 @@ registerPack("pt-BR", {
   "tools.description.builtin.trigger_resume": "Retomar um gatilho pausado escopado ao chamador para que dispare pelo agendamento salvo",
   "tools.description.builtin.outbound_delivery_targets_list": "Listar os destinos de entrega de saída conectados disponíveis para o chamador atual",
   "tools.description.builtin.outbound_deliver": "Entregar conteúdo como assistente a um destino de saída listado (uma conversa de canal conectada)",
+  "tools.description.builtin.notification_channels_set":
+    "Definir quais canais conectados recebem as notificações de execuções em segundo plano — pedidos de aprovação, solicitações de login e avisos de falha de execução",
   "tools.description.builtin.extension_search": "Pesquisar no catálogo local de extensões Reborn por extensão, produto, provedor ou nome de serviço",
   "tools.description.builtin.extension_install": "Instalar uma extensão Reborn encontrada no estado durável do ciclo de vida local-dev",
   "tools.description.builtin.extension_remove": "Remover uma extensão Reborn instalada do estado durável do ciclo de vida local-dev",
@@ -799,6 +801,8 @@ registerPack("pt-BR", {
     "Não foi possível salvar seus canais de notificação. Tente novamente.",
   "automations.notificationChannels.pill.ready": "Pronto",
   "automations.notificationChannels.pill.unavailable": "Indisponível",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "A edição fica desativada até seus canais salvos carregarem — salvar agora os substituiria por uma lista incompleta.",
   "automations.summary.scheduled": "Agendadas",
   "automations.summary.scheduledDetail": "Automações agendadas visíveis para este agente.",
   "automations.summary.active": "Ativo",

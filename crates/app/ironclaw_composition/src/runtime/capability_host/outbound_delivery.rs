@@ -406,8 +406,26 @@ impl OutboundPreferenceOperation {
 
     fn denied_summary(self) -> &'static str {
         match self {
-            Self::ListTargets => "not permitted to change the outbound delivery target",
+            // Read-shaped: this arm serves the targets LIST call, which never
+            // writes. A write-verb denial ("change the delivery target") both
+            // misdescribes the refusal and names a retired concept.
+            Self::ListTargets => "not permitted to list outbound delivery targets",
             Self::SetNotificationChannels => "not permitted to change notification channels",
+        }
+    }
+
+    /// Summary for a lost or stale approval lease. Operation-specific for the
+    /// same reason the arms above are: only the notification-channel write
+    /// takes a lease today, so a fixed "outbound delivery target" sentence
+    /// would name a retired concept on the one path that can actually reach it.
+    fn lease_invalid_summary(self) -> &'static str {
+        match self {
+            Self::ListTargets => {
+                "outbound delivery target approval lease is no longer valid; re-request approval"
+            }
+            Self::SetNotificationChannels => {
+                "notification channel approval lease is no longer valid; re-request approval"
+            }
         }
     }
 
@@ -526,6 +544,7 @@ pub(super) fn approval_store_error(
 ///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
 pub(super) fn approval_lease_outcome(
+    preference_operation: OutboundPreferenceOperation,
     operation: &'static str,
     error: CapabilityLeaseError,
 ) -> Result<Resolution, AgentLoopHostError> {
@@ -535,9 +554,9 @@ pub(super) fn approval_lease_outcome(
         | CapabilityLeaseError::ExhaustedLease { .. }
         | CapabilityLeaseError::UnclaimedFingerprintLease { .. }
         | CapabilityLeaseError::FingerprintMismatch { .. }
-        | CapabilityLeaseError::InactiveLease { .. } => approval_denied(
-            "outbound delivery target approval lease is no longer valid; re-request approval",
-        ),
+        | CapabilityLeaseError::InactiveLease { .. } => {
+            approval_denied(preference_operation.lease_invalid_summary())
+        }
         CapabilityLeaseError::Persistence { .. }
         | CapabilityLeaseError::VersionMismatch
         | CapabilityLeaseError::CasExhausted => Err(ironclaw_loop_host::raw_agent_loop_host_error(
@@ -736,17 +755,63 @@ mod tests {
 
     #[test]
     fn expired_lease_is_a_recoverable_denial_not_terminal() {
-        let denied = approval_lease_outcome("claim_approval_lease", lease_error_unknown())
-            .expect("an expired approval lease must be a model-visible denial, not terminal");
+        let denied = approval_lease_outcome(
+            OutboundPreferenceOperation::SetNotificationChannels,
+            "claim_approval_lease",
+            lease_error_unknown(),
+        )
+        .expect("an expired approval lease must be a model-visible denial, not terminal");
 
         assert!(matches!(denied, Resolution::Denied(_)));
         LoopSafeSummary::new(recoverable_summary(&denied))
             .expect("denial safe summary must satisfy the loop validator");
     }
 
+    /// Both denial surfaces must name the operation the caller actually
+    /// attempted. The list arm is read-only, so a write verb ("change the
+    /// delivery target") misdescribes the refusal; and only the
+    /// notification-channel write takes a lease, so a fixed "outbound delivery
+    /// target" lease sentence names a retired concept on the one production
+    /// path that reaches it.
+    #[test]
+    fn denial_summaries_name_the_attempted_operation() {
+        assert_eq!(
+            OutboundPreferenceOperation::ListTargets.denied_summary(),
+            "not permitted to list outbound delivery targets"
+        );
+        assert_eq!(
+            OutboundPreferenceOperation::SetNotificationChannels.denied_summary(),
+            "not permitted to change notification channels"
+        );
+
+        let lease_denial = recoverable_summary(
+            &approval_lease_outcome(
+                OutboundPreferenceOperation::SetNotificationChannels,
+                "consume_approval_lease",
+                lease_error_unknown(),
+            )
+            .expect("a stale lease is model-visible"),
+        );
+        assert_eq!(
+            lease_denial,
+            "notification channel approval lease is no longer valid; re-request approval"
+        );
+
+        for summary in [
+            OutboundPreferenceOperation::ListTargets.denied_summary(),
+            OutboundPreferenceOperation::SetNotificationChannels.denied_summary(),
+            OutboundPreferenceOperation::ListTargets.lease_invalid_summary(),
+            OutboundPreferenceOperation::SetNotificationChannels.lease_invalid_summary(),
+        ] {
+            LoopSafeSummary::new(summary.to_string())
+                .expect("every denial summary must satisfy the loop validator");
+        }
+    }
+
     #[test]
     fn lease_persistence_failure_stays_terminal() {
         let error = approval_lease_outcome(
+            OutboundPreferenceOperation::SetNotificationChannels,
             "claim_approval_lease",
             CapabilityLeaseError::Persistence {
                 reason: "disk".to_string(),

@@ -180,7 +180,11 @@ impl SyntheticCapabilityHandler for NotificationChannelsSetHandler {
                 .await
             {
                 Ok(_) => {}
-                Err(error) => match approval_lease_outcome("consume_approval_lease", error) {
+                Err(error) => match approval_lease_outcome(
+                    OutboundPreferenceOperation::SetNotificationChannels,
+                    "consume_approval_lease",
+                    error,
+                ) {
                     Ok(denied) => return Ok(denied),
                     Err(host_error) => return Err(host_error),
                 },
@@ -423,7 +427,11 @@ impl NotificationChannelsSetHandler {
             .await
         {
             Ok(_) => {}
-            Err(error) => match approval_lease_outcome("claim_approval_lease", error) {
+            Err(error) => match approval_lease_outcome(
+                OutboundPreferenceOperation::SetNotificationChannels,
+                "claim_approval_lease",
+                error,
+            ) {
                 Ok(denied) => return Ok(ApprovedResumeDecision::Denied(denied)),
                 Err(host_error) => return Err(host_error),
             },

@@ -155,7 +155,19 @@ pub(crate) fn delivered_messages_from_outcome(
     outcome: &CoordinatedDeliveryOutcome,
 ) -> Vec<DeliveredChannelMessage> {
     match outcome {
+        // `DeliveredUnconfirmed` is the ONE non-`Delivered` outcome that
+        // actually sent something: the provider accepted the message and
+        // returned real refs, only the durable terminal write failed. The
+        // messages exist in the channel, so everything keyed off them — gate
+        // reply routes, and retraction of a live auth prompt — must still be
+        // bookkept, or a delivered OAuth link can never be retracted and a
+        // threaded `approve` can never route.
         CoordinatedDeliveryOutcome::Delivered {
+            conversation,
+            vendor_message_refs,
+            ..
+        }
+        | CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
             conversation,
             vendor_message_refs,
             ..

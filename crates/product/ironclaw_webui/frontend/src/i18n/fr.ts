@@ -556,6 +556,8 @@ registerPack("fr", {
   "tools.description.builtin.trigger_resume": "Reprendre un déclencheur en pause limité à l'appelant afin qu'il puisse se déclencher selon son planning enregistré",
   "tools.description.builtin.outbound_delivery_targets_list": "Lister les destinations de livraison sortantes connectées disponibles pour l'appelant actuel",
   "tools.description.builtin.outbound_deliver": "Livrer du contenu en tant qu'assistant vers une destination sortante listée (une conversation de canal connectée)",
+  "tools.description.builtin.notification_channels_set":
+    "Définir quels canaux connectés reçoivent les notifications des exécutions en arrière-plan : demandes d'approbation, invites de connexion et avis d'échec d'exécution",
   "tools.description.builtin.extension_search": "Rechercher dans le catalogue local des extensions Reborn par extension, produit, fournisseur ou nom de service",
   "tools.description.builtin.extension_install": "Installer une extension Reborn trouvée dans l'état durable du cycle de vie local-dev",
   "tools.description.builtin.extension_remove": "Supprimer une extension Reborn installée de l'état durable du cycle de vie local-dev",
@@ -799,6 +801,8 @@ registerPack("fr", {
     "Impossible d'enregistrer vos canaux de notification. Veuillez réessayer.",
   "automations.notificationChannels.pill.ready": "Prêt",
   "automations.notificationChannels.pill.unavailable": "Indisponible",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "La modification est désactivée tant que vos canaux enregistrés ne sont pas chargés : enregistrer maintenant les remplacerait par une liste incomplète.",
   "automations.summary.scheduled": "Planifié",
   "automations.summary.scheduledDetail": "Automatisations planifiées visibles par cet agent.",
   "automations.summary.active": "Actif",

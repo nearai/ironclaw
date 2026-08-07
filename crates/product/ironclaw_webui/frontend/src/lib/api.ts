@@ -383,12 +383,23 @@ export function getNotificationChannels() {
 
 // `target_ids` is the sole canonical wire name for this full-replace body —
 // no aliases (see CLAUDE.md's wire-contract naming rule).
+//
+// No `targetIds ?? []` default. `RebornSetNotificationChannelsRequest`
+// deliberately omits `#[serde(default)]` on `target_ids` so an omitted field
+// is a 400, never an implicit clear-all — and a client-side default would
+// defeat exactly that guard, because the backend accepts `[]` as a valid,
+// *intentional* full replace. A caller that forgot the argument would wipe
+// every stored notification channel. Fail fast instead, the way the other
+// mutations here reject a missing required argument.
 export function setNotificationChannels({ targetIds } = {}) {
+  if (!Array.isArray(targetIds)) {
+    return Promise.reject(
+      new TypeError("targetIds must be an array of target ids (pass [] to clear)"),
+    );
+  }
   return apiFetch(`${V2_BASE}/outbound/notification-channels`, {
     method: "POST",
-    body: JSON.stringify({
-      target_ids: targetIds ?? [],
-    }),
+    body: JSON.stringify({ target_ids: targetIds }),
   });
 }
 

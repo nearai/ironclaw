@@ -20,6 +20,8 @@ const COPY = {
     "Couldn't save your notification channels. Please try again.",
   "automations.notificationChannels.pill.ready": "Ready",
   "automations.notificationChannels.pill.unavailable": "Unavailable",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "Editing is off until your saved channels load — saving now would replace them with an incomplete list.",
   "automations.error.loadFailed": "Unable to load automations",
 };
 
@@ -255,6 +257,63 @@ test("NotificationChannelsPanel shows a load error instead of claiming there are
   assert.ok(
     !scalars.includes("No connected channels yet."),
     "a backend outage must not look like a truthful empty catalog"
+  );
+});
+
+test("NotificationChannelsPanel locks editing after a failed read so Save cannot become a destructive full replace", () => {
+  const saved = [];
+  const harness = createHarness({
+    error: new Error("notification-channels read failed"),
+    saveNotificationChannels: async (targetIds) => {
+      saved.push(targetIds);
+    },
+  });
+
+  // The destructive shape: the notification-channels GET failed while the
+  // targets GET succeeded, so the hook yields channels=[] => selectedIds=[]
+  // and every genuinely-stored channel renders UNCHECKED. Toggling one row
+  // would make the draft dirty and Save posts a FULL REPLACE — silently
+  // dropping every stored channel the user never got to see. Editing must
+  // stay locked until the read actually succeeded (tool-evidence UI rule:
+  // render backend evidence or a disabled state, never a guess).
+  let rendered = harness.render({
+    targets: [target("slack-alpha"), target("slack-beta")],
+    channels: [],
+  });
+
+  const checkboxes = nativeProps(rendered, "input");
+  assert.equal(checkboxes.length, 2);
+  for (const checkbox of checkboxes) {
+    assert.equal(
+      checkbox.disabled,
+      true,
+      "a failed read must disable every row, not just render an alert above them",
+    );
+  }
+
+  // Even if a click lands (a stale render, a keyboard activation), the toggle
+  // must not stage a draft the user could then save.
+  checkboxes[0].onChange({ target: { checked: true } });
+  rendered = harness.render({
+    targets: [target("slack-alpha"), target("slack-beta")],
+    channels: [],
+  });
+  const [saveButton] = componentProps(rendered, harness.Button);
+  assert.equal(saveButton.disabled, true, "Save must stay disabled while the read is failed");
+
+  saveButton.onClick();
+  assert.deepEqual(saved, [], "a failed read must never reach the full-replace write");
+
+  const scalars = collectScalars(rendered);
+  assert.ok(
+    scalars.includes(
+      "Editing is off until your saved channels load — saving now would replace them with an incomplete list.",
+    ),
+    "the user must be told why the panel is disabled, not left with an inert form",
+  );
+  assert.ok(
+    !scalars.includes("Notifications stay in the web app"),
+    "the empty-selection helper is a claim about the stored set — a failed read must not assert it",
   );
 });
 

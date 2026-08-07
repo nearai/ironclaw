@@ -556,6 +556,8 @@ registerPack("de", {
   "tools.description.builtin.trigger_resume": "Einen pausierten Trigger im Caller-Geltungsbereich fortsetzen, sodass er nach seinem gespeicherten Zeitplan auslösen kann",
   "tools.description.builtin.outbound_delivery_targets_list": "Verbundene ausgehende Zustellziele des aktuellen Aufrufers auflisten",
   "tools.description.builtin.outbound_deliver": "Inhalt als Assistent an ein gelistetes ausgehendes Ziel (eine verbundene Kanal-Konversation) zustellen",
+  "tools.description.builtin.notification_channels_set":
+    "Festlegen, welche verbundenen Kanäle Benachrichtigungen zu Hintergrund-Läufen erhalten — Freigabe-Anfragen, Anmelde-Aufforderungen und Hinweise zu fehlgeschlagenen Läufen",
   "tools.description.builtin.extension_search": "Den lokalen Reborn-Erweiterungskatalog nach Erweiterung, Produkt, Anbieter oder Dienstname durchsuchen",
   "tools.description.builtin.extension_install": "Eine gefundene Reborn-Erweiterung in den dauerhaften local-dev-Lebenszykluszustand installieren",
   "tools.description.builtin.extension_remove": "Eine installierte Reborn-Erweiterung aus dem dauerhaften local-dev-Lebenszykluszustand entfernen",
@@ -799,6 +801,8 @@ registerPack("de", {
     "Deine Benachrichtigungskanäle konnten nicht gespeichert werden. Bitte versuche es erneut.",
   "automations.notificationChannels.pill.ready": "Bereit",
   "automations.notificationChannels.pill.unavailable": "Nicht verfügbar",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "Die Bearbeitung ist deaktiviert, bis deine gespeicherten Kanäle geladen sind — jetzt zu speichern würde sie durch eine unvollständige Liste ersetzen.",
   "automations.summary.scheduled": "Geplant",
   "automations.summary.scheduledDetail": "Geplante Automatisierungen, die für diesen Agenten sichtbar sind.",
   "automations.summary.active": "Aktive",

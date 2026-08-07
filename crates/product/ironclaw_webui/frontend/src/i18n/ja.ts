@@ -556,6 +556,8 @@ registerPack("ja", {
   "tools.description.builtin.trigger_resume": "呼び出し元スコープの一時停止中トリガーを再開し、保存済みスケジュールで発火できるようにします",
   "tools.description.builtin.outbound_delivery_targets_list": "現在の呼び出し元が利用できる接続済みの送信配信先を一覧表示します",
   "tools.description.builtin.outbound_deliver": "アシスタントとして、一覧にある送信先（接続済みチャネルの会話）にコンテンツを配信します",
+  "tools.description.builtin.notification_channels_set":
+    "バックグラウンド実行の通知（承認リクエスト、サインインリクエスト、実行失敗の通知）を受け取る接続済みチャネルを設定します",
   "tools.description.builtin.extension_search": "拡張機能、製品、プロバイダー、サービス名でローカルの Reborn 拡張カタログを検索します",
   "tools.description.builtin.extension_install": "検索した Reborn 拡張機能を永続的な local-dev ライフサイクル状態にインストールします",
   "tools.description.builtin.extension_remove": "インストール済みの Reborn 拡張機能を永続的な local-dev ライフサイクル状態から削除します",
@@ -799,6 +801,8 @@ registerPack("ja", {
     "通知チャネルを保存できませんでした。もう一度お試しください。",
   "automations.notificationChannels.pill.ready": "準備完了",
   "automations.notificationChannels.pill.unavailable": "利用不可",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "保存済みチャネルが読み込まれるまで編集はできません。ここで保存すると、不完全な一覧で置き換えられてしまいます。",
   "automations.summary.scheduled": "スケジュール済み",
   "automations.summary.scheduledDetail": "このエージェントに表示されるスケジュール済みの自動化。",
   "automations.summary.active": "アクティブ",

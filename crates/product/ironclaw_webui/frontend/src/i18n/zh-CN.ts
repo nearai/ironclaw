@@ -556,6 +556,7 @@ registerPack("zh-CN", {
   "tools.description.builtin.trigger_resume": "恢复调用者作用域内已暂停的触发器，使其可按保存的计划触发",
   "tools.description.builtin.outbound_delivery_targets_list": "列出当前调用者可用的已连接出站投递目标",
   "tools.description.builtin.outbound_deliver": "以助手身份将内容投递到列出的出站目标（已连接频道的会话）",
+  "tools.description.builtin.notification_channels_set": "设置哪些已连接频道接收后台运行通知——审批请求、登录请求和运行失败通知",
   "tools.description.builtin.extension_search": "搜索本地 Reborn 扩展目录，可按扩展、产品、提供方或服务名称查询",
   "tools.description.builtin.extension_install": "将搜索到的 Reborn 扩展安装到持久本地开发生命周期状态",
   "tools.description.builtin.extension_remove": "从持久本地开发生命周期状态中移除已安装的 Reborn 扩展",
@@ -799,6 +800,8 @@ registerPack("zh-CN", {
     "无法保存您的通知渠道，请重试。",
   "automations.notificationChannels.pill.ready": "就绪",
   "automations.notificationChannels.pill.unavailable": "不可用",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "在已保存的渠道加载完成前无法编辑——此时保存会用不完整的列表替换它们。",
   "automations.summary.scheduled": "总排期项",
   "automations.summary.scheduledDetail": "列出了系统当前为这位 AI 代理可见的所有正在进行的自动化项目与计划清单调度项。",
   "automations.summary.active": "可用计划项",

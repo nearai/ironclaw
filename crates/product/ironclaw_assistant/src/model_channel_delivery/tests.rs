@@ -776,6 +776,7 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
             target: target.clone(),
             provider_message_refs: vec!["ref-1".to_string()],
             durably_recorded: true,
+            already_delivered: false,
         })
     );
 
@@ -793,8 +794,30 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
             target: target.clone(),
             provider_message_refs: vec!["ref-unconfirmed".to_string()],
             durably_recorded: false,
+            already_delivered: false,
         }),
         "provider evidence must survive while the failed terminal write stays explicit"
+    );
+
+    // A replay of a durably confirmed delivery. The ledger row does not retain
+    // provider refs, so the empty list is honest — but it must be flagged, or
+    // the caller reads "no refs" as unverified and resends what was already
+    // sent, defeating the at-most-once claim.
+    let already_delivered = classify_delivery_outcome(
+        target.clone(),
+        CoordinatedDeliveryOutcome::AlreadyDelivered {
+            attempt: sample_attempt(),
+        },
+    );
+    assert_eq!(
+        already_delivered,
+        Ok(ModelChannelDeliveryEvidence {
+            target: target.clone(),
+            provider_message_refs: Vec::new(),
+            durably_recorded: true,
+            already_delivered: true,
+        }),
+        "a durable replay must be distinguishable from a send with no provider reference"
     );
 
     let rejected = classify_delivery_outcome(
@@ -946,6 +969,7 @@ impl ModelChannelDelivery for LabelledModelChannelDelivery {
             .expect("summary"),
             provider_message_refs: vec![self.label.to_string()],
             durably_recorded: true,
+            already_delivered: false,
         })
     }
 }

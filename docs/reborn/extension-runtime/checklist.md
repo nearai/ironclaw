@@ -813,7 +813,7 @@ Rules — kept short on purpose:
   success string; there is no queued/accepted state in v1 — a call either
   returns provider evidence or a typed, model-visible failure. —
   `model_delivery_is_policy_class`
-  (`crates/ironclaw_product/tests/outbound_delivery_contract.rs`) pins the
+  (`crates/product/ironclaw_assistant/tests/outbound_delivery_contract.rs`) pins the
   intent-class routing; `ModelChannelDeliveryEvidence.provider_message_refs`
   (`crates/ironclaw_outbound/src/model_channel_delivery.rs`) is the only
   success shape the tool port can return — no "queued"/"accepted" variant

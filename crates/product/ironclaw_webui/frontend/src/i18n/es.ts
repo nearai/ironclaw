@@ -556,6 +556,8 @@ registerPack("es", {
   "tools.description.builtin.trigger_resume": "Reanudar un disparador pausado acotado al llamador para que pueda ejecutarse según su programación guardada",
   "tools.description.builtin.outbound_delivery_targets_list": "Listar los destinos de entrega salientes conectados disponibles para el llamante actual",
   "tools.description.builtin.outbound_deliver": "Entregar contenido como asistente a un destino saliente listado (una conversación de canal conectada)",
+  "tools.description.builtin.notification_channels_set":
+    "Definir qué canales conectados reciben las notificaciones de ejecuciones en segundo plano: solicitudes de aprobación, solicitudes de inicio de sesión y avisos de ejecuciones fallidas",
   "tools.description.builtin.extension_search": "Buscar en el catálogo local de extensiones de Reborn por extensión, producto, proveedor o nombre de servicio",
   "tools.description.builtin.extension_install": "Instalar una extensión de Reborn encontrada en el estado duradero del ciclo de vida local-dev",
   "tools.description.builtin.extension_remove": "Eliminar una extensión de Reborn instalada del estado duradero del ciclo de vida local-dev",
@@ -799,6 +801,8 @@ registerPack("es", {
     "No se pudieron guardar tus canales de notificación. Inténtalo de nuevo.",
   "automations.notificationChannels.pill.ready": "Listo",
   "automations.notificationChannels.pill.unavailable": "No disponible",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "La edición está desactivada hasta que se carguen tus canales guardados: guardar ahora los reemplazaría por una lista incompleta.",
   "automations.summary.scheduled": "Programado",
   "automations.summary.scheduledDetail": "Automatizaciones programadas visibles para este agente.",
   "automations.summary.active": "Activo",

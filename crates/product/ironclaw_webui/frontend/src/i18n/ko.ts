@@ -556,6 +556,8 @@ registerPack("ko", {
   "tools.description.builtin.trigger_resume": "호출자 범위의 일시 중지된 트리거를 재개해 저장된 일정에 따라 실행되도록 합니다",
   "tools.description.builtin.outbound_delivery_targets_list": "현재 호출자가 사용할 수 있는 연결된 아웃바운드 전송 대상을 나열합니다",
   "tools.description.builtin.outbound_deliver": "어시스턴트 자격으로 목록에 있는 아웃바운드 대상(연결된 채널 대화)에 콘텐츠를 전송합니다",
+  "tools.description.builtin.notification_channels_set":
+    "백그라운드 실행 알림(승인 요청, 로그인 요청, 실행 실패 알림)을 받을 연결된 채널을 설정합니다",
   "tools.description.builtin.extension_search": "확장, 제품, 제공자 또는 서비스 이름으로 로컬 Reborn 확장 카탈로그를 검색합니다",
   "tools.description.builtin.extension_install": "검색된 Reborn 확장을 영구 local-dev 수명 주기 상태에 설치합니다",
   "tools.description.builtin.extension_remove": "설치된 Reborn 확장을 영구 local-dev 수명 주기 상태에서 제거합니다",
@@ -799,6 +801,8 @@ registerPack("ko", {
     "알림 채널을 저장하지 못했습니다. 다시 시도해 주세요.",
   "automations.notificationChannels.pill.ready": "준비됨",
   "automations.notificationChannels.pill.unavailable": "사용 불가",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "저장된 채널이 로드될 때까지 편집이 비활성화됩니다. 지금 저장하면 불완전한 목록으로 대체됩니다.",
   "automations.summary.scheduled": "예약됨",
   "automations.summary.scheduledDetail": "예약된 자동화가 이 에이전트에 표시됩니다.",
   "automations.summary.active": "활성",

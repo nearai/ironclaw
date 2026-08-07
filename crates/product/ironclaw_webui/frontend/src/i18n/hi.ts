@@ -556,6 +556,8 @@ registerPack("hi", {
   "tools.description.builtin.trigger_resume": "caller-scoped paused trigger resume करें ताकि वह saved schedule पर fire कर सके",
   "tools.description.builtin.outbound_delivery_targets_list": "वर्तमान कॉलर के लिए उपलब्ध कनेक्टेड आउटबाउंड डिलीवरी लक्ष्यों की सूची दिखाएँ",
   "tools.description.builtin.outbound_deliver": "सूचीबद्ध आउटबाउंड लक्ष्य (एक कनेक्टेड चैनल वार्तालाप) पर सहायक के रूप में सामग्री पहुँचाएँ",
+  "tools.description.builtin.notification_channels_set":
+    "तय करें कि कौन से कनेक्टेड चैनल बैकग्राउंड रन की सूचनाएँ प्राप्त करें — अनुमोदन अनुरोध, साइन-इन अनुरोध और रन विफलता की सूचनाएँ",
   "tools.description.builtin.extension_search": "extension, product, provider या service name से local Reborn extension catalog खोजें",
   "tools.description.builtin.extension_install": "खोजे गए Reborn extension को durable local-dev lifecycle state में install करें",
   "tools.description.builtin.extension_remove": "installed Reborn extension को durable local-dev lifecycle state से हटाएं",
@@ -799,6 +801,8 @@ registerPack("hi", {
     "आपके सूचना चैनल सहेजे नहीं जा सके। कृपया पुनः प्रयास करें।",
   "automations.notificationChannels.pill.ready": "तैयार",
   "automations.notificationChannels.pill.unavailable": "अनुपलब्ध",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "जब तक आपके सहेजे गए चैनल लोड नहीं हो जाते, संपादन बंद है — अभी सहेजने पर वे एक अधूरी सूची से बदल जाएँगे।",
   "automations.summary.scheduled": "शेड्यूल किया गया",
   "automations.summary.scheduledDetail": "शेड्यूल किए गए ऑटोमेशन इस एजेंट को दिखाई देते हैं।",
   "automations.summary.active": "सक्रिय",

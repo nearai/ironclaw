@@ -556,6 +556,8 @@ registerPack("uk", {
   "tools.description.builtin.trigger_resume": "Відновити призупинений тригер в області виклику, щоб він міг спрацьовувати за збереженим розкладом",
   "tools.description.builtin.outbound_delivery_targets_list": "Показати підключені вихідні цілі доставлення, доступні поточному викликачеві",
   "tools.description.builtin.outbound_deliver": "Доставити вміст як асистент до вказаної вихідної цілі (розмова підключеного каналу)",
+  "tools.description.builtin.notification_channels_set":
+    "Визначити, які підключені канали отримують сповіщення про фонові запуски — запити на схвалення, запити входу та сповіщення про невдалі запуски",
   "tools.description.builtin.extension_search": "Шукати в локальному каталозі розширень Reborn за розширенням, продуктом, постачальником або назвою сервісу",
   "tools.description.builtin.extension_install": "Встановити знайдене розширення Reborn у сталий стан життєвого циклу local-dev",
   "tools.description.builtin.extension_remove": "Видалити встановлене розширення Reborn зі сталого стану життєвого циклу local-dev",
@@ -799,6 +801,8 @@ registerPack("uk", {
     "Не вдалося зберегти канали сповіщень. Спробуйте ще раз.",
   "automations.notificationChannels.pill.ready": "Готовий",
   "automations.notificationChannels.pill.unavailable": "Недоступний",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "Редагування вимкнено, доки не завантажаться збережені канали — збереження зараз замінило б їх неповним списком.",
   "automations.summary.scheduled": "Заплановано",
   "automations.summary.scheduledDetail": "Заплановані автоматизації, видимі для цього агента.",
   "automations.summary.active": "Активний",

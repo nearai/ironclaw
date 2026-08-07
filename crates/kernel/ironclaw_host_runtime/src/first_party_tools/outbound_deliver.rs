@@ -73,6 +73,20 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
                 tracing::debug!(%error, "outbound delivery input failed schema decoding");
                 super::input_error()
             })?;
+        // The input schema promises `content` minLength 1, but schema
+        // advertisement is not enforcement: nothing between the model and the
+        // adapter checks it, so empty content would reach the channel as an
+        // empty text part and come back as an opaque provider rejection
+        // instead of the input error the schema led the model to expect.
+        if input.content.trim().is_empty() {
+            return Err(FirstPartyCapabilityError::invalid_input_issues(
+                "outbound delivery input failed validation",
+                vec![
+                    DispatchInputIssue::new("content", DispatchInputIssueCode::InvalidValue)
+                        .expected("non-empty content to deliver"),
+                ],
+            ));
+        }
         let run_id = request.run_id.ok_or_else(|| {
             FirstPartyCapabilityError::with_safe_summary(
                 RuntimeDispatchErrorKind::OperationFailed,
@@ -95,12 +109,21 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
             .map_err(map_delivery_error)?;
         let display_name = evidence.target.display_name.to_string();
         let provider_confirmed = !evidence.provider_message_refs.is_empty();
-        let summary =
-            delivered_summary(&display_name, provider_confirmed, evidence.durably_recorded);
+        // A replay is delivered — the durable row is the proof, and it is
+        // stronger than a provider ref, not weaker. Reporting it as unverified
+        // because the row does not retain refs is what invites a resend.
+        let delivered = provider_confirmed || evidence.already_delivered;
+        let summary = delivered_summary(
+            &display_name,
+            provider_confirmed,
+            evidence.durably_recorded,
+            evidence.already_delivered,
+        );
         Ok(FirstPartyCapabilityResult::new(
             json!({
-                "delivered": provider_confirmed,
+                "delivered": delivered,
                 "provider_confirmed": provider_confirmed,
+                "already_delivered": evidence.already_delivered,
                 "target_id": evidence.target.target_id.as_str(),
                 "channel": evidence.target.channel.as_str(),
                 "display_name": evidence.target.display_name.as_str(),
@@ -121,12 +144,19 @@ impl FirstPartyCapabilityHandler for OutboundDeliverHandler {
 
 /// `durably_recorded: false` means the provider accepted the send but the
 /// confirmation row did not commit — delivered, with the weaker claim shown.
+///
+/// `already_delivered` is checked first: a durable replay row is positive
+/// proof the message went out, so it must never fall through to the
+/// "no message reference" wording (that row simply does not retain refs).
 fn delivered_summary(
     display_name: &str,
     provider_confirmed: bool,
     durably_recorded: bool,
+    already_delivered: bool,
 ) -> String {
-    if !provider_confirmed {
+    if already_delivered {
+        format!("Already delivered to {display_name} earlier in this run - not resent")
+    } else if !provider_confirmed {
         format!("Delivery to {display_name} is unverified (provider supplied no message reference)")
     } else if durably_recorded {
         format!("Delivered to {display_name}")
@@ -321,6 +351,7 @@ mod tests {
             target: sample_target(),
             provider_message_refs: vec!["1721.045".to_string()],
             durably_recorded: true,
+            already_delivered: false,
         };
         let delivery = Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence)));
         let handler = OutboundDeliverHandler {
@@ -369,6 +400,7 @@ mod tests {
             target: sample_target(),
             provider_message_refs: Vec::new(),
             durably_recorded: true,
+            already_delivered: false,
         };
         let handler = OutboundDeliverHandler {
             delivery: Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence))),
@@ -399,6 +431,7 @@ mod tests {
             target: sample_target(),
             provider_message_refs: vec!["1721.046".to_string()],
             durably_recorded: false,
+            already_delivered: false,
         };
         let handler = OutboundDeliverHandler {
             delivery: Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence))),
@@ -632,6 +665,124 @@ mod tests {
             if let Some(summary) = expected_summary {
                 assert_eq!(error.safe_summary(), Some(summary), "{port_error:?}");
             }
+        }
+    }
+
+    /// A durable replay row is positive proof the message already went out.
+    /// It must read as delivered — reporting "unverified" because the row does
+    /// not retain provider refs is what invites the duplicate resend the
+    /// at-most-once claim exists to prevent.
+    #[tokio::test]
+    async fn already_delivered_replay_reads_as_delivered_not_unverified() {
+        let evidence = ModelChannelDeliveryEvidence {
+            target: sample_target(),
+            provider_message_refs: Vec::new(),
+            durably_recorded: true,
+            already_delivered: true,
+        };
+        let handler = OutboundDeliverHandler {
+            delivery: Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence))),
+        };
+
+        let result = handler
+            .dispatch(sample_request(
+                json!({"target_id": "slack:C123", "content": "hello team"}),
+                Some(RunId::new()),
+                Some(actor()),
+            ))
+            .await
+            .expect("a replay is a success, not an error");
+
+        assert_eq!(
+            result.output["delivered"],
+            json!(true),
+            "a durably confirmed replay must not read as undelivered"
+        );
+        assert_eq!(result.output["already_delivered"], json!(true));
+        assert_eq!(result.output["durably_recorded"], json!(true));
+        // Honest about what we have: the ledger row retains no provider refs.
+        assert_eq!(result.output["provider_confirmed"], json!(false));
+        assert_eq!(result.output["provider_message_refs"], json!([]));
+
+        let summary = result
+            .display_preview
+            .expect("display preview should be set")
+            .output_summary
+            .expect("summary should be set");
+        assert!(
+            !summary.contains("unverified"),
+            "a replay must never be summarized as unverified: {summary}"
+        );
+        assert!(
+            summary.contains("Already delivered"),
+            "the summary must tell the model it was not resent: {summary}"
+        );
+    }
+
+    /// Every non-replay outcome keeps the flag off, so the wire field cannot
+    /// silently become "always true".
+    #[tokio::test]
+    async fn a_fresh_send_is_not_reported_as_a_replay() {
+        let evidence = ModelChannelDeliveryEvidence {
+            target: sample_target(),
+            provider_message_refs: vec!["1721.045".to_string()],
+            durably_recorded: true,
+            already_delivered: false,
+        };
+        let handler = OutboundDeliverHandler {
+            delivery: Arc::new(FakeDelivery::new(FakeOutcome::Ok(evidence))),
+        };
+
+        let result = handler
+            .dispatch(sample_request(
+                json!({"target_id": "slack:C123", "content": "hello team"}),
+                Some(RunId::new()),
+                Some(actor()),
+            ))
+            .await
+            .expect("delivery should succeed");
+
+        assert_eq!(result.output["already_delivered"], json!(false));
+        assert_eq!(result.output["delivered"], json!(true));
+    }
+
+    /// The input schema advertises `content` minLength 1; advertisement is not
+    /// enforcement, so the handler must reject empty content itself rather than
+    /// letting an empty part reach the channel.
+    #[tokio::test]
+    async fn empty_content_is_rejected_before_the_port() {
+        for empty in ["", "   ", "\n\t "] {
+            let delivery = Arc::new(FakeDelivery::new(FakeOutcome::Err(
+                ModelChannelDeliveryError::Internal,
+            )));
+            let handler = OutboundDeliverHandler {
+                delivery: delivery.clone(),
+            };
+
+            let error = handler
+                .dispatch(sample_request(
+                    json!({"target_id": "slack:C123", "content": empty}),
+                    Some(RunId::new()),
+                    Some(actor()),
+                ))
+                .await
+                .expect_err("empty content must fail validation");
+
+            assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+            let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+                panic!("expected Dispatch variant");
+            };
+            let Some(DispatchFailureDetail::InvalidInput { issues }) = detail.as_deref() else {
+                panic!("expected InvalidInput detail, got {detail:?}");
+            };
+            assert!(
+                issues.iter().any(|issue| issue.path == "content"),
+                "the issue must point at `content`"
+            );
+            assert!(
+                delivery.seen.lock().unwrap().is_empty(),
+                "empty content must never reach the delivery port"
+            );
         }
     }
 }

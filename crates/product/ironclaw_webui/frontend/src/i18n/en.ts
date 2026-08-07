@@ -576,6 +576,8 @@ registerPack("en", {
   "tools.description.builtin.trigger_resume": "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
   "tools.description.builtin.outbound_delivery_targets_list": "List connected outbound delivery targets available to the current caller",
   "tools.description.builtin.outbound_deliver": "Deliver content to a listed outbound target (a connected channel conversation) as the assistant",
+  "tools.description.builtin.notification_channels_set":
+    "Set which connected channels receive background-run notifications — approval prompts, sign-in prompts, and run-failure notices",
   "tools.description.builtin.extension_search": "Search the local Reborn extension catalog by extension, product, provider, or service name",
   "tools.description.builtin.extension_install": "Install a searched Reborn extension into durable local-dev lifecycle state",
   "tools.description.builtin.extension_remove": "Remove an installed Reborn extension from durable local-dev lifecycle state",
@@ -848,6 +850,8 @@ registerPack("en", {
     "Couldn't save your notification channels. Please try again.",
   "automations.notificationChannels.pill.ready": "Ready",
   "automations.notificationChannels.pill.unavailable": "Unavailable",
+  "automations.notificationChannels.loadFailedEditingDisabled":
+    "Editing is off until your saved channels load — saving now would replace them with an incomplete list.",
   "automations.summary.scheduled": "Scheduled",
   "automations.summary.scheduledDetail":
     "Scheduled automations visible to this agent.",

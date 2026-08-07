@@ -33,6 +33,16 @@ pub struct ModelChannelDeliveryEvidence {
     /// (`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`): the refs are
     /// real, the message must not be resent, and recovery reconciles the row.
     pub durably_recorded: bool,
+    /// `true` when the durable row proves this exact delivery already
+    /// completed in an earlier invocation
+    /// (`CoordinatedDeliveryOutcome::AlreadyDelivered`).
+    ///
+    /// Provider refs are not retained on that row, so `provider_message_refs`
+    /// is legitimately empty here. Without this flag a replay is
+    /// indistinguishable from "the provider returned no reference", and the
+    /// caller reports the send as unverified — inviting exactly the resend the
+    /// at-most-once claim exists to prevent.
+    pub already_delivered: bool,
 }
 
 /// Redacted failure classes crossing the capability-to-product port.

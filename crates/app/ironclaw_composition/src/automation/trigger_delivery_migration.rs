@@ -10,13 +10,30 @@
 //! act on — the prompt — and then clears the legacy field so the pass is a
 //! no-op on every subsequent boot.
 //!
-//! Runs from composition boot before the trigger poller starts. Boot fails
-//! closed while a valid legacy route cannot be represented in the prompt:
-//! the fire path no longer reads the retired field, so starting the poller
-//! with an unmigrated row would silently discard user routing intent.
+//! Runs from composition boot before the trigger poller starts. The fire path
+//! no longer reads the retired field, so starting the poller with an unmigrated
+//! row would silently discard user routing intent — the failure this pass
+//! exists to prevent. It is prevented *per record*: a route that cannot be
+//! represented in its prompt pauses its own routine (which therefore cannot
+//! fire) and boot continues. Only a systemic failure — the store refusing to
+//! read, write, or pause — is boot-fatal.
 
 use ironclaw_host_api::ids::TenantId;
-use ironclaw_triggers::{MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord, TriggerRepository};
+use ironclaw_triggers::{
+    MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord, TriggerRepository, TriggerState,
+};
+
+/// The retired host-owned pseudo-target.
+///
+/// A row carrying it means "results land in the run thread only — no external
+/// delivery": it was the *opt out* of pushing, not a destination. Rewriting it
+/// into a delivery step would invert that intent and make every later fire
+/// attempt — and fail — an external send to an id nothing can resolve.
+///
+/// Kept here as a literal on purpose: the constant that named it
+/// (`WEB_APP_OUTBOUND_DELIVERY_TARGET_ID`) died with the provider this PR
+/// deletes, but durable rows outlive the code that wrote them.
+const RETIRED_WEB_APP_TARGET_ID: &str = "builtin:web_app";
 
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetId,
@@ -44,8 +61,10 @@ use crate::outbound::{
 ///   `builtin.outbound_deliver` takes the id directly, so it stays actionable
 ///   and fails loudly at fire time if the destination really did go away;
 /// * registry lookup fails outright → migrate by id without a display name;
-/// * prompt would exceed [`MAX_TRIGGER_PROMPT_BYTES`] → fail boot closed while
-///   leaving the record untouched;
+/// * target is the retired `builtin:web_app` opt-out → clear the field and
+///   leave the prompt untouched (it never meant an external destination);
+/// * prompt would exceed [`MAX_TRIGGER_PROMPT_BYTES`] → pause that routine and
+///   leave its stored target intact for a later boot; boot continues;
 /// * no stored target → untouched (not even rewritten).
 ///
 /// Idempotent: after a pass every migrated record has `delivery_target: None`,
@@ -81,35 +100,43 @@ async fn migrate_one(
         let Some(target) = record.delivery_target.clone() else {
             return Ok(false);
         };
-        let display_name = resolve_display_name(registry, &record, target.as_str()).await;
-        if display_name.is_none() {
-            tracing::warn!(
-                target: "ironclaw::reborn::trigger_delivery_migration",
-                trigger_id = %record.trigger_id,
-                "stored delivery target did not resolve; migrating it by id without a destination name"
-            );
-        }
-        let step = delivery_step(display_name.as_deref(), target.as_str());
-        if record.prompt.len() + step.len() > MAX_TRIGGER_PROMPT_BYTES {
-            return Err(TriggerError::InvalidRecord {
-                kind: ironclaw_triggers::TriggerRecordValidationKind::PromptTooLong,
-                reason: format!(
-                    "routine {} cannot preserve its legacy delivery target within the {}-byte prompt limit; shorten the prompt before starting the trigger poller",
-                    record.trigger_id, MAX_TRIGGER_PROMPT_BYTES
-                ),
-            });
-        }
-        let migrated_prompt = format!("{}{}", record.prompt, step);
+        let migrated_prompt = if target.as_str() == RETIRED_WEB_APP_TARGET_ID {
+            // Opt-out row: clear the field and leave the prompt exactly as the
+            // user wrote it. Lane 1 already lands the result in the routine's
+            // own run thread, which is all this target ever meant.
+            record.prompt.clone()
+        } else {
+            let display_name = resolve_display_name(registry, &record, target.as_str()).await;
+            if display_name.is_none() {
+                tracing::warn!(
+                    target: "ironclaw::reborn::trigger_delivery_migration",
+                    trigger_id = %record.trigger_id,
+                    "stored delivery target did not resolve; migrating it by id without a destination name"
+                );
+            }
+            let step = delivery_step(display_name.as_deref(), target.as_str());
+            if record.prompt.len() + step.len() > MAX_TRIGGER_PROMPT_BYTES {
+                return quarantine_unmigratable_route(repository, &record).await;
+            }
+            format!("{}{}", record.prompt, step)
+        };
         if repository
             .migrate_legacy_delivery_target(&record, migrated_prompt)
             .await?
         {
             return Ok(true);
         }
-        record = repository
+        // CAS miss: the row moved under us. Re-read and retry against the
+        // current one. A row that vanished between the miss and the re-read
+        // has no routing intent left to preserve — that is nothing to migrate,
+        // not a reason to fail the boot.
+        let Some(current) = repository
             .get_trigger(record.tenant_id.clone(), record.trigger_id)
             .await?
-            .ok_or(TriggerError::NotFound)?;
+        else {
+            return Ok(false);
+        };
+        record = current;
     }
     Err(TriggerError::Backend {
         reason: format!(
@@ -117,6 +144,51 @@ async fn migrate_one(
             record.trigger_id
         ),
     })
+}
+
+/// Pause the one routine whose legacy route cannot be represented in its
+/// prompt, instead of failing the whole boot.
+///
+/// The invariant this migration protects is per-record: a routine must never
+/// fire without the routing its creator chose. Pausing enforces exactly that
+/// for the record at issue — a paused trigger cannot fire, its
+/// `delivery_target` stays set, and the next boot retries the migration
+/// idempotently once the prompt has room. Aborting composition would instead
+/// take down every *other* routine and the product UI the operator needs in
+/// order to shorten the prompt, leaving DB surgery as the only recovery.
+///
+/// Failing to pause IS systemic, so that stays boot-fatal. A record the store
+/// refuses to move (a terminal `Completed` one-shot) cannot fire either, so the
+/// invariant already holds and boot continues.
+async fn quarantine_unmigratable_route(
+    repository: &dyn TriggerRepository,
+    record: &TriggerRecord,
+) -> Result<bool, TriggerError> {
+    tracing::warn!(
+        target: "ironclaw::reborn::trigger_delivery_migration",
+        trigger_id = %record.trigger_id,
+        prompt_bytes = record.prompt.len(),
+        limit_bytes = MAX_TRIGGER_PROMPT_BYTES,
+        "routine cannot preserve its legacy delivery target within the prompt limit; pausing it so it cannot fire unrouted — shorten the prompt and resume it to migrate"
+    );
+    let paused = repository
+        .set_scoped_trigger_state(
+            record.tenant_id.clone(),
+            record.creator_user_id.clone(),
+            record.agent_id.clone(),
+            record.project_id.clone(),
+            record.trigger_id,
+            TriggerState::Paused,
+        )
+        .await?;
+    if paused.is_none() {
+        tracing::warn!(
+            target: "ironclaw::reborn::trigger_delivery_migration",
+            trigger_id = %record.trigger_id,
+            "unmigratable routine is already in a terminal state and cannot fire; leaving it untouched"
+        );
+    }
+    Ok(false)
 }
 
 /// The instruction that replaces the stored route. `display_name` is omitted

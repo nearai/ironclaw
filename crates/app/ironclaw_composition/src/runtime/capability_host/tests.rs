@@ -4172,14 +4172,16 @@ mod tests {
             Resolution::Done(failure) => {
                 // Missing target routes through `outbound_delivery_outcome`
                 // (recoverable, model-visible InvalidInput); the disposition
-                // function gives a fixed, host-authored summary.
+                // function gives a fixed, host-authored summary naming the
+                // operation the model can correct — the notification-channel
+                // set, not the retired delivery-target write.
                 assert_eq!(
                     failure.verdict.error_kind(),
                     Some(&FailureKind::InputEncode)
                 );
                 assert_eq!(
                     failure.summary.as_str(),
-                    "invalid outbound delivery request"
+                    "invalid notification channel request"
                 );
             }
             other => panic!("missing target should fail non-terminally, got {other:?}"),

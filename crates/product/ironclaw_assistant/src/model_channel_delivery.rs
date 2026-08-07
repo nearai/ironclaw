@@ -511,6 +511,7 @@ fn classify_delivery_outcome(
             target,
             provider_message_refs: vendor_message_refs,
             durably_recorded: true,
+            already_delivered: false,
         }),
         // The send happened (the refs are real) but the durable confirmation
         // write failed. Success-shaped so the model never resends; the
@@ -522,14 +523,18 @@ fn classify_delivery_outcome(
             target,
             provider_message_refs: vendor_message_refs,
             durably_recorded: false,
+            already_delivered: false,
         }),
         // The durable row confirms that this exact delivery fact completed in
-        // an earlier invocation. Provider refs are not retained in the row,
-        // so report only the evidence we actually have.
+        // an earlier invocation. Provider refs are not retained in the row, so
+        // report only the evidence we actually have — flagged as a replay, so
+        // the empty ref list cannot be mistaken for an unverified send and
+        // answered with a duplicate.
         CoordinatedDeliveryOutcome::AlreadyDelivered { .. } => Ok(ModelChannelDeliveryEvidence {
             target,
             provider_message_refs: Vec::new(),
             durably_recorded: true,
+            already_delivered: true,
         }),
         CoordinatedDeliveryOutcome::Rejected { .. } => Err(ModelChannelDeliveryError::Rejected),
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
