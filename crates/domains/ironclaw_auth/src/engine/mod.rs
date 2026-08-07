@@ -739,9 +739,19 @@ fn build_recipe_authorization_url(
         pairs
             .append_pair("client_id", client.client_id.as_str())
             .append_pair("redirect_uri", redirect_uri.as_str())
-            .append_pair("response_type", "code")
-            .append_pair(recipe.scope_param(), &scope_text)
-            .append_pair("state", state.as_str());
+            .append_pair("response_type", "code");
+        // An empty ceiling omits the parameter instead of sending it empty.
+        // RFC 6749 §3.3 makes `scope` optional but requires at least one token
+        // when present, and servers may reject `scope=` while accepting the
+        // same request without it (#7308). A recipe legitimately carries no
+        // scopes when dynamic registration discovers no declared scopes or a
+        // static recipe deliberately defines an empty ceiling —
+        // `OAuth2CodeRecipe::validate` rejects only an empty scope *string*,
+        // not an empty list.
+        if !scopes.is_empty() {
+            pairs.append_pair(recipe.scope_param(), &scope_text);
+        }
+        pairs.append_pair("state", state.as_str());
         if recipe.pkce == PkceMode::S256 {
             let challenge = pkce_s256_challenge(pkce_verifier);
             pairs

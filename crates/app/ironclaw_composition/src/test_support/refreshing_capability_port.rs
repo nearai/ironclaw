@@ -15,7 +15,7 @@ pub use ironclaw_extension_host::test_support::ExtensionManagementTestHandle;
 /// the `test_support` -> `runtime` -> `runtime::capability_host` forwarding chain
 /// so no layer needs `#[allow(clippy::too_many_arguments)]`. Mirrors
 /// `RefreshingCapabilityPortConfig` minus the no-op-by-default parts
-/// (`external_tool_catalog`, `policy`). `extension_surface_source` itself
+/// (`external_tool_catalog`, builtin grant `policy`). `extension_surface_source` itself
 /// stays no-op-by-default too — the harness supplies the raw
 /// `extension_management` port below (Change 3, harness-port-seam P1
 /// follow-up) and `create_refreshing_capability_port_for_test`
@@ -29,6 +29,9 @@ pub struct RefreshingCapabilityPortTestParts {
     /// through (harness passes a recording double).
     pub runtime: std::sync::Arc<dyn ironclaw_host_runtime::HostRuntime>,
     pub run_context: ironclaw_loop_contracts::LoopRunContext,
+    /// The already-resolved neutral host-API surface policy production's
+    /// runner passes into the real factory for this run.
+    pub surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy,
     pub fallback_user_id: ironclaw_host_api::ids::UserId,
     pub workspace_mounts: ironclaw_host_api::mount::MountView,
     pub skill_mounts: ironclaw_host_api::mount::MountView,

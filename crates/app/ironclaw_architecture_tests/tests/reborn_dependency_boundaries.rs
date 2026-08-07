@@ -628,7 +628,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // constants, and the test-support conformance module. Declarations
         // only; executable validation stays in ironclaw_host_runtime. Rationale
         // reviewed in the PR body's architecture-audit section.
-        ("ironclaw_host_api", 18_570),
+        // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
+        // CapabilitySurfacePolicy and capability-id scope algebra are neutral
+        // host declarations; enforcement remains in host_runtime/loop_host.
+        ("ironclaw_host_api", 18_784),
         // 14_479 -> 13_850 (2026-08-05, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

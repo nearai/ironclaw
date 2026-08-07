@@ -384,6 +384,52 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         await anon_ctx.close()
 
 
+async def test_inspector_debug_activation_and_responsive_shell(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """The opt-in inspector adapts without changing the ordinary chat shell."""
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    panel = page.locator(SEL_V2["inspector_panel"])
+    try:
+        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await expect(panel).to_have_count(0)
+
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(panel).to_have_attribute("data-layout", "sidebar")
+
+        stats_tab = page.locator(SEL_V2["inspector_tab_stats"])
+        await stats_tab.click()
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+        await page.locator(SEL_V2["inspector_close"]).click()
+        await expect(panel).to_have_count(0)
+        await page.locator(SEL_V2["inspector_open"]).click()
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+
+        await page.set_viewport_size({"width": 900, "height": 900})
+        await expect(panel).to_have_attribute("data-layout", "overlay")
+        await page.set_viewport_size({"width": 500, "height": 900})
+        await expect(panel).to_have_count(0)
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await expect(panel).to_have_attribute("data-layout", "sidebar")
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+
+        await page.reload()
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(panel).to_have_count(0)
+    finally:
+        await context.close()
+
+
 @pytest.mark.parametrize(
     ("locale", "expected_lang", "connect_label"),
     [

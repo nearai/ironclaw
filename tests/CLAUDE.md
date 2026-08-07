@@ -116,7 +116,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (5)
+### 3.4 Memory — `group_memory/` (6)
 
 | The user can… | Evidence |
 |---|---|
@@ -125,6 +125,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
+| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's — through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -185,7 +186,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
-| Bridged tool disclosure mode reaches production's decorator wiring | `tool_disclosure.rs` |
+| Bridged disclosure never advertises a capability excluded by the resolved host-API surface policy | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
@@ -328,6 +329,7 @@ entries.
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
+| Opt into the inspector, preserve its selected tab while closing, resizing, and reloading, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
 | Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
 
