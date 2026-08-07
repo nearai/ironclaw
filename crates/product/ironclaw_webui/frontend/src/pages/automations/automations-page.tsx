@@ -10,9 +10,11 @@ export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
-  // Failure summaries and the Failures tab must include completed one-shots.
-  // The presenter keeps completed rows out of the default All view.
-  const automationsState = useAutomations(true);
+  const includeCompleted = filter === "completed" || filter === "failures";
+  // The hook fetches the lean scheduled list first and a completed-inclusive
+  // summary in parallel. Switching to either historical filter then reuses
+  // that full query while keepPreviousData preserves the visible rows.
+  const automationsState = useAutomations(includeCompleted);
   const channelsState = useNotificationChannels();
 
   // A local refetch can resolve almost instantly, leaving the spinner to flash

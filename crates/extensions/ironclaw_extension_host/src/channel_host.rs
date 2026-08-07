@@ -612,6 +612,7 @@ impl GenericChannelHostAssembly {
 
         let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
+        let actor_user_resolver = self.actor_user_resolver(source);
         let graph = self
             .deps
             .channel_workflow
@@ -620,18 +621,16 @@ impl GenericChannelHostAssembly {
                 extras,
                 adapter_id.clone(),
                 command_roles,
+                Arc::clone(&actor_user_resolver),
             )?)
             .await?;
-        let (provider, provider_lookup) = self.provider_identity_lookup(source);
         let dm_target_backfill =
             self.deps
                 .dm_targets
                 .as_ref()
                 .map(|store| DirectInboundDmTargetBackfill {
                     extension_id: source.extension_id().to_string(),
-                    provider,
-                    provider_lookup,
-                    operator_user_id: self.deps.identity.operator_user_id.clone(),
+                    actor_user_resolver,
                     store: Arc::clone(store),
                 });
         let observer = if graph.observer.is_some() || dm_target_backfill.is_some() {
@@ -721,6 +720,30 @@ impl GenericChannelHostAssembly {
         }
     }
 
+    /// Build the one actor resolver shared by conversation admission and the
+    /// post-admission DM-target backfill. Sharing the instance is important:
+    /// the admission path has already resolved and freshness-checked the
+    /// actor, so the observer can reuse that positive resolution without a
+    /// third identity-store read after the acknowledgement is committed.
+    fn actor_user_resolver(
+        &self,
+        source: &HostedChannelSource,
+    ) -> Arc<dyn ProductActorUserResolver> {
+        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        match provider_lookup {
+            Some(lookup) => Arc::new(
+                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
+                    provider,
+                    source.extension_id(),
+                    lookup,
+                ),
+            ),
+            None => Arc::new(OperatorActorUserResolver {
+                operator_user_id: self.deps.identity.operator_user_id.clone(),
+            }),
+        }
+    }
+
     /// The per-extension inputs the product-side workflow factory needs.
     ///
     /// Everything here is host policy: where the durable state lives, which
@@ -735,6 +758,7 @@ impl GenericChannelHostAssembly {
         extras: &StoredChannelExtras,
         adapter_id: ProductAdapterId,
         command_roles: Arc<dyn ironclaw_product_contracts::command::CommandActorRoleResolver>,
+        actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     ) -> Result<ChannelWorkflowRequest, String> {
         let identity = &self.deps.identity;
         let storage_roots = match &extras.storage_roots {
@@ -745,26 +769,6 @@ impl GenericChannelHostAssembly {
         };
         let installation_id = AdapterInstallationId::new(source.installation_id())
             .map_err(|error| format!("invalid installation id: {error}"))?;
-        // Auth-declaring channel extensions resolve verified inbound actors
-        // through the generic installation-scoped identity bindings written
-        // by the post-OAuth channel-identity hook; unbound actors fall to
-        // the pairing service (fail-closed pairing flow). Extensions without
-        // an auth vendor keep the operator-actor policy: the ingress
-        // verification secret gates who reaches the installation and no
-        // binding can exist to resolve.
-        let (provider, provider_lookup) = self.provider_identity_lookup(source);
-        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match provider_lookup {
-            Some(lookup) => Arc::new(
-                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    provider,
-                    source.extension_id(),
-                    lookup,
-                ),
-            ),
-            None => Arc::new(OperatorActorUserResolver {
-                operator_user_id: identity.operator_user_id.clone(),
-            }),
-        };
         // Generic shared-channel admission (§5.3): with a subject-route
         // resolver installed, unrouted shared conversations fail closed —
         // an extras override wins; otherwise a channel declaring the
@@ -978,9 +982,7 @@ pub struct RunDeliveryPostAdmissionObserver {
 
 struct DirectInboundDmTargetBackfill {
     extension_id: String,
-    provider: String,
-    provider_lookup: Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
-    operator_user_id: UserId,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     store: Arc<FilesystemChannelDmTargetStore>,
 }
 
@@ -1008,31 +1010,27 @@ impl RunDeliveryPostAdmissionObserver {
             return;
         }
 
-        let user_id = match &backfill.provider_lookup {
-            Some(lookup) => {
-                let provider_user_id =
-                    ironclaw_host_api::user_identity::installation_scoped_provider_user_id(
-                        envelope.installation_id(),
-                        envelope.external_actor_ref().id(),
-                    );
-                match lookup
-                    .resolve_user_identity(&backfill.provider, &provider_user_id)
-                    .await
-                {
-                    Ok(Some(user_id)) => user_id,
-                    Ok(None) => return,
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "ironclaw::reborn::channel_host",
-                            extension_id = %backfill.extension_id,
-                            %error,
-                            "direct channel target backfill identity lookup failed"
-                        );
-                        return;
-                    }
-                }
+        let request = ProductActorUserResolutionRequest::new(
+            envelope.adapter_id().clone(),
+            envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
+        );
+        let user_id = match backfill
+            .actor_user_resolver
+            .resolve_product_actor_user(request)
+            .await
+        {
+            Ok(Some(actor)) => actor.user_id,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_host",
+                    extension_id = %backfill.extension_id,
+                    %error,
+                    "direct channel target backfill actor resolution failed"
+                );
+                return;
             }
-            None => backfill.operator_user_id.clone(),
         };
         let conversation = envelope.external_conversation_ref();
         if let Err(error) = backfill
