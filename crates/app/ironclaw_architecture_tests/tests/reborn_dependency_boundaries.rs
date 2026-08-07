@@ -648,7 +648,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // a production file. Net effect is a smaller crate than before the
         // fixes, so the ceiling ratchets DOWN rather than being raised. Count
         // read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_115),
+        // 13_115 -> 13_181 (2026-08-07): +66 lines landed in
+        // `instruction_bundle.rs` from main (#7361/#7363) when this branch
+        // folded onto it. Not growth from this PR — the upward check is a hard
+        // `lines > ceiling` with ZERO headroom (TOLERANCE is the downward
+        // ratchet-nudge window only), so any commit that adds a line to a
+        // contracts crate reddens every branch until the ceiling is
+        // re-captured. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_181),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
