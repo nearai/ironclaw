@@ -75,6 +75,19 @@ mod tests {
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
+    #[derive(Default)]
+    struct RecordingToolDiagnosticSink {
+        result: std::sync::Mutex<Option<HostManagedToolResultDiagnosticCapture>>,
+    }
+
+    impl HostManagedPromptDiagnosticSink for RecordingToolDiagnosticSink {
+        fn record_prompt(&self, _capture: ironclaw_loop_host::HostManagedPromptDiagnosticCapture) {}
+
+        fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+            *self.result.lock().expect("diagnostic result lock") = Some(capture);
+        }
+    }
+
     impl StagedCapabilityIo {
         fn latest_result_output(
             &self,
@@ -2076,6 +2089,93 @@ mod tests {
         assert!(store.get("result:first").is_none());
         assert!(store.get("result:second").is_some());
         assert!(store.total_bytes <= CAPABILITY_IO_MAX_STAGED_BYTES);
+    }
+
+    #[test]
+    fn tool_diagnostic_result_capture_bounds_work_and_preserves_redaction_context() {
+        let secret = format!("Bearer {}", "s".repeat(80));
+        let retained_prefix = "x".repeat(TOOL_RESULT_MAX_BYTES - 32);
+        let payload = format!(
+            "{retained_prefix}{secret}{}",
+            "y".repeat(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES)
+        );
+
+        let captured = bounded_tool_diagnostic_result(payload.as_bytes())
+            .expect("serialized JSON diagnostic text is valid UTF-8");
+        assert_eq!(captured.len(), TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert!(captured.len() < payload.len());
+        assert!(captured.contains(&secret));
+
+        let (redacted, changed) =
+            ironclaw_safety::LeakDetector::new().redact_all_secrets(&captured);
+        assert!(changed, "boundary-crossing secret must remain detectable");
+        let retained =
+            ironclaw_product_contracts::inspector::BoundedDiagnosticText::retained_tool_result(
+                redacted,
+                u64::try_from(payload.len()).expect("test payload length fits u64"),
+            )
+            .expect("bounded diagnostic text accepts the original byte count");
+        assert!(retained.content().len() <= TOOL_RESULT_MAX_BYTES);
+        assert!(!retained.content().contains(&secret));
+        assert!(retained.truncated());
+    }
+
+    #[test]
+    fn tool_diagnostic_result_capture_drops_a_split_utf8_suffix() {
+        let mut payload = "a".repeat(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
+        payload.push('€');
+        payload.push_str("tail");
+
+        let captured = bounded_tool_diagnostic_result(payload.as_bytes())
+            .expect("valid prefix is retained when the cap splits a code point");
+        assert_eq!(captured.len(), TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES - 1);
+        assert!(captured.is_char_boundary(captured.len()));
+    }
+
+    #[tokio::test]
+    async fn capability_io_sends_only_bounded_output_to_the_diagnostic_sink() {
+        let sink = Arc::new(RecordingToolDiagnosticSink::default());
+        let capability_io = StagedCapabilityIo::default().with_tool_diagnostic_sink(Some(
+            Arc::clone(&sink) as Arc<dyn HostManagedPromptDiagnosticSink>,
+        ));
+        let run_context = run_context("bounded-tool-diagnostic").await;
+        let input_ref = CapabilityInputRef::new(format!(
+            "input:{}:bounded-tool-diagnostic",
+            run_context.run_id
+        ))
+        .expect("input ref");
+        let output = serde_json::Value::String("x".repeat(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2));
+        let serialized_bytes = serialized_result_output(&output)
+            .expect("result serializes")
+            .len();
+
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &CapabilityId::new("builtin.echo").expect("capability id"),
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::InlineOnly,
+            })
+            .await
+            .expect("result writes");
+
+        let capture = sink
+            .result
+            .lock()
+            .expect("diagnostic result lock")
+            .take()
+            .expect("tool diagnostic captured");
+        let retained = capture
+            .result
+            .expect("successful result has diagnostic text");
+        assert_eq!(retained.len(), TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert_eq!(
+            capture.result_original_bytes,
+            Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))
+        );
     }
 
     #[test]

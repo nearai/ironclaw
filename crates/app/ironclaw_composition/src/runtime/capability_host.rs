@@ -31,7 +31,9 @@ use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ThreadScopeResolver, loop_driver_execution_extension_id,
 };
-use ironclaw_product_contracts::project_service::ProjectService;
+use ironclaw_product_contracts::{
+    inspector::TOOL_RESULT_MAX_BYTES, project_service::ProjectService,
+};
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -311,6 +313,13 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
 const CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
 const DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Additional bounded lookahead retained only while the Inspector leak detector
+/// scans a result. This matches the detector's largest structurally validated
+/// candidate and lets a secret beginning just before the retained-result limit
+/// be consumed and redacted instead of being split at that boundary.
+const TOOL_DIAGNOSTIC_REDACTION_CONTEXT_BYTES: usize = 64 * 1024;
+const TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES: usize =
+    TOOL_RESULT_MAX_BYTES + TOOL_DIAGNOSTIC_REDACTION_CONTEXT_BYTES;
 /// First-look preview bound on the initial result-reference observation.
 /// Matches `result_read`'s max chunk size so the preview is exactly the
 /// first chunk `result_read` would itself return at `offset: 0` — a model
@@ -870,8 +879,9 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         let diagnostic_result = self
             .tool_diagnostic_sink
             .as_ref()
-            .and_then(|_| String::from_utf8(output_content.clone()).ok());
-        let diagnostic_result_original_bytes = u64::try_from(output_content.len()).ok();
+            .and_then(|_| bounded_tool_diagnostic_result(&output_content));
+        let diagnostic_result_original_bytes =
+            self.tool_diagnostic_sink.as_ref().map(|_| output_bytes);
         // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
@@ -1044,6 +1054,21 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
         ));
     }
     Ok(content)
+}
+
+/// Copies only the retained Inspector result plus bounded leak-redaction
+/// lookahead. `serialized_result_output` produces valid UTF-8, so an invalid
+/// suffix here can only be a code point split by the byte cap.
+fn bounded_tool_diagnostic_result(serialized: &[u8]) -> Option<String> {
+    let candidate = &serialized[..serialized.len().min(TOOL_DIAGNOSTIC_CAPTURE_MAX_BYTES)];
+    match std::str::from_utf8(candidate) {
+        Ok(text) => Some(text.to_owned()),
+        Err(error) if error.error_len().is_none() => {
+            let valid_prefix = &candidate[..error.valid_up_to()];
+            std::str::from_utf8(valid_prefix).ok().map(str::to_owned)
+        }
+        Err(_) => None,
+    }
 }
 
 /// A bounded, UTF-8-safe first-look slice of a serialized result payload,
