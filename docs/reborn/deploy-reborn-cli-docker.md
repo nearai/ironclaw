@@ -97,15 +97,19 @@ NEARAI_API_KEY=<nearai-api-key>
 The volume-backed sandbox profiles have distinct operator intent:
 
 - `hosted-single-tenant-volume-sandboxed` is the local-Docker profile. It is
-  for exercising the Docker worker boundary, including a worker started with
-  `--network none`. Build its Python worker once with
-  `docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .`.
+  for exercising the Docker worker boundary. The deployment factory enables
+  the worker's default Docker network; `--network none` is only the ad-hoc
+  transport's fail-closed construction default. Build its Python worker once
+  with `docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .`.
   On Docker Desktop or Colima, keep `IRONCLAW_REBORN_HOME` under a host path
   shared with the Docker VM (for example `/Users/...` on macOS); otherwise the
   daemon cannot bind the per-user workspace.
 - `hosted-single-tenant-volume-sandboxed-railway` is the Railway preview
-  profile. It selects the same initial volume-backed seed config, but its
-  Railway sandbox lifecycle requirements are documented in
+  profile. Each command runs in a fresh inner Docker worker inside a Railway
+  Sandbox. The deployment factory enables the worker's default Docker network,
+  providing direct egress through the outer sandbox's Railway NAT. The
+  `--network none` setting remains only the ad-hoc transport's fail-closed
+  construction default. Its lifecycle requirements are documented in
   [the Railway sandbox operator runbook](railway-sandbox-operator.md).
 
 The persisted seed config records the canonical volume-backed application

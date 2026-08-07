@@ -528,6 +528,29 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertNotEqual(plan["mode"], "none")
                 self.assertTrue(plan["run_sandbox_docker"])
 
+    def test_sandbox_docker_paths_preserve_regular_test_inventory_selection(
+        self,
+    ) -> None:
+        integration_path = "tests/integration/reborn_sandbox_shell_turn.rs"
+        integration_inventory = planner._integration_test_lanes()
+        self.assertIn(integration_path, integration_inventory)
+
+        integration_plan = self.plan("pull_request", [integration_path])
+        self.assertTrue(integration_plan["run_sandbox_docker"])
+        self.assertEqual(
+            integration_plan["integration_lanes"],
+            [integration_inventory[integration_path]],
+        )
+
+        docker_only_path = "tests/e2e_trace_runtime_policy_serde.rs"
+        self.assertNotIn(docker_only_path, planner._root_test_partitions())
+        self.assertNotIn(docker_only_path, integration_inventory)
+
+        docker_only_plan = self.plan("pull_request", [docker_only_path])
+        self.assertTrue(docker_only_plan["run_sandbox_docker"])
+        self.assertEqual(docker_only_plan["root_partitions"], [])
+        self.assertEqual(docker_only_plan["integration_lanes"], [])
+
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
             self.plan("pull_request", [])

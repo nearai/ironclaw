@@ -122,8 +122,8 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
     // through the deployment-blind local `process` port. The resolver bundles it
     // with the port matching the plan's process backend: the local host port
     // under LocalSingleUser+LocalHost, the user-sandbox port under a hosted
-    // user-sandbox deployment (so a tenant's command runs isolated in that
-    // tenant's sandbox, never on the provider host), and nothing when no backend
+    // user-sandbox deployment (so each command runs in the sandbox scoped to its
+    // tenant and user, never on the provider host), and nothing when no backend
     // can run it in isolation.
     let resolver = ConfiguredInvocationServicesResolver::new(
         Arc::new(DiskFilesystem::new()),

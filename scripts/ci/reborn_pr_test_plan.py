@@ -696,7 +696,11 @@ def build_plan(
         if path in SANDBOX_DOCKER_EXACT_PATHS or path.startswith(SANDBOX_DOCKER_PREFIXES):
             run_sandbox_docker = True
             reasons.append(f"sandbox Docker surface changed: {path}")
-            if not path.startswith("crates/"):
+            if (
+                not path.startswith("crates/")
+                and path not in root_inventory
+                and path not in integration_inventory
+            ):
                 continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")

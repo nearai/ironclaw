@@ -7151,7 +7151,9 @@ async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_service
 #[tokio::test]
 async fn builtin_read_file_uses_scoped_mounts_for_hosted_tenant_workspace() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "hosted scoped read\n").unwrap();
+    tokio::fs::write(temp.path().join("README.md"), "hosted scoped read\n")
+        .await
+        .unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 

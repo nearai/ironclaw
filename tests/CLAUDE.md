@@ -158,7 +158,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (54)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -237,9 +237,10 @@ One thread, whole real turn. Grouped by what the user experiences.
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-The 54th registered bin, `delivery_user_journeys.rs`, is a retired Cargo target
-with no scenario behavior. Current delivery evidence is listed under Extensions
-& channels and the group trigger scenarios; the retired target is not coverage.
+One of the 55 registered bins, `delivery_user_journeys.rs`, is a retired Cargo
+target with no scenario behavior. Current delivery evidence is listed under
+Extensions & channels and the group trigger scenarios; the retired target is
+not coverage.
 
 ---
 

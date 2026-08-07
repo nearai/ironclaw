@@ -76,10 +76,12 @@ checkpoint or the Railway volume.
 
 ## Worker network boundary
 
-The `--network none` requirement applies to the untrusted Docker worker. Keep
-the worker on that Docker-enforced network boundary and use the Unix-socket
-broker path when it needs mediated host services. The Railway control service
-cannot use `--network none`: it needs egress to invoke Railway's sandbox API.
+Each command runs in a fresh inner Docker worker inside its Railway Sandbox.
+The Railway preview deployment factory enables that worker's default Docker
+network, providing direct egress through the outer sandbox's Railway NAT.
+`--network none` remains only the ad-hoc transport's fail-closed construction
+default; it is not active for this profile. The Railway control service also
+needs egress to invoke Railway's sandbox API.
 
 Do not describe a Railway Sandbox's `ISOLATED` mode as equivalent to Docker
 `--network none`. Railway documents `ISOLATED` as private-network isolation;

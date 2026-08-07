@@ -488,43 +488,11 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
     }
 }
 
+// Kept as the crate-local seam used by Docker-backed tests. Connection policy
+// lives exclusively in the `connect` module; do not add discovery or timeout
+// behavior here.
 async fn connect_docker() -> Result<Docker, RuntimeProcessError> {
-    if let Ok(docker) = Docker::connect_with_local_defaults()
-        && docker.ping().await.is_ok()
-    {
-        return Ok(docker);
-    }
-    #[cfg(unix)]
-    {
-        for socket in unix_socket_candidates() {
-            if socket.exists() {
-                let socket = socket.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&socket, 120, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
-                {
-                    return Ok(docker);
-                }
-            }
-        }
-    }
-    Err(RuntimeProcessError::ExecutionFailed(
-        "could not connect to Docker daemon for Reborn sandbox".to_string(),
-    ))
-}
-
-#[cfg(unix)]
-fn unix_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.push(home.join(".docker/run/docker.sock"));
-        candidates.push(home.join(".colima/default/docker.sock"));
-        candidates.push(home.join(".rd/docker.sock"));
-    }
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        candidates.push(runtime_dir.join("docker.sock"));
-    }
-    candidates
+    connect_docker_with_retry().await
 }
 
 async fn wait_for_container(
@@ -666,10 +634,36 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
+
+    #[test]
+    fn transport_constructor_uses_canonical_bounded_docker_connector() {
+        let _guard = lock_env();
+        set_runtime_env(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            "/nonexistent/ironclaw-constructor-docker.sock",
+        );
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(RebornScopedSandboxCommandTransport::connect(
+                RebornSandboxConfig::new("/tmp/reborn-sandbox-constructor-test"),
+            ));
+
+        remove_runtime_env("IRONCLAW_REBORN_DOCKER_HOST");
+
+        let error = result.expect_err("nonexistent Docker override must fail closed");
+        assert!(
+            error.to_string().contains("IRONCLAW_REBORN_DOCKER_HOST"),
+            "constructor must use the canonical connector, including its bounded retry and override handling: {error}"
+        );
+    }
 
     #[test]
     fn relative_workdir_rejects_escape() {
