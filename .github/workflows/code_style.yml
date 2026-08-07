@@ -576,6 +576,16 @@ jobs:
             exit 1
           fi
 
+          # Same reason as the docs gate above: a guidance-only PR has
+          # has_code=false, so fast-checks (which carries check-guidance.py)
+          # must be judged before the early exit or the gate would run and
+          # never be able to block — the inert-guard shape this whole change
+          # exists to remove.
+          if [[ "${{ needs.changes.outputs.has_guidance }}" == "true" && "${{ needs.fast-checks.result }}" != "success" ]]; then
+            echo "fast-checks failed: ${{ needs.fast-checks.result }}"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
             if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
               echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"
