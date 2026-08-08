@@ -244,7 +244,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         // observer only emits structured automation-health telemetry and
         // must never mint a replacement run or bypass the delivery path.
         tracing::warn!(
-            target = "ironclaw::reborn::trigger_poller",
+            target: "ironclaw::reborn::trigger_poller",
             tenant_id = %event.tenant_id,
             trigger_id = %event.trigger_id,
             fire_slot = %event.fire_slot,

@@ -111,11 +111,11 @@ struct ScriptedTurnCoordinator {
     clamp_at_last: bool,
     calls: Mutex<usize>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
-    /// Optional late transition: from call `flip_after` on, `flip_to` is
-    /// returned instead of the scripted sequence — used to race a terminal
-    /// state in after the wait backstop has already fired.
-    flip_after: Option<usize>,
-    flip_to: Option<ScriptedRunState>,
+    /// Optional late transition: from call `flip.0` on, `flip.1` is returned
+    /// instead of the scripted sequence — used to race a terminal state in
+    /// after the wait backstop has already fired. One tuple keeps the flip
+    /// point and target from being configured independently.
+    flip: Option<(usize, ScriptedRunState)>,
 }
 
 impl ScriptedTurnCoordinator {
@@ -126,8 +126,7 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
-            flip_after: None,
-            flip_to: None,
+            flip: None,
         }
     }
 
@@ -143,8 +142,7 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
-            flip_after: Some(flip_after),
-            flip_to: Some(terminal),
+            flip: Some((flip_after, terminal)),
         }
     }
 
@@ -187,11 +185,8 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         let mut calls = self.calls.lock().expect("calls");
         let call = *calls;
         *calls += 1;
-        let scripted = match self.flip_after {
-            Some(flip) if call >= flip => self
-                .flip_to
-                .clone()
-                .expect("late-terminal flip target present"),
+        let scripted = match self.flip {
+            Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
             _ => {
                 let idx = if self.clamp_at_last {
                     call.min(self.states.len() - 1)
@@ -2893,6 +2888,13 @@ async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellat
     // crosses into a terminal state during the bounded race-grace window
     // must receive the correct terminal notice — the timeout arm used to
     // exit the watcher and lose the terminal copy.
+    //
+    // Deterministic grace-path entry: the wait loop polls at 1ms intervals
+    // doubling to a 5s cap against a 60ms max_wait, so the wait backstop
+    // fires after at most ~8 `get_run_state` calls — far below the flip at
+    // call 30. The scripted Cancelled state is therefore never observable
+    // inside the wait loop; only the grace window (60ms, 1ms polls) reaches
+    // call 30 and observes the terminal state.
     let harness = build_triggered_harness_with_turns(
         Arc::new(ScriptedTurnCoordinator::with_late_terminal(
             scripted_state(TurnStatus::Running, None),
@@ -2922,6 +2924,11 @@ async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellat
         !texts[0].contains("taking longer than expected"),
         "no timeout copy for a run that reached terminal: {}",
         texts[0]
+    );
+    assert_eq!(
+        harness.turns.cancel_call_count(),
+        0,
+        "grace loop observed the terminal state without issuing a cancellation"
     );
 }
 

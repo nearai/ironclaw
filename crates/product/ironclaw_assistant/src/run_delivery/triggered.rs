@@ -609,6 +609,27 @@ async fn notify_background_run(
     // extensions, so retraction is per-message.
     let mut messages_to_delete_after_final: Vec<(String, DeliveredChannelMessage)> = Vec::new();
 
+    // The reply authority, codec resolver, and notification context are
+    // loop-invariant for one fire: scope, actor, run id, and the codec
+    // snapshot never change across polls. Built once so the watcher loop,
+    // the race-grace arm, and the timeout arm share one construction.
+    let authority = TriggeredReplyTargetAuthority {
+        scope: scope.clone(),
+        actor: actor.clone(),
+    };
+    let target_resolver = CodecChannelTargetResolver::with_context_label(
+        target_codecs.to_vec(),
+        "background run notification",
+    );
+    let notification_context = TriggeredNotificationContext {
+        scope: &scope,
+        thread_scope: &thread_scope,
+        actor: &actor,
+        run_id,
+        authority: &authority,
+        target_resolver: &target_resolver,
+    };
+
     loop {
         let state = match wait_for_actionable_state(
             services.turn_coordinator.as_ref(),
@@ -658,17 +679,30 @@ async fn notify_background_run(
                 let grace_deadline =
                     tokio::time::Instant::now() + settings.max_wait.min(TERMINAL_RACE_GRACE);
                 loop {
-                    let fresh = services
+                    let fresh = match services
                         .turn_coordinator
                         .get_run_state(GetRunStateRequest {
                             scope: scope.clone(),
                             run_id,
                         })
                         .await
-                        .ok();
+                    {
+                        Ok(state) => Some(state),
+                        Err(err) => {
+                            // silent-ok: the state poll during the race-grace
+                            // window failed; fall back to the timeout notice.
+                            tracing::debug!(
+                                target: TRACE_TARGET,
+                                %run_id,
+                                error = %err,
+                                "terminal race grace poll failed; using timeout notice"
+                            );
+                            None
+                        }
+                    };
                     match fresh {
                         Some(state) if state.status.is_terminal() => {
-                            if let Ok(Some(plan)) = notification_plan_for_state(
+                            let plan = notification_plan_for_state(
                                 services,
                                 &scope,
                                 &actor,
@@ -676,25 +710,19 @@ async fn notify_background_run(
                                 run_id,
                                 &trigger_label,
                             )
-                            .await
-                            {
-                                let authority = TriggeredReplyTargetAuthority {
-                                    scope: scope.clone(),
-                                    actor: actor.clone(),
-                                };
-                                let target_resolver =
-                                    CodecChannelTargetResolver::with_context_label(
-                                        target_codecs.to_vec(),
-                                        "background run notification",
-                                    );
-                                let notification_context = TriggeredNotificationContext {
-                                    scope: &scope,
-                                    thread_scope: &thread_scope,
-                                    actor: &actor,
-                                    run_id,
-                                    authority: &authority,
-                                    target_resolver: &target_resolver,
-                                };
+                            .await;
+                            if let Err(err) = &plan {
+                                // silent-ok: the terminal notice could not be
+                                // built during the grace window; fall back to
+                                // the timeout copy.
+                                tracing::warn!(
+                                    target: TRACE_TARGET,
+                                    %run_id,
+                                    error = %err,
+                                    "terminal race notification build failed; using timeout notice"
+                                );
+                            }
+                            if let Ok(Some(plan)) = plan {
                                 let fan =
                                     fan_out_plan(services, &notification_context, &plan, &targets)
                                         .await;
@@ -730,22 +758,6 @@ async fn notify_background_run(
                     }],
                     gate_ref_for_routing: None,
                     keeps_run_parked: false,
-                };
-                let authority = TriggeredReplyTargetAuthority {
-                    scope: scope.clone(),
-                    actor: actor.clone(),
-                };
-                let target_resolver = CodecChannelTargetResolver::with_context_label(
-                    target_codecs.to_vec(),
-                    "background run notification",
-                );
-                let notification_context = TriggeredNotificationContext {
-                    scope: &scope,
-                    thread_scope: &thread_scope,
-                    actor: &actor,
-                    run_id,
-                    authority: &authority,
-                    target_resolver: &target_resolver,
                 };
                 let fan =
                     fan_out_plan(services, &notification_context, &timeout_plan, &targets).await;
@@ -806,22 +818,6 @@ async fn notify_background_run(
         };
 
         let next_blocked_marker = blocked_actionable_marker(&state);
-        let authority = TriggeredReplyTargetAuthority {
-            scope: scope.clone(),
-            actor: actor.clone(),
-        };
-        let target_resolver = CodecChannelTargetResolver::with_context_label(
-            target_codecs.to_vec(),
-            "background run notification",
-        );
-        let notification_context = TriggeredNotificationContext {
-            scope: &scope,
-            thread_scope: &thread_scope,
-            actor: &actor,
-            run_id,
-            authority: &authority,
-            target_resolver: &target_resolver,
-        };
 
         let fan = fan_out_plan(services, &notification_context, &plan, &targets).await;
         messages_to_delete_after_final.extend(fan.messages_to_retract_after_final);
@@ -991,8 +987,8 @@ async fn resolve_notification_targets(
 /// ## Background-run channel surface contract
 ///
 /// A background run is **notification-only, plus gate-resolution input** — it
-/// is NOT a conversational surface and it never pushes results. Only three
-/// states produce output:
+/// is NOT a conversational surface and it never pushes results. The
+/// deliverable states are:
 ///
 /// - `BlockedApproval` → gate prompt (approve/deny) on every channel
 /// - `BlockedAuth`     → OAuth prompt to personal DMs + a redacted notice
@@ -1159,33 +1155,23 @@ async fn notification_plan_for_state(
             // notice — cancelled runs never carry a failure category in the
             // real system, and a failure summary would mislabel a host or
             // operator cancel as a failed run.
+            let failure_summary = || {
+                reborn_failure_summary_for_category(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                )
+                .to_string()
+            };
             let (text, discriminator) = match state.status {
                 TurnStatus::Cancelled => (
                     prompts::TRIGGERED_RUN_CANCELED_MESSAGE.to_string(),
                     "cancelled",
                 ),
-                TurnStatus::RecoveryRequired => (
-                    state
-                        .failure
-                        .as_ref()
-                        .map(|failure| {
-                            reborn_failure_summary_for_category(Some(failure.category()))
-                        })
-                        .unwrap_or_else(|| reborn_failure_summary_for_category(None))
-                        .to_string(),
-                    "recovery-required",
-                ),
-                _ => (
-                    state
-                        .failure
-                        .as_ref()
-                        .map(|failure| {
-                            reborn_failure_summary_for_category(Some(failure.category()))
-                        })
-                        .unwrap_or_else(|| reborn_failure_summary_for_category(None))
-                        .to_string(),
-                    "failed",
-                ),
+                TurnStatus::RecoveryRequired => (failure_summary(), "recovery-required"),
+                TurnStatus::Failed => (failure_summary(), "failed"),
+                // Unreachable: the enclosing arm narrows to the three
+                // terminal statuses; named arms keep new statuses
+                // compiler-visible instead of silently inheriting "failed".
+                _ => return Ok(None),
             };
             Ok(Some(TriggeredNotificationPlan {
                 notifications: vec![TriggeredNotification {
