@@ -138,6 +138,13 @@ pub enum SlackInboundEvent {
     Message(Box<NormalizedInboundMessage>),
 }
 
+/// Opaque per-message context the host stores server-side and hands back at
+/// delivery time: the originating user id, needed by `chat.startStream` for
+/// channel (non-DM) streams. The host never interprets these bytes.
+fn slack_reply_context(user: &str) -> Option<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({ "user": user })).ok()
+}
+
 /// Parse one host-verified Slack Events API request into its normalized
 /// channel form. Pure protocol work — no I/O, no secrets; the host executed
 /// the signature recipe before calling this.
@@ -210,6 +217,10 @@ pub fn normalize_slack_event(
                     descriptor,
                 })
                 .collect();
+            // Captured before the actor ref moves into the message below:
+            // the originating user id is carried for channel streaming
+            // recipients (chat.startStream requires it for non-DM streams).
+            let reply_context = slack_reply_context(parsed.external_actor_ref.id());
             Ok(SlackInboundEvent::Message(Box::new(
                 NormalizedInboundMessage {
                     actor: parsed.external_actor_ref,
@@ -221,7 +232,7 @@ pub fn normalize_slack_event(
                     // Reply routing rides the conversation ref's thread anchors
                     // (pre-coordinator delivery path); adopted when the P5
                     // delivery coordinator consumes stored contexts.
-                    reply_context: None,
+                    reply_context,
                 },
             )))
         }
@@ -315,7 +326,7 @@ fn normalize_slack_slash_command(
             text,
             trigger,
             attachments: Vec::new(),
-            reply_context: None,
+            reply_context: slack_reply_context(&form.user_id),
         },
     )))
 }

@@ -324,6 +324,9 @@ impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgr
 
 struct StaticResolver {
     adapter: Arc<RecordingChannelAdapter>,
+    /// Mirrors the manifest-declared `streams_working_indicator` capability;
+    /// tests that exercise streaming set this to true.
+    streams_working_indicator: bool,
 }
 
 impl ChannelDeliveryResolver for StaticResolver {
@@ -334,6 +337,7 @@ impl ChannelDeliveryResolver for StaticResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(DenyAllEgress),
+            streams_working_indicator: self.streams_working_indicator,
         })
     }
 }
@@ -848,6 +852,7 @@ fn build_harness_with_settings(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            streams_working_indicator: false,
         }),
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
@@ -879,6 +884,8 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         auth_flow_cancel: None,
+        projection_stream: Arc::new(ironclaw_assistant::LiveProjectionStream::default())
+            as Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
     let observer = Arc::new(
@@ -2044,6 +2051,7 @@ fn build_triggered_harness_with_catalog(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            streams_working_indicator: false,
         }),
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
@@ -2077,6 +2085,8 @@ fn build_triggered_harness_with_catalog(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         auth_flow_cancel: None,
+        projection_stream: Arc::new(ironclaw_assistant::LiveProjectionStream::default())
+            as Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,

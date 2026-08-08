@@ -509,6 +509,12 @@ pub struct ChannelPresentation {
     /// renders the bare `/{name}` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,
+    /// The channel renders the agent's working state as a vendor-native
+    /// progressive-response stream (e.g. Slack `chat.startStream`) instead
+    /// of a transient text message. Manifest-declared; the host never
+    /// guesses from the vendor name.
+    #[serde(default)]
+    pub streams_working_indicator: bool,
 }
 
 /// Structural channel-descriptor failures (path context added by the

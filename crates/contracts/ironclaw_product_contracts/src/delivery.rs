@@ -38,6 +38,10 @@ pub struct ResolvedChannelDelivery {
     pub adapter: Arc<dyn ChannelAdapter>,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
+    /// Whether the channel's manifest declares working-indicator streaming.
+    /// The coordinator reduces the `Working` intent to `StreamStart` only
+    /// when this is true.
+    pub streams_working_indicator: bool,
 }
 
 /// Resolver port: the coordinator's view of the active extension set.

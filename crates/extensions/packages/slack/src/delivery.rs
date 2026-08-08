@@ -38,7 +38,12 @@ pub(crate) fn slack_error_kind(error: &str) -> SlackDeliveryFailureKind {
         | "internal_error"
         | "service_unavailable"
         | "request_timeout"
-        | "ratelimited" => SlackDeliveryFailureKind::Retryable,
+        | "ratelimited"
+        // An empty-text stopStream is retryable with the short-text fallback
+        // (the observer's empty-tail recovery path); deterministic, but the
+        // retry changes the payload, so the coordinator's drive loop burns
+        // one attempt and the observer's recovery takes over.
+        | "no_text" => SlackDeliveryFailureKind::Retryable,
         _ => SlackDeliveryFailureKind::Permanent,
     }
 }

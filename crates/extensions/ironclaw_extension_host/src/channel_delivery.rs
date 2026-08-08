@@ -104,6 +104,12 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                 installation_id,
                 adapter: Arc::clone(&extension.adapter),
                 egress,
+                streams_working_indicator: extension
+                    .resolved
+                    .channel
+                    .as_ref()
+                    .map(|channel| channel.presentation.streams_working_indicator)
+                    .unwrap_or(false),
             });
         }
         let snapshot = self.watch.current();
@@ -134,6 +140,12 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             installation_id,
             adapter,
             egress,
+            streams_working_indicator: extension
+                .resolved
+                .channel
+                .as_ref()
+                .map(|channel| channel.presentation.streams_working_indicator)
+                .unwrap_or(false),
         })
     }
 }

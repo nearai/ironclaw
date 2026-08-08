@@ -226,6 +226,9 @@ credential_handle = "slack_bot_token"
 paths = [
   "/api/chat.postMessage",
   "/api/chat.delete",
+  "/api/chat.startStream",
+  "/api/chat.appendStream",
+  "/api/chat.stopStream",
   "/api/conversations.open",
   "/api/files.completeUploadExternal",
 ]
@@ -271,6 +274,7 @@ supports_markdown = true
 supports_threads = true
 max_message_chars = 40000
 command_prefix = "/ironclaw "
+streams_working_indicator = true
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 

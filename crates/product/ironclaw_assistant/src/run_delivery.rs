@@ -38,6 +38,7 @@ use ironclaw_outbound::{
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
 use ironclaw_auth::product_prompt::BlockedAuthFlowCanceller;
+use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
@@ -48,12 +49,14 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
 };
+
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
 
 mod gate_routes;
 mod observer;
 pub(crate) mod prompts;
+mod streaming;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
@@ -139,6 +142,31 @@ pub struct RunDeliveryServices {
     pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    /// The live projection feed the WebUI drains (live text, thinking,
+    /// capability activity). The streaming forwarder subscribes here for
+    /// the run's token deltas; wired to the runtime's
+    /// `RebornProjectionServices::product_event_stream()` in production.
+    pub projection_stream: Arc<dyn ProjectionStream>,
+}
+
+/// A posted working indicator: either a vendor-native stream (finalized via
+/// `StreamStop`) or a plain transient message (stopped via `Retract`). The
+/// observer dispatches cleanup on `streamed` — it never guesses which shape
+/// the vendor accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedWorkingNotice {
+    pub conversation: ExternalConversationRef,
+    pub vendor_message_ref: String,
+    pub streamed: bool,
+}
+
+/// One live text delta awaiting a Slack append: the suffix of the run's
+/// cumulative text not yet sent, coalesced by the streaming forwarder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingStreamAppend {
+    pub conversation: ExternalConversationRef,
+    pub vendor_message_ref: String,
+    pub suffix: String,
 }
 
 /// One message a channel accepted, in generic vocabulary: the conversation
@@ -469,6 +497,174 @@ impl RunDeliveryServices {
                 %error,
                 "failed to retract channel prompt/status message"
             );
+        }
+    }
+
+    /// Raise the working indicator for a run: the coordinator reduces the
+    /// `Working` intent to `StreamStart` when the resolved channel declares
+    /// `streams_working_indicator`, else to the plain text notice. Best-effort
+    /// — a failure returns `None` and the run simply has no indicator.
+    pub(crate) async fn start_working_notice(
+        &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        conversation: &ExternalConversationRef,
+    ) -> Option<PostedWorkingNotice> {
+        let notice_ref = format!(
+            "working:{}",
+            run_id.map(|id| id.to_string()).unwrap_or_default()
+        );
+        match self
+            .coordinator
+            .deliver_working_notice(
+                NoticeDeliveryRequest {
+                    intent: DeliveryIntent::Working,
+                    scope,
+                    turn_run_id: run_id,
+                    conversation: conversation.clone(),
+                    thread_anchor: None,
+                    parts: Vec::new(),
+                    extension_id: &self.extension_id,
+                    notice_ref,
+                },
+                prompts::WORKING_MESSAGE,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                outcome
+                    .vendor_message_ref
+                    .map(|vendor_message_ref| PostedWorkingNotice {
+                        conversation: outcome.conversation,
+                        vendor_message_ref,
+                        streamed: outcome.streamed,
+                    })
+            }
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "working indicator delivery failed (best-effort)"
+                );
+                None
+            }
+        }
+    }
+
+    /// Append one live text suffix to the working stream. Returns whether
+    /// the vendor accepted it — `false` on any failure, so the forwarder
+    /// DROPS the suffix (the LCP-tail stop recomputes the remainder from the
+    /// ledger at completion). The ledger must never advance without the
+    /// vendor having the text: a false positive would compute an empty tail
+    /// and lose the answer.
+    pub(crate) async fn append_to_stream(
+        &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        append: PendingStreamAppend,
+    ) -> bool {
+        match self
+            .coordinator
+            .deliver_notice(NoticeDeliveryRequest {
+                intent: DeliveryIntent::Working,
+                scope,
+                turn_run_id: run_id,
+                conversation: append.conversation,
+                thread_anchor: None,
+                parts: vec![OutboundPart::StreamAppend {
+                    vendor_message_ref: append.vendor_message_ref,
+                    markdown_text: append.suffix,
+                }],
+                extension_id: &self.extension_id,
+                notice_ref: "stream-append".to_string(),
+            })
+            .await
+        {
+            // `DeliveredUnconfirmed` sent the part (only the durable write
+            // failed) — the vendor has the text; count it as accepted.
+            Ok(
+                CoordinatedDeliveryOutcome::Delivered { .. }
+                | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
+            ) => true,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "stream append delivery failed"
+                );
+                false
+            }
+        }
+    }
+
+    /// Finalize a working notice. Streamed notices get a `StreamStop` with
+    /// `markdown_text` (never empty), plus a best-effort `Retract` delete when
+    /// `delete_after_stop` is set — the no-final-text and blocked paths, where
+    /// the stream holds no answer and must not linger as an answer-shaped
+    /// message. Plain notices get the `Retract` as today. Best-effort: a
+    /// failure is logged, never propagated.
+    pub(crate) async fn stop_working_notice(
+        &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        notice: PostedWorkingNotice,
+        markdown_text: &str,
+        delete_after_stop: bool,
+    ) -> bool {
+        let notice_ref = format!(
+            "retract-{}",
+            notice
+                .vendor_message_ref
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+                .collect::<String>()
+        );
+        let mut parts = Vec::with_capacity(2);
+        if notice.streamed {
+            parts.push(OutboundPart::StreamStop {
+                vendor_message_ref: notice.vendor_message_ref.clone(),
+                markdown_text: markdown_text.to_string(),
+            });
+            if delete_after_stop {
+                parts.push(OutboundPart::Retract {
+                    vendor_message_ref: notice.vendor_message_ref,
+                });
+            }
+        } else {
+            parts.push(OutboundPart::Retract {
+                vendor_message_ref: notice.vendor_message_ref,
+            });
+        }
+        match self
+            .coordinator
+            .deliver_notice(NoticeDeliveryRequest {
+                intent: DeliveryIntent::Cleanup,
+                scope,
+                turn_run_id: run_id,
+                conversation: notice.conversation,
+                thread_anchor: None,
+                parts,
+                extension_id: &self.extension_id,
+                notice_ref,
+            })
+            .await
+        {
+            // `DeliveredUnconfirmed` sent the parts (only the durable write
+            // failed) — the stream is finalized; count it as stopped.
+            Ok(
+                CoordinatedDeliveryOutcome::Delivered { .. }
+                | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
+            ) => true,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "failed to stop working indicator stream/message"
+                );
+                false
+            }
         }
     }
 }

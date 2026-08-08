@@ -483,6 +483,9 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         [
             "/api/chat.postMessage",
             "/api/chat.delete",
+            "/api/chat.startStream",
+            "/api/chat.appendStream",
+            "/api/chat.stopStream",
             "/api/conversations.open",
             "/api/files.completeUploadExternal",
         ]

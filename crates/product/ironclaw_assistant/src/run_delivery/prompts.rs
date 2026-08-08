@@ -13,6 +13,11 @@ use ironclaw_product_contracts::outbound::{ApprovalPromptContextView, GatePrompt
 use crate::is_approval_gate_ref;
 
 pub(crate) const WORKING_MESSAGE: &str = "Ironclaw is thinking...";
+/// Non-empty terminal text for `StreamStop` on paths where the stream holds
+/// no answer (no-final-text runs, blocked runs, empty-tail stop retries).
+/// `chat.stopStream` rejects empty text (`no_text`), and a stopped stream
+/// finalizes as a persistent message — so the stop never carries nothing.
+pub(crate) const WORKING_STREAM_STOP_TEXT: &str = "Ironclaw finished.";
 pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run has no channel-serviceable auth challenge. This stays
 /// deliberately generic because missing/unknown challenge metadata cannot
@@ -295,6 +300,27 @@ mod tests {
         assert_eq!(
             run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
             format!("run-notification:auth:{run_id}")
+        );
+    }
+
+    /// The stream-fallback re-drive mints a DIFFERENT delivery identity from
+    /// the original final reply, so the deterministic delivery id (derived
+    /// from the projection ref) cannot suppress it as AlreadyDelivered.
+    #[test]
+    fn final_reply_stream_fallback_discriminator_is_distinct() {
+        let run_id = TurnRunId::new();
+        let original =
+            run_notification_projection_id(run_id, RunNotificationEventKind::FinalReplyReady, None);
+        let fallback = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::FinalReplyReady,
+            Some("stream-fallback"),
+        );
+        assert_ne!(original, fallback);
+        assert_eq!(original, format!("run-notification:final:{run_id}"));
+        assert_eq!(
+            fallback,
+            format!("run-notification:final:stream-fallback:{run_id}")
         );
     }
 

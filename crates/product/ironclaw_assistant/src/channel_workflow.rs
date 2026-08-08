@@ -110,6 +110,9 @@ pub struct ChannelWorkflowDeliveryServices {
     pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+    /// The live projection feed (WebUI's SSE source). The run-delivery
+    /// streaming forwarder subscribes here for token deltas.
+    pub projection_stream: Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
     pub settings: RunDeliverySettings,
     /// Durable outcome record for proactive (trigger-fired) deliveries.
     pub triggered_delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
@@ -199,6 +202,7 @@ impl RebornChannelWorkflowFactory {
             approval_context: delivery.approval_context.clone(),
             blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
             auth_flow_cancel: delivery.auth_flow_cancel.clone(),
+            projection_stream: Arc::clone(&delivery.projection_stream),
         };
         Some(Arc::new(TriggeredRunDeliveryDriver::with_settings(
             services,
@@ -429,6 +433,7 @@ impl RebornChannelWorkflowFactory {
             approval_context: delivery.approval_context.clone(),
             blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
             auth_flow_cancel: delivery.auth_flow_cancel.clone(),
+            projection_stream: Arc::clone(&delivery.projection_stream),
         };
         Ok(Arc::new(
             RunDeliveryObserver::with_settings_and_connection_notices(

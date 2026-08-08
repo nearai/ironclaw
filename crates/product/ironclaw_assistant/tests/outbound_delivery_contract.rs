@@ -356,6 +356,7 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
+            streams_working_indicator: false,
         })
     }
 }
@@ -410,6 +411,7 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
+            streams_working_indicator: false,
         })
     }
 }

@@ -289,6 +289,19 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         }
                     }
                 }
+                // Telegram has no progressive-response stream surface; these
+                // parts are never emitted for this channel (the coordinator
+                // reduces Working to Text unless the manifest declares
+                // streams_working_indicator), but the match must be total.
+                OutboundPart::StreamStart { .. }
+                | OutboundPart::StreamAppend { .. }
+                | OutboundPart::StreamStop { .. } => {
+                    parts.push(PartDeliveryOutcome::Permanent {
+                        reason: "telegram channel does not support working-indicator streaming"
+                            .to_string(),
+                    });
+                    break 'parts;
+                }
                 OutboundPart::Retract { vendor_message_ref } => {
                     let outcome = match vendor_message_ref.parse::<i64>() {
                         Ok(message_id) => {

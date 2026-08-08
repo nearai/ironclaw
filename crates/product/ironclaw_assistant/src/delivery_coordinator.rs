@@ -185,6 +185,7 @@ struct WorkspaceMaterialization<'a> {
 /// resolution — the target IS the conversation the triggering inbound event
 /// arrived on — but the attempt is persisted and driven under the same
 /// sole-writer rules.
+#[derive(Clone)]
 pub struct NoticeDeliveryRequest<'a> {
     pub intent: DeliveryIntent,
     pub scope: TurnScope,
@@ -199,6 +200,32 @@ pub struct NoticeDeliveryRequest<'a> {
     /// Audit discriminator recorded in the attempt's projection ref
     /// (e.g. a run id or event id), so repeated notices stay distinguishable.
     pub notice_ref: String,
+}
+
+/// Outcome of a working-notice delivery: which vendor ref was accepted and
+/// whether it is a progressive stream (finalize via `StreamStop`) or a plain
+/// transient message (stop via `Retract`). The observer dispatches cleanup
+/// on `streamed` — it never guesses which shape the vendor accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingNoticeOutcome {
+    pub conversation: ExternalConversationRef,
+    pub vendor_message_ref: Option<String>,
+    pub streamed: bool,
+}
+
+/// The first provider-issued message ref of a delivered outcome, if any.
+fn first_sent_ref(outcome: &CoordinatedDeliveryOutcome) -> Option<String> {
+    match outcome {
+        CoordinatedDeliveryOutcome::Delivered {
+            vendor_message_refs,
+            ..
+        }
+        | CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+            vendor_message_refs,
+            ..
+        } => vendor_message_refs.first().cloned(),
+        _ => None,
+    }
 }
 
 /// Coordinator outcome for one request.
@@ -475,6 +502,19 @@ impl DeliveryCoordinator {
             });
         }
         reject_caller_supplied_files(&request.parts)?;
+        // Clone: the shared core consumes the request; notice parts are
+        // small (text/retract/stream parts — file parts are rejected above).
+        let parts = request.parts.clone();
+        self.deliver_notice_parts(request, parts).await
+    }
+
+    /// The shared notice-delivery core: scope recovery, attempt persistence,
+    /// single-flight, and one adapter drive with the given parts.
+    async fn deliver_notice_parts(
+        &self,
+        request: NoticeDeliveryRequest<'_>,
+        parts: Vec<OutboundPart>,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         self.ensure_scope_recovered(&request.scope).await;
 
         // Persist the attempt before anything else. The synthetic reply
@@ -531,7 +571,7 @@ impl DeliveryCoordinator {
                 request.extension_id,
                 request.conversation,
                 request.thread_anchor,
-                request.parts,
+                parts,
             )
             .await;
         self.in_flight
@@ -539,6 +579,81 @@ impl DeliveryCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&delivery_id);
         result
+    }
+
+    /// Deliver the `Working` intent to the resolved channel, reducing it to
+    /// [`OutboundPart::StreamStart`] when the channel's manifest declares
+    /// `streams_working_indicator`, else to the plain [`OutboundPart::Text`]
+    /// notice. On a stream-start failure with nothing sent, re-drives the
+    /// notice as `Text` (the degraded path) so the working indicator is
+    /// never lost. `request.parts` must be empty; the parts are built here.
+    pub async fn deliver_working_notice(
+        &self,
+        request: NoticeDeliveryRequest<'_>,
+        text: &str,
+    ) -> Result<WorkingNoticeOutcome, CoordinatedDeliveryError> {
+        if request.intent != DeliveryIntent::Working {
+            return Err(CoordinatedDeliveryError::IntentClassMismatch {
+                intent: request.intent,
+            });
+        }
+        reject_caller_supplied_files(&request.parts)?;
+
+        let streams_working_indicator = self
+            .resolver
+            .resolve_channel_delivery(request.extension_id)
+            .map(|channel| channel.streams_working_indicator)
+            .unwrap_or(false);
+
+        if !streams_working_indicator {
+            let conversation = request.conversation.clone();
+            let outcome = self
+                .deliver_notice_parts(request, vec![OutboundPart::Text(text.to_string())])
+                .await?;
+            return Ok(WorkingNoticeOutcome {
+                conversation,
+                vendor_message_ref: first_sent_ref(&outcome),
+                streamed: false,
+            });
+        }
+
+        let conversation = request.conversation.clone();
+        let outcome = self
+            .deliver_notice_parts(
+                request.clone(),
+                vec![OutboundPart::StreamStart {
+                    markdown_text: None,
+                }],
+            )
+            .await?;
+        match outcome {
+            CoordinatedDeliveryOutcome::Delivered {
+                vendor_message_refs,
+                ..
+            }
+            | CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+                vendor_message_refs,
+                ..
+            } => Ok(WorkingNoticeOutcome {
+                conversation,
+                vendor_message_ref: vendor_message_refs.first().cloned(),
+                streamed: true,
+            }),
+            // Degraded path: the stream could not be started (vendor
+            // rejection, missing recipient, capability not provisioned).
+            // Re-drive the same notice as plain text — a fresh attempt with
+            // its own persistence; nothing was sent by the failed drive.
+            _ => {
+                let outcome = self
+                    .deliver_notice_parts(request, vec![OutboundPart::Text(text.to_string())])
+                    .await?;
+                Ok(WorkingNoticeOutcome {
+                    conversation,
+                    vendor_message_ref: first_sent_ref(&outcome),
+                    streamed: false,
+                })
+            }
+        }
     }
 
     async fn drive_authorized(
@@ -1034,9 +1149,12 @@ fn validate_final_workspace_files(parts: &[OutboundPart]) -> Result<(), Coordina
     let mut total_bytes = 0usize;
     for file in parts.iter().filter_map(|part| match part {
         OutboundPart::File(file) => Some(file),
-        OutboundPart::Text(_) | OutboundPart::AuthPrompt { .. } | OutboundPart::Retract { .. } => {
-            None
-        }
+        OutboundPart::Text(_)
+        | OutboundPart::AuthPrompt { .. }
+        | OutboundPart::StreamStart { .. }
+        | OutboundPart::StreamAppend { .. }
+        | OutboundPart::StreamStop { .. }
+        | OutboundPart::Retract { .. } => None,
     }) {
         count = count
             .checked_add(1)

@@ -9,6 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_product_contracts::inbound::{
     ProductInboundEnvelope, ProductInboundPayload, ProductRejection, UserMessagePayload,
 };
@@ -704,7 +705,6 @@ impl InboundTurnService for FakeInboundTurnService {
 /// One inert double lives here, beside the trait it implements, so those
 /// suites do not each carry an identical copy.
 pub struct NoProjectFilesystem;
-
 #[async_trait]
 impl crate::ProjectFilesystemReader for NoProjectFilesystem {
     async fn list_dir(
@@ -729,5 +729,117 @@ impl crate::ProjectFilesystemReader for NoProjectFilesystem {
         _path: &str,
     ) -> Result<crate::ProjectFsStat, crate::ProjectFsError> {
         Err(crate::ProjectFsError::NotFound)
+    }
+}
+
+/// A projection stream with live push semantics, for the streaming forwarder.
+///
+/// `push` fans the envelope out to every open subscription immediately (no
+/// replay — mirrors the live feed's ephemerality). A subscriber whose queue
+/// overflows drops updates, which the LCP-tail stop recovers — the same
+/// contract the production live feed has.
+pub struct LiveProjectionStream {
+    subscribers: std::sync::Mutex<
+        Vec<
+            tokio::sync::mpsc::Sender<
+                Result<
+                    ironclaw_product_contracts::outbound::ProductOutboundEnvelope,
+                    ProductAdapterError,
+                >,
+            >,
+        >,
+    >,
+}
+
+impl Default for LiveProjectionStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveProjectionStream {
+    pub fn new() -> Self {
+        Self {
+            subscribers: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Push one envelope to every open subscription.
+    pub fn push(&self, envelope: ironclaw_product_contracts::outbound::ProductOutboundEnvelope) {
+        let subscribers = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for sender in subscribers.iter() {
+            let _ = sender.try_send(Ok(envelope.clone()));
+        }
+    }
+
+    /// Open subscriptions (the forwarder subscribes once per stream). Tests
+    /// push live text only after this is non-zero.
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
+#[async_trait]
+impl ironclaw_product_contracts::projection::ProjectionStream for LiveProjectionStream {
+    async fn drain(
+        &self,
+        _request: ironclaw_product_contracts::projection::ProjectionSubscriptionRequest,
+    ) -> Result<
+        Vec<ironclaw_product_contracts::outbound::ProductOutboundEnvelope>,
+        ProductAdapterError,
+    > {
+        Ok(Vec::new())
+    }
+
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
+    async fn subscribe(
+        &self,
+        _request: ironclaw_product_contracts::projection::ProjectionSubscriptionRequest,
+    ) -> Result<
+        ironclaw_product_contracts::projection::ProjectionStreamSubscription,
+        ProductAdapterError,
+    > {
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(sender);
+        Ok(ironclaw_product_contracts::projection::ProjectionStreamSubscription::new(receiver))
+    }
+}
+
+/// A projection stream that holds nothing.
+///
+/// Run-delivery components that never stream live text (triggered delivery,
+/// tests without a composed projection pipeline) still have to supply the
+/// stream the streaming forwarder subscribes through. One inert double lives
+/// here, beside the trait it implements, so those suites do not each carry an
+/// identical copy. The LCP-tail stop recovers the full answer when the
+/// forwarder's subscription is unavailable.
+pub struct NoopProjectionStream;
+
+#[async_trait]
+impl ironclaw_product_contracts::projection::ProjectionStream for NoopProjectionStream {
+    async fn drain(
+        &self,
+        _request: ironclaw_product_contracts::projection::ProjectionSubscriptionRequest,
+    ) -> Result<
+        Vec<ironclaw_product_contracts::outbound::ProductOutboundEnvelope>,
+        ProductAdapterError,
+    > {
+        Ok(Vec::new())
+    }
+
+    fn supports_subscription(&self) -> bool {
+        false
     }
 }
