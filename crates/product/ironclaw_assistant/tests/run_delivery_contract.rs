@@ -1517,6 +1517,267 @@ async fn observer_records_gate_route_after_approval_prompt() {
     );
 }
 
+/// A run can block on more than one approval or auth gate of the same kind.
+/// The durable projection identity must therefore include the bounded gate
+/// reference. The gate reference is hashed with a domain-separated,
+/// length-framed SHA-256 input so the persisted metadata neither leaks the ref
+/// nor admits ambiguous concatenations. Replaying the *same* gate must still
+/// resolve to the identity its first appearance reserved, so it addresses the
+/// original durable row instead of opening a second one.
+#[tokio::test]
+async fn observer_delivers_distinct_same_kind_gates_and_replays_reuse_their_identity() {
+    const APPROVAL_A: &str = "gate:approval-00000000000000000000000000000001";
+    const APPROVAL_B: &str = "gate:approval-00000000000000000000000000000002";
+    const AUTH_A: &str = "gate:auth-vector";
+    const AUTH_B: &str = "gate:auth-vector-next";
+
+    let harness = build_harness(
+        vec![
+            // The observer's existence guard consumes this first state.
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_B)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_B)),
+            // Replays must resolve to the same identity as their first
+            // appearance and therefore address the row that appearance
+            // already reserved rather than opening a second one.
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "all gates resolved").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-sequential-gates"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    // Egress-level duplicate suppression is the durable delivery claim's job,
+    // not this identity's: the claim recognizes a replay's projection ref as
+    // already `Delivered` and reports `AlreadyDelivered` without a second
+    // provider egress, so the observable egress here is just the two distinct
+    // approvals and the two distinct auth gates once each, plus the final
+    // reply -- the replay of each kind adds no new egress. This is a
+    // DIFFERENT thing than what this test pins: a colliding identity would
+    // make the REPLAY resolve to the same row as a DIFFERENT gate of the same
+    // kind, which the `attempts.len()` and `expected_run_notification_refs`
+    // assertions below catch (a collision would come up short on distinct
+    // rows and distinct pinned digests).
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        5,
+        "two distinct approvals, two distinct auth gates, and one final reply must reach egress; \
+         each replay's egress is suppressed by the durable delivery claim"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Approval needed"))
+            .count(),
+        2,
+        "same-kind approval gates with distinct refs must not collide"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Authentication required"))
+            .count(),
+        2,
+        "same-kind auth gates with distinct refs must not collide"
+    );
+    // Rendering sanity check for the counts above: each count is made of four
+    // distinct gates rather than repeats of one, and every prompt carries its
+    // own gate ref. This is not a collision detector — under a collision all
+    // four refs still render distinctly, because the collision lands on the
+    // durable row rather than the rendered text.
+    for gate_ref in [APPROVAL_A, APPROVAL_B, AUTH_A, AUTH_B] {
+        assert!(
+            texts.iter().any(|text| text.contains(gate_ref)),
+            "every distinct gate must render its own prompt: {gate_ref} missing from {texts:#?}"
+        );
+    }
+
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        7,
+        "five run-notification identities plus cleanup of the two delivered auth prompts"
+    );
+    let mut run_notification_refs: Vec<String> = attempts
+        .iter()
+        .map(|attempt| attempt.candidate.projection_ref.as_str())
+        .filter(|projection_ref| projection_ref.starts_with("run-notification:"))
+        .map(str::to_string)
+        .collect();
+    run_notification_refs.sort();
+    let mut expected_run_notification_refs = vec![
+        format!(
+            "run-notification:approval:{run_id}:\
+             e3206a38703ea974fc4f5902051fcf48593081aa6c025dcb21db98bf886d8c25"
+        ),
+        format!(
+            "run-notification:approval:{run_id}:\
+             78c0c16afee88400ca2434de5c1a4d975cd21733915519104f04e3d580709356"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             876c0617c31155ca02b78fb0934d45d0dde148fe65fa2a11baf58eac34c72084"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             62ad57165b8c00856fded1220d7cb8f785b126c640afbcb137831ab819326116"
+        ),
+        format!("run-notification:final:{run_id}"),
+    ];
+    expected_run_notification_refs.sort();
+    assert_eq!(
+        run_notification_refs, expected_run_notification_refs,
+        "same-gate replays reuse their original rows, distinct gates own their pinned digested \
+         rows, and the final identity remains byte-for-byte unchanged"
+    );
+    assert_eq!(
+        attempts
+            .iter()
+            .filter(|attempt| attempt
+                .candidate
+                .projection_ref
+                .as_str()
+                .starts_with("system-notice:cleanup:retract-"))
+            .count(),
+        2,
+        "each delivered auth prompt owns one durable cleanup/retraction row"
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        2,
+        "every stale auth prompt is retracted after the final reply"
+    );
+}
+
+async fn assert_gate_projection_digest_vector(
+    status: TurnStatus,
+    gate_ref: &str,
+    expected_suffix: &str,
+    expected_digest: &str,
+) {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(status, Some(gate_ref)),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "gate resolved").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-gate-digest-vector"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    let projection_refs: Vec<&str> = attempts
+        .iter()
+        .map(|attempt| attempt.candidate.projection_ref.as_str())
+        .collect();
+    let expected = format!("run-notification:{expected_suffix}:{run_id}:{expected_digest}");
+    assert!(
+        projection_refs.contains(&expected.as_str()),
+        "gate identity must hash the three u64-BE-length-framed parts \
+         (`ironclaw_product:run_notification_gate_projection:v1`, `{expected_suffix}`, \
+         canonical gate_ref) with full lowercase SHA-256; expected {expected}, got \
+         {projection_refs:?}"
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_projection_identity_matches_the_pinned_digest_vector() {
+    assert_gate_projection_digest_vector(
+        TurnStatus::BlockedApproval,
+        "gate:approval-00000000000000000000000000000001",
+        "approval",
+        "e3206a38703ea974fc4f5902051fcf48593081aa6c025dcb21db98bf886d8c25",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn auth_gate_projection_identity_matches_the_pinned_digest_vector() {
+    assert_gate_projection_digest_vector(
+        TurnStatus::BlockedAuth,
+        "gate:auth-vector",
+        "auth",
+        "876c0617c31155ca02b78fb0934d45d0dde148fe65fa2a11baf58eac34c72084",
+    )
+    .await;
+}
+
+/// Pins `notification_for_actionable_state`'s existing guard (`observer.rs`
+/// lines 656-663 / 682-689): a gate-kind state with no `gate_ref` returns
+/// `Ok(None)` before an `ActionableNotification` is ever built, so this test
+/// never reaches the fallible gate-identity path `run_notification_projection_id`
+/// adds. That branch (`MissingGateRef`) is pinned directly in `prompts.rs`'s
+/// `gate_kinds_reject_an_absent_gate_ref` unit test instead.
+#[tokio::test]
+async fn observer_skips_delivery_when_a_gate_kind_has_no_gate_ref() {
+    for status in [TurnStatus::BlockedApproval, TurnStatus::BlockedAuth] {
+        let harness = build_harness(
+            vec![scripted_state(status, None)],
+            false,
+            Some("https://provider.example/oauth"),
+            Duration::from_millis(40),
+        );
+        let run_id = TurnRunId::new();
+
+        harness
+            .observer
+            .observe_ack(
+                user_message_envelope(ProductTriggerReason::DirectChat, "evt-missing-gate-ref"),
+                accepted_ack(run_id),
+            )
+            .await;
+
+        assert!(
+            harness.adapter.texts().is_empty(),
+            "{status:?} without a gate_ref must skip delivery preparation entirely, per \
+             notification_for_actionable_state's existing pre-identity guard"
+        );
+        assert!(
+            harness
+                .store
+                .list_delivery_attempts(binding_scope())
+                .await
+                .expect("attempts")
+                .is_empty(),
+            "{status:?} without a gate_ref must never reach durable delivery preparation"
+        );
+    }
+}
+
 #[tokio::test]
 async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
     // `vendor_message_ref` is an unvalidated vendor string, so a channel can
@@ -2355,6 +2616,147 @@ async fn triggered_completed_run_delivers_nothing_external() {
         .await
         .expect("attempts");
     assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+}
+
+/// The triggered driver is a separate production caller of the projection-id
+/// helper. Keep its gate reference wired into identity derivation too: a
+/// trigger can park repeatedly on distinct approval/auth gates, and a replay
+/// of an already-delivered gate must land back on the identity that gate
+/// already reserved. (The triggered notifier no longer pushes a final reply
+/// to a notification channel at all -- that now lands only in the run's own
+/// conversation, or via the model's explicit delivery call -- so this
+/// contract, unlike its observer-path sibling, has no `final` identity to
+/// pin.)
+#[tokio::test]
+async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
+    const APPROVAL_A: &str = "gate:approval-00000000000000000000000000000001";
+    const APPROVAL_B: &str = "gate:approval-00000000000000000000000000000002";
+    const AUTH_A: &str = "gate:auth-vector";
+    const AUTH_B: &str = "gate:auth-vector-next";
+
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_B)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_B)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+        ],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    // Keep this contract focused on the four run-notification identities. A
+    // successful channel delivery may omit a vendor message ref; doing so
+    // prevents the driver's terminal auth-prompt cleanup from adding unrelated
+    // Cleanup rows to this projection-identity assertion. One report per
+    // egress -- the durable delivery claim suppresses a replay's egress, so
+    // only the four distinct gates actually send.
+    for _ in 0..4 {
+        harness
+            .adapter
+            .reports
+            .lock()
+            .expect("reports lock")
+            .push_back(DeliveryReport {
+                parts: vec![PartDeliveryOutcome::Sent {
+                    vendor_message_ref: None,
+                }],
+            });
+    }
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+
+    // As on the observer path, suppressing a replay's *egress* belongs to the
+    // durable delivery claim. This contract owns the identity: distinct
+    // same-kind gates each render, and replays fold back onto the rows their
+    // first appearance reserved (asserted over `attempts` below).
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        4,
+        "two distinct approvals and two distinct auth gates must reach the triggered target; \
+         each replay's egress is suppressed by the durable delivery claim"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Approval needed"))
+            .count(),
+        2,
+        "distinct triggered approval gates must not collide"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Authentication required"))
+            .count(),
+        2,
+        "distinct triggered auth gates must not collide"
+    );
+    for gate_ref in [APPROVAL_A, APPROVAL_B, AUTH_A, AUTH_B] {
+        assert!(
+            texts.iter().any(|text| text.contains(gate_ref)),
+            "every distinct triggered gate must render its own prompt: {gate_ref} missing from \
+             {texts:#?}"
+        );
+    }
+    assert!(
+        harness.adapter.envelopes().iter().all(|envelope| envelope
+            .target
+            .conversation
+            .conversation_id()
+            == "dm-creator"),
+        "every prompt must use the decoded personal-DM preference target"
+    );
+
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        4,
+        "replayed gates reuse their durable rows; distinct gates do not"
+    );
+    let mut projection_refs: Vec<String> = attempts
+        .iter()
+        .map(|attempt| attempt.candidate.projection_ref.as_str().to_string())
+        .collect();
+    projection_refs.sort();
+    let mut expected = vec![
+        format!(
+            "run-notification:approval:{run_id}:\
+             e3206a38703ea974fc4f5902051fcf48593081aa6c025dcb21db98bf886d8c25"
+        ),
+        format!(
+            "run-notification:approval:{run_id}:\
+             78c0c16afee88400ca2434de5c1a4d975cd21733915519104f04e3d580709356"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             876c0617c31155ca02b78fb0934d45d0dde148fe65fa2a11baf58eac34c72084"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             62ad57165b8c00856fded1220d7cb8f785b126c640afbcb137831ab819326116"
+        ),
+    ];
+    expected.sort();
+    assert_eq!(
+        projection_refs, expected,
+        "the triggered caller must pass each canonical gate_ref into the pinned digest contract"
+    );
 }
 
 /// Spec §7: an approval gate raised by a background run reaches EVERY

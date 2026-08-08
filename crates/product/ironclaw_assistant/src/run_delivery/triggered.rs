@@ -130,7 +130,13 @@ struct TriggeredNotification {
     /// `AlreadyDelivered` and silently never sent while still being recorded
     /// as delivered. `None` keeps the historical id shape for kinds that occur
     /// at most once per run.
-    notice_discriminator: Option<&'static str>,
+    ///
+    /// `ApprovalNeeded` and `AuthRequired` additionally require this to carry
+    /// the notice's canonical gate ref: [`prompts::run_notification_projection_id`]
+    /// fails closed rather than silently falling back to the legacy identity
+    /// for those two kinds. Owned rather than `&'static str` so it can carry
+    /// either a fixed vocabulary word or a runtime gate ref.
+    notice_discriminator: Option<String>,
 }
 
 /// Everything one actionable run state produces: the messages to fan out,
@@ -937,7 +943,7 @@ async fn notification_plan_for_state(
                 .push_str(&prompts::triggered_gate_footer(trigger_label));
             Ok(Some(TriggeredNotificationPlan {
                 notifications: vec![TriggeredNotification {
-                    notice_discriminator: None,
+                    notice_discriminator: Some(gate_ref.as_str().to_string()),
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
                     // Notification channels are personal DMs or picked shared
@@ -991,7 +997,7 @@ async fn notification_plan_for_state(
                     Ok(Some(TriggeredNotificationPlan {
                         notifications: vec![
                             TriggeredNotification {
-                                notice_discriminator: None,
+                                notice_discriminator: Some(gate_ref.as_str().to_string()),
                                 event_kind: RunNotificationEventKind::AuthRequired,
                                 intent: DeliveryIntent::AuthPrompt,
                                 text: prompts::auth_prompt_text(&view, true),
@@ -1004,7 +1010,7 @@ async fn notification_plan_for_state(
                             TriggeredNotification {
                                 event_kind: RunNotificationEventKind::RunBlocked,
                                 intent: DeliveryIntent::BackgroundRunNotice,
-                                notice_discriminator: Some("reauth"),
+                                notice_discriminator: Some("reauth".to_string()),
                                 text: format!(
                                     "{}{}",
                                     prompts::BACKGROUND_RUN_REAUTH_MESSAGE,
@@ -1037,7 +1043,7 @@ async fn notification_plan_for_state(
                         notifications: vec![TriggeredNotification {
                             event_kind: RunNotificationEventKind::RunBlocked,
                             intent: DeliveryIntent::BackgroundRunNotice,
-                            notice_discriminator: Some("auth-unavailable"),
+                            notice_discriminator: Some("auth-unavailable".to_string()),
                             text: format!(
                                 "{}{}",
                                 unavailable,
@@ -1056,7 +1062,7 @@ async fn notification_plan_for_state(
             notifications: vec![TriggeredNotification {
                 event_kind: RunNotificationEventKind::RunBlocked,
                 intent: DeliveryIntent::BackgroundRunNotice,
-                notice_discriminator: Some("failed"),
+                notice_discriminator: Some("failed".to_string()),
                 text: format!(
                     "{}{}",
                     prompts::BACKGROUND_RUN_FAILED_MESSAGE,
@@ -1147,8 +1153,11 @@ async fn deliver_notification_to_target(
     let projection_id = prompts::run_notification_projection_id(
         context.run_id,
         notification.event_kind,
-        notification.notice_discriminator,
-    );
+        notification.notice_discriminator.as_deref(),
+    )
+    .map_err(|reason| {
+        TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
+    })?;
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;
