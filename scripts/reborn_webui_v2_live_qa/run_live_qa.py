@@ -3810,10 +3810,15 @@ def _trigger_run_outbound_deliver_evidence(
         if input_summary is None:
             evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
             continue
-        if str(preview.get("status") or "") == "completed":
-            evidence["completed_deliver_count"] = (
-                int(evidence["completed_deliver_count"]) + 1
-            )
+        # Only completed calls are evidence: a failed or in-flight deliver
+        # whose content happens to carry the marker never reached Slack, so
+        # counting it would fake the exactly-one-verified-send inconclusive
+        # classification and suppress the deterministic markerless red.
+        if str(preview.get("status") or "") != "completed":
+            continue
+        evidence["completed_deliver_count"] = (
+            int(evidence["completed_deliver_count"]) + 1
+        )
         if marker in str(input_summary.get("content") or ""):
             evidence["marker_deliver_count"] = (
                 int(evidence["marker_deliver_count"]) + 1
@@ -3972,6 +3977,15 @@ async def _wait_for_slack_delivery_marker(
                     # outbound_deliver whose composed content lacks the
                     # marker can never satisfy the history read-back — fail
                     # deterministically instead of timing out.
+                    #
+                    # Deliberately NOT the whole healthy_terminal class:
+                    # `delivered` means a NOTICE went out, which includes a
+                    # fire parked on an approval gate whose run is not
+                    # settled — it resumes after the approve and may only
+                    # then make its marker-carrying deliver call. Running
+                    # this check there would hard-fail a fire that is still
+                    # going to deliver; a genuinely marker-less gated fire
+                    # still fails via the timeout path.
                     thread_id = str(row.get("thread_id") or "")
                     deliver_evidence = _trigger_run_outbound_deliver_evidence(
                         ctx.reborn_home,
@@ -4024,9 +4038,13 @@ async def _wait_for_slack_delivery_marker(
                     "the exact trigger run completed one verified Slack send to the "
                     "expected DM, but the independent Slack history readback did not "
                     "expose the marker before timeout",
+                    # Namespaced per lane: both evidence dicts carry a
+                    # parse_error_count, and a flat merge would let one lane
+                    # silently overwrite the other's in the persisted
+                    # delivery_readback_evidence.
                     {
-                        **vendor_evidence,
-                        **deliver_evidence,
+                        "vendor_evidence": vendor_evidence,
+                        "deliver_evidence": deliver_evidence,
                         "model_delivery": last_model_delivery,
                     },
                 )

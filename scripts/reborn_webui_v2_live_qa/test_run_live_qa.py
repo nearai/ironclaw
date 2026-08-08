@@ -10327,45 +10327,15 @@ class TwoLaneDeliveryContractTests(unittest.TestCase):
 
     @staticmethod
     def _create_store(reborn_home: Path) -> Path:
+        # The production schema helper, so this fixture cannot drift from the
+        # columns the readers filter on (is_dir, content_type).
         db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-        db_path.parent.mkdir(parents=True)
-        with closing(sqlite3.connect(db_path)) as db:
-            db.execute(
-                """
-                CREATE TABLE root_filesystem_entries (
-                    path TEXT PRIMARY KEY,
-                    contents BLOB NOT NULL,
-                    is_dir INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    content_type TEXT NOT NULL,
-                    kind TEXT,
-                    indexed TEXT NOT NULL DEFAULT '{}',
-                    version INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
-            db.commit()
+        run_live_qa._root_filesystem_create_table(db_path)
         return db_path
 
     @staticmethod
     def _insert_json(db_path: Path, path: str, payload: dict) -> None:
-        with closing(sqlite3.connect(db_path)) as db:
-            db.execute(
-                """
-                INSERT INTO root_filesystem_entries (
-                    path, contents, is_dir, created_at, updated_at,
-                    content_type, kind
-                ) VALUES (?, ?, 0, ?, ?, 'application/json', 'record')
-                """,
-                (
-                    path,
-                    json.dumps(payload),
-                    "2026-08-08T00:00:00.000Z",
-                    "2026-08-08T00:00:00.000Z",
-                ),
-            )
-            db.commit()
+        run_live_qa._put_root_filesystem_json(db_path, path, payload)
 
     def _model_delivery_record(
         self,
@@ -10533,6 +10503,19 @@ class TwoLaneDeliveryContractTests(unittest.TestCase):
                 "/tenants/t/users/u/threads/a/threads/thread-fire-1/messages/2.json",
                 self._outbound_deliver_preview_message(
                     invocation="invocation-2", content="no marker here"
+                ),
+            )
+            # A failed (non-completed) deliver carrying the marker must count
+            # toward NEITHER counter: a marker that never reached Slack would
+            # otherwise fake the exactly-one-verified-send inconclusive
+            # classification and suppress the deterministic markerless red.
+            self._insert_json(
+                db_path,
+                "/tenants/t/users/u/threads/a/threads/thread-fire-1/messages/3.json",
+                self._outbound_deliver_preview_message(
+                    invocation="invocation-3",
+                    content=f"aborted body {marker}",
+                    status="failed",
                 ),
             )
 
