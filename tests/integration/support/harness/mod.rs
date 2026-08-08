@@ -700,9 +700,16 @@ impl HostRuntimeCapabilityHarness {
             channel_extension_bindings,
             recording_network_egress,
             google_oauth_backend_for_test,
+            sandboxed_shell,
             workspace_scoped_per_caller,
         } = options;
-        let root = Arc::new(tempfile::tempdir()?);
+        let root = Arc::new(if sandboxed_shell {
+            // macOS Docker VMs can bind-mount the checkout but not the default
+            // `/var/folders` tempfile root.
+            tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?
+        } else {
+            tempfile::tempdir()?
+        });
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
@@ -735,6 +742,17 @@ impl HostRuntimeCapabilityHarness {
                 },
             )?
             .with_local_runtime_confirmed_host_home_root(host_home_root)
+        } else if sandboxed_shell {
+            let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
+                storage_root.join("sandbox-workspaces"),
+            )
+            .await?;
+            ironclaw_composition::local_filesystem_build_input_with_profile(
+                ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                service_label,
+                storage_root,
+            )
+            .with_runtime_process_binding(user_sandbox)
         } else {
             ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
         };

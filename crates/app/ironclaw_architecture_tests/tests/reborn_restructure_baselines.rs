@@ -123,11 +123,9 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// notification-channel capability split and delivery wiring preserve their
 /// mediated owners. Measured on the merged tree; the manifest ceiling and
 /// observed value move with this record so the increase is explicit.
-/// ✎ Re-recorded 40_432 → 40_593 on 2026-08-08 for #7131: the required
-/// `on_run_failure_settled` production observer plus its traced observer
-/// test. Measured on the merged tree; the manifest ceiling and observed
-/// value move with this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_593;
+/// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
+/// delivery refactor with #7214's sandbox profile and binding assembly.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_747;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

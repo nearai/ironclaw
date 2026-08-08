@@ -55,6 +55,16 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     // a deferred/describe-first schema, so keep both always advertised.
     "trigger_list",
     "trigger_create",
+    // outbound delivery lane — core for the same reason the trigger lifecycle
+    // is: a routine's prompt must pin `builtin__outbound_deliver` steps against
+    // ids from `builtin__outbound_delivery_targets_list` at creation time, and
+    // the delivery guidance block renders only while BOTH tools are visible
+    // (`delivery_tools_visible` in the loop driver host). Deferring the pair on
+    // a wide catalog silently un-injects that steering, and creation turns were
+    // observed improvising act-as-user vendor send_message steps to reach the
+    // requester instead.
+    "outbound_deliver",
+    "outbound_delivery_targets_list",
     // skills + time
     "skill_list",
     "time",
@@ -938,6 +948,11 @@ mod tests {
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),
             ("trigger_create", "builtin.trigger_create"),
+            ("outbound_deliver", "builtin.outbound_deliver"),
+            (
+                "outbound_delivery_targets_list",
+                "builtin.outbound_delivery_targets_list",
+            ),
             ("time", ironclaw_host_runtime::TIME_CAPABILITY_ID),
         ];
         let synthetic_or_extension_core_names = [

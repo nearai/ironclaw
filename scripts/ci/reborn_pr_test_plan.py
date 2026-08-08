@@ -42,6 +42,20 @@ def _webui_frontend_prefix() -> str:
             f"the frontend path prefix used to route Code Style is unknown: {error}"
         ) from error
     return f"{directory}/frontend/"
+
+
+def _sandbox_docker_prefixes() -> tuple[str, ...]:
+    """Sandbox source prefixes whose changes require the Docker lane."""
+    try:
+        directory = crate_directory("ironclaw_sandbox", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_sandbox crate, so "
+            f"the source path prefixes used to route the Docker lane are unknown: {error}"
+        ) from error
+    return (f"{directory}/src/sandbox_process",)
+
+
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -142,6 +156,35 @@ QA_HARNESS_PREFIXES = (
     "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+SANDBOX_DOCKER_EXACT_PATHS = {
+    "Dockerfile.sandbox-worker",
+    "crates/app/ironclaw_cli/src/runtime/mod.rs",
+    "crates/app/ironclaw_composition/src/sandbox.rs",
+    "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
+    "crates/app/ironclaw_composition/src/deployment.rs",
+    "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+    "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
+    "crates/app/ironclaw_composition/src/input.rs",
+    "crates/app/ironclaw_config/src/profile.rs",
+    "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+    "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
+    "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+    "crates/kernel/ironclaw_host_runtime/src/services.rs",
+    "crates/kernel/ironclaw_host_runtime/src/services/builder.rs",
+    "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
+    "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
+    "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
+    "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+    "tests/integration/reborn_sandbox_shell_turn.rs",
+    "tests/e2e_trace_runtime_policy_serde.rs",
+    "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
+    "tests/integration/support/builder.rs",
+    "tests/integration/support/capability_backend.rs",
+    "tests/integration/support/docker_gate.rs",
+    "tests/integration/support/harness/mod.rs",
+    "tests/integration/support/harness/options.rs",
+    "tests/integration/support/harness/profiles/sandbox_shell.rs",
+}
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
@@ -607,6 +650,7 @@ def _full_plan(
         "integration_lanes": [0, 1, 2, 3, "groups"],
         "run_group_tests": True,
         "run_qa_replay": True,
+        "run_sandbox_docker": True,
         "coverage_mode": "full",
     }
 
@@ -643,10 +687,23 @@ def build_plan(
     # not affected-area coverage. Keep it on for every pull request even when
     # no changed path maps to another Reborn lane.
     run_qa_replay = True
+    run_sandbox_docker = False
     qa_evidence_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
+    sandbox_docker_prefixes = _sandbox_docker_prefixes()
+    sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
+    if sandbox_docker_prefixes:
+        sandbox_crate_directory = sandbox_docker_prefixes[0].removesuffix(
+            "/src/sandbox_process"
+        )
+        sandbox_docker_exact_paths.update(
+            {
+                f"{sandbox_crate_directory}/Cargo.toml",
+                f"{sandbox_crate_directory}/src/lib.rs",
+            }
+        )
 
     for path in sorted(paths):
         if path == "Cargo.lock":
@@ -687,6 +744,17 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
+        if path in sandbox_docker_exact_paths or path.startswith(
+            sandbox_docker_prefixes
+        ):
+            run_sandbox_docker = True
+            reasons.append(f"sandbox Docker surface changed: {path}")
+            if (
+                not path.startswith("crates/")
+                and path not in root_inventory
+                and path not in integration_inventory
+            ):
+                continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
@@ -911,6 +979,7 @@ def build_plan(
         or root_partitions
         or integration_lanes
         or qa_evidence_changed
+        or run_sandbox_docker
     )
     return {
         "mode": "selected" if active else "none",
@@ -924,6 +993,7 @@ def build_plan(
         ),
         "run_group_tests": False,
         "run_qa_replay": run_qa_replay,
+        "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",
     }
 

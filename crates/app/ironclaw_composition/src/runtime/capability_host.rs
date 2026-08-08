@@ -23,12 +23,17 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     HostRuntime, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedToolResultDiagnosticCapture;
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ThreadScopeResolver, loop_driver_execution_extension_id,
+    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolDiagnosticEmitter,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ThreadScopeResolver, loop_driver_execution_extension_id,
 };
-use ironclaw_product_contracts::project_service::ProjectService;
+use ironclaw_product_contracts::{
+    inspector::TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, project_service::ProjectService,
+};
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -114,6 +119,7 @@ pub(super) fn capability_wiring(
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
@@ -155,6 +161,7 @@ pub(super) fn capability_wiring(
             Arc::clone(&display_previews),
             Arc::clone(&thread_service),
             fallback_user_id.clone(),
+            tool_diagnostic_sink,
         )
         .with_observer(capability_observer),
     );
@@ -336,6 +343,7 @@ struct StagedCapabilityIo {
     /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
     /// (the input resolver bypasses this IO for provider tool-call inputs).
     observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    tool_diagnostics: HostManagedToolDiagnosticEmitter,
 }
 
 #[derive(Clone)]
@@ -362,6 +370,7 @@ impl StagedCapabilityIo {
             display_previews,
             durable_previews: None,
             observer: None,
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::default(),
         }
     }
 
@@ -369,6 +378,7 @@ impl StagedCapabilityIo {
         display_previews: Arc<CapabilityDisplayPreviewStore>,
         thread_service: Arc<dyn SessionThreadService>,
         fallback_user_id: UserId,
+        tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     ) -> Self {
         Self {
             inputs: StdMutex::new(StagedValueStore::default()),
@@ -379,6 +389,7 @@ impl StagedCapabilityIo {
                 fallback_user_id,
             }),
             observer: None,
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::new(tool_diagnostic_sink),
         }
     }
 
@@ -599,6 +610,7 @@ pub(super) fn staged_capability_io_for_test(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service,
         fallback_user_id,
+        None,
     ));
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
@@ -619,6 +631,7 @@ pub(super) fn staged_capability_io_with_observer_for_test(
             Arc::new(CapabilityDisplayPreviewStore::default()),
             thread_service,
             fallback_user_id,
+            None,
         )
         .with_observer(
             observer.map(crate::observability::trajectory_observer::as_capability_observer),
@@ -776,6 +789,12 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
             tool_call.name.as_str(),
             &tool_call.arguments,
         );
+        self.tool_diagnostics.record_input(
+            run_context,
+            &input_ref,
+            tool_call.name.as_str(),
+            &tool_call.arguments,
+        );
         Ok(input_ref)
     }
 
@@ -793,6 +812,12 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
         // provider tool name, so the title and per-tool summary are correct.
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
+            input_ref,
+            capability_id.as_str(),
+            &tool_call.arguments,
+        );
+        self.tool_diagnostics.record_input(
+            run_context,
             input_ref,
             capability_id.as_str(),
             &tool_call.arguments,
@@ -831,6 +856,9 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
         let preview = first_look_result_preview(&output_content);
+        let diagnostic_result = self
+            .tool_diagnostics
+            .prepare_result(&output_content, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
         // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
@@ -875,6 +903,13 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
+        self.tool_diagnostics.record_succeeded(
+            run_context,
+            invocation_id,
+            capability_id,
+            diagnostic_result,
+            output_bytes,
+        );
         let mut write_result =
             CapabilityWriteResult::from_output(result_ref, output_bytes, &output);
         write_result.model_observation = Some(result_reference_observation(
@@ -888,12 +923,14 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
 
     fn record_running_invocation(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+        self.tool_diagnostics
+            .record_started(run_context, invocation_id, input_ref);
     }
 
     async fn stage_capability_failure_preview(
@@ -909,6 +946,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             capability_id,
             summary,
         );
+        self.tool_diagnostics
+            .record_failed(run_context, invocation_id, capability_id, summary);
         // Persist the failure preview to the durable timeline (status Failed)
         // so the detail survives refresh/replay, mirroring the success path in
         // `write_capability_result`.
