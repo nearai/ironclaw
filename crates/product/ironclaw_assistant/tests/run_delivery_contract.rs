@@ -1600,8 +1600,14 @@ async fn auth_gate_projection_identity_matches_the_pinned_digest_vector() {
     .await;
 }
 
+/// Pins `notification_for_actionable_state`'s existing guard (`observer.rs`
+/// lines 656-663 / 682-689): a gate-kind state with no `gate_ref` returns
+/// `Ok(None)` before an `ActionableNotification` is ever built, so this test
+/// never reaches the fallible gate-identity path `run_notification_projection_id`
+/// adds. That branch (`MissingGateRef`) is pinned directly in `prompts.rs`'s
+/// `gate_kinds_reject_an_absent_gate_ref` unit test instead.
 #[tokio::test]
-async fn observer_fails_closed_when_a_gate_kind_has_no_gate_ref() {
+async fn observer_skips_delivery_when_a_gate_kind_has_no_gate_ref() {
     for status in [TurnStatus::BlockedApproval, TurnStatus::BlockedAuth] {
         let harness = build_harness(
             vec![scripted_state(status, None)],
@@ -1621,7 +1627,8 @@ async fn observer_fails_closed_when_a_gate_kind_has_no_gate_ref() {
 
         assert!(
             harness.adapter.texts().is_empty(),
-            "{status:?} without a gate_ref must not synthesize a weaker delivery identity"
+            "{status:?} without a gate_ref must skip delivery preparation entirely, per \
+             notification_for_actionable_state's existing pre-identity guard"
         );
         assert!(
             harness
@@ -1630,7 +1637,7 @@ async fn observer_fails_closed_when_a_gate_kind_has_no_gate_ref() {
                 .await
                 .expect("attempts")
                 .is_empty(),
-            "{status:?} without a gate_ref must fail before durable delivery preparation"
+            "{status:?} without a gate_ref must never reach durable delivery preparation"
         );
     }
 }

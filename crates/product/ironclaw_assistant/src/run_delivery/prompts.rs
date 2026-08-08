@@ -353,6 +353,27 @@ mod tests {
         );
     }
 
+    /// `notification_for_actionable_state` in `observer.rs`/`triggered.rs`
+    /// never calls this function with `gate_ref: None` for a gate kind — it
+    /// short-circuits to `Ok(None)` first when `state.gate_ref` is absent.
+    /// This function must still fail closed on its own if a future caller
+    /// reaches it without a gate ref, so the branch is pinned directly here
+    /// rather than through that upstream guard.
+    #[test]
+    fn gate_kinds_reject_an_absent_gate_ref() {
+        for kind in [
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationEventKind::AuthRequired,
+        ] {
+            let error = run_notification_projection_id(TurnRunId::new(), kind, None)
+                .expect_err("a gate notification without a gate ref must fail closed");
+            assert!(
+                matches!(error, RunNotificationProjectionIdError::MissingGateRef),
+                "{kind:?} must not fall back to the collision-prone legacy identity, got {error:?}"
+            );
+        }
+    }
+
     /// A pairing challenge is completable from a chat surface, so it must not
     /// be denied like a credential-entry challenge. Regression for #6616,
     /// whose merge resolution dropped every consumer of `challenge_kind` and
