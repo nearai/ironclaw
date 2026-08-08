@@ -226,3 +226,21 @@ access_token = "/access_token"
 refresh_token = "/refresh_token"
 expires_in = "/expires_in"
 scope = { path = "/scope" }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-sheets.preview"
+description = "Preview a bounded sheet range with headers and sample rows."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/google-sheets/preview.input.v1.json"
+output_schema_ref = "schemas/google-sheets/preview.output.v1.json"
+prompt_doc_ref = "prompts/google-sheets/preview.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }

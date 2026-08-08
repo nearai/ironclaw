@@ -63,6 +63,28 @@ class InstallPlaywrightTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 common.install_playwright(Path("/venv/bin/python"), "plain")
 
+    def test_gateway_env_propagates_compact_google_benchmark_flag(self):
+        with patch.dict(
+            common.os.environ,
+            {"IRONCLAW_COMPACT_GOOGLE_CAPABILITIES_ENABLED": "false"},
+        ):
+            env = common.build_gateway_env(
+                owner_user_id="owner",
+                gateway_port=3000,
+                http_port=3001,
+                gateway_token="token",
+                db_path=Path("/tmp/db"),
+                home_dir=Path("/tmp/home"),
+                tools_dir=Path("/tmp/tools"),
+                channels_dir=Path("/tmp/channels"),
+                mock_llm_url="http://127.0.0.1:3002",
+                secrets_master_key="secret",
+            )
+
+        self.assertEqual(
+            env["IRONCLAW_COMPACT_GOOGLE_CAPABILITIES_ENABLED"], "false"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

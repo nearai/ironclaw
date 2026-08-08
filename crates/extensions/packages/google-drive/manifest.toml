@@ -243,3 +243,37 @@ access_token = "/access_token"
 refresh_token = "/refresh_token"
 expires_in = "/expires_in"
 scope = { path = "/scope" }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-drive.find_files_compact"
+description = "Search or list Drive files with compact metadata for context-efficient file discovery."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/find_files_compact.input.v1.json"
+prompt_doc_ref = "prompts/google-drive/find_files_compact.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-drive.recent_files"
+description = "List recently modified Drive files with compact metadata."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/recent_files.input.v1.json"
+prompt_doc_ref = "prompts/google-drive/recent_files.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }

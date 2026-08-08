@@ -139,6 +139,27 @@ tested = [
 live_only = []
 unsupported = []
 
+# Compact Google context capabilities (PR #5503 experiment): exercised by the
+# live canary A/B benchmark arms only. They have no emulator support, no
+# typed operation cases, and no harvested traces yet, so the evidence
+# contract is waived until the benchmark traces are harvested or operation
+# cases land.
+[[waivers]]
+owner = "compact-google-experiment"
+reason = "Experimental compact capabilities verified by the live canary A/B benchmark; no deterministic in-repo evidence tier exists yet."
+issue = "https://github.com/nearai/ironclaw/pull/5503"
+review_condition = "Harvest the compact benchmark traces into live_canary fixtures or add emulator-backed operation cases, then reclassify as tested."
+capabilities = [
+  "gmail.fetch_message_summaries",
+  "google-calendar.agenda",
+  "google-calendar.daily_brief",
+  "google-calendar.meeting_prep",
+  "google-docs.read_excerpt",
+  "google-drive.find_files_compact",
+  "google-drive.recent_files",
+  "google-sheets.preview",
+]
+
 [[integration_evidence]]
 capability = "github.handle_webhook"
 outcome_class = "success"

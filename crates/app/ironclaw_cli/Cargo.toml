@@ -43,6 +43,7 @@ test-support = [
 anyhow = "1"
 async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
+toml = "1.1"
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
@@ -120,7 +121,6 @@ ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version =
 # (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../../substrates/ironclaw_secrets", version = "0.1.0" }
-toml = "1.1"
 
 [[bin]]
 name = "ironclaw"

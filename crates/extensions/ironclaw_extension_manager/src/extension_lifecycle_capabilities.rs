@@ -1993,6 +1993,10 @@ mod tests {
             BTreeSet::from([
                 "https://www.googleapis.com/auth/calendar.events".to_string(),
                 "https://www.googleapis.com/auth/calendar.readonly".to_string(),
+                // The compact daily brief (PR #5503) reads Gmail attention
+                // summaries, so the calendar package's OAuth recipe ceiling
+                // carries gmail.readonly alongside the calendar scopes.
+                "https://www.googleapis.com/auth/gmail.readonly".to_string(),
             ])
         );
 

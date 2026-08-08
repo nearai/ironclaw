@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+use ironclaw_auth::{
+    GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+};
 
 #[derive(Default)]
 struct SlackDmOpenNetworkEgress {
@@ -5872,6 +5874,7 @@ async fn standalone_webui_bundle_uses_lifecycle_product_service_for_setup_extens
     let expected_google_scopes = [
         GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
         GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+        GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
     ]
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();

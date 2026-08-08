@@ -32,9 +32,22 @@ def live_qa_matrix_cases(workflow: str, errors: list[str]) -> set[str]:
         errors.append("live-canary workflow has no reborn-webui-v2-live-qa job")
         return set()
 
+    # `dispatch_only` matrix shards run only when one of their cases is
+    # explicitly requested (A/B benchmark arms, expected-red probes, etc.).
+    # They are never scheduled and never harvested as regression fixtures, so
+    # their case names must not be held to the harvested-inventory contract.
     cases: set[str] = set()
-    for value in re.findall(r"(?m)^ {12}cases:\s*([^#\n]+)$", job_match.group("job")):
-        cases.update(case.strip() for case in value.split(",") if case.strip())
+    for block in re.findall(
+        r"(?m)^ {10}- shard_id:[^\n]*(?:\n {12}[^\n]*)*", job_match.group("job")
+    ):
+        if re.search(r"(?m)^ {12}dispatch_only:\s*true\s*$", block):
+            continue
+        value_match = re.search(r"(?m)^ {12}cases:\s*([^#\n]+)$", block)
+        if value_match is None:
+            continue
+        cases.update(
+            case.strip() for case in value_match.group(1).split(",") if case.strip()
+        )
     if not cases:
         errors.append("reborn-webui-v2-live-qa matrix has no cases")
     return cases

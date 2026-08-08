@@ -73,11 +73,14 @@ fn assets() -> Vec<super::PackageAsset> {
         gmail_schema_asset!("reply_to_message.output.v1.json"),
         gmail_schema_asset!("trash_message.input.v1.json"),
         gmail_schema_asset!("trash_message.output.v1.json"),
+        gmail_schema_asset!("fetch_message_summaries.input.v1.json"),
+        gmail_schema_asset!("fetch_message_summaries.output.v1.json"),
         gmail_prompt_asset!("list_messages.md"),
         gmail_prompt_asset!("get_message.md"),
         gmail_prompt_asset!("send_message.md"),
         gmail_prompt_asset!("create_draft.md"),
         gmail_prompt_asset!("reply_to_message.md"),
         gmail_prompt_asset!("trash_message.md"),
+        gmail_prompt_asset!("fetch_message_summaries.md"),
     ]
 }

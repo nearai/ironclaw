@@ -521,6 +521,26 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     .iter()
                     .map(|scope| (*scope).to_string())
                     .collect::<Vec<_>>();
+                let runtime_credentials = vec![(
+                    spec.credential_handle.to_string(),
+                    ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                    ceiling.clone(),
+                    required_scopes.clone(),
+                    spec.credential_host_pattern.to_string(),
+                )];
+                let output_schema_ref = matches!(
+                    capability.id,
+                    "gmail.fetch_message_summaries"
+                        | "google-calendar.agenda"
+                        | "google-calendar.daily_brief"
+                        | "google-calendar.meeting_prep"
+                )
+                .then(|| {
+                    format!(
+                        "schemas/{}/{}.output.v1.json",
+                        spec.schema_prefix, capability.short_name
+                    )
+                });
                 (
                     capability.id.to_string(),
                     capability.effects.to_vec(),
@@ -529,19 +549,12 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "schemas/{}/{}.input.v1.json",
                         spec.schema_prefix, capability.short_name
                     ),
-                    // Manifest v3 declares no output schema refs.
-                    None,
+                    output_schema_ref,
                     Some(format!(
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name
                     )),
-                    vec![(
-                        spec.credential_handle.to_string(),
-                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
-                        ceiling.clone(),
-                        required_scopes,
-                        spec.credential_host_pattern.to_string(),
-                    )],
+                    runtime_credentials,
                 )
             })
             .collect::<Vec<_>>();
@@ -740,7 +753,7 @@ async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(expected_capability_ids.len(), 15);
+    assert_eq!(expected_capability_ids.len(), 19);
     for capability_id in expected_capability_ids {
         assert!(
             registry.contains_handler(&cap_id(&capability_id)),

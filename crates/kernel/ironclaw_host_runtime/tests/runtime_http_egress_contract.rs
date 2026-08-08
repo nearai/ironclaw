@@ -281,6 +281,118 @@ async fn host_http_egress_consumes_staged_obligation_secret_once() {
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn first_party_http_egress_borrows_staged_secret_for_the_invocation() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
+
+    let request = RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::FirstParty,
+        scope,
+        capability_id: capability_id.clone(),
+        method: NetworkMethod::Post,
+        url: "https://api.example.test/v1/run".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+        network_policy: sample_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation {
+                capability_id: capability_id.clone(),
+            },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        save_body_to: None,
+        timeout_ms: None,
+    };
+
+    service
+        .execute(request.clone())
+        .await
+        .expect("first request should inject the staged secret");
+    service
+        .execute(request.clone())
+        .await
+        .expect("the same first-party invocation should borrow the staged secret again");
+
+    // The borrow must be bounded by scope: a regression that drops or widens
+    // the scope key would turn same-invocation reuse into a cross-invocation
+    // or cross-user credential leak. A new invocation id and then a new user
+    // id must both fail closed with a Credential error and never reach the
+    // transport. The policy is staged for the new scopes so the only missing
+    // material is the invocation-scoped secret.
+    let mut other_invocation = request.clone();
+    other_invocation.scope.invocation_id = InvocationId::new();
+    stage_policy_sync(
+        &services,
+        &other_invocation.scope,
+        &capability_id,
+        sample_policy(),
+    );
+    let cross_invocation = service
+        .execute(other_invocation)
+        .await
+        .expect_err("another invocation must not borrow this invocation's staged secret");
+    assert!(matches!(
+        cross_invocation,
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
+    ));
+
+    let mut other_user = request.clone();
+    other_user.scope.user_id = UserId::new("user2").unwrap();
+    other_user.scope.invocation_id = InvocationId::new();
+    stage_policy_sync(
+        &services,
+        &other_user.scope,
+        &capability_id,
+        sample_policy(),
+    );
+    let cross_user = service
+        .execute(other_user)
+        .await
+        .expect_err("another user must not borrow this invocation's staged secret");
+    assert!(matches!(
+        cross_user,
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
+    ));
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer sk-staged-secret")
+    }));
+}
+
 #[test]
 fn host_http_egress_records_injected_credentials_in_zeroizing_network_request() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {

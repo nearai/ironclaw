@@ -556,7 +556,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
 }
 
 #[tokio::test]
-async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
+async fn reborn_e2e_gate_host_http_borrows_staged_handoffs_until_abort() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -589,28 +589,30 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
         .unwrap();
     let mut context = execution_context_without_grants();
     context.resource_scope = scope.clone();
-    obligation_services
-        .obligation_handler()
-        .satisfy(ironclaw_capabilities::CapabilityObligationRequest {
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![
+        Obligation::ApplyNetworkPolicy {
+            policy: staged_policy.clone(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        },
+    ];
+    let obligation_handler = obligation_services.obligation_handler();
+    let outcome = obligation_handler
+        .prepare(ironclaw_capabilities::CapabilityObligationRequest {
             phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
             context: &context,
             capability_id: &capability_id,
-            estimate: &ResourceEstimate::default(),
-            obligations: &[
-                Obligation::ApplyNetworkPolicy {
-                    policy: staged_policy.clone(),
-                },
-                Obligation::InjectSecretOnce {
-                    handle: handle.clone(),
-                },
-            ],
+            estimate: &estimate,
+            obligations: &obligations,
         })
         .await
         .unwrap();
     let service = obligation_services.host_http_egress(network);
 
     let request = RuntimeHttpEgressRequest {
-        runtime: RuntimeKind::Script,
+        runtime: RuntimeKind::FirstParty,
         scope: scope.clone(),
         capability_id: capability_id.clone(),
         method: NetworkMethod::Post,
@@ -634,35 +636,77 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
         timeout_ms: None,
     };
 
-    let response = service
+    let first = service
         .execute(request.clone())
         .await
         .expect("host HTTP egress should use staged Reborn policy and secret material");
-    assert_eq!(response.status, 200);
+    let second = service
+        .execute(request.clone())
+        .await
+        .expect("the same invocation should borrow its staged handoffs again");
+    assert_eq!(first.status, 200);
+    assert_eq!(second.status, 200);
     {
         let recorded = network_recorder.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].policy, staged_policy);
-        assert_eq!(
-            recorded[0]
-                .headers
-                .iter()
-                .find(|(name, _)| name == "authorization"),
-            Some(&(
-                "authorization".to_string(),
-                "Bearer sk-reborn-e2e-staged-secret".to_string()
-            ))
-        );
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded.iter().all(|request| {
+            request.policy == staged_policy
+                && request.headers.iter().any(|(name, value)| {
+                    name == "authorization" && value == "Bearer sk-reborn-e2e-staged-secret"
+                })
+        }));
     }
-    let replay = service
+
+    obligation_handler
+        .abort(ironclaw_capabilities::CapabilityObligationAbortRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            outcome: &outcome,
+        })
+        .await
+        .expect("abort should revoke staged invocation handoffs");
+
+    let policy_only_outcome = obligation_handler
+        .prepare(ironclaw_capabilities::CapabilityObligationRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: staged_policy.clone(),
+            }],
+        })
+        .await
+        .expect("network policy should be restaged without the secret");
+
+    let after_abort = service
         .execute(request)
         .await
-        .expect_err("consumed staged secret must not be reusable");
-    assert!(matches!(replay, RuntimeHttpEgressError::Credential { .. }));
+        .expect_err("aborted invocation handoffs must not be reusable");
+    assert!(matches!(
+        after_abort,
+        RuntimeHttpEgressError::Credential { .. }
+    ));
+    obligation_handler
+        .abort(ironclaw_capabilities::CapabilityObligationAbortRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: staged_policy,
+            }],
+            outcome: &policy_only_outcome,
+        })
+        .await
+        .expect("restaged policy should be revoked during test cleanup");
     assert_eq!(
         network_recorder.lock().unwrap().len(),
-        1,
-        "replay must fail before a second outbound transport attempt"
+        2,
+        "post-abort egress must fail before another outbound transport attempt"
     );
 }
 

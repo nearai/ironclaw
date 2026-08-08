@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets preview output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spreadsheet_id",
+    "title",
+    "url",
+    "sheet_name",
+    "range",
+    "row_count_estimate",
+    "column_count_estimate",
+    "headers",
+    "rows",
+    "sampled_row_count",
+    "sampled_column_count"
+  ],
+  "properties": {
+    "spreadsheet_id": { "type": "string" },
+    "title": { "type": "string" },
+    "url": { "type": "string" },
+    "sheet_name": { "type": "string" },
+    "range": { "type": "string" },
+    "row_count_estimate": { "type": "integer", "minimum": 0 },
+    "column_count_estimate": { "type": "integer", "minimum": 0 },
+    "headers": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {}
+      }
+    },
+    "sampled_row_count": { "type": "integer", "minimum": 0 },
+    "sampled_column_count": { "type": "integer", "minimum": 0 }
+  }
+}

@@ -15,11 +15,13 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, NewCredentialAccount,
 };
 use ironclaw_extension_support::{
-    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_AGENDA_CAPABILITY_ID,
+    CALENDAR_CREATE_EVENT_CAPABILITY_ID, CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
     CALENDAR_DELETE_EVENT_CAPABILITY_ID, CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID,
     CALENDAR_GET_EVENT_CAPABILITY_ID, CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
-    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_SET_REMINDER_CAPABILITY_ID,
-    CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
+    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_MEETING_PREP_CAPABILITY_ID,
+    CALENDAR_SET_REMINDER_CAPABILITY_ID, CALENDAR_UPDATE_EVENT_CAPABILITY_ID,
+    GMAIL_CREATE_DRAFT_CAPABILITY_ID, GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
     GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_PROVIDER_SCOPES,
@@ -50,7 +52,20 @@ fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
         .iter()
         .map(|package| package.capabilities.len())
         .sum::<usize>();
-    assert_eq!(capability_count, 15);
+    assert_eq!(capability_count, 19);
+
+    let capability_ids = packages
+        .iter()
+        .flat_map(|package| package.capabilities.iter().map(|capability| capability.id))
+        .collect::<Vec<_>>();
+    for compact_id in [
+        CALENDAR_AGENDA_CAPABILITY_ID,
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        CALENDAR_MEETING_PREP_CAPABILITY_ID,
+        GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID,
+    ] {
+        assert!(capability_ids.contains(&compact_id));
+    }
 }
 
 #[test]
@@ -2126,12 +2141,9 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
 }
 
 #[tokio::test]
-async fn add_attendees_restages_credential_before_patch() {
-    // P2 regression: the staged-obligation store is one-shot.
-    // execute_add_attendees makes GET then PATCH; without restaging, the PATCH
-    // fires with no credential. We use FailOnNthCallStager to verify the second
-    // staging call happens — if it doesn't happen, the dispatch succeeds instead
-    // of returning AuthRequired.
+async fn add_attendees_reuses_invocation_scoped_credential_for_patch() {
+    // First-party credentials remain staged for the capability invocation, so a
+    // multi-request operation must not restage between its GET and PATCH.
     let scope = scope();
     let auth = auth_with_google_account(
         &scope,
@@ -2147,13 +2159,10 @@ async fn add_attendees_restages_credential_before_patch() {
             }),
             50,
         ),
-        // PATCH response — would succeed, but stager fails before we get here
         RecordingEgress::json_with_request_bytes(json!({"id": "evt-1", "updated": true}), 80),
     ]));
 
-    // Stager succeeds on first call (for GET), fails AuthRequired on second call (for PATCH).
-    // Without the P2 fix, the second staging call never happens and dispatch succeeds.
-    let error = GsuiteExecutor::new(
+    let result = GsuiteExecutor::new(
         auth.clone(),
         auth,
         FailOnNthCallStager::fail_on_second_call(),
@@ -2169,21 +2178,11 @@ async fn add_attendees_restages_credential_before_patch() {
         runtime_http_egress: egress.clone(),
     })
     .await
-    .expect_err("second staging should fail with AuthRequired before PATCH fires");
+    .expect("one staged credential should authorize both requests");
 
-    assert!(
-        error.is_auth_required(),
-        "stager auth-required on PATCH restage must surface as AuthRequired; got {error:?}"
-    );
-    // Only the GET fired; PATCH was blocked by staging failure
+    assert_eq!(egress.requests().len(), 2);
     assert_eq!(
-        egress.requests().len(),
-        1,
-        "PATCH must not fire after staging failure; egress count should be 1 (GET only)"
-    );
-    assert_eq!(
-        error.usage().map(|u| u.network_egress_bytes),
-        Some(50),
-        "GET network bytes must be reported even when PATCH staging fails"
+        result.usage.network_egress_bytes, 130,
+        "usage must include both the GET and PATCH requests"
     );
 }

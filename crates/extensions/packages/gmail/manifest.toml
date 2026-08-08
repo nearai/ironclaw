@@ -189,3 +189,28 @@ access_token = "/access_token"
 refresh_token = "/refresh_token"
 expires_in = "/expires_in"
 scope = { path = "/scope" }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "gmail.fetch_message_summaries"
+description = "Fetch compact Gmail message summaries for triage and inbox context."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/gmail/fetch_message_summaries.input.v1.json"
+output_schema_ref = "schemas/gmail/fetch_message_summaries.output.v1.json"
+prompt_doc_ref = "prompts/gmail/fetch_message_summaries.md"
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }

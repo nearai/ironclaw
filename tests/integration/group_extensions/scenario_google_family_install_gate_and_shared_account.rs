@@ -208,6 +208,7 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 GOOGLE_CALENDAR_EVENTS_SCOPE,
                 GOOGLE_DRIVE_READONLY_SCOPE,
                 GOOGLE_DRIVE_SCOPE,
+                GOOGLE_GMAIL_READONLY_SCOPE,
             ],
         )
         .await?;

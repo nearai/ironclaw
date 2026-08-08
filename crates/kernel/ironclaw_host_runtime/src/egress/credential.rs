@@ -284,7 +284,7 @@ fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
     // (`take`) would 403 every call after the first.
     matches!(
         runtime,
-        RuntimeKind::Mcp | RuntimeKind::Wasm | RuntimeKind::Sandbox
+        RuntimeKind::FirstParty | RuntimeKind::Mcp | RuntimeKind::Wasm | RuntimeKind::Sandbox
     )
 }
 
@@ -693,6 +693,7 @@ mod tests {
         assert!(runtime_reuses_staged_credentials(RuntimeKind::Mcp));
         assert!(runtime_reuses_staged_credentials(RuntimeKind::Wasm));
         assert!(runtime_reuses_staged_credentials(RuntimeKind::Sandbox));
+        assert!(runtime_reuses_staged_credentials(RuntimeKind::FirstParty));
         assert!(!runtime_reuses_staged_credentials(RuntimeKind::Script));
     }
 

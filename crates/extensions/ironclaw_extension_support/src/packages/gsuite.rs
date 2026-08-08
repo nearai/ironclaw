@@ -113,6 +113,42 @@ fn google_calendar_assets() -> Vec<PackageAsset> {
             ),
         ),
         bytes_asset(
+            "schemas/google-calendar/agenda.input.v1.json",
+            include_bytes!(
+                "../../../packages/google-calendar/schemas/google-calendar/agenda.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/agenda.output.v1.json",
+            include_bytes!(
+                "../../../packages/google-calendar/schemas/google-calendar/agenda.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/daily_brief.input.v1.json",
+            include_bytes!(
+                "../../../packages/google-calendar/schemas/google-calendar/daily_brief.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/daily_brief.output.v1.json",
+            include_bytes!(
+                "../../../packages/google-calendar/schemas/google-calendar/daily_brief.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/meeting_prep.input.v1.json",
+            include_bytes!(
+                "../../../packages/google-calendar/schemas/google-calendar/meeting_prep.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/meeting_prep.output.v1.json",
+            include_bytes!(
+                "../../../packages/google-calendar/schemas/google-calendar/meeting_prep.output.v1.json"
+            ),
+        ),
+        bytes_asset(
             "schemas/google-calendar/get_event.input.v1.json",
             include_bytes!(
                 "../../../packages/google-calendar/schemas/google-calendar/get_event.input.v1.json"
@@ -209,6 +245,22 @@ fn google_calendar_assets() -> Vec<PackageAsset> {
             ),
         ),
         bytes_asset(
+            "prompts/google-calendar/agenda.md",
+            include_bytes!("../../../packages/google-calendar/prompts/google-calendar/agenda.md"),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/daily_brief.md",
+            include_bytes!(
+                "../../../packages/google-calendar/prompts/google-calendar/daily_brief.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/meeting_prep.md",
+            include_bytes!(
+                "../../../packages/google-calendar/prompts/google-calendar/meeting_prep.md"
+            ),
+        ),
+        bytes_asset(
             "prompts/google-calendar/get_event.md",
             include_bytes!(
                 "../../../packages/google-calendar/prompts/google-calendar/get_event.md"
@@ -277,29 +329,37 @@ pub(super) fn google_calendar_bundle() -> PackageBundle {
 }
 
 pub(super) fn google_docs_bundle() -> PackageBundle {
+    let mut assets = google_wasm_assets!(
+        "google-docs",
+        DOCS_MANIFEST,
+        "google_docs_tool.wasm",
+        DOCS_WASM,
+        [
+            "create_document",
+            "get_document",
+            "read_content",
+            "read_excerpt",
+            "insert_text",
+            "delete_content",
+            "replace_text",
+            "format_text",
+            "format_paragraph",
+            "insert_table",
+            "create_list",
+            "batch_update"
+        ]
+    );
+    assets.push(bytes_asset(
+        "schemas/google-docs/read_excerpt.output.v1.json",
+        include_bytes!(
+            "../../../packages/google-docs/schemas/google-docs/read_excerpt.output.v1.json"
+        ),
+    ));
     PackageBundle {
         id: DOCS_ID,
         display_name: "Google Docs",
         manifest_toml: Cow::Borrowed(DOCS_MANIFEST),
-        assets: google_wasm_assets!(
-            "google-docs",
-            DOCS_MANIFEST,
-            "google_docs_tool.wasm",
-            DOCS_WASM,
-            [
-                "create_document",
-                "get_document",
-                "read_content",
-                "insert_text",
-                "delete_content",
-                "replace_text",
-                "format_text",
-                "format_paragraph",
-                "insert_table",
-                "create_list",
-                "batch_update"
-            ]
-        ),
+        assets,
         onboarding: None,
         trust_effects: Some(trust_effects()),
     }
@@ -317,6 +377,8 @@ pub(super) fn google_drive_bundle() -> PackageBundle {
             DRIVE_WASM,
             [
                 "list_files",
+                "find_files_compact",
+                "recent_files",
                 "get_file",
                 "download_file",
                 "upload_file",
@@ -336,29 +398,37 @@ pub(super) fn google_drive_bundle() -> PackageBundle {
 }
 
 pub(super) fn google_sheets_bundle() -> PackageBundle {
+    let mut assets = google_wasm_assets!(
+        "google-sheets",
+        SHEETS_MANIFEST,
+        "google_sheets_tool.wasm",
+        SHEETS_WASM,
+        [
+            "create_spreadsheet",
+            "get_spreadsheet",
+            "read_values",
+            "preview",
+            "batch_read_values",
+            "write_values",
+            "append_values",
+            "clear_values",
+            "add_sheet",
+            "delete_sheet",
+            "rename_sheet",
+            "format_cells"
+        ]
+    );
+    assets.push(bytes_asset(
+        "schemas/google-sheets/preview.output.v1.json",
+        include_bytes!(
+            "../../../packages/google-sheets/schemas/google-sheets/preview.output.v1.json"
+        ),
+    ));
     PackageBundle {
         id: SHEETS_ID,
         display_name: "Google Sheets",
         manifest_toml: Cow::Borrowed(SHEETS_MANIFEST),
-        assets: google_wasm_assets!(
-            "google-sheets",
-            SHEETS_MANIFEST,
-            "google_sheets_tool.wasm",
-            SHEETS_WASM,
-            [
-                "create_spreadsheet",
-                "get_spreadsheet",
-                "read_values",
-                "batch_read_values",
-                "write_values",
-                "append_values",
-                "clear_values",
-                "add_sheet",
-                "delete_sheet",
-                "rename_sheet",
-                "format_cells"
-            ]
-        ),
+        assets,
         onboarding: None,
         trust_effects: Some(trust_effects()),
     }

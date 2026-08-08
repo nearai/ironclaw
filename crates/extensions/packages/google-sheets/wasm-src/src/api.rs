@@ -9,6 +9,8 @@ use crate::types::*;
 
 const SHEETS_API_BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
+const MAX_PREVIEW_ROWS: usize = 100;
+const MAX_PREVIEW_COLUMNS: usize = 30;
 
 /// Make a Google Sheets API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
@@ -26,6 +28,12 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
 
     let body_bytes = body.map(|b| b.as_bytes().to_vec());
 
+    #[cfg(test)]
+    if let Some(response) = TEST_API_RESPONSES.with(|queue| queue.borrow_mut().pop_front()) {
+        TEST_API_CALLS.with(|calls| calls.borrow_mut().push((method.to_string(), url)));
+        return response;
+    }
+
     host::log(
         host::LogLevel::Debug,
         &format!("Google Sheets API: {} {}", method, url),
@@ -34,7 +42,11 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        return Err(api_status_error("Google Sheets", response.status, &response.body));
+        return Err(api_status_error(
+            "Google Sheets",
+            response.status,
+            &response.body,
+        ));
     }
 
     if response.body.is_empty() {
@@ -183,6 +195,218 @@ pub fn read_values(spreadsheet_id: &str, range: &str) -> Result<ValuesResult, St
             })
             .unwrap_or_default(),
     })
+}
+
+/// Preview a bounded sheet range with headers and sample rows.
+pub fn preview(
+    spreadsheet_id: &str,
+    sheet_name: Option<&str>,
+    range: Option<&str>,
+    max_rows: usize,
+    max_columns: usize,
+) -> Result<SheetPreviewResult, String> {
+    let metadata = get_spreadsheet(spreadsheet_id)?;
+    let selected_sheet = select_sheet(&metadata, sheet_name)?;
+    let max_rows = max_rows.clamp(1, MAX_PREVIEW_ROWS);
+    let max_columns = max_columns.clamp(1, MAX_PREVIEW_COLUMNS);
+    let has_explicit_range = range.is_some();
+    let range = match range {
+        Some(range) => bound_explicit_preview_range(range, max_rows, max_columns)?,
+        None => preview_range(&selected_sheet.title, max_rows, max_columns),
+    };
+    let values = read_values(spreadsheet_id, &range)?;
+    let returned_range = values.range.clone();
+    let effective_sheet = range_sheet_name(&returned_range)
+        .or_else(|| range_sheet_name(&range))
+        .map(|name| select_sheet(&metadata, Some(&name)))
+        .transpose()?
+        .unwrap_or(selected_sheet);
+    let mut rows = values.values;
+    let headers: Vec<String> = if has_explicit_range {
+        Vec::new()
+    } else {
+        let headers = rows
+            .first()
+            .map(|row| row.iter().map(cell_to_string).collect())
+            .unwrap_or_default();
+        if !rows.is_empty() {
+            rows.remove(0);
+        }
+        headers
+    };
+    let sampled_column_count = rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(headers.len()))
+        .max()
+        .unwrap_or(0);
+    let sampled_row_count = rows.len();
+
+    Ok(SheetPreviewResult {
+        spreadsheet_id: metadata.spreadsheet_id,
+        title: metadata.title,
+        url: metadata.url,
+        sheet_name: effective_sheet.title,
+        range,
+        row_count_estimate: effective_sheet.row_count,
+        column_count_estimate: effective_sheet.column_count,
+        headers,
+        rows,
+        sampled_row_count,
+        sampled_column_count,
+    })
+}
+
+fn select_sheet(
+    metadata: &SpreadsheetMetadata,
+    sheet_name: Option<&str>,
+) -> Result<SheetInfo, String> {
+    if let Some(name) = sheet_name {
+        return metadata
+            .sheets
+            .iter()
+            .find(|sheet| sheet.title == name)
+            .cloned()
+            .ok_or_else(|| format!("sheet_not_found: {name}"));
+    }
+    metadata
+        .sheets
+        .first()
+        .cloned()
+        .ok_or_else(|| "spreadsheet_has_no_sheets".to_string())
+}
+
+fn preview_range(sheet_name: &str, max_rows: usize, max_columns: usize) -> String {
+    format!(
+        "{}!A1:{}{}",
+        quote_sheet_name(sheet_name),
+        column_name(max_columns),
+        max_rows
+    )
+}
+
+fn range_sheet_name(range: &str) -> Option<String> {
+    let (sheet, _) = range.split_once('!')?;
+    if sheet.is_empty() {
+        return None;
+    }
+    if let Some(quoted) = sheet.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) {
+        return Some(quoted.replace("''", "'"));
+    }
+    Some(sheet.to_string())
+}
+
+fn quote_sheet_name(sheet_name: &str) -> String {
+    format!("'{}'", sheet_name.replace('\'', "''"))
+}
+
+/// A parsed A1 cell reference: 0-based column/row indices.
+struct CellRef {
+    col: usize,
+    row: usize,
+}
+
+fn parse_cell_ref(reference: &str) -> Option<CellRef> {
+    let reference = reference.trim();
+    let split = reference
+        .find(|character: char| character.is_ascii_digit())
+        .unwrap_or(reference.len());
+    if split == 0 || split == reference.len() {
+        // "A" (whole column) and "1" (whole row) cannot be bounded.
+        return None;
+    }
+    let (letters, digits) = reference.split_at(split);
+    if !letters.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut col = 0usize;
+    for byte in letters.bytes() {
+        col = col
+            .checked_mul(26)
+            .and_then(|value| value.checked_add(usize::from(byte.to_ascii_uppercase() - b'A' + 1)))
+            .and_then(|value| value.checked_sub(1))?;
+    }
+    let row = digits.parse::<usize>().ok()?.checked_sub(1)?;
+    Some(CellRef { col, row })
+}
+
+/// Clamp an explicit A1 preview range to `max_rows` x `max_columns` so the
+/// compact-preview contract holds even when the caller names a huge range.
+/// Unbounded forms (whole columns/rows, open-ended ranges) are rejected: the
+/// tool cannot promise a bounded preview it cannot bound.
+fn bound_explicit_preview_range(
+    range: &str,
+    max_rows: usize,
+    max_columns: usize,
+) -> Result<String, String> {
+    let (sheet_prefix, cells) = match range.split_once('!') {
+        Some((prefix, cells)) => (Some(prefix), cells),
+        None => (None, range),
+    };
+    let (start_ref, end_ref) = match cells.split_once(':') {
+        Some((start, end)) => (start, Some(end)),
+        None => (cells, None),
+    };
+    let start = parse_cell_ref(start_ref)
+        .ok_or_else(|| format!("unbounded preview range: {range}"))?;
+    let Some(end_ref) = end_ref else {
+        // A single-cell reference is already bounded.
+        return Ok(range.to_string());
+    };
+    let end = parse_cell_ref(end_ref)
+        .ok_or_else(|| format!("unbounded preview range: {range}"))?;
+    let max_end_col = start.col.saturating_add(max_columns.saturating_sub(1));
+    let max_end_row = start.row.saturating_add(max_rows.saturating_sub(1));
+    let end_col = end.col.min(max_end_col);
+    let end_row = end.row.min(max_end_row);
+    if end.col == end_col && end.row == end_row {
+        return Ok(range.to_string());
+    }
+    let prefix = sheet_prefix.map(|prefix| format!("{prefix}!")).unwrap_or_default();
+    Ok(format!(
+        "{prefix}{}{}:{}{}",
+        column_name(start.col + 1),
+        start.row + 1,
+        column_name(end_col + 1),
+        end_row + 1,
+    ))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_API_RESPONSES: std::cell::RefCell<std::collections::VecDeque<Result<String, String>>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    static TEST_API_CALLS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn stub_api_responses(responses: Vec<Result<String, String>>) {
+    TEST_API_RESPONSES.with(|queue| *queue.borrow_mut() = responses.into());
+    TEST_API_CALLS.with(|calls| calls.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn take_test_api_calls() -> Vec<(String, String)> {
+    TEST_API_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+}
+
+fn column_name(mut one_based_column: usize) -> String {
+    let mut name = String::new();
+    while one_based_column > 0 {
+        let rem = (one_based_column - 1) % 26;
+        name.insert(0, (b'A' + rem as u8) as char);
+        one_based_column = (one_based_column - 1) / 26;
+    }
+    name
+}
+
+fn cell_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => String::new(),
+        value => value.to_string(),
+    }
 }
 
 /// Read values from multiple ranges at once.
@@ -520,4 +744,104 @@ pub fn format_cells(opts: FormatOptions<'_>) -> Result<FormatResult, String> {
 
 fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata_response() -> String {
+        serde_json::json!({
+            "spreadsheetId": "sheet-1",
+            "properties": {"title": "Preview sheet"},
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 0,
+                        "title": "Data",
+                        "gridProperties": {"rowCount": 1000, "columnCount": 100}
+                    }
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    fn values_response(range: &str) -> String {
+        serde_json::json!({
+            "range": range,
+            "values": [
+                ["h1", "h2", "h3"],
+                ["a", "b", "c"],
+                ["d", "e", "f"]
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn explicit_oversized_range_is_clamped_to_preview_bounds() {
+        // Metadata call, then the read_values call.
+        stub_api_responses(vec![
+            Ok(metadata_response()),
+            Ok(values_response("Data!A1:Z1000")),
+        ]);
+
+        let result = preview("sheet-1", None, Some("Data!A1:Z1000"), 2, 2).unwrap();
+
+        let calls = take_test_api_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls[1].1.contains("Data%21A1%3AB2"),
+            "explicit range must be clamped to 2x2, got: {}",
+            calls[1].1
+        );
+        assert_eq!(result.range, "Data!A1:B2");
+        assert_eq!(result.sampled_row_count, 3);
+    }
+
+    #[test]
+    fn explicit_in_bounds_range_is_passed_through_unchanged() {
+        stub_api_responses(vec![
+            Ok(metadata_response()),
+            Ok(values_response("Data!A1:C3")),
+        ]);
+
+        let result = preview("sheet-1", None, Some("Data!A1:C3"), 10, 10).unwrap();
+
+        assert_eq!(result.range, "Data!A1:C3");
+    }
+
+    #[test]
+    fn unbounded_explicit_range_is_rejected_before_the_read() {
+        // Each attempt still needs its metadata call; the unbounded range must
+        // fail before any read_values egress (one call per attempt, no more).
+        stub_api_responses(vec![
+            Ok(metadata_response()),
+            Ok(metadata_response()),
+            Ok(metadata_response()),
+            Ok(metadata_response()),
+        ]);
+
+        for range in ["Data!A:A", "Data!1:5", "Data!A1:B", "Data!A"] {
+            let error = preview("sheet-1", None, Some(range), 10, 10).unwrap_err();
+            assert!(
+                error.contains("unbounded preview range"),
+                "{range}: expected rejection, got {error}"
+            );
+        }
+        assert_eq!(take_test_api_calls().len(), 4);
+    }
+
+    #[test]
+    fn single_cell_explicit_range_is_allowed() {
+        stub_api_responses(vec![
+            Ok(metadata_response()),
+            Ok(values_response("Data!B2:B2")),
+        ]);
+
+        let result = preview("sheet-1", None, Some("Data!B2"), 10, 10).unwrap();
+
+        assert_eq!(result.range, "Data!B2");
+    }
 }

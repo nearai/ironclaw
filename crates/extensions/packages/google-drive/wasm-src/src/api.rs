@@ -19,6 +19,31 @@ const FILE_FIELDS: &str = "id,name,mimeType,description,size,createdTime,modifie
     webViewLink,parents,shared,starred,trashed,ownedByMe,driveId,\
     owners(emailAddress,displayName)";
 
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TestApiCall {
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) body: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_API_RESPONSE: std::cell::RefCell<Option<Result<String, String>>> = const { std::cell::RefCell::new(None) };
+    static TEST_API_CALLS: std::cell::RefCell<Vec<TestApiCall>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn stub_api_response(response: Result<String, String>) {
+    TEST_API_RESPONSE.with(|slot| *slot.borrow_mut() = Some(response));
+    TEST_API_CALLS.with(|calls| calls.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_api_calls() -> Vec<TestApiCall> {
+    TEST_API_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+}
+
 /// Make a Drive API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
     let url = format!("{}/{}", DRIVE_API_BASE, path);
@@ -30,6 +55,18 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     };
 
     let body_bytes = body.map(|b| b.as_bytes().to_vec());
+
+    #[cfg(test)]
+    if let Some(response) = TEST_API_RESPONSE.with(|slot| slot.borrow_mut().take()) {
+        TEST_API_CALLS.with(|calls| {
+            calls.borrow_mut().push(TestApiCall {
+                method: method.to_string(),
+                url,
+                body: body.map(str::to_string),
+            });
+        });
+        return response;
+    }
 
     host::log(
         host::LogLevel::Debug,
@@ -161,6 +198,76 @@ pub fn list_files(
         files,
         next_page_token: parsed["nextPageToken"].as_str().map(|s| s.to_string()),
     })
+}
+
+/// Search/list files with compact fields intended for model context.
+pub fn find_files_compact(
+    query: Option<&str>,
+    page_size: u32,
+    order_by: Option<&str>,
+    corpora: &str,
+    drive_id: Option<&str>,
+    page_token: Option<&str>,
+) -> Result<CompactFilesResult, String> {
+    // Google Drive lists trashed files by default; an absent query must not
+    // silently widen the compact search surface to trash. Callers that want
+    // trashed results can still pass an explicit query.
+    let result = list_files(
+        query.or(Some("trashed = false")),
+        page_size.clamp(1, 100),
+        order_by.or(Some("modifiedTime desc")),
+        corpora,
+        drive_id,
+        page_token,
+    )?;
+    Ok(compact_files_result(result))
+}
+
+/// Return recently modified files with compact fields intended for model context.
+pub fn recent_files(
+    page_size: u32,
+    corpora: &str,
+    drive_id: Option<&str>,
+    page_token: Option<&str>,
+) -> Result<CompactFilesResult, String> {
+    find_files_compact(
+        Some("trashed = false"),
+        page_size,
+        Some("modifiedTime desc"),
+        corpora,
+        drive_id,
+        page_token,
+    )
+}
+
+fn compact_files_result(result: ListFilesResult) -> CompactFilesResult {
+    CompactFilesResult {
+        files: result.files.into_iter().map(compact_file).collect(),
+        next_page_token: result.next_page_token,
+    }
+}
+
+fn compact_file(file: DriveFile) -> CompactDriveFile {
+    let owner = file.owners.first().and_then(|owner| {
+        owner
+            .display_name
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!owner.email.is_empty()).then_some(owner.email.as_str()))
+            .map(str::to_owned)
+    });
+    CompactDriveFile {
+        id: file.id,
+        name: file.name,
+        mime_type: file.mime_type,
+        modified_time: file.modified_time,
+        web_view_link: file.web_view_link,
+        is_folder: file.is_folder,
+        shared: file.shared,
+        owned_by_me: file.owned_by_me,
+        trashed: file.trashed,
+        owner,
+    }
 }
 
 /// Get file metadata.
@@ -635,5 +742,59 @@ mod tests {
         // Multi-GB sizes must parse (u64), not overflow `usize` on wasm32 and
         // silently skip the guard.
         assert!(declared_oversize_message(Some("5000000000")).is_some());
+    }
+
+    #[test]
+    fn compact_file_omits_owner_when_name_and_email_are_empty() {
+        let file = parse_file(&serde_json::json!({
+            "id": "file-1",
+            "name": "Untitled",
+            "mimeType": "text/plain",
+            "owners": [{}]
+        }));
+
+        let compact = serde_json::to_value(compact_file(file)).unwrap();
+
+        assert!(compact.get("owner").is_none());
+    }
+
+    #[test]
+    fn query_less_compact_search_defaults_to_excluding_trash() {
+        stub_api_response(Ok(r#"{"files": []}"#.to_string()));
+
+        find_files_compact(None, 10, None, "user", None, None).unwrap();
+
+        let calls = take_test_api_calls();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.method, "GET");
+        assert!(
+            call.url.contains("q=trashed%20%3D%20false"),
+            "query-less compact search must default to trashed = false, got: {}",
+            call.url
+        );
+    }
+
+    #[test]
+    fn explicit_query_is_preserved_for_compact_search() {
+        stub_api_response(Ok(r#"{"files": []}"#.to_string()));
+
+        find_files_compact(
+            Some("name contains 'report'"),
+            10,
+            None,
+            "user",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let calls = take_test_api_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].url.contains("name%20contains%20%27report%27"),
+            "explicit query must be passed through unchanged, got: {}",
+            calls[0].url
+        );
     }
 }

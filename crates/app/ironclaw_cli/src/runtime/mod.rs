@@ -650,7 +650,7 @@ pub(crate) fn with_binary_host_extension_bindings(
     // concrete first-party extension crate. Keep this helper independent from
     // LLM resolution so lifecycle-only commands can expose the production
     // extension catalog without requiring run-time model config.
-    let first_party_bundles = crate::first_party::bundled_first_party_bundles();
+    let first_party_bundles = crate::first_party::bundled_first_party_bundles()?;
     with_binary_host_extension_bindings_from_bundles(services_input, first_party_bundles)
 }
 

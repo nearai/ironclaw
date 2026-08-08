@@ -1,0 +1,8 @@
+gmail.fetch_message_summaries
+google-calendar.agenda
+google-calendar.daily_brief
+google-calendar.meeting_prep
+google-docs.read_excerpt
+google-drive.find_files_compact
+google-drive.recent_files
+google-sheets.preview

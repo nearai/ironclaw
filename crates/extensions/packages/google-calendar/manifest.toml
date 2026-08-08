@@ -249,7 +249,7 @@ display_name = "Google account"
 authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
 token_endpoint = "https://oauth2.googleapis.com/token"
 pkce = "s256"
-scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events"]
+scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly"]
 extra_authorize_params = { access_type = "offline", include_granted_scopes = "true", prompt = "consent" }
 client_credentials = { client_id_handle = "google_oauth_client_id", client_secret_handle = "google_oauth_client_secret" }
 
@@ -264,3 +264,79 @@ access_token = "/access_token"
 refresh_token = "/refresh_token"
 expires_in = "/expires_in"
 scope = { path = "/scope" }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-calendar.agenda"
+description = "Return a compact Google Calendar agenda for today, tomorrow, this week, or an upcoming window."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/google-calendar/agenda.input.v1.json"
+output_schema_ref = "schemas/google-calendar/agenda.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/agenda.md"
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-calendar.daily_brief"
+description = "Return a compact daily brief with agenda events and Gmail attention summaries."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/google-calendar/daily_brief.input.v1.json"
+output_schema_ref = "schemas/google-calendar/daily_brief.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/daily_brief.md"
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-calendar.meeting_prep"
+description = "Return compact prep context for the next matching Google Calendar meeting."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/google-calendar/meeting_prep.input.v1.json"
+output_schema_ref = "schemas/google-calendar/meeting_prep.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/meeting_prep.md"
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
