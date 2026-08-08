@@ -1997,6 +1997,48 @@ fn regression_artifact_descriptors_follow_the_deployment_gate() {
             .iter()
             .any(|id| id == WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT)
     );
+
+    // The two artifact surfaces have independent gates: each route family must
+    // appear exactly when its own flag is on, regardless of the other.
+    let qa_only = route_ids_for_flags(true, false);
+    let admin_only = route_ids_for_flags(false, true);
+    for id in [
+        WEBUI_V2_ROUTE_GET_RUN_ARTIFACT,
+        WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT,
+    ] {
+        assert!(
+            qa_only.iter().any(|route_id| route_id == id),
+            "QA export route {id} must exist when only regression export is enabled"
+        );
+        assert!(
+            !admin_only.iter().any(|route_id| route_id == id),
+            "QA export route {id} must NOT exist when only admin scraping is enabled"
+        );
+    }
+    for id in [
+        WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS,
+        WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
+        WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT,
+    ] {
+        assert!(
+            admin_only.iter().any(|route_id| route_id == id),
+            "admin scrape route {id} must exist when only admin scraping is enabled"
+        );
+        assert!(
+            !qa_only.iter().any(|route_id| route_id == id),
+            "admin scrape route {id} must NOT exist when only regression export is enabled"
+        );
+    }
+}
+
+fn route_ids_for_flags(regression_artifact_export: bool, admin_thread_scrape: bool) -> Vec<String> {
+    ironclaw_webui::webui_v2::webui_v2_routes_with_artifact_flags(
+        regression_artifact_export,
+        admin_thread_scrape,
+    )
+    .into_iter()
+    .map(|route| route.route_id().as_str().to_string())
+    .collect()
 }
 
 #[test]

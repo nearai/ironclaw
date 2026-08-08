@@ -1148,7 +1148,7 @@ registerPack("uk", {
   "admin.user.usage30Days": "Використання (останні 30 днів)",
   "admin.user.noUsage": "Немає даних використання.",
   "admin.threadScraping.title": "Збір даних ниток",
-  "admin.threadScraping.description": "Збирайте відредаговані артефакти ниток і запусків для налагодження та оптимізації.",
+  "admin.threadScraping.description": "Збирайте артефакти ниток і запусків із видаленими (прихованими) конфіденційними даними для налагодження та оптимізації.",
   "admin.threadScraping.empty": "Немає ниток, доступних для збору.",
   "admin.threadScraping.untitled": "Нитка без назви",
   "admin.threadScraping.selectThread": "Виберіть нитку, щоб завантажити її артефакт.",

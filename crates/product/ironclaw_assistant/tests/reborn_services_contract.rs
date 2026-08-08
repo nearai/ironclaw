@@ -15776,6 +15776,30 @@ async fn admin_thread_scrape_views_dispatch_through_query() {
         "target trajectory",
     )
     .await;
+    // Two more target threads, created strictly after the seeded one, so the
+    // activity-sorted page order is deterministic: [thread-target-new,
+    // thread-target-mid, thread-target].
+    let mid = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&target_caller),
+            thread_id: Some(ThreadId::new("thread-target-mid").expect("mid thread id")),
+            created_by_actor_id: target_caller.user_id.as_str().to_string(),
+            title: Some("Mid target chat".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("mid target thread");
+    wait_until_after(mid.updated_at.expect("activity stamp")).await;
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&target_caller),
+            thread_id: Some(ThreadId::new("thread-target-new").expect("new thread id")),
+            created_by_actor_id: target_caller.user_id.as_str().to_string(),
+            title: Some("New target chat".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("new target thread");
     let target = UserId::new("user-beta").expect("target user");
 
     // The three scrape views must be reachable through the real query
@@ -15802,8 +15826,49 @@ async fn admin_thread_scrape_views_dispatch_through_query() {
         .expect("threads view");
     let threads: RebornListThreadsResponse =
         serde_json::from_value(threads_page.payload).expect("threads payload");
-    assert_eq!(threads.threads.len(), 1);
-    assert_eq!(threads.threads[0].thread_id.as_str(), "thread-target");
+    assert_eq!(threads.threads.len(), 3);
+    assert_eq!(
+        threads
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["thread-target-new", "thread-target-mid", "thread-target"],
+    );
+
+    // The transport page cursor must override a conflicting params cursor and
+    // the page boundary must round-trip as the next cursor. The params cursor
+    // alone (the oldest thread) would select an empty page; the transport
+    // cursor (the newest thread) must win and return the middle page.
+    let cursor_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_THREADS_VIEW
+                .query(
+                    RebornAdminThreadScrapeListRequest {
+                        user_id: target.clone(),
+                        limit: Some(1),
+                        cursor: Some("thread-target".to_string()),
+                    },
+                    Some("thread-target-new".to_string()),
+                )
+                .expect("threads query"),
+        )
+        .await
+        .expect("threads view");
+    let cursor_threads: RebornListThreadsResponse =
+        serde_json::from_value(cursor_page.payload).expect("threads payload");
+    assert_eq!(cursor_threads.threads.len(), 1);
+    assert_eq!(
+        cursor_threads.threads[0].thread_id.as_str(),
+        "thread-target-mid",
+        "the transport cursor must determine the returned page"
+    );
+    assert_eq!(
+        cursor_page.next_cursor.as_deref(),
+        Some("thread-target-mid"),
+        "the page boundary must propagate as the next cursor"
+    );
 
     let artifact_page = services
         .query(

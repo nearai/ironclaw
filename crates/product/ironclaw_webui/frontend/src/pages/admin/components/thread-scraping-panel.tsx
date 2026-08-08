@@ -2,168 +2,49 @@
 import React from "react";
 import { Button } from "../../../design-system/button";
 import { Panel } from "../../../design-system/primitives";
-import { saveBlob } from "../../../lib/download";
 import { useT } from "../../../lib/i18n";
-import {
-  fetchThreadScrapeArtifact,
-  fetchThreadScrapeRunArtifact,
-  fetchThreadScrapeThreads,
-} from "../lib/admin-api";
+import { useThreadScrape } from "../hooks/useThreadScrape";
 
-function artifactFilename(prefix, id) {
-  const safeId = String(id || "artifact").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `ironclaw-${prefix}-${safeId}.json`;
-}
-
-function saveArtifact(artifact, filename) {
-  saveBlob(
-    new Blob([`${JSON.stringify(artifact, null, 2)}\n`], {
-      type: "application/json",
-    }),
-    filename,
-  );
-}
+// A single thread artifact can carry up to 1,000 messages / ~16MiB of text;
+// rendering all of it into the DOM in one pass stalls the main thread. Render
+// a bounded window and expose a "show more" expander instead.
+const INITIAL_MESSAGE_WINDOW = 50;
 
 export function ThreadScrapingPanel({ userId }) {
   const t = useT();
-  const [threads, setThreads] = React.useState([]);
-  const [nextCursor, setNextCursor] = React.useState(null);
-  const [selectedThreadId, setSelectedThreadId] = React.useState("");
-  const [artifact, setArtifact] = React.useState(null);
-  const [isLoading, setIsLoading] = React.useState(true);
-  const [isLoadingMore, setIsLoadingMore] = React.useState(false);
-  const [isLoadingArtifact, setIsLoadingArtifact] = React.useState(false);
-  const [downloadingRunId, setDownloadingRunId] = React.useState("");
-  const [errorKey, setErrorKey] = React.useState("");
-  const artifactRequestRef = React.useRef(0);
-  const loadMoreAbortRef = React.useRef(null);
-  const artifactAbortRef = React.useRef(null);
+  const {
+    threads,
+    nextCursor,
+    isLoading,
+    isLoadingMore,
+    isLoadingArtifact,
+    selectedThreadId,
+    selectThread,
+    artifact,
+    loadMore,
+    downloadingRunId,
+    downloadRun,
+    downloadThreadArtifact,
+    errorKey,
+  } = useThreadScrape(userId);
+  const [visibleMessageCount, setVisibleMessageCount] = React.useState(
+    INITIAL_MESSAGE_WINDOW,
+  );
 
+  // A new selection (thread or target user) starts a fresh render window.
   React.useEffect(() => {
-    const controller = new AbortController();
-    artifactRequestRef.current += 1;
-    loadMoreAbortRef.current?.abort();
-    loadMoreAbortRef.current = null;
-    setThreads([]);
-    setNextCursor(null);
-    setSelectedThreadId("");
-    setArtifact(null);
-    setIsLoading(true);
-    setIsLoadingMore(false);
-    setIsLoadingArtifact(false);
-    setDownloadingRunId("");
-    setErrorKey("");
-    fetchThreadScrapeThreads(userId, { limit: 100, signal: controller.signal })
-      .then((response) => {
-        if (controller.signal.aborted) return;
-        setThreads(Array.isArray(response?.threads) ? response.threads : []);
-        setNextCursor(response?.next_cursor ?? null);
-      })
-      .catch((requestError) => {
-        if (!controller.signal.aborted && requestError?.name !== "AbortError") {
-          setErrorKey("admin.threadScraping.loadFailed");
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setIsLoading(false);
-      });
-    return () => {
-      controller.abort();
-      artifactAbortRef.current?.abort();
-      artifactAbortRef.current = null;
-      artifactRequestRef.current += 1;
-      loadMoreAbortRef.current?.abort();
-      loadMoreAbortRef.current = null;
-    };
-    // Error keys are translated during render; locale changes must not reset
-    // the selected thread or restart the request.
-  }, [userId]);
-
-  const selectThread = async (threadId) => {
-    const requestId = artifactRequestRef.current + 1;
-    artifactRequestRef.current = requestId;
-    artifactAbortRef.current?.abort();
-    const controller = new AbortController();
-    artifactAbortRef.current = controller;
-    setSelectedThreadId(threadId);
-    setArtifact(null);
-    setErrorKey("");
-    setIsLoadingArtifact(true);
-    setDownloadingRunId("");
-    try {
-      const response = await fetchThreadScrapeArtifact(userId, threadId, {
-        signal: controller.signal,
-      });
-      if (artifactRequestRef.current === requestId) setArtifact(response);
-    } catch {
-      if (artifactRequestRef.current === requestId) {
-        setErrorKey("admin.threadScraping.loadFailed");
-      }
-    } finally {
-      if (artifactAbortRef.current === controller) {
-        artifactAbortRef.current = null;
-      }
-      if (artifactRequestRef.current === requestId) setIsLoadingArtifact(false);
-    }
-  };
-
-  const loadMore = async () => {
-    if (!nextCursor || isLoadingMore) return;
-    const cursor = nextCursor;
-    const controller = new AbortController();
-    loadMoreAbortRef.current = controller;
-    setIsLoadingMore(true);
-    setErrorKey("");
-    try {
-      const response = await fetchThreadScrapeThreads(userId, {
-        limit: 100,
-        cursor,
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      const page = Array.isArray(response?.threads) ? response.threads : [];
-      setThreads((current) => {
-        const ids = new Set(current.map((thread) => thread.thread_id));
-        return [...current, ...page.filter((thread) => !ids.has(thread.thread_id))];
-      });
-      setNextCursor(response?.next_cursor ?? null);
-    } catch (requestError) {
-      if (!controller.signal.aborted && requestError?.name !== "AbortError") {
-        setErrorKey("admin.threadScraping.loadFailed");
-      }
-    } finally {
-      if (loadMoreAbortRef.current === controller) {
-        loadMoreAbortRef.current = null;
-        setIsLoadingMore(false);
-      }
-    }
-  };
-
-  const downloadRun = async (runId) => {
-    if (!selectedThreadId || !runId || downloadingRunId) return;
-    const requestId = artifactRequestRef.current;
-    setDownloadingRunId(runId);
-    setErrorKey("");
-    try {
-      const runArtifact = await fetchThreadScrapeRunArtifact(
-        userId,
-        selectedThreadId,
-        runId,
-        { signal: artifactAbortRef.current?.signal },
-      );
-      if (artifactRequestRef.current !== requestId) return;
-      saveArtifact(runArtifact, artifactFilename("run", runId));
-    } catch {
-      if (artifactRequestRef.current === requestId) {
-        setErrorKey("admin.threadScraping.downloadFailed");
-      }
-    } finally {
-      if (artifactRequestRef.current === requestId) setDownloadingRunId("");
-    }
-  };
+    setVisibleMessageCount(INITIAL_MESSAGE_WINDOW);
+  }, [selectedThreadId]);
 
   const runIds = React.useMemo(
-    () => Array.from(new Set((artifact?.messages || []).map((message) => message.run_id).filter(Boolean))),
+    () =>
+      Array.from(
+        new Set(
+          (artifact?.messages || [])
+            .map((message) => message.run_id)
+            .filter(Boolean),
+        ),
+      ),
     [artifact],
   );
 
@@ -181,7 +62,7 @@ export function ThreadScrapingPanel({ userId }) {
             size="sm"
             variant="secondary"
             data-testid="admin-thread-scraping-download-thread"
-            onClick={() => saveArtifact(artifact, artifactFilename("thread", artifact.thread_id))}
+            onClick={downloadThreadArtifact}
           >
             {t("admin.threadScraping.downloadThread")}
           </Button>
@@ -190,7 +71,7 @@ export function ThreadScrapingPanel({ userId }) {
 
       {errorKey && <p className="mt-4 text-sm text-red-200" role="alert">{t(errorKey)}</p>}
       {isLoading && <p className="mt-4 text-sm text-iron-300">{t("common.loading")}</p>}
-      {!isLoading && threads.length === 0 && (
+      {!isLoading && !errorKey && threads.length === 0 && (
         <p className="mt-4 text-sm text-iron-300">{t("admin.threadScraping.empty")}</p>
       )}
 
@@ -257,7 +138,7 @@ export function ThreadScrapingPanel({ userId }) {
                   </div>
                 )}
                 <div className="max-h-[32rem] space-y-3 overflow-y-auto pr-1">
-                  {(artifact.messages || []).map((message) => (
+                  {(artifact.messages || []).slice(0, visibleMessageCount).map((message) => (
                     <div key={message.message_id} className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
                       <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-iron-400">
                         <span>{message.kind}</span>
@@ -268,6 +149,24 @@ export function ThreadScrapingPanel({ userId }) {
                       </div>
                     </div>
                   ))}
+                  {(artifact.messages || []).length > visibleMessageCount && (
+                    <Button
+                      className="w-full"
+                      size="sm"
+                      variant="secondary"
+                      data-testid="admin-thread-scraping-show-more"
+                      onClick={() =>
+                        setVisibleMessageCount((current) =>
+                          Math.min(
+                            (artifact.messages || []).length,
+                            current + INITIAL_MESSAGE_WINDOW,
+                          ),
+                        )
+                      }
+                    >
+                      {t("common.loadMore")}
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

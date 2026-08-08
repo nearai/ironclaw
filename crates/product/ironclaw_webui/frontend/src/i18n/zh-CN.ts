@@ -1148,7 +1148,7 @@ registerPack("zh-CN", {
   "admin.user.usage30Days": "用量（最近 30 天）",
   "admin.user.noUsage": "暂无用量数据。",
   "admin.threadScraping.title": "线程抓取",
-  "admin.threadScraping.description": "收集经过编辑的线程和运行产物，用于调试和优化。",
+  "admin.threadScraping.description": "收集已脱敏（隐藏敏感内容）的线程和运行产物，用于调试和优化。",
   "admin.threadScraping.empty": "没有可用于抓取的线程。",
   "admin.threadScraping.untitled": "无标题线程",
   "admin.threadScraping.selectThread": "选择线程以加载其产物。",

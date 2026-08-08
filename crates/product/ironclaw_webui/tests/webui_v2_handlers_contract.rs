@@ -327,6 +327,20 @@ fn artifact_router_with(services: Arc<dyn ProductSurface>) -> Router {
     .layer(axum::Extension(WebUiV2Capabilities::default()))
 }
 
+fn flags_router_with(
+    services: Arc<dyn ProductSurface>,
+    regression_artifact_export: bool,
+    admin_thread_scrape: bool,
+) -> Router {
+    webui_v2_router(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_regression_artifact_export_enabled(regression_artifact_export)
+            .with_admin_thread_scrape_enabled(admin_thread_scrape),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()))
+}
+
 fn router_with_caller(
     services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
@@ -2573,6 +2587,104 @@ async fn regression_artifact_routes_are_unmounted_by_default() {
         services.view_queries.lock().expect("lock").is_empty(),
         "a disabled artifact route must not invoke the product surface"
     );
+}
+
+// The two artifact surfaces are gated independently: caller-owned QA export
+// (`regression_artifact_export_enabled`) and admin thread scraping
+// (`admin_thread_scrape_enabled`) must not share a kill switch, so enabling
+// QA self-export can never silently mount tenant-wide admin transcript
+// access and vice versa. Drive both mixed combinations through the real
+// router so the axum mounts are what is asserted, not the descriptor table.
+#[tokio::test]
+async fn artifact_and_admin_scrape_routes_follow_their_own_gates() {
+    let legacy_paths = [
+        "/api/webchat/v2/threads/thread-x/runs/3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18/artifact",
+        "/api/webchat/v2/threads/thread-x/artifact",
+    ];
+    let admin_paths = [
+        "/api/webchat/v2/admin/users/user-x/thread-scrape/threads",
+        "/api/webchat/v2/admin/users/user-x/thread-scrape/threads/thread-x/artifact",
+        "/api/webchat/v2/admin/users/user-x/thread-scrape/threads/thread-x/runs/3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18/artifact",
+    ];
+
+    // (true, false): QA export only — legacy routes live, admin scrape 404s
+    // and never reaches the product surface.
+    let services = Arc::new(StubServices::default());
+    let router = flags_router_with(services.clone(), true, false);
+    for path in legacy_paths {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK, "path={path}");
+    }
+    for path in admin_paths {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "path={path}");
+    }
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(
+        queries.len(),
+        2,
+        "only the legacy artifact routes may query"
+    );
+    assert_eq!(queries[0].view_id, RUN_ARTIFACT_VIEW.id);
+    assert_eq!(queries[1].view_id, THREAD_ARTIFACT_VIEW.id);
+
+    // (false, true): admin scrape only — the three admin paths live, legacy
+    // QA export 404s.
+    let services = Arc::new(StubServices::default());
+    let router = flags_router_with(services.clone(), false, true);
+    for path in legacy_paths {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "path={path}");
+    }
+    for path in admin_paths {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK, "path={path}");
+    }
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 3, "only the admin scrape routes may query");
+    assert_eq!(queries[0].view_id, ADMIN_THREAD_SCRAPE_THREADS_VIEW.id);
+    assert_eq!(queries[1].view_id, ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id);
+    assert_eq!(queries[2].view_id, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id);
 }
 
 // The attachment-bytes route carries three path segments and returns raw

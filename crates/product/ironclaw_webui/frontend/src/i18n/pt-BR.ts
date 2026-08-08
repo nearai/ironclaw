@@ -1148,7 +1148,7 @@ registerPack("pt-BR", {
   "admin.user.usage30Days": "Uso (últimos 30 dias)",
   "admin.user.noUsage": "Sem dados de uso.",
   "admin.threadScraping.title": "Extração de conversas",
-  "admin.threadScraping.description": "Colete artefatos editados de conversas e execuções para depuração e otimização.",
+  "admin.threadScraping.description": "Colete artefatos de conversas e execuções com conteúdo confidencial removido (ocultado) para depuração e otimização.",
   "admin.threadScraping.empty": "Nenhuma conversa disponível para extração.",
   "admin.threadScraping.untitled": "Conversa sem título",
   "admin.threadScraping.selectThread": "Selecione uma conversa para carregar o artefato.",

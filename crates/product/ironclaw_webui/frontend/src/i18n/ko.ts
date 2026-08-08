@@ -1148,7 +1148,7 @@ registerPack("ko", {
   "admin.user.usage30Days": "사용량(최근 30일)",
   "admin.user.noUsage": "사용량 데이터 없음.",
   "admin.threadScraping.title": "스레드 스크래핑",
-  "admin.threadScraping.description": "디버깅 및 최적화를 위해 편집된 스레드 및 실행 아티팩트를 수집합니다.",
+  "admin.threadScraping.description": "디버깅 및 최적화를 위해 민감한 내용이 삭제된(비식별화된) 스레드 및 실행 아티팩트를 수집합니다.",
   "admin.threadScraping.empty": "스크래핑할 수 있는 스레드가 없습니다.",
   "admin.threadScraping.untitled": "제목 없는 스레드",
   "admin.threadScraping.selectThread": "스레드를 선택하여 아티팩트를 불러옵니다.",

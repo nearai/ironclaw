@@ -3,10 +3,16 @@
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider, notifyManager } from "@tanstack/react-query";
 import { test, vi } from "vitest";
 import "../../../i18n/de";
 import "../../../i18n/en";
 import { I18nProvider, useI18n } from "../../../lib/i18n";
+
+// react-query schedules observer notifications through setTimeout(0) by
+// default; a macrotask is never flushed by `await act(...)`, so run
+// notifications synchronously and let act's microtask flush settle queries.
+notifyManager.setScheduler((callback) => callback());
 
 const requests = vi.hoisted(() => ({
   fetchThreads: vi.fn(),
@@ -47,6 +53,20 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
+function createTestRoot(container, queryClient) {
+  const root = createRoot(container);
+  return {
+    render(node) {
+      root.render(
+        <QueryClientProvider client={queryClient}>{node}</QueryClientProvider>,
+      );
+    },
+    unmount() {
+      root.unmount();
+    },
+  };
+}
+
 test("thread scraping loads every page and ignores stale artifact responses", async () => {
   const firstArtifact = deferred<Record<string, unknown>>();
   const secondArtifact = deferred<Record<string, unknown>>();
@@ -68,7 +88,8 @@ test("thread scraping loads every page and ignores stale artifact responses", as
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -140,7 +161,8 @@ test("switching target users discards the previous user's pending artifact", asy
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -199,6 +221,106 @@ test("switching target users discards the previous user's pending artifact", asy
   }
 });
 
+test("run artifact requests abort when the target user or thread changes", async () => {
+  const pendingRun = deferred<Record<string, unknown>>();
+  requests.fetchThreads.mockImplementation((userId) =>
+    Promise.resolve({
+      threads: [
+        {
+          thread_id: userId === "user-one" ? "thread-one" : "thread-two",
+          title: userId === "user-one" ? "One" : "Two",
+        },
+      ],
+      next_cursor: null,
+    }),
+  );
+  requests.fetchArtifact.mockImplementation((_userId, threadId) =>
+    Promise.resolve({
+      thread_id: threadId,
+      messages: [
+        {
+          message_id: `message-${threadId}`,
+          kind: "assistant",
+          run_id: threadId === "thread-one" ? "run-one" : "run-two",
+          content: threadId,
+        },
+      ],
+    }),
+  );
+  requests.fetchRunArtifact.mockReturnValue(pendingRun.promise);
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-one" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    const firstRunButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("run-one"),
+    );
+    assert.ok(firstRunButton);
+    await act(async () => firstRunButton.click());
+    const firstRunSignal = requests.fetchRunArtifact.mock.calls[0]?.[3]?.signal;
+    assert.ok(firstRunSignal, "the run request carries a dedicated abort signal");
+
+    // Selecting another thread cancels the in-flight run request.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    assert.equal(firstRunSignal.aborted, true);
+    assert.equal(vi.mocked(saveBlob).mock.calls.length, 0);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-two" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+    const secondRunButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("run-two"),
+    );
+    assert.ok(secondRunButton);
+    await act(async () => secondRunButton.click());
+    const secondRunSignal = requests.fetchRunArtifact.mock.calls[1]?.[3]?.signal;
+    assert.ok(secondRunSignal);
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-three" />
+        </I18nProvider>,
+      );
+    });
+    assert.equal(secondRunSignal.aborted, true);
+    assert.equal(vi.mocked(saveBlob).mock.calls.length, 0);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+    vi.mocked(saveBlob).mockReset();
+  }
+});
+
 test("switching target users discards a pending run download", async () => {
   const pendingRun = deferred<Record<string, unknown>>();
   requests.fetchThreads.mockImplementation((userId) =>
@@ -229,7 +351,8 @@ test("switching target users discards a pending run download", async () => {
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -292,7 +415,8 @@ test("switching target users discards late initial list responses and errors", a
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -370,7 +494,8 @@ test("switching target users discards late paginated responses and errors", asyn
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -460,7 +585,8 @@ test("thread scraping never renders raw request errors", async () => {
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -472,6 +598,11 @@ test("thread scraping never renders raw request errors", async () => {
     let alert = container.querySelector('[role="alert"]');
     assert.equal(alert?.textContent, "Thread scraping failed.");
     assert.doesNotMatch(container.textContent ?? "", /sensitive initial details/);
+    assert.doesNotMatch(
+      container.textContent ?? "",
+      /No threads available for scraping/,
+      "a failed list request must not render the empty state",
+    );
 
     await act(async () => {
       root.render(
@@ -522,7 +653,8 @@ test("pending errors use the active locale when they settle", async () => {
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -561,7 +693,8 @@ test("switching locales preserves the loaded thread and artifact", async () => {
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -584,6 +717,63 @@ test("switching locales preserves the loaded thread and artifact", async () => {
     assert.match(container.textContent ?? "", /Thread-Scraping/);
     assert.match(container.textContent ?? "", /loaded transcript/);
     assert.equal(requests.fetchThreads.mock.calls.length, 1);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
+
+test("thread transcripts render in a bounded window with a show-more expander", async () => {
+  const manyMessages = Array.from({ length: 60 }, (_, index) => ({
+    message_id: `message-${index}`,
+    kind: index % 2 === 0 ? "user" : "assistant",
+    content: `content-${index}`,
+  }));
+  requests.fetchThreads.mockResolvedValueOnce({
+    threads: [{ thread_id: "thread-one", title: "One" }],
+    next_cursor: null,
+  });
+  requests.fetchArtifact.mockResolvedValueOnce({
+    thread_id: "thread-one",
+    messages: manyMessages,
+  });
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-target" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+
+    // Only the first 50 messages mount; the expander reveals the rest.
+    assert.match(container.textContent ?? "", /content-0/);
+    assert.match(container.textContent ?? "", /content-49/);
+    assert.doesNotMatch(container.textContent ?? "", /content-50/);
+    const showMore = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-show-more"]',
+    );
+    assert.ok(showMore, "a show-more control renders when the window is smaller than the artifact");
+    await act(async () => showMore.click());
+    assert.match(container.textContent ?? "", /content-59/);
+    assert.equal(
+      container.querySelector('[data-testid="admin-thread-scraping-show-more"]'),
+      null,
+      "the expander disappears once every message is visible",
+    );
   } finally {
     act(() => root.unmount());
     container.remove();
@@ -624,7 +814,8 @@ test("download-thread button saves the artifact under a sanitized filename", asy
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -650,8 +841,8 @@ test("download-thread button saves the artifact under a sanitized filename", asy
     // whitespace into the download filename.
     assert.equal(filename, "ironclaw-thread-thread_one.json");
     const text = await blob.text();
-    assert.match(text, /"thread_id": "thread\/one"/);
-    assert.match(text, /"content": "hello"/);
+    assert.match(text, /"thread_id":"thread\/one"/);
+    assert.match(text, /"content":"hello"/);
   } finally {
     act(() => root.unmount());
     container.remove();
@@ -687,7 +878,8 @@ test("download-run button saves the artifact under a sanitized filename", async 
 
   const container = document.createElement("div");
   document.body.append(container);
-  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createTestRoot(container, queryClient);
   try {
     await act(async () => {
       root.render(
@@ -736,7 +928,7 @@ test("download-run button saves the artifact under a sanitized filename", async 
     const [blob, filename] = vi.mocked(saveBlob).mock.calls[0] ?? [];
     assert.equal(filename, "ironclaw-run-run-one-123.json");
     const text = await blob.text();
-    assert.match(text, /"run_id": "run-one-123"/);
+    assert.match(text, /"run_id":"run-one-123"/);
   } finally {
     act(() => root.unmount());
     container.remove();
