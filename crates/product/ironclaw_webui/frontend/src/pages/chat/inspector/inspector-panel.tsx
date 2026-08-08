@@ -372,20 +372,43 @@ function ToolDetailDisclosure({
   const [loading, setLoading] = React.useState(false);
   const [tool, setTool] = React.useState<ToolDetail | null>(null);
   const [unavailable, setUnavailable] = React.useState(false);
+  const requestRef = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
   const load = () => {
     const nextOpen = !open;
     setOpen(nextOpen);
-    if (!nextOpen || tool || loading || unavailable) return;
+    if (!nextOpen) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      setLoading(false);
+      return;
+    }
+    if (tool || loading) return;
     const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
+    setUnavailable(false);
     fetchInspectorTool({ threadId, runId, activityId, signal: controller.signal })
       .then((response) => {
+        if (controller.signal.aborted || requestRef.current !== controller) return;
         const detail = (response as { tool?: ToolDetail | null })?.tool || null;
         setTool(detail);
         setUnavailable(!detail);
       })
-      .catch(() => setUnavailable(true))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (!controller.signal.aborted && requestRef.current === controller) {
+          setUnavailable(true);
+        }
+      })
+      .finally(() => {
+        if (requestRef.current === controller) {
+          requestRef.current = null;
+          setLoading(false);
+        }
+      });
   };
   return (
     <div className="mt-3 border-t border-[var(--v2-panel-border)] pt-3">
@@ -480,6 +503,7 @@ function ActivityEntry({
       </p>
       {hasToolDetails && entry.activity_id && threadId && runId && (
         <ToolDetailDisclosure
+          key={`${threadId}:${runId}:${entry.activity_id}`}
           threadId={threadId}
           runId={runId}
           activityId={entry.activity_id}
