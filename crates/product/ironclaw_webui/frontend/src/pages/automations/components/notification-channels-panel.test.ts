@@ -18,7 +18,7 @@ const COPY = {
   "automations.notificationChannels.webPush.checking":
     "Checking this browser's notification support…",
   "automations.notificationChannels.webPush.unsupported":
-    "This browser doesn't support push notifications.",
+    "Push notifications aren't available in this browser.",
   "automations.notificationChannels.webPush.permissionDenied":
     "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.",
   "automations.notificationChannels.webPush.notEnrolled":
@@ -31,6 +31,11 @@ const COPY = {
   "automations.notificationChannels.webPush.deviceCount": "Enrolled browsers: {count}",
   "automations.notificationChannels.webPush.actionFailed":
     "Couldn't update this browser's notification enrollment. Please try again.",
+  "automations.notificationChannels.webPush.enrolledOtherAccount":
+    "This browser is enrolled for a different account. You can enable it for this account too.",
+  "automations.notificationChannels.webPush.enableForAccount": "Enable for this account",
+  "automations.notificationChannels.webPush.statusFailed":
+    "Couldn't load this account's enrollment status. Try reloading the page.",
   "automations.notificationChannels.save": "Save",
   "automations.notificationChannels.saved": "Saved",
   "automations.notificationChannels.saveFailed":
@@ -712,7 +717,7 @@ test("WebPushDeviceBlock distinguishes unsupported, denied, not-enrolled, and en
   const cases = [
     [
       { state: "unsupported" },
-      "This browser doesn't support push notifications.",
+      "Push notifications aren't available in this browser.",
     ],
     [
       { state: "permission-denied" },
@@ -723,7 +728,23 @@ test("WebPushDeviceBlock distinguishes unsupported, denied, not-enrolled, and en
       "This browser isn't receiving notifications yet.",
     ],
     [
-      { state: "enrolled", endpoint: "https://fcm.googleapis.com/send/x" },
+      { state: "enrolled", endpoint: "https://fcm.googleapis.com/send/x", accountMatch: true },
+      "This browser receives notifications.",
+    ],
+    [
+      {
+        state: "enrolled-other-account",
+        endpoint: "https://fcm.googleapis.com/send/x",
+        accountMatch: false,
+      },
+      "This browser is enrolled for a different account. You can enable it for this account too.",
+    ],
+    [
+      {
+        state: "enrolled-unverified",
+        endpoint: "https://fcm.googleapis.com/send/x",
+        accountMatch: null,
+      },
       "This browser receives notifications.",
     ],
   ];
@@ -800,5 +821,104 @@ test("WebPushDeviceBlock surfaces an action failure", () => {
     collectScalars(rendered).includes(
       "Couldn't update this browser's notification enrollment. Please try again.",
     ),
+  );
+});
+
+test("WebPushDeviceBlock offers enable-for-this-account (never disable) for another account's subscription", () => {
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+
+  const enrollCalls = [];
+  const unenrollCalls = [];
+  const rendered = block({
+    device: fakeDevice({
+      browser: {
+        state: "enrolled-other-account",
+        endpoint: "https://fcm.googleapis.com/send/x",
+        accountMatch: false,
+      },
+      enroll: async () => {
+        enrollCalls.push("enroll");
+        return { state: "enrolled" };
+      },
+      unenroll: async () => {
+        unenrollCalls.push("unenroll");
+        return { state: "not-enrolled" };
+      },
+    }),
+    t,
+  });
+  const buttons = componentProps(rendered, harness.Button);
+  assert.equal(
+    buttons.length,
+    1,
+    "exactly one action for another account's subscription — no local disable that would sever it",
+  );
+  const scalars = collectScalars(rendered);
+  assert.ok(scalars.includes("Enable for this account"));
+  assert.ok(
+    !scalars.includes("Disable in this browser"),
+    "the local unsubscribe must not be offered for a subscription this account does not own",
+  );
+  buttons[0].onClick();
+  assert.deepEqual(enrollCalls, ["enroll"], "the action routes through the enroll flow");
+  assert.deepEqual(unenrollCalls, []);
+});
+
+test("WebPushDeviceBlock offers no actions for an unverified enrollment", () => {
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+  const rendered = block({
+    device: fakeDevice({
+      browser: {
+        state: "enrolled-unverified",
+        endpoint: "https://fcm.googleapis.com/send/x",
+        accountMatch: null,
+      },
+      statusError: new Error("status query failed"),
+    }),
+    t,
+  });
+  assert.equal(
+    componentProps(rendered, harness.Button).length,
+    0,
+    "without account correlation neither enroll nor the destructive disable is offered",
+  );
+});
+
+test("WebPushDeviceBlock renders the status failure instead of claiming zero enrolled browsers", () => {
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+  const rendered = block({
+    device: fakeDevice({ statusError: new Error("status query failed") }),
+    t,
+  });
+  const scalars = collectScalars(rendered);
+  assert.ok(
+    scalars.includes("Couldn't load this account's enrollment status. Try reloading the page."),
+    "a failed status query must be announced",
+  );
+  assert.ok(
+    !scalars.includes("Enrolled browsers: 0"),
+    "a failed status query must not be rendered as a truthful zero-device count",
+  );
+});
+
+test("WebPushDeviceBlock disables enroll while the VAPID key is missing", () => {
+  // `vapidPublicKey` is "" until the status query resolves (or after it
+  // fails). The enroll click would then always throw `vapidPublicKey is
+  // required`, so the gate on the key is load-bearing — pin it.
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+  const rendered = block({
+    device: fakeDevice({ vapidPublicKey: "" }),
+    t,
+  });
+  const [enrollButton] = componentProps(rendered, harness.Button);
+  assert.ok(enrollButton, "the enroll button still renders");
+  assert.equal(
+    enrollButton.disabled,
+    true,
+    "enroll must stay disabled until the VAPID key is available",
   );
 });

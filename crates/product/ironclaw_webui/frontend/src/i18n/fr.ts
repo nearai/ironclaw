@@ -797,7 +797,7 @@ registerPack("fr", {
   "automations.notificationChannels.webOnlyHelper": "Aucun canal de notification n'est sélectionné — les demandes d'approbation, les invites d'authentification et les avis d'échec ne seront livrés nulle part.",
   "automations.notificationChannels.webPush.deviceHeading": "Ce navigateur",
   "automations.notificationChannels.webPush.checking": "Vérification de la prise en charge des notifications par ce navigateur…",
-  "automations.notificationChannels.webPush.unsupported": "Ce navigateur ne prend pas en charge les notifications push.",
+  "automations.notificationChannels.webPush.unsupported": "Les notifications push ne sont pas disponibles dans ce navigateur.",
   "automations.notificationChannels.webPush.permissionDenied": "Les notifications sont bloquées pour ce site. Autorisez-les dans les paramètres du site de votre navigateur, puis réessayez.",
   "automations.notificationChannels.webPush.notEnrolled": "Ce navigateur ne reçoit pas encore de notifications.",
   "automations.notificationChannels.webPush.enrolled": "Ce navigateur reçoit les notifications.",
@@ -805,6 +805,9 @@ registerPack("fr", {
   "automations.notificationChannels.webPush.unenroll": "Désactiver dans ce navigateur",
   "automations.notificationChannels.webPush.deviceCount": "Navigateurs inscrits : {count}",
   "automations.notificationChannels.webPush.actionFailed": "Impossible de mettre à jour l'inscription aux notifications de ce navigateur. Veuillez réessayer.",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "Ce navigateur est inscrit pour un autre compte. Vous pouvez aussi l'activer pour ce compte.",
+  "automations.notificationChannels.webPush.enableForAccount": "Activer pour ce compte",
+  "automations.notificationChannels.webPush.statusFailed": "Impossible de charger l'état d'inscription de ce compte. Rechargez la page.",
   "automations.notificationChannels.save": "Enregistrer",
   "automations.notificationChannels.saved": "Enregistré",
   "automations.notificationChannels.saveFailed":

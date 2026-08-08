@@ -21,9 +21,12 @@ The web app's browser-notification channel: outbound-only Web Push
   readable message reference, so delivery reports `Sent` with no vendor ref —
   acceptance by the push service, not device receipt.
 
-The egress host allowlist in `manifest.toml` must stay in lockstep with
-`ironclaw_web_push::SUPPORTED_PUSH_SERVICE_HOSTS`
-(`tests/manifest_lockstep.rs` pins it).
+The `[[channel.egress]]` hosts in `manifest.toml` are the deployment's
+push-service allowlist: composition reads them back at boot and hands them to
+enrollment validation (`PushEndpoint::validate_against_push_services`), so the
+same list bounds both which endpoints may enroll and where deliveries may go.
+`tests/manifest_lockstep.rs` pins the egress declarations' shape (https-only,
+VAPID credential, `vapid_authorization` injection).
 
 ## Validation
 

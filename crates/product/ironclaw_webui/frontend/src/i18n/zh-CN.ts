@@ -796,7 +796,7 @@ registerPack("zh-CN", {
   "automations.notificationChannels.webOnlyHelper": "未选择任何通知渠道——审批请求、认证提示和失败通知将不会送达任何地方。",
   "automations.notificationChannels.webPush.deviceHeading": "此浏览器",
   "automations.notificationChannels.webPush.checking": "正在检查此浏览器的通知支持…",
-  "automations.notificationChannels.webPush.unsupported": "此浏览器不支持推送通知。",
+  "automations.notificationChannels.webPush.unsupported": "此浏览器无法使用推送通知。",
   "automations.notificationChannels.webPush.permissionDenied": "此站点的通知已被屏蔽。请在浏览器的站点设置中允许通知，然后重试。",
   "automations.notificationChannels.webPush.notEnrolled": "此浏览器尚未接收通知。",
   "automations.notificationChannels.webPush.enrolled": "此浏览器会接收通知。",
@@ -804,6 +804,9 @@ registerPack("zh-CN", {
   "automations.notificationChannels.webPush.unenroll": "在此浏览器中停用",
   "automations.notificationChannels.webPush.deviceCount": "已注册的浏览器：{count}",
   "automations.notificationChannels.webPush.actionFailed": "无法更新此浏览器的通知注册。请重试。",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "此浏览器已为另一个账户注册。你也可以为此账户启用。",
+  "automations.notificationChannels.webPush.enableForAccount": "为此账户启用",
+  "automations.notificationChannels.webPush.statusFailed": "无法加载此账户的注册状态。请重新加载页面。",
   "automations.notificationChannels.save": "保存",
   "automations.notificationChannels.saved": "已保存",
   "automations.notificationChannels.saveFailed":

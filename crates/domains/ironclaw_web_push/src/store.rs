@@ -107,20 +107,19 @@ where
 }
 
 fn document_path() -> Result<ScopedPath, WebPushError> {
-    ScopedPath::new(SUBSCRIPTIONS_DOCUMENT).map_err(|error| WebPushError::Store {
-        reason: format!("subscription path rejected: {error}"),
-    })
+    ScopedPath::new(SUBSCRIPTIONS_DOCUMENT)
+        .map_err(|error| WebPushError::store(format!("subscription path rejected: {error}")))
 }
 
 fn decode_document(bytes: &[u8]) -> Result<SubscriptionDocument, WebPushError> {
-    serde_json::from_slice(bytes).map_err(|error| WebPushError::Store {
-        reason: format!("subscription document decode failed: {error}"),
+    serde_json::from_slice(bytes).map_err(|error| {
+        WebPushError::store(format!("subscription document decode failed: {error}"))
     })
 }
 
 fn encode_document(document: &SubscriptionDocument) -> Result<Entry, WebPushError> {
-    let bytes = serde_json::to_vec(document).map_err(|error| WebPushError::Store {
-        reason: format!("subscription document encode failed: {error}"),
+    let bytes = serde_json::to_vec(document).map_err(|error| {
+        WebPushError::store(format!("subscription document encode failed: {error}"))
     })?;
     Ok(Entry::bytes(bytes).with_content_type(ContentType::json()))
 }
@@ -128,9 +127,7 @@ fn encode_document(document: &SubscriptionDocument) -> Result<Entry, WebPushErro
 fn map_cas_error(error: CasUpdateError<WebPushError>) -> WebPushError {
     match error {
         CasUpdateError::Apply(inner) => inner,
-        other => WebPushError::Store {
-            reason: format!("subscription document update failed: {other}"),
-        },
+        other => WebPushError::store(format!("subscription document update failed: {other}")),
     }
 }
 
@@ -392,5 +389,43 @@ mod tests {
             over_cap,
             Err(WebPushError::SubscriptionLimitReached { .. })
         ));
+    }
+
+    /// Two browsers enrolling at once against the same (empty) document must
+    /// BOTH land: `cas_update` re-reads and re-applies on conflict, so the
+    /// loser of the first commit retries against the winner's document rather
+    /// than clobbering it. `.claude/rules/database.md` requires conflict/retry
+    /// behavior to be proven at the public domain-operation seam for new
+    /// persistence — drive it through `upsert_subscription`, not `cas_update`.
+    #[tokio::test]
+    async fn concurrent_enrollments_from_two_browsers_both_persist() {
+        let store = Arc::new(store());
+        let scope = scope("user1");
+
+        let first = {
+            let store = Arc::clone(&store);
+            let scope = scope.clone();
+            tokio::spawn(async move { store.upsert_subscription(&scope, record("alpha", 1)).await })
+        };
+        let second = {
+            let store = Arc::clone(&store);
+            let scope = scope.clone();
+            tokio::spawn(async move { store.upsert_subscription(&scope, record("beta", 2)).await })
+        };
+        first.await.expect("join alpha").expect("enroll alpha");
+        second.await.expect("join beta").expect("enroll beta");
+
+        let listed = store.list_subscriptions(&scope).await.expect("list");
+        assert_eq!(
+            listed.len(),
+            2,
+            "a lost enrollment means the CAS retry clobbered instead of re-applying"
+        );
+        let endpoints: std::collections::BTreeSet<&str> = listed
+            .iter()
+            .map(|record| record.endpoint.as_str())
+            .collect();
+        assert!(endpoints.iter().any(|endpoint| endpoint.ends_with("alpha")));
+        assert!(endpoints.iter().any(|endpoint| endpoint.ends_with("beta")));
     }
 }

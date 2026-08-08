@@ -15,6 +15,21 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(self.clients.claim());
 });
 
+// Deep links are same-origin paths by contract. Payloads are produced by our
+// own backend, but the notification store outlives deploys and a push
+// payload is still external input to this worker — so the contract is
+// enforced here, where navigation happens: anything that does not resolve to
+// this origin collapses to "/".
+function sameOriginPath(value) {
+  try {
+    const target = new URL(value, self.location.origin);
+    if (target.origin !== self.location.origin) return "/";
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch (_) {
+    return "/";
+  }
+}
+
 function payloadFromEvent(event) {
   const fallback = {
     title: "IronClaw",
@@ -28,7 +43,10 @@ function payloadFromEvent(event) {
     return {
       title: typeof parsed.title === "string" && parsed.title ? parsed.title : fallback.title,
       body: typeof parsed.body === "string" ? parsed.body : fallback.body,
-      url: typeof parsed.url === "string" && parsed.url ? parsed.url : fallback.url,
+      url:
+        typeof parsed.url === "string" && parsed.url
+          ? sameOriginPath(parsed.url)
+          : fallback.url,
       tag: typeof parsed.tag === "string" && parsed.tag ? parsed.tag : undefined,
     };
   } catch (_) {
@@ -51,7 +69,11 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || "/";
+  // Re-validate here as well: stored notifications can predate this worker's
+  // version, so `data.url` is not trusted to already be origin-checked.
+  const url = sameOriginPath(
+    (event.notification.data && event.notification.data.url) || "/",
+  );
   event.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })

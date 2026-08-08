@@ -32,19 +32,34 @@ function rowTone(status) {
  */
 function WebPushDeviceBlock({ device, t }) {
   const state = device.browser?.state || "checking";
+  const hasStatusError = Boolean(device.statusError);
   let stateCopy;
   if (state === "unsupported") {
     stateCopy = t("automations.notificationChannels.webPush.unsupported");
   } else if (state === "permission-denied") {
     stateCopy = t("automations.notificationChannels.webPush.permissionDenied");
-  } else if (state === "enrolled") {
+  } else if (state === "enrolled" || state === "enrolled-unverified") {
+    // "enrolled-unverified" (correlation unavailable — e.g. the status query
+    // failed) renders the enrolled copy but exposes no disable action; the
+    // status-error line below explains why the panel knows less than usual.
     stateCopy = t("automations.notificationChannels.webPush.enrolled");
+  } else if (state === "enrolled-other-account") {
+    stateCopy = t("automations.notificationChannels.webPush.enrolledOtherAccount");
   } else if (state === "not-enrolled") {
     stateCopy = t("automations.notificationChannels.webPush.notEnrolled");
   } else {
     stateCopy = t("automations.notificationChannels.webPush.checking");
   }
-  const canEnroll = state === "not-enrolled" && !device.isBusy && device.vapidPublicKey;
+  // The enroll flow also serves "enable for this account" when another
+  // account's subscription occupies this browser: the same backend register
+  // reuses the existing subscription without touching the other enrollment.
+  const canEnroll =
+    (state === "not-enrolled" || state === "enrolled-other-account") &&
+    !device.isBusy &&
+    device.vapidPublicKey;
+  // Local unsubscribe is offered ONLY for a verified own-account enrollment:
+  // the push subscription is browser-global, so disabling from any other
+  // state could sever a different account's notifications.
   const canUnenroll = state === "enrolled" && !device.isBusy;
   return (
     <div
@@ -54,15 +69,23 @@ function WebPushDeviceBlock({ device, t }) {
         {t("automations.notificationChannels.webPush.deviceHeading")}
       </div>
       <div className="mt-1">{stateCopy}</div>
-      <div className="mt-1 text-[var(--v2-text-faint)]">
-        {t("automations.notificationChannels.webPush.deviceCount", {
-          count: device.subscriptionCount,
-        })}
-      </div>
-      {(state === "not-enrolled" || state === "enrolled") &&
+      {hasStatusError
+        ? (
+          <div role="alert" className="mt-1 text-red-300">
+            {t("automations.notificationChannels.webPush.statusFailed")}
+          </div>
+        )
+        : (
+          <div className="mt-1 text-[var(--v2-text-faint)]">
+            {t("automations.notificationChannels.webPush.deviceCount", {
+              count: device.subscriptionCount,
+            })}
+          </div>
+        )}
+      {(state === "not-enrolled" || state === "enrolled" || state === "enrolled-other-account") &&
       (
         <div className="mt-2 flex items-center gap-3">
-          {state === "not-enrolled" &&
+          {(state === "not-enrolled" || state === "enrolled-other-account") &&
           (
             <Button
               variant="secondary"
@@ -70,7 +93,9 @@ function WebPushDeviceBlock({ device, t }) {
               disabled={!canEnroll}
               onClick={() => device.enroll().catch(() => {})}
             >
-              {t("automations.notificationChannels.webPush.enroll")}
+              {state === "enrolled-other-account"
+                ? t("automations.notificationChannels.webPush.enableForAccount")
+                : t("automations.notificationChannels.webPush.enroll")}
             </Button>
           )}
           {state === "enrolled" &&

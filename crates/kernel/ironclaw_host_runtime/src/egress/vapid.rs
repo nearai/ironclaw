@@ -45,6 +45,11 @@ pub(super) fn vapid_authorization_header(
 ) -> Result<String, VapidHeaderError> {
     let material: VapidCredentialMaterialV1 =
         serde_json::from_str(material_json).map_err(|_| VapidHeaderError::MaterialInvalid)?;
+    // Reject a structurally corrupt blob before it can produce a token no push
+    // service will accept (base64url shape, P-256 point, subject grammar).
+    material
+        .validate_shape()
+        .map_err(|_| VapidHeaderError::MaterialInvalid)?;
 
     // Push service audiences are https origins; the outer injection gate has
     // already required TLS (or literal loopback, which never hosts a push

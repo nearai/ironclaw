@@ -797,7 +797,7 @@ registerPack("hi", {
   "automations.notificationChannels.webOnlyHelper": "कोई सूचना चैनल चयनित नहीं है — अनुमोदन अनुरोध, प्रमाणीकरण संकेत और विफलता सूचनाएँ कहीं नहीं पहुँचाई जाएँगी।",
   "automations.notificationChannels.webPush.deviceHeading": "यह ब्राउज़र",
   "automations.notificationChannels.webPush.checking": "इस ब्राउज़र में सूचना समर्थन की जाँच हो रही है…",
-  "automations.notificationChannels.webPush.unsupported": "यह ब्राउज़र पुश सूचनाओं का समर्थन नहीं करता।",
+  "automations.notificationChannels.webPush.unsupported": "इस ब्राउज़र में पुश सूचनाएँ उपलब्ध नहीं हैं।",
   "automations.notificationChannels.webPush.permissionDenied": "इस साइट के लिए सूचनाएँ अवरुद्ध हैं। अपने ब्राउज़र की साइट सेटिंग में उन्हें अनुमति दें, फिर पुनः प्रयास करें।",
   "automations.notificationChannels.webPush.notEnrolled": "यह ब्राउज़र अभी सूचनाएँ प्राप्त नहीं कर रहा है।",
   "automations.notificationChannels.webPush.enrolled": "यह ब्राउज़र सूचनाएँ प्राप्त करता है।",
@@ -805,6 +805,9 @@ registerPack("hi", {
   "automations.notificationChannels.webPush.unenroll": "इस ब्राउज़र में अक्षम करें",
   "automations.notificationChannels.webPush.deviceCount": "पंजीकृत ब्राउज़र: {count}",
   "automations.notificationChannels.webPush.actionFailed": "इस ब्राउज़र का सूचना पंजीकरण अपडेट नहीं हो सका। कृपया पुनः प्रयास करें।",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "यह ब्राउज़र किसी दूसरे खाते के लिए नामांकित है। आप इसे इस खाते के लिए भी सक्षम कर सकते हैं।",
+  "automations.notificationChannels.webPush.enableForAccount": "इस खाते के लिए सक्षम करें",
+  "automations.notificationChannels.webPush.statusFailed": "इस खाते की नामांकन स्थिति लोड नहीं हो सकी। पृष्ठ को फिर से लोड करें।",
   "automations.notificationChannels.save": "सहेजें",
   "automations.notificationChannels.saved": "सहेजा गया",
   "automations.notificationChannels.saveFailed":

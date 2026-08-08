@@ -20,9 +20,12 @@ pub enum WebPushError {
     /// never material.
     #[error("web push crypto failure: {reason}")]
     Crypto { reason: String },
-    /// The subscription store rejected or failed the operation.
-    #[error("web push subscription store failure: {reason}")]
-    Store { reason: String },
+    /// The subscription store rejected or failed the operation. Carries a
+    /// fixed sanitized category only — backend diagnostics never enter the
+    /// message. The originating cause is logged server-side at the store
+    /// boundary (see [`WebPushError::store`]) before it is dropped.
+    #[error("web push subscription store failure")]
+    Store,
     /// The per-user subscription cap would be exceeded.
     #[error("subscription limit of {limit} browsers reached")]
     SubscriptionLimitReached { limit: usize },
@@ -38,10 +41,17 @@ pub enum WebPushError {
 }
 
 impl WebPushError {
+    /// Map a store/backend cause to the sanitized [`WebPushError::Store`]
+    /// category, logging the bound source server-side first so the diagnostic
+    /// is retained without ever entering the error's `Display` (the
+    /// redaction contract this module's header states).
     pub fn store(source: impl std::fmt::Display) -> Self {
-        Self::Store {
-            reason: source.to_string(),
-        }
+        tracing::debug!(
+            target: "ironclaw::web_push",
+            error = %source,
+            "web push subscription store operation failed"
+        );
+        Self::Store
     }
 
     pub fn crypto(reason: impl Into<String>) -> Self {

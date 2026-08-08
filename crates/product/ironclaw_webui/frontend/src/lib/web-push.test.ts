@@ -1,5 +1,6 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { afterEach, test, vi } from "vitest";
 
 vi.mock("./api", () => ({
@@ -9,6 +10,7 @@ vi.mock("./api", () => ({
 
 import { subscribeWebPush, unsubscribeWebPush } from "./api";
 import {
+  endpointDigestHex,
   enrollThisBrowser,
   getWebPushBrowserState,
   registerServiceWorker,
@@ -43,11 +45,15 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function sha256Hex(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 function browserEnvironment({
   permission = "default",
   subscription = null,
   subscribeResult = null,
-  registrationOverrides = {},
+  hasRegistration = true,
 } = {}) {
   const subscribeCalls = [];
   const registration = {
@@ -59,7 +65,6 @@ function browserEnvironment({
         throw new Error("no subscribe result configured");
       },
     },
-    ...registrationOverrides,
   };
   const registerCalls = [];
   setGlobal("navigator", {
@@ -69,7 +74,11 @@ function browserEnvironment({
         registerCalls.push(url);
         return registration;
       },
-      ready: Promise.resolve(registration),
+      // The module must never await `serviceWorker.ready` — it hangs forever
+      // when no registration exists — so the fake only offers the prompt
+      // `getRegistration()` probe, and `undefined` models the failed-boot-
+      // registration case.
+      getRegistration: async () => (hasRegistration ? registration : undefined),
     },
   });
   setGlobal("window", { PushManager: function PushManager() {} });
@@ -98,6 +107,13 @@ test("urlBase64ToUint8Array decodes an unpadded base64url key", () => {
   // URL-safe alphabet round-trip: "_-8" → [0xff, 0xef].
   assert.deepEqual(Array.from(urlBase64ToUint8Array("_-8")), [0xff, 0xef]);
   assert.throws(() => urlBase64ToUint8Array(""), /base64url key is required/);
+});
+
+test("endpointDigestHex matches an independent SHA-256 and rejects junk", async () => {
+  const endpoint = "https://fcm.googleapis.com/fcm/send/abc";
+  assert.equal(await endpointDigestHex(endpoint), sha256Hex(endpoint));
+  assert.equal(await endpointDigestHex(""), null);
+  assert.equal(await endpointDigestHex(undefined), null);
 });
 
 test("registerServiceWorker registers /sw.js and swallows failures", async () => {
@@ -137,7 +153,40 @@ test("getWebPushBrowserState distinguishes unsupported, denied, not-enrolled, an
   assert.deepEqual(await getWebPushBrowserState(), {
     state: "enrolled",
     endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    accountMatch: null,
   });
+});
+
+test("getWebPushBrowserState resolves promptly as unsupported when no registration exists", async () => {
+  // A failed boot registration leaves getRegistration() → undefined;
+  // `serviceWorker.ready` would hang forever here, which is the regression
+  // this pins (CodeRabbit stability finding on PR #7398).
+  browserEnvironment({ permission: "granted", hasRegistration: false });
+  assert.deepEqual(await getWebPushBrowserState(), { state: "unsupported" });
+});
+
+test("getWebPushBrowserState correlates the subscription with the account's endpoint digests", async () => {
+  const endpoint = "https://fcm.googleapis.com/fcm/send/mine";
+  browserEnvironment({ permission: "granted", subscription: fakeSubscription(endpoint) });
+
+  const matched = await getWebPushBrowserState({
+    accountEndpointDigests: [sha256Hex(endpoint)],
+  });
+  assert.deepEqual(matched, { state: "enrolled", endpoint, accountMatch: true });
+
+  const matchedCaseInsensitive = await getWebPushBrowserState({
+    accountEndpointDigests: [sha256Hex(endpoint).toUpperCase()],
+  });
+  assert.equal(matchedCaseInsensitive.accountMatch, true);
+
+  // Another account's browser subscription: digests exist, none match.
+  const foreign = await getWebPushBrowserState({
+    accountEndpointDigests: [sha256Hex("https://fcm.googleapis.com/fcm/send/other")],
+  });
+  assert.deepEqual(foreign, { state: "enrolled", endpoint, accountMatch: false });
+
+  const emptyAccount = await getWebPushBrowserState({ accountEndpointDigests: [] });
+  assert.equal(emptyAccount.accountMatch, false, "an empty digest list is a definite non-match");
 });
 
 test("enrollThisBrowser subscribes with the VAPID key and registers with the backend", async () => {
@@ -152,6 +201,7 @@ test("enrollThisBrowser subscribes with the VAPID key and registers with the bac
   assert.deepEqual(state, {
     state: "enrolled",
     endpoint: "https://fcm.googleapis.com/fcm/send/new",
+    accountMatch: true,
   });
   assert.equal(subscribeCalls.length, 1);
   assert.equal(subscribeCalls[0].userVisibleOnly, true);
@@ -162,6 +212,34 @@ test("enrollThisBrowser subscribes with the VAPID key and registers with the bac
     keys: { p256dh: "pk", auth: "as" },
     userAgent: "TestBrowser/1.0",
   });
+});
+
+test("enrollThisBrowser rolls back a freshly created subscription when the backend rejects", async () => {
+  const created = fakeSubscription("https://fcm.googleapis.com/fcm/send/fresh");
+  browserEnvironment({
+    permission: "granted",
+    subscription: null,
+    subscribeResult: created,
+  });
+  subscribeWebPush.mockRejectedValueOnce(new Error("backend rejected"));
+
+  await assert.rejects(enrollThisBrowser({ vapidPublicKey: "AQAB" }), /backend rejected/);
+  assert.equal(
+    created.unsubscribe.mock.calls.length,
+    1,
+    "a created-but-unregistered subscription must be unsubscribed so the browser never reports enrolled without a server record",
+  );
+});
+
+test("enrollThisBrowser never unsubscribes a pre-existing subscription on backend failure", async () => {
+  // The pre-existing subscription may belong to ANOTHER account in this
+  // browser profile; rolling it back would sever that account's enrollment.
+  const existing = fakeSubscription("https://fcm.googleapis.com/fcm/send/other-account");
+  browserEnvironment({ permission: "granted", subscription: existing });
+  subscribeWebPush.mockRejectedValueOnce(new Error("backend rejected"));
+
+  await assert.rejects(enrollThisBrowser({ vapidPublicKey: "AQAB" }), /backend rejected/);
+  assert.equal(existing.unsubscribe.mock.calls.length, 0);
 });
 
 test("enrollThisBrowser reports a denied permission without subscribing", async () => {

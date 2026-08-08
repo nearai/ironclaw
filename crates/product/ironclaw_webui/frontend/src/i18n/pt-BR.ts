@@ -797,7 +797,7 @@ registerPack("pt-BR", {
   "automations.notificationChannels.webOnlyHelper": "Nenhum canal de notificação está selecionado — solicitações de aprovação, avisos de autenticação e notificações de falha não serão entregues em lugar algum.",
   "automations.notificationChannels.webPush.deviceHeading": "Este navegador",
   "automations.notificationChannels.webPush.checking": "Verificando o suporte a notificações deste navegador…",
-  "automations.notificationChannels.webPush.unsupported": "Este navegador não oferece suporte a notificações push.",
+  "automations.notificationChannels.webPush.unsupported": "Notificações push não estão disponíveis neste navegador.",
   "automations.notificationChannels.webPush.permissionDenied": "As notificações estão bloqueadas para este site. Permita-as nas configurações do site do seu navegador e tente novamente.",
   "automations.notificationChannels.webPush.notEnrolled": "Este navegador ainda não recebe notificações.",
   "automations.notificationChannels.webPush.enrolled": "Este navegador recebe notificações.",
@@ -805,6 +805,9 @@ registerPack("pt-BR", {
   "automations.notificationChannels.webPush.unenroll": "Desativar neste navegador",
   "automations.notificationChannels.webPush.deviceCount": "Navegadores registrados: {count}",
   "automations.notificationChannels.webPush.actionFailed": "Não foi possível atualizar o registro de notificações deste navegador. Tente novamente.",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "Este navegador está inscrito para outra conta. Você também pode ativá-lo para esta conta.",
+  "automations.notificationChannels.webPush.enableForAccount": "Ativar para esta conta",
+  "automations.notificationChannels.webPush.statusFailed": "Não foi possível carregar o status de inscrição desta conta. Recarregue a página.",
   "automations.notificationChannels.save": "Salvar",
   "automations.notificationChannels.saved": "Salvo",
   "automations.notificationChannels.saveFailed":

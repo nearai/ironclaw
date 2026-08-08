@@ -112,6 +112,22 @@ impl PushEndpoint {
             })
     }
 
+    /// Lowercase-hex SHA-256 of the full endpoint URL. The endpoint itself is
+    /// a bearer capability the settings surface must not echo, but the browser
+    /// can compute the same digest over its local subscription endpoint and
+    /// match it against the caller's enrolled set — so a shared browser profile
+    /// tells "enrolled for this account" apart from "enrolled for another"
+    /// without the backend ever surfacing the URL.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(self.0.as_bytes());
+        let mut hex = String::with_capacity(hash.len() * 2);
+        for byte in hash {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
     /// Origin-form path + query for the restricted egress request.
     pub fn path_and_query(&self) -> Result<String, WebPushError> {
         let parsed = url::Url::parse(&self.0).map_err(|_| WebPushError::InvalidSubscription {

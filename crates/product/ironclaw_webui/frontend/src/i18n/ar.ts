@@ -797,7 +797,7 @@ registerPack("ar", {
   "automations.notificationChannels.webOnlyHelper": "لم يتم اختيار أي قناة إشعارات — لن يتم تسليم طلبات الموافقة وتنبيهات المصادقة وإشعارات الفشل إلى أي وجهة.",
   "automations.notificationChannels.webPush.deviceHeading": "هذا المتصفح",
   "automations.notificationChannels.webPush.checking": "جارٍ التحقق من دعم الإشعارات في هذا المتصفح…",
-  "automations.notificationChannels.webPush.unsupported": "هذا المتصفح لا يدعم الإشعارات الفورية.",
+  "automations.notificationChannels.webPush.unsupported": "إشعارات الدفع غير متاحة في هذا المتصفح.",
   "automations.notificationChannels.webPush.permissionDenied": "الإشعارات محظورة لهذا الموقع. اسمح بها في إعدادات الموقع في متصفحك ثم حاول مرة أخرى.",
   "automations.notificationChannels.webPush.notEnrolled": "هذا المتصفح لا يتلقى الإشعارات بعد.",
   "automations.notificationChannels.webPush.enrolled": "هذا المتصفح يتلقى الإشعارات.",
@@ -805,6 +805,9 @@ registerPack("ar", {
   "automations.notificationChannels.webPush.unenroll": "التعطيل في هذا المتصفح",
   "automations.notificationChannels.webPush.deviceCount": "المتصفحات المسجلة: {count}",
   "automations.notificationChannels.webPush.actionFailed": "تعذر تحديث تسجيل الإشعارات لهذا المتصفح. يرجى المحاولة مرة أخرى.",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "هذا المتصفح مسجَّل لحساب آخر. يمكنك تفعيله لهذا الحساب أيضًا.",
+  "automations.notificationChannels.webPush.enableForAccount": "تفعيل لهذا الحساب",
+  "automations.notificationChannels.webPush.statusFailed": "تعذّر تحميل حالة تسجيل هذا الحساب. أعد تحميل الصفحة.",
   "automations.notificationChannels.save": "حفظ",
   "automations.notificationChannels.saved": "تم الحفظ",
   "automations.notificationChannels.saveFailed":

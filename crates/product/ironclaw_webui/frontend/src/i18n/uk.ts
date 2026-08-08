@@ -797,7 +797,7 @@ registerPack("uk", {
   "automations.notificationChannels.webOnlyHelper": "Канал сповіщень не вибрано — запити на схвалення, підказки автентифікації та сповіщення про збої нікуди не доставлятимуться.",
   "automations.notificationChannels.webPush.deviceHeading": "Цей браузер",
   "automations.notificationChannels.webPush.checking": "Перевіряємо підтримку сповіщень у цьому браузері…",
-  "automations.notificationChannels.webPush.unsupported": "Цей браузер не підтримує push-сповіщення.",
+  "automations.notificationChannels.webPush.unsupported": "Push-сповіщення недоступні в цьому браузері.",
   "automations.notificationChannels.webPush.permissionDenied": "Сповіщення для цього сайту заблоковано. Дозвольте їх у налаштуваннях сайту вашого браузера й спробуйте ще раз.",
   "automations.notificationChannels.webPush.notEnrolled": "Цей браузер ще не отримує сповіщень.",
   "automations.notificationChannels.webPush.enrolled": "Цей браузер отримує сповіщення.",
@@ -805,6 +805,9 @@ registerPack("uk", {
   "automations.notificationChannels.webPush.unenroll": "Вимкнути в цьому браузері",
   "automations.notificationChannels.webPush.deviceCount": "Зареєстровані браузери: {count}",
   "automations.notificationChannels.webPush.actionFailed": "Не вдалося оновити реєстрацію сповіщень цього браузера. Спробуйте ще раз.",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "Цей браузер зареєстровано для іншого облікового запису. Ви можете ввімкнути його й для цього облікового запису.",
+  "automations.notificationChannels.webPush.enableForAccount": "Увімкнути для цього облікового запису",
+  "automations.notificationChannels.webPush.statusFailed": "Не вдалося завантажити стан реєстрації цього облікового запису. Перезавантажте сторінку.",
   "automations.notificationChannels.save": "Зберегти",
   "automations.notificationChannels.saved": "Збережено",
   "automations.notificationChannels.saveFailed":

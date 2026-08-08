@@ -644,7 +644,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `VapidCredentialMaterialV1` material schema (RFC 8292 vocabulary,
         // declarations only); ES256 signing stays at the host egress
         // credential chokepoint in ironclaw_host_runtime.
-        ("ironclaw_host_api", 18_832),
+        // 18_832 -> 18_922 (web-push review): `VapidCredentialMaterialV1` gained
+        // a redacting `Debug`, a `validate_shape` fallible shape check, and a
+        // dependency-free base64url decode helper — all declaration/validation
+        // on the type's own shape, no execution.
+        ("ironclaw_host_api", 18_922),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -685,7 +689,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // subscribe/unsubscribe command descriptors) joined per the
         // transport/product boundary — new feature descriptors are declared
         // here, not added to the frozen webui→assistant residue.
-        ("ironclaw_product_contracts", 15_879),
+        // 15_879 -> 15_885 (review): the `endpoint_digest` field + its doc on
+        // `RebornWebPushSubscriptionInfo` for account-scoped enrollment
+        // correlation.
+        ("ironclaw_product_contracts", 15_885),
         ("ironclaw_prompt_envelope", 832),
     ];
 

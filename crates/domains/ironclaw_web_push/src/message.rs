@@ -24,6 +24,7 @@ pub const MAX_PAYLOAD_JSON_BYTES: usize = 3_800;
 
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_BODY_CHARS: usize = 1_500;
+const MAX_TAG_CHARS: usize = 64;
 const ELLIPSIS: char = '…';
 
 /// RFC 8030 §5.3 urgency.
@@ -60,19 +61,55 @@ pub struct WebPushNotificationPayload {
 }
 
 impl WebPushNotificationPayload {
-    /// Build a payload, truncating title/body to their display budgets.
+    /// Build a payload with every field forced into the notification grammar:
+    /// title/body sanitized and char-capped, `url` coerced to an app-relative
+    /// path (the service worker opens it), `tag` sanitized, and finally the
+    /// body trimmed by **serialized-JSON bytes** so a title made of multi-byte
+    /// characters can never blow the single-record push budget. Truncating by
+    /// character count alone let 1,500 four-byte emoji pass the char cap yet
+    /// serialize past 6 KiB, failing every send.
     pub fn new(
         title: impl Into<String>,
         body: impl Into<String>,
         url: impl Into<String>,
         tag: Option<String>,
     ) -> Self {
-        Self {
+        let mut payload = Self {
             title: truncate_chars(&sanitize_text(title.into()), MAX_TITLE_CHARS),
             body: truncate_chars(&sanitize_text(body.into()), MAX_BODY_CHARS),
-            url: url.into(),
-            tag,
+            url: app_relative_url(url.into()),
+            tag: tag.map(sanitize_tag),
+        };
+        payload.fit_body_to_byte_budget();
+        payload
+    }
+
+    /// Trim `body` (char-boundary safe) until the serialized payload fits
+    /// `MAX_PAYLOAD_JSON_BYTES`. Bounded: each pass drops at least one
+    /// character, and only the body shrinks (title/url/tag are already capped).
+    fn fit_body_to_byte_budget(&mut self) {
+        while self.serialized_len() > MAX_PAYLOAD_JSON_BYTES {
+            let char_count = self.body.chars().count();
+            if char_count == 0 {
+                break;
+            }
+            // Drop a proportional chunk to converge quickly on large payloads,
+            // always at least one character, then re-mark the truncation.
+            let overshoot = self.serialized_len() - MAX_PAYLOAD_JSON_BYTES;
+            let drop = (overshoot / 2).max(1).min(char_count);
+            let kept = char_count.saturating_sub(drop).saturating_sub(1);
+            let mut trimmed: String = self.body.chars().take(kept).collect();
+            if kept < char_count {
+                trimmed.push(ELLIPSIS);
+            }
+            self.body = trimmed;
         }
+    }
+
+    fn serialized_len(&self) -> usize {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
     }
 
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, WebPushError> {
@@ -86,6 +123,26 @@ impl WebPushNotificationPayload {
         }
         Ok(bytes)
     }
+}
+
+/// Coerce a caller-supplied deep link into the app-relative form the service
+/// worker's same-origin guard expects: a single leading `/`, no scheme, no
+/// protocol-relative `//`, no control bytes. Anything else falls back to `/`
+/// (the app root) rather than shipping a link the SW would reject anyway.
+fn app_relative_url(raw: String) -> String {
+    let is_app_relative = raw.starts_with('/')
+        && !raw.starts_with("//")
+        && !raw.contains("://")
+        && !raw.chars().any(char::is_control);
+    if is_app_relative {
+        raw
+    } else {
+        "/".to_string()
+    }
+}
+
+fn sanitize_tag(raw: String) -> String {
+    truncate_chars(&sanitize_text(raw), MAX_TAG_CHARS)
 }
 
 fn sanitize_text(raw: String) -> String {
@@ -185,6 +242,42 @@ mod tests {
         assert_eq!(payload.title, "t itle");
         assert!(payload.body.chars().count() <= MAX_BODY_CHARS);
         assert!(payload.body.ends_with(ELLIPSIS));
+    }
+
+    #[test]
+    fn multibyte_body_is_trimmed_to_the_serialized_byte_budget() {
+        // 1,500 four-byte emoji clear the character cap but serialize to ~6 KB
+        // of escaped JSON; char-only truncation would let this blow the push
+        // budget and fail every send. The byte-aware fit must bring it under.
+        let payload = WebPushNotificationPayload::new(
+            "IronClaw",
+            "🍉".repeat(MAX_BODY_CHARS),
+            "/automations",
+            None,
+        );
+        let serialized = payload
+            .to_json_bytes()
+            .expect("multibyte payload fits the budget");
+        assert!(
+            serialized.len() <= MAX_PAYLOAD_JSON_BYTES,
+            "serialized {} bytes exceeds the {MAX_PAYLOAD_JSON_BYTES}-byte budget",
+            serialized.len()
+        );
+    }
+
+    #[test]
+    fn non_app_relative_urls_collapse_to_root() {
+        for url in [
+            "https://evil.example.com/x",
+            "//evil.example.com",
+            "javascript:alert(1)",
+            "/ok\nnewline",
+        ] {
+            let payload = WebPushNotificationPayload::new("t", "b", url, None);
+            assert_eq!(payload.url, "/", "{url:?} must collapse to root");
+        }
+        let ok = WebPushNotificationPayload::new("t", "b", "/automations?x=1", None);
+        assert_eq!(ok.url, "/automations?x=1");
     }
 
     #[test]

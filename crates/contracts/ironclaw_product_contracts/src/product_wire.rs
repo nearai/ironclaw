@@ -1001,11 +1001,17 @@ pub struct RebornWebPushUnsubscribeResponse {
 }
 
 /// One enrolled browser, redacted for the settings surface: the endpoint is
-/// a bearer capability URL, so only its push-service host is projected.
+/// a bearer capability URL, so only its push-service host is projected. The
+/// `endpoint_digest` (lowercase-hex SHA-256 of the full endpoint) lets the
+/// browser correlate its own local subscription with the caller's enrolled
+/// set — distinguishing "enrolled for this account" from "enrolled for a
+/// different account in this shared browser profile" — without the URL ever
+/// leaving the backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornWebPushSubscriptionInfo {
     pub subscription_id: String,
     pub endpoint_host: String,
+    pub endpoint_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
     pub created_at: String,

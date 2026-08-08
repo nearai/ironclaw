@@ -177,7 +177,12 @@ pub enum RuntimeCredentialTarget {
 /// are not, but travel inside the same material so the injector needs one
 /// resolution. Generation lives in `ironclaw_web_push`; parsing/signing at
 /// the host egress credential boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written to redact the private key: this type is serialized
+/// as a channel credential, and the safety boundary forbids raw secret
+/// material in any debug output, log, event, or snapshot. A derived `Debug`
+/// would render `es256_private_key_pkcs8_b64url` verbatim.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VapidCredentialMaterialV1 {
     /// PKCS#8 P-256 private key, base64url (unpadded).
@@ -187,6 +192,91 @@ pub struct VapidCredentialMaterialV1 {
     pub public_key_b64url: String,
     /// RFC 8292 `sub` claim: a `mailto:` or `https:` operator contact URI.
     pub subject: String,
+}
+
+impl std::fmt::Debug for VapidCredentialMaterialV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VapidCredentialMaterialV1")
+            .field("es256_private_key_pkcs8_b64url", &"<redacted>")
+            .field("public_key_b64url", &self.public_key_b64url)
+            .field("subject", &self.subject)
+            .finish()
+    }
+}
+
+impl VapidCredentialMaterialV1 {
+    /// Validate the material's cryptographic shape: the private key must be a
+    /// parseable PKCS#8 P-256 signing key and the public key a 65-byte
+    /// uncompressed point whose base64url decodes cleanly. `deny_unknown_fields`
+    /// only rejects extra JSON keys; this rejects a structurally corrupt blob
+    /// so a bad persisted credential fails at composition rather than surfacing
+    /// later as a push-service rejection on every delivery. Kept dependency-free
+    /// (length/prefix + base64url checks only) so the contracts crate stays a
+    /// leaf; full keypair parsing happens at the signing boundary.
+    pub fn validate_shape(&self) -> Result<(), HostApiError> {
+        let public_key = decode_b64url_no_pad(&self.public_key_b64url).ok_or_else(|| {
+            HostApiError::invalid_runtime_credential_target(
+                "vapid_public_key",
+                "must be base64url (unpadded)",
+            )
+        })?;
+        if public_key.len() != 65 || public_key.first() != Some(&0x04) {
+            return Err(HostApiError::invalid_runtime_credential_target(
+                "vapid_public_key",
+                "must decode to a 65-byte uncompressed P-256 point",
+            ));
+        }
+        if decode_b64url_no_pad(&self.es256_private_key_pkcs8_b64url).is_none() {
+            return Err(HostApiError::invalid_runtime_credential_target(
+                "vapid_private_key",
+                "must be base64url (unpadded)",
+            ));
+        }
+        let subject_ok = (self.subject.starts_with("mailto:")
+            && self.subject.len() > "mailto:".len())
+            || (self.subject.starts_with("https://") && self.subject.len() > "https://".len());
+        if !subject_ok || self.subject.len() > 256 || self.subject.chars().any(char::is_control) {
+            return Err(HostApiError::invalid_runtime_credential_target(
+                "vapid_subject",
+                "must be a short control-free mailto: or https: URI",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Minimal unpadded-base64url decode, dependency-free so this stays in the
+/// contracts leaf. Accepts the RFC 4648 URL-safe alphabet without padding.
+fn decode_b64url_no_pad(value: &str) -> Option<Vec<u8>> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3 + 2);
+    for chunk in bytes.chunks(4) {
+        let mut acc = 0u32;
+        for &byte in chunk {
+            acc = (acc << 6) | u32::from(sextet(byte)?);
+        }
+        let pad = 4 - chunk.len();
+        acc <<= 6 * pad as u32;
+        let take = 3 - pad;
+        for index in 0..take {
+            out.push((acc >> (16 - 8 * index)) as u8);
+        }
+    }
+    Some(out)
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {

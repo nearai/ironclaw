@@ -131,6 +131,7 @@ impl WebPushProductService for RebornWebPushProductService {
                 Ok(RebornWebPushSubscriptionInfo {
                     subscription_id: record.subscription_id.clone(),
                     endpoint_host: record.endpoint.host().map_err(map_web_push_error)?,
+                    endpoint_digest: record.endpoint.digest(),
                     user_agent: record.user_agent.clone(),
                     created_at: record.created_at.clone(),
                 })
@@ -216,7 +217,7 @@ fn map_web_push_error(error: WebPushError) -> ProductSurfaceError {
             tracing::error!(%error, "web push scope projection failed");
             ProductSurfaceError::internal_from(error)
         }
-        WebPushError::Store { .. } => {
+        WebPushError::Store => {
             tracing::warn!(%error, "web push subscription store failure");
             ProductSurfaceError::service_unavailable(true)
         }

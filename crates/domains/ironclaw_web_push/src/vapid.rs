@@ -18,13 +18,28 @@ use crate::error::WebPushError;
 /// Freshly generated VAPID material: the JSON blob to store as the channel
 /// credential, plus the (non-secret) public key the browser needs as
 /// `applicationServerKey`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written to redact `material_json` — it is the serialized
+/// [`VapidCredentialMaterialV1`] and carries the ES256 private key, which the
+/// safety boundary forbids from reaching any debug output, log, or panic
+/// message. A derived `Debug` would print the key verbatim.
+#[derive(Clone)]
 pub struct GeneratedVapidKeyMaterial {
     /// Serialized [`VapidCredentialMaterialV1`] — store as the channel
     /// credential under the web-push VAPID handle. Contains the private key.
     pub material_json: String,
     /// Base64url (unpadded) uncompressed P-256 public key (65 bytes).
     pub public_key_b64url: String,
+}
+
+impl std::fmt::Debug for GeneratedVapidKeyMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GeneratedVapidKeyMaterial")
+            .field("material_json", &"<redacted>")
+            .field("public_key_b64url", &self.public_key_b64url)
+            .finish()
+    }
 }
 
 /// Generate a fresh P-256 keypair and wrap it in the credential-material
@@ -66,18 +81,26 @@ pub fn generate_vapid_key_material(
 }
 
 /// RFC 8292 §2.1: the subject is a contact URI for the application server —
-/// `mailto:` or `https:`.
+/// `mailto:` or `https:`. Parsed with `url` (a crate dependency already) so a
+/// malformed URI is rejected at generation rather than surfacing later as a
+/// push-service rejection on every delivery.
 pub fn validate_vapid_subject(subject: &str) -> Result<(), WebPushError> {
-    let valid = subject.starts_with("mailto:") && subject.len() > "mailto:".len()
-        || subject.starts_with("https://") && subject.len() > "https://".len();
-    if !valid {
-        return Err(WebPushError::InvalidScope {
-            reason: "VAPID subject must be a mailto: or https: URI".to_string(),
-        });
-    }
     if subject.len() > 256 || subject.chars().any(char::is_control) {
         return Err(WebPushError::InvalidScope {
             reason: "VAPID subject must be a short control-free URI".to_string(),
+        });
+    }
+    let parsed = url::Url::parse(subject).map_err(|_| WebPushError::InvalidScope {
+        reason: "VAPID subject must be a valid mailto: or https: URI".to_string(),
+    })?;
+    let valid = match parsed.scheme() {
+        "mailto" => !parsed.path().is_empty(),
+        "https" => parsed.host_str().is_some(),
+        _ => false,
+    };
+    if !valid {
+        return Err(WebPushError::InvalidScope {
+            reason: "VAPID subject must be a mailto: address or https: URL".to_string(),
         });
     }
     Ok(())

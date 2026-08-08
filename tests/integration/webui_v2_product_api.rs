@@ -2537,6 +2537,19 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
         body["subscriptions"][0]["endpoint_host"], "fcm.googleapis.com",
         "{body}"
     );
+    // The endpoint is redacted to its host, but a 64-char hex digest is
+    // published so the browser can correlate its own subscription with this
+    // account without the URL ever leaving the backend.
+    let digest = body["subscriptions"][0]["endpoint_digest"]
+        .as_str()
+        .expect("endpoint_digest present");
+    assert_eq!(digest.len(), 64, "SHA-256 hex digest: {body}");
+    assert!(
+        digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "digest must be lowercase hex: {body}"
+    );
     assert!(
         !body.to_string().contains(ENDPOINT),
         "the full endpoint capability URL must never leave the backend: {body}"

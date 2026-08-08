@@ -6,8 +6,11 @@ mechanics behind the web app's browser-notification channel.
 ## What it owns
 
 - `PushSubscriptionRecord` / `PushEndpoint` / `PushSubscriptionKeys` — the
-  validated per-browser enrollment grammar, including the exact-host push
-  service allowlist (`SUPPORTED_PUSH_SERVICE_HOSTS`).
+  validated per-browser enrollment grammar. The endpoint's push-service host
+  is checked at enrollment against the deployment-supplied allowlist
+  (`PushEndpoint::validate_against_push_services`), whose hosts composition
+  resolves from the web-push manifest `[[channel.egress]]` entries — one
+  source of truth with the egress path.
 - `WebPushSubscriptionStore` + the scoped-filesystem implementation — one
   CAS-updated JSON document per (tenant, user), capped at
   `MAX_SUBSCRIPTIONS_PER_USER` browsers.

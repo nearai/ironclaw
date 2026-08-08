@@ -1451,60 +1451,81 @@ where
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("web push VAPID handle is invalid: {error}"),
     })?;
+    // Ensure the deployment VAPID keypair exists, then advertise the public
+    // key from the CANONICAL stored material — not from a locally-generated
+    // copy. The store has no create-if-absent primitive and permits
+    // replacement, so two replicas cold-starting against a shared empty store
+    // can each generate and `put` a distinct keypair (last write wins). By
+    // always reading back after ensuring presence, every replica converges on
+    // whichever keypair won the race and hands browsers the matching
+    // `applicationServerKey`; the only residual is a sub-second window on the
+    // losing replica between its own `put` and this read-back. A true
+    // single-writer election would need a create-if-absent secret-store
+    // primitive (follow-up).
     let existing = secret_store
         .metadata(channel_egress_scope, &vapid_handle)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("web push VAPID credential lookup failed: {error}"),
         })?;
-    let vapid_public_key = match existing {
-        Some(_) => {
-            // Re-derive the (non-secret) public half from the stored
-            // material so restarts advertise the same applicationServerKey.
-            let lease = secret_store
-                .lease_once(channel_egress_scope, &vapid_handle)
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!("web push VAPID credential lease failed: {error}"),
-                })?;
-            let material = secret_store
-                .consume(channel_egress_scope, lease.id)
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!("web push VAPID credential read failed: {error}"),
-                })?;
-            let parsed: ironclaw_host_api::http::VapidCredentialMaterialV1 = serde_json::from_str(
-                secrecy::ExposeSecret::expose_secret(&material),
-            )
-            .map_err(|_| RebornBuildError::InvalidConfig {
-                reason: "stored web push VAPID credential material is malformed".to_string(),
+    if existing.is_none() {
+        let subject = vapid_subject
+            .map(str::to_string)
+            .unwrap_or_else(|| "mailto:webpush@ironclaw.invalid".to_string());
+        let generated =
+            ironclaw_web_push::generate_vapid_key_material(&subject).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("web push VAPID key generation failed: {error}"),
+                }
             })?;
-            parsed.public_key_b64url
-        }
-        None => {
-            let subject = vapid_subject
-                .map(str::to_string)
-                .unwrap_or_else(|| "mailto:webpush@ironclaw.invalid".to_string());
-            let generated =
-                ironclaw_web_push::generate_vapid_key_material(&subject).map_err(|error| {
-                    RebornBuildError::InvalidConfig {
-                        reason: format!("web push VAPID key generation failed: {error}"),
-                    }
-                })?;
-            secret_store
-                .put(
-                    channel_egress_scope.clone(),
-                    vapid_handle.clone(),
-                    ironclaw_secrets::SecretMaterial::from(generated.material_json),
-                    None,
-                )
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!("web push VAPID credential seeding failed: {error}"),
-                })?;
-            generated.public_key_b64url
-        }
-    };
+        secret_store
+            .put(
+                channel_egress_scope.clone(),
+                vapid_handle.clone(),
+                ironclaw_secrets::SecretMaterial::from(generated.material_json),
+                None,
+            )
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("web push VAPID credential seeding failed: {error}"),
+            })?;
+    }
+    // Read back the canonical material and validate its shape before exposing
+    // the public key — a corrupt persisted blob fails composition here rather
+    // than surfacing later as a push-service rejection on every delivery.
+    let lease = secret_store
+        .lease_once(channel_egress_scope, &vapid_handle)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("web push VAPID credential lease failed: {error}"),
+        })?;
+    let material = secret_store
+        .consume(channel_egress_scope, lease.id)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("web push VAPID credential read failed: {error}"),
+        })?;
+    let parsed: ironclaw_host_api::http::VapidCredentialMaterialV1 =
+        serde_json::from_str(secrecy::ExposeSecret::expose_secret(&material)).map_err(|error| {
+            // Log the bound serde cause server-side (it names the malformed
+            // field/offset) before mapping to a sanitized boot error — the
+            // material carries the private key, so the cause must not ride the
+            // returned error's message.
+            tracing::warn!(
+                target: "ironclaw::web_push",
+                error = %error,
+                "stored web push VAPID credential material failed to parse"
+            );
+            RebornBuildError::InvalidConfig {
+                reason: "stored web push VAPID credential material is malformed".to_string(),
+            }
+        })?;
+    parsed
+        .validate_shape()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("stored web push VAPID credential material is invalid: {error}"),
+        })?;
+    let vapid_public_key = parsed.public_key_b64url;
     Ok(Some(crate::factory::WebPushComposition {
         subscriptions,
         vapid_public_key,

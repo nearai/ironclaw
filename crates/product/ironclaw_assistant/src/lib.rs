@@ -371,11 +371,11 @@ pub use reborn_services::{
     UnsupportedAutomationProductService, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
     UnsupportedOutboundPreferencesProductService, UnsupportedWebPushProductService,
-    WebPushProductService,
-    list_outbound_delivery_targets_for_model, notification_channels_set_input_schema,
-    notification_channels_set_operator_tool_info, outbound_delivery_synthetic_provider,
-    outbound_delivery_targets_list_input_schema, parse_notification_channels_set_input,
-    parse_outbound_delivery_targets_list_input, set_notification_channels_for_model,
+    WebPushProductService, list_outbound_delivery_targets_for_model,
+    notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
+    outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
+    parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
+    set_notification_channels_for_model,
 };
 
 pub use product_surface_inbound::{
