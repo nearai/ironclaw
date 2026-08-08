@@ -5467,16 +5467,16 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
 /// drives `RebornRuntime::webui_workspace_filesystem()` — the exact method
 /// `runtime.product_surface`/`build_openai_compat_route_mount` call — through
 /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
-/// through the same `ProjectScopedAttachmentReader` production wires
-/// `attachment_read_port` with. The C-ATTACH integration tests exercise the
-/// shared `RebornRuntimeStores::read_write_workspace_filesystem` recipe via the
+/// through a read-only `ProjectScopedAttachmentReader` built from the same
+/// per-caller mount policy production uses for `attachment_read_port`. The
+/// C-ATTACH integration tests exercise the shared attachment recipe via the
 /// `standalone_attachment_test_support_for_test` seam, but never call through
 /// this `RebornRuntime` wrapper itself; this closes that gap so a future
-/// regression in the wrapper (not just the shared recipe) fails a test
+/// scoping regression in the runtime wrapper fails a test
 /// instead of only breaking WebUI/OpenAI-compatible attachment landing in
 /// production.
 #[tokio::test]
-async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
+async fn webui_lander_and_read_only_attachment_reader_share_the_caller_mount() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "attachment mount ok".to_string(),
@@ -5505,12 +5505,12 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     let read_write_filesystem = runtime
         .webui_workspace_filesystem()
         .expect("standalone runtime composes a read-write webui workspace filesystem");
-    // The read port reads the same durable bytes the lander writes; production's
-    // `attachment_read_port` uses the read-only workspace view, but the read side
-    // is byte-identical over the read-write view (the reader never writes), so
-    // this test resolves the same authority a vision-capable model would.
-    let read_port =
-        ironclaw_assistant::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
+    let read_only_filesystem = crate::runtime_mounts::read_only_workspace_filesystem(
+        &runtime.extension_filesystem,
+        &runtime.workspace_mount_policy,
+    )
+    .expect("standalone runtime composes a read-only attachment filesystem");
+    let read_port = ironclaw_assistant::ProjectScopedAttachmentReader::new(read_only_filesystem);
     let lander = ironclaw_attachments::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {

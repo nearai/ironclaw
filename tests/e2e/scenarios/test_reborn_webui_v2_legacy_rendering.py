@@ -24,7 +24,14 @@ async def test_reborn_legacy_rendering_assistant_html_is_sanitized(reborn_v2_pag
     inner_html = (await assistant_msg.inner_html()).lower()
     assert "<script" not in inner_html
     assert "<iframe" not in inner_html
-    assert "onerror=" not in inner_html
+    # The raw `<img ... onerror=...>` payload is escaped as text, so the literal
+    # `onerror=` substring survives inside the escaped `&lt;img src=x
+    # onerror=...&gt;` text. The safety contract is that no live element with
+    # an event handler is ever created, so assert on DOM nodes instead of the
+    # raw string.
+    assert await assistant_msg.locator("img").count() == 0
+    assert await assistant_msg.locator("[onerror]").count() == 0
+    assert await assistant_msg.locator("iframe").count() == 0
 
 
 async def test_reborn_legacy_rendering_user_html_stays_plain_text(reborn_v2_page):
