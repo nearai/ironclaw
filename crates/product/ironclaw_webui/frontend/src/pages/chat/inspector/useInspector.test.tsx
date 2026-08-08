@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, test, vi } from "vitest";
 
 import { INSPECTOR_HEALTH } from "./inspector-state";
+import { resetInspectorSessionStats } from "./inspector-session-stats";
 import { useInspector } from "./useInspector";
 
 const eventStreams = vi.hoisted(() => [] as any[]);
@@ -60,8 +61,10 @@ function Probe({ enabled = true }: { enabled?: boolean }) {
 }
 
 beforeEach(() => {
+  resetInspectorSessionStats();
   eventStreams.length = 0;
   latestState = null;
+  sessionStorage.clear();
   sessionStorage.setItem("ironclaw_token", "operator-token");
   vi.stubGlobal(
     "fetch",
@@ -77,6 +80,44 @@ beforeEach(() => {
     value: "visible",
   });
   root = createRoot(document.body.appendChild(document.createElement("div")));
+});
+
+test("records authoritative run snapshots in page-session statistics", async () => {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify({
+        snapshot: {
+          stats: {
+            total_model_calls: 2,
+            total_tool_calls: 1,
+            successful_tool_calls: 1,
+            failed_tool_calls: 0,
+            calls_per_model: [{
+              model: { content: "model-a", original_bytes: 7, truncated: false },
+              calls: 2,
+            }],
+            calls_per_model_truncated: false,
+            input_tokens: { known_total: 20, unavailable_samples: 0 },
+            output_tokens: { known_total: 5, unavailable_samples: 0 },
+            cache_read_input_tokens: { known_total: 0, unavailable_samples: 2 },
+            cache_creation_input_tokens: { known_total: 0, unavailable_samples: 2 },
+            total_latency_ms: { known_total: 200, unavailable_samples: 0 },
+          },
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    ),
+  );
+
+  await act(async () => root?.render(<Probe />));
+
+  assert.equal(latestState?.sessionStats?.total_model_calls, 2);
+  assert.equal(latestState?.sessionStats?.total_tool_calls, 1);
+  assert.equal(latestState?.sessionStats?.input_tokens.known_total, 20);
 });
 
 afterEach(async () => {
@@ -119,6 +160,7 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
 
   await act(async () => stream.controller.reconnect());
   assert.equal(stream.requestOptions.query.connection_generation, 2);
+  assert.equal(latestState?.reconnectCount, 1);
 });
 
 test("recovers a transient snapshot failure after the diagnostics stream connects", async () => {
@@ -156,6 +198,48 @@ test("recovers a transient snapshot failure after the diagnostics stream connect
   }
 });
 
+test("a live update's snapshot refresh does not downgrade the connected stream", async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => root?.render(<Probe />));
+    const stream = eventStreams[0];
+    await act(async () => stream.respond());
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+
+    const streamId = "550e8400-e29b-41d4-a716-446655440000";
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:1`, {
+        update: { type: "stats" },
+      });
+    });
+    // The settling `stats` update is the last one a completed run emits. Its
+    // debounced snapshot refresh must stay a background read: reporting
+    // LOADING/CONNECTING here left an open, healthy stream displayed as
+    // "Connecting" indefinitely.
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("incomplete snapshot statistics stay unavailable instead of reading as zero", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify({ snapshot: { stats: {} } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+  );
+
+  await act(async () => root?.render(<Probe />));
+
+  assert.equal(latestState?.sessionStats, null);
+});
+
 test("bounds transient snapshot retries", async () => {
   vi.useFakeTimers();
   vi.stubGlobal(
@@ -191,6 +275,8 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
     });
     assert.equal(latestState?.updates.length, 2);
     assert.equal(latestState?.lastCursor, `${streamId}:2`);
+    assert.equal(latestState?.receivedUpdateCount, 2);
+    assert.match(latestState?.lastUpdateAt || "", /^\d{4}-\d{2}-\d{2}T/);
 
     await act(async () => {
       stream.message("diagnostic_update", `${streamId}:3`, {
@@ -245,6 +331,7 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
       .filter((update) => update.local_id)
       .map((update) => update.local_id);
     assert.deepEqual(retainedLocalIds, ["transport-1", "transport-2"]);
+    const receivedBeforeRebase = latestState?.receivedUpdateCount;
 
     await act(async () => {
       stream.message("diagnostic_rebase", `${streamId}:14`, {
@@ -255,6 +342,7 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
       latestState?.updates.map((update) => update.local_id),
       retainedLocalIds,
     );
+    assert.equal(latestState?.receivedUpdateCount, receivedBeforeRebase);
     assert.equal(vi.mocked(fetch).mock.calls.length, 3);
     await act(async () => vi.advanceTimersByTimeAsync(50));
     assert.equal(vi.mocked(fetch).mock.calls.length, 4);

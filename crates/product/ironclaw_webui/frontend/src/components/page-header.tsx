@@ -102,6 +102,7 @@ export function PageHeader({
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
         {status}
+        <span id="page-header-inspector-action" className="contents" />
         <NotificationCenter state={notificationsState} />
         <TeeShield />
         <NavLink

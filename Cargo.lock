@@ -3544,6 +3544,7 @@ name = "ironclaw_architecture_tests"
 version = "0.1.0"
 dependencies = [
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "proc-macro2",
  "serde_json",
  "syn 3.0.3",
