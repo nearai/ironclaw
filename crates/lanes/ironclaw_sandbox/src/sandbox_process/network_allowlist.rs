@@ -1,4 +1,4 @@
-//! Default egress allowlist for the sandboxed (`TenantSandbox`) shell
+//! Default egress allowlist for the sandboxed (`UserSandbox`) shell
 //! profile.
 //!
 //! IronClaw's sandboxed shell needs outbound network access for ordinary

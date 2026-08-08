@@ -37,9 +37,8 @@
             "id": "call_eaf12649cebc412cb6d9a8e3",
             "name": "builtin__trigger_create",
             "arguments": {
-              "delivery_target_id": "slack:personal-dm:SLACK_ID_REDACTED:reborn-webui-v2-live-qa-user",
               "name": "reborn-qa-8d-hn-keyword-slack-delivery-1784642663971",
-              "prompt": "Perform exactly one public HTTP GET to https://hn.algolia.com/api/v1/search_by_date?query=NEAR%20AI&tags=story&hitsPerPage=1 as the Hacker News keyword check for recent NEAR AI posts. Parse the JSON response. If hits is non-empty, compose a concise Slack message including the title, URL, and author of the first hit. If hits is empty, compose a concise Slack message stating that no current matching item was found. Both messages must include the text \"Hacker News\". The final answer must include the exact marker REBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971. The final answer will be delivered automatically to the Slack DM delivery target.",
+              "prompt": "Perform exactly one public HTTP GET to https://hn.algolia.com/api/v1/search_by_date?query=NEAR%20AI&tags=story&hitsPerPage=1 as the Hacker News keyword check for recent NEAR AI posts. Parse the JSON response. If hits is non-empty, compose a concise Slack message including the title, URL, and author of the first hit. If hits is empty, compose a concise Slack message stating that no current matching item was found. Both messages must include the text \"Hacker News\". The final answer must include the exact marker REBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971. Then call builtin__outbound_deliver with target_id \"slack:personal-dm:SLACK_ID_REDACTED:reborn-webui-v2-live-qa-user\" to deliver that Slack message to my Slack DM.",
               "schedule": {
                 "expression": "* * * * *",
                 "kind": "cron",
@@ -59,7 +58,7 @@
       },
       "response": {
         "type": "text",
-        "content": "Routine created successfully.\n\n**Routine:** `reborn-qa-8d-hn-keyword-slack-delivery-1784642663971`\n- **Schedule:** `* * * * *` (every minute, UTC)\n- **Action:** HTTP GET to `https://hn.algolia.com/api/v1/search_by_date?query=NEAR%20AI&tags=story&hitsPerPage=1` — checks for recent NEAR AI stories on Hacker News\n- **Delivery:** Results sent automatically to your Slack DM\n- **Marker in delivered answer:** `REBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971`\n\nREBORN_QA_8D_HN_KEYWORD_ROUTINE_CREATED_1784642663971 — the routine is created and will begin firing next minute.",
+        "content": "Routine created successfully.\n\n**Routine:** `reborn-qa-8d-hn-keyword-slack-delivery-1784642663971`\n- **Schedule:** `* * * * *` (every minute, UTC)\n- **Action:** HTTP GET to `https://hn.algolia.com/api/v1/search_by_date?query=NEAR%20AI&tags=story&hitsPerPage=1` — checks for recent NEAR AI stories on Hacker News\n- **Delivery:** Each fire calls `builtin__outbound_deliver` to push the summary to your Slack DM\n- **Marker in delivered answer:** `REBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971`\n\nREBORN_QA_8D_HN_KEYWORD_ROUTINE_CREATED_1784642663971 — the routine is created and will begin firing next minute.",
         "input_tokens": 14534,
         "output_tokens": 186
       }
@@ -112,8 +111,29 @@
         "min_message_count": 6
       },
       "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_9c1d2e3f4a5b6c7d8e9f0a1b",
+            "name": "builtin__outbound_deliver",
+            "arguments": {
+              "target_id": "slack:personal-dm:SLACK_ID_REDACTED:reborn-webui-v2-live-qa-user",
+              "content": "📰 Hacker News — Recent NEAR AI post found\n\n*Ask HN: To lead with, or bury, AI in product marketing* by probst\nhttps://news.ycombinator.com/item?id=48992019\n\nREBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971"
+            }
+          }
+        ],
+        "input_tokens": 13920,
+        "output_tokens": 210
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Perform exactly one public HTTP GET to https://hn.algolia.com/api/v1/search_by_d",
+        "min_message_count": 8
+      },
+      "response": {
         "type": "text",
-        "content": "The response is parsed. The `hits` array is non-empty — there's a matching story. Here's the hit:\n\n- **Title**: \"Ask HN: To lead with, or bury, AI in product marketing\"\n- **Author**: probst\n- **HN URL**: https://news.ycombinator.com/item?id=48992019\n\nThe query \"NEAR AI\" matched this story because the story text contains \"AI\" near the word \"dear\" (a fuzzy/highlight match on \"near\" as part of \"dear\" — but it did surface on the query). Let me compose the Slack message.\n\n**Slack message composed:**\n\n📰 **Hacker News** — Recent NEAR AI post found\n\n*Ask HN: To lead with, or bury, AI in product marketing* by probst\nhttps://news.ycombinator.com/item?id=48992019\n\nREBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971",
+        "content": "The response is parsed. The `hits` array is non-empty — there's a matching story. Here's the hit:\n\n- **Title**: \"Ask HN: To lead with, or bury, AI in product marketing\"\n- **Author**: probst\n- **HN URL**: https://news.ycombinator.com/item?id=48992019\n\nThe query \"NEAR AI\" matched this story because the story text contains \"AI\" near the word \"dear\" (a fuzzy/highlight match on \"near\" as part of \"dear\" — but it did surface on the query). Delivered to your Slack DM via `builtin__outbound_deliver`.\n\nREBORN_QA_8D_HN_KEYWORD_SLACK_DELIVERED_1784642663971",
         "input_tokens": 16160,
         "output_tokens": 214
       }

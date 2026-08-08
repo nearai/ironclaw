@@ -36,12 +36,12 @@ use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornBuildError, RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus,
     RebornRuntime,
-    outbound::{
-        OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
-        RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
-        outbound_delivery_target_set_operator_tool_info,
-    },
+    outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry},
     support::fs::MountScopedFilesystemReader,
+};
+use ironclaw_assistant::{
+    RebornOutboundPreferencesService, notification_channels_set_operator_tool_info,
+    outbound_delivery_synthetic_provider,
 };
 use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
 use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
@@ -183,9 +183,9 @@ pub(crate) fn build_product_surface_with_channel_connection(
                 }
             })?;
             vec![
-                outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                notification_channels_set_operator_tool_info(provider).map_err(|error| {
                     RebornBuildError::InvalidConfig {
-                        reason: format!("outbound delivery operator tool is invalid: {error}"),
+                        reason: format!("notification channels operator tool is invalid: {error}"),
                     }
                 })?,
             ]
@@ -568,6 +568,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusState::Degraded,
             RebornOperatorStatusSeverity::Warning,
             Some("mounted-volume hosted preview is ready for single-tenant validation but is not production storage".to_string()),
+        ),
+        crate::RebornReadinessState::HostedSingleTenantVolumeSandboxedValidated => (
+            RebornOperatorStatusState::Degraded,
+            RebornOperatorStatusSeverity::Warning,
+            Some("sandboxed mounted-volume preview is ready for validation but is not a production multi-replica topology".to_string()),
         ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,
