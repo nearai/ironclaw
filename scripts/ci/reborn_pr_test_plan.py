@@ -42,6 +42,20 @@ def _webui_frontend_prefix() -> str:
             f"the frontend path prefix used to route Code Style is unknown: {error}"
         ) from error
     return f"{directory}/frontend/"
+
+
+def _sandbox_docker_prefixes() -> tuple[str, ...]:
+    """Sandbox source prefixes whose changes require the Docker lane."""
+    try:
+        directory = crate_directory("ironclaw_sandbox", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_sandbox crate, so "
+            f"the source path prefixes used to route the Docker lane are unknown: {error}"
+        ) from error
+    return (f"{directory}/src/sandbox_process",)
+
+
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -142,6 +156,35 @@ QA_HARNESS_PREFIXES = (
     "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+SANDBOX_DOCKER_EXACT_PATHS = {
+    "Dockerfile.sandbox-worker",
+    "crates/app/ironclaw_cli/src/runtime/mod.rs",
+    "crates/app/ironclaw_composition/src/sandbox.rs",
+    "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
+    "crates/app/ironclaw_composition/src/deployment.rs",
+    "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+    "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
+    "crates/app/ironclaw_composition/src/input.rs",
+    "crates/app/ironclaw_config/src/profile.rs",
+    "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+    "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
+    "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+    "crates/kernel/ironclaw_host_runtime/src/services.rs",
+    "crates/kernel/ironclaw_host_runtime/src/services/builder.rs",
+    "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
+    "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
+    "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
+    "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+    "tests/integration/reborn_sandbox_shell_turn.rs",
+    "tests/e2e_trace_runtime_policy_serde.rs",
+    "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
+    "tests/integration/support/builder.rs",
+    "tests/integration/support/capability_backend.rs",
+    "tests/integration/support/docker_gate.rs",
+    "tests/integration/support/harness/mod.rs",
+    "tests/integration/support/harness/options.rs",
+    "tests/integration/support/harness/profiles/sandbox_shell.rs",
+}
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
@@ -159,6 +202,7 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 #
 # `scripts/ci/test_reborn_pr_test_plan.py` pins both halves: that the mapping
 # routes (not ignores), and that every prefix and owner below still exists.
+BUNDLED_SKILLS_PREFIX = "skills/"
 EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # manifests, prompts, schemas and built `wasm/*.wasm` for the first-party
     # extension packages -> `ironclaw_extension_support`
@@ -173,6 +217,16 @@ EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # whole tree to the embedding crate over-schedules those rather than
     # letting a fixture change select nothing at all.
     ("test-tools/", "ironclaw_extension_host"),
+    # the bundled Reborn product skills. `ironclaw_extension_host`'s build
+    # script (`build.rs`, `embed_reborn_skills`) walks this repo-root tree,
+    # parses every `skills/<name>/SKILL.md`, and embeds each skill's complete
+    # file set byte-for-byte into the binary (`src/bundled_skills.rs`), with
+    # `cargo:rerun-if-changed` on every file. Unlike the two trees above,
+    # *every* file here is shipped product output — Markdown included, which
+    # is why `_is_shipped_asset_markdown` special-cases this prefix instead of
+    # keying on a `prompts/` segment. Unclassified until 2026-08-05, when the
+    # fail-closed arm rejected #7157 on `skills/delegation/SKILL.md`.
+    (BUNDLED_SKILLS_PREFIX, "ironclaw_extension_host"),
 )
 EMBEDDED_ASSET_PREFIXES: tuple[str, ...] = tuple(
     prefix for prefix, _ in EMBEDDED_ASSET_OWNERS
@@ -183,18 +237,26 @@ CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
 )
 
 
-def _is_package_prompt(path: str) -> bool:
-    """True for a shipped prompt inside an asset tree owned by the table above.
+def _is_shipped_asset_markdown(path: str) -> bool:
+    """True for Markdown that is itself a shipped asset in a table-owned tree.
 
-    Prompts are the one Markdown *asset* kind: the table owns "manifests,
-    prompts, schemas and built `wasm/*.wasm`", and the other three are `.toml`,
-    `.json` and `.wasm`. Everything else ending in `.md` under those trees is
-    documentation — `test-tools/README.md`, a package `AGENTS.md` — and stays
-    prose. Keyed on the directory segment so it holds at any depth
-    (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    Two Markdown *asset* kinds exist, and everything else ending in `.md`
+    under the asset trees is documentation — `test-tools/README.md`, a package
+    `AGENTS.md` — and stays prose:
+
+    * **Prompts** in the package and fixture trees: the table owns "manifests,
+      prompts, schemas and built `wasm/*.wasm`", and of those kinds only a
+      prompt is Markdown (the other three are `.toml`, `.json` and `.wasm`).
+      Keyed on the directory segment so it holds at any depth
+      (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    * **Bundled skills**: under `skills/` every file is the shipped artifact —
+      `build.rs` parses each `SKILL.md` and embeds each skill's complete file
+      set — so all Markdown there is product output, keyed on the tree itself.
     """
     if not path.startswith(EMBEDDED_ASSET_PREFIXES):
         return False
+    if path.startswith(BUNDLED_SKILLS_PREFIX):
+        return True
     return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
     "tests/fixtures/extensions/acme-messenger/manifest.toml": (
@@ -597,6 +659,7 @@ def _full_plan(
         "integration_lanes": [0, 1, 2, 3, "groups"],
         "run_group_tests": True,
         "run_qa_replay": True,
+        "run_sandbox_docker": True,
         "coverage_mode": "full",
     }
 
@@ -633,10 +696,23 @@ def build_plan(
     # not affected-area coverage. Keep it on for every pull request even when
     # no changed path maps to another Reborn lane.
     run_qa_replay = True
+    run_sandbox_docker = False
     qa_evidence_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
+    sandbox_docker_prefixes = _sandbox_docker_prefixes()
+    sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
+    if sandbox_docker_prefixes:
+        sandbox_crate_directory = sandbox_docker_prefixes[0].removesuffix(
+            "/src/sandbox_process"
+        )
+        sandbox_docker_exact_paths.update(
+            {
+                f"{sandbox_crate_directory}/Cargo.toml",
+                f"{sandbox_crate_directory}/src/lib.rs",
+            }
+        )
 
     for path in sorted(paths):
         if path == "Cargo.lock":
@@ -677,6 +753,17 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
+        if path in sandbox_docker_exact_paths or path.startswith(
+            sandbox_docker_prefixes
+        ):
+            run_sandbox_docker = True
+            reasons.append(f"sandbox Docker surface changed: {path}")
+            if (
+                not path.startswith("crates/")
+                and path not in root_inventory
+                and path not in integration_inventory
+            ):
+                continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
@@ -750,24 +837,27 @@ def build_plan(
             # after the WS7 family move. A crate-resident doc still resolves to
             # its package below and keeps selecting that package's lane.
             #
-            # The carve-out yields to a shipped *prompt*, and must. The asset
-            # table declares it owns "manifests, prompts, schemas and built
-            # `wasm/*.wasm`"; of those kinds only a prompt is Markdown
-            # (manifests are `.toml`, schemas `.json`, wasm `.wasm`), so
-            # `.md` under a `prompts/` directory is an asset and every other
-            # `.md` is prose. Without this clause the prose arm fired first and
-            # a change to a shipped prompt — production output that
-            # `ironclaw_extension_support` compiles in — planned `mode=none`,
-            # selecting no lane at all, while its sibling `manifest.toml` in the
-            # same package correctly selected two. That is exactly the "silent
-            # under-schedule of a change to production output" the comment above
-            # `EMBEDDED_ASSET_OWNERS` forbids.
+            # The carve-out yields to shipped Markdown *assets*, and must.
+            # Prompts: the asset table declares it owns "manifests, prompts,
+            # schemas and built `wasm/*.wasm`"; of those kinds only a prompt is
+            # Markdown (manifests are `.toml`, schemas `.json`, wasm `.wasm`),
+            # so `.md` under a `prompts/` directory is an asset. Bundled
+            # skills: under `skills/` every file is embedded product output,
+            # `SKILL.md` first among them, so all its Markdown is an asset.
+            # Every other `.md` is prose. Without this clause the prose arm
+            # fired first and a change to a shipped prompt — production output
+            # that `ironclaw_extension_support` compiles in — planned
+            # `mode=none`, selecting no lane at all, while its sibling
+            # `manifest.toml` in the same package correctly selected two. That
+            # is exactly the "silent under-schedule of a change to production
+            # output" the comment above `EMBEDDED_ASSET_OWNERS` forbids.
             #
-            # Keyed on the `prompts/` segment rather than on the asset prefixes
-            # themselves, because those prefixes also cover genuine prose:
-            # `test-tools/README.md` is documentation of the fixture bundles and
-            # stays prose, as its own test pins.
-            if Path(path).suffix == ".md" and not _is_package_prompt(path):
+            # Keyed on the `prompts/` segment (or the `skills/` tree) rather
+            # than on the asset prefixes themselves, because the package and
+            # fixture prefixes also cover genuine prose: `test-tools/README.md`
+            # is documentation of the fixture bundles and stays prose, as its
+            # own test pins.
+            if Path(path).suffix == ".md" and not _is_shipped_asset_markdown(path):
                 if not any(
                     path.startswith(f"{directory}/")
                     for directory in package_directories
@@ -898,6 +988,7 @@ def build_plan(
         or root_partitions
         or integration_lanes
         or qa_evidence_changed
+        or run_sandbox_docker
     )
     return {
         "mode": "selected" if active else "none",
@@ -911,6 +1002,7 @@ def build_plan(
         ),
         "run_group_tests": False,
         "run_qa_replay": run_qa_replay,
+        "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",
     }
 

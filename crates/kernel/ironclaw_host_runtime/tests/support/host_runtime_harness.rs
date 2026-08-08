@@ -1879,7 +1879,7 @@ pub(crate) fn hosted_dev_runtime_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,

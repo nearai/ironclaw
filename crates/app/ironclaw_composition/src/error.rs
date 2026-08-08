@@ -93,8 +93,8 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::ProductionWiring { report } => {
                 Self::ProductionWiring { report }
             }
-            error @ crate::RebornCompositionError::MissingTenantSandboxProcessPort
-            | error @ crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort { .. } => {
+            error @ crate::RebornCompositionError::MissingUserSandboxProcessPort
+            | error @ crate::RebornCompositionError::UnexpectedUserSandboxProcessPort { .. } => {
                 Self::InvalidConfig {
                     reason: error.to_string(),
                 }
@@ -115,25 +115,25 @@ mod tests {
     }
 
     #[test]
-    fn composition_missing_tenant_sandbox_process_port_becomes_invalid_config() {
+    fn composition_missing_user_sandbox_process_port_becomes_invalid_config() {
         let error =
-            RebornBuildError::from(crate::RebornCompositionError::MissingTenantSandboxProcessPort);
+            RebornBuildError::from(crate::RebornCompositionError::MissingUserSandboxProcessPort);
 
         assert!(
-            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production tenant-sandbox process backend requires a tenant sandbox process binding")
+            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production user-sandbox process backend requires a user sandbox process binding")
         );
     }
 
     #[test]
-    fn composition_unexpected_tenant_sandbox_process_port_becomes_invalid_config() {
+    fn composition_unexpected_user_sandbox_process_port_becomes_invalid_config() {
         let error = RebornBuildError::from(
-            crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort {
+            crate::RebornCompositionError::UnexpectedUserSandboxProcessPort {
                 process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::LocalHost,
             },
         );
 
         assert!(
-            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production runtime policy uses LocalHost but a tenant sandbox process binding was supplied")
+            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production runtime policy uses LocalHost but a user sandbox process binding was supplied")
         );
     }
 

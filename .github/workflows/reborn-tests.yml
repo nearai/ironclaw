@@ -95,6 +95,7 @@ jobs:
       integration_lanes: ${{ steps.plan.outputs.integration_lanes }}
       run_coverage: ${{ steps.plan.outputs.run_coverage }}
       run_qa_replay: ${{ steps.plan.outputs.run_qa_replay }}
+      run_sandbox_docker: ${{ steps.plan.outputs.run_sandbox_docker }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -141,6 +142,7 @@ jobs:
               and .integration_lanes == [0, 1, 2, 3, "groups"]
               and .run_group_tests == true
               and .run_qa_replay == true
+              and .run_sandbox_docker == true
               and .coverage_mode == "full"
             )
           ' <<< "${plan}" > /dev/null; then
@@ -155,6 +157,7 @@ jobs:
             echo "- Crate buckets: $(jq -r '.crate_buckets | length' <<< "${plan}")"
             echo "- Root partitions: $(jq -c '.root_partitions' <<< "${plan}")"
             echo "- Integration lanes: $(jq -c '.integration_lanes' <<< "${plan}")"
+            echo "- Sandbox Docker: $(jq -r '.run_sandbox_docker' <<< "${plan}")"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "plan_mode=$(jq -r '.mode' <<< "${plan}")" >> "$GITHUB_OUTPUT"
@@ -177,6 +180,7 @@ jobs:
           fi
           echo "run_coverage=${run_coverage}" >> "$GITHUB_OUTPUT"
           echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "run_sandbox_docker=$(jq -r '.run_sandbox_docker' <<< "${plan}")" >> "$GITHUB_OUTPUT"
 
           scripts/ci/check-test-suite-boundaries.sh
           scripts/ci/test-reborn-changed-coverage.sh
@@ -611,6 +615,52 @@ jobs:
 
       - name: Run Reborn group tests
         run: scripts/ci/run-hermetic-deterministic-suite.sh groups
+
+  sandbox-docker-tests:
+    name: Reborn user-sandbox Docker tests
+    needs: changes
+    if: needs.changes.outputs.run_sandbox_docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ""
+      IRONCLAW_REQUIRE_DOCKER_TESTS: "1"
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: reborn-sandbox-docker-tests
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Build Python sandbox worker
+        run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
+
+      - name: Verify production local-sandbox profile wiring
+        run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
+
+      - name: Run real-Docker user sandbox contract
+        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
+
+      - name: Run full-turn sandbox shell integration
+        run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
 
   reborn-integration-coverage:
     name: Reborn integration tests (${{ matrix.lane }})
@@ -1077,6 +1127,7 @@ jobs:
       - coverage-report
       - critical-mutation
       - qa-recorded-fixtures
+      - sandbox-docker-tests
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1110,7 +1161,8 @@ jobs:
             "${{ needs.changes.outputs.run_group_tests }}" \
             "${{ needs.changes.outputs.run_integration_tests }}" \
             "${{ needs.changes.outputs.run_coverage }}" \
-            "${{ needs.changes.outputs.run_qa_replay }}"; do
+            "${{ needs.changes.outputs.run_qa_replay }}" \
+            "${{ needs.changes.outputs.run_sandbox_docker }}"; do
             if [[ "${flag}" != "true" && "${flag}" != "false" ]]; then
               echo "Missing or invalid Reborn test plan flag: '${flag}'"
               exit 1
@@ -1123,7 +1175,8 @@ jobs:
               "${{ needs.changes.outputs.run_root_tests }}" \
               "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
-              "${{ needs.changes.outputs.run_qa_replay }}"; do
+              "${{ needs.changes.outputs.run_qa_replay }}" \
+              "${{ needs.changes.outputs.run_sandbox_docker }}"; do
               if [[ "${flag}" != "true" ]]; then
                 echo "Full Reborn plan omitted a required lane"
                 exit 1
@@ -1175,6 +1228,9 @@ jobs:
           check_planned_job "qa-recorded-fixtures" \
             "${{ needs.qa-recorded-fixtures.result }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"
+          check_planned_job "sandbox-docker-tests" \
+            "${{ needs.sandbox-docker-tests.result }}" \
+            "${{ needs.changes.outputs.run_sandbox_docker }}"
 
           mutation_expected=${{ github.event_name == 'merge_group' }}
           check_planned_job "critical-mutation" \

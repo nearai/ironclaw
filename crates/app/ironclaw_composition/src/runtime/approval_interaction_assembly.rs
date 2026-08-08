@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct RegistryPersistentApprovalGranteeResolver {
     registry: Arc<ExtensionRegistry>,
-    outbound_delivery_target_set_provider: ExtensionId,
+    notification_channels_set_provider: ExtensionId,
 }
 
 impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
@@ -10,9 +10,9 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
         if let Some(descriptor) = self.registry.get_capability(capability_id) {
             return Some(Principal::Extension(descriptor.provider.clone()));
         }
-        if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+        if capability_id.as_str() == OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID {
             return Some(Principal::Extension(
-                self.outbound_delivery_target_set_provider.clone(),
+                self.notification_channels_set_provider.clone(),
             ));
         }
         None
@@ -21,13 +21,15 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
 
 impl RegistryPersistentApprovalGranteeResolver {
     pub(super) fn new(registry: Arc<ExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
-        let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+        let notification_channels_set_provider =
+            outbound_delivery_synthetic_provider().map_err(|error| {
+                RebornRuntimeError::InvalidArgument {
+                    reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+                }
             })?;
         Ok(Self {
             registry,
-            outbound_delivery_target_set_provider,
+            notification_channels_set_provider,
         })
     }
 }

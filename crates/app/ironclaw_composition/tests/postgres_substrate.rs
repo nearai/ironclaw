@@ -104,7 +104,7 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
             process_local_resource_governor_singleton: true,
             secret_master_key: Some(SecretString::from("too-short")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
                 production_runtime_policy(),
                 sandbox_process_port(),
             )
@@ -143,7 +143,7 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
             process_local_resource_governor_singleton: true,
             secret_master_key: None,
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
                 production_runtime_policy(),
                 sandbox_process_port(),
             )
@@ -177,7 +177,7 @@ async fn postgres_substrate_builder_rejects_without_singleton_resource_governor_
             process_local_resource_governor_singleton: false,
             secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
                 production_runtime_policy(),
                 sandbox_process_port(),
             )
@@ -199,7 +199,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedSafe,
         resolved_profile: RuntimeProfile::HostedSafe,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Brokered,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
@@ -220,7 +220,7 @@ async fn build_postgres_test_services(
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
             production_runtime_policy(),
             sandbox_process_port(),
         )
@@ -232,8 +232,8 @@ async fn build_postgres_test_services(
     .unwrap()
 }
 
-fn sandbox_process_port() -> Arc<ironclaw_host_runtime::TenantSandboxProcessPort> {
-    Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+fn sandbox_process_port() -> Arc<ironclaw_host_runtime::UserSandboxProcessPort> {
+    Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
         Arc::new(RecordingSandboxTransport),
     ))
 }

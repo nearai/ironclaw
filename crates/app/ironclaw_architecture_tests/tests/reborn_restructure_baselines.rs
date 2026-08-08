@@ -118,11 +118,17 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
 /// messaging framework, which landed through the queue's tolerance window;
 /// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`.
-/// ✎ Re-equalized 2026-08-07 (gate audit): + 101 of merged main-side growth
-/// through the tolerance window since 08-05 had left 49 LOC of live headroom;
-/// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`,
-/// restoring the designed 150-LOC working window.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_524;
+/// ✎ Re-recorded 40_423 → 40_692 on 2026-08-07 for #7157: the one-time
+/// stored-trigger delivery migration runs in boot sequencing, while the
+/// notification-channel capability split and delivery wiring preserve their
+/// mediated owners. Measured on the merged tree; the manifest ceiling and
+/// observed value move with this record so the increase is explicit.
+/// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
+/// delivery refactor with #7214's sandbox profile and binding assembly.
+/// ✎ Union re-measured on the #7373 merge (2026-08-08): the gate audit's
+/// independent re-equalization (40_423 → 40_524, same drift class) folds into
+/// the merged-tree figure, recorded with `[gate].loc_ceiling`/`loc_observed`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_804;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

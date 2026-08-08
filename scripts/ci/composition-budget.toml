@@ -66,8 +66,8 @@ tolerance_bp = 30
 # Informational — the observed share when this file was last updated. Lets a
 # reviewer see the baseline and lets the gate emit a down-ratchet nudge. Not
 # consulted for the pass/fail decision.
-observed_bp = 571
-observed_date = "2026-08-07"
+observed_bp = 572
+observed_date = "2026-08-08"
 
 # --- Absolute mass (production LOC) ---------------------------------------
 # The BINDING mass bound. Same numerator as the share metric — production `.rs`
@@ -138,14 +138,28 @@ observed_date = "2026-08-07"
 # Re-equalized 40419 -> 40423 on 2026-08-05 (program closure): #6831 (standardized
 # messaging framework) added 4 governed LOC through the queue's tolerance window;
 # ceiling, observed, and the arch-test record move together in this commit.
-# Re-equalized 40423 -> 40524 on 2026-08-07 (gate audit): +101 LOC of merged
-# main-side growth had drifted through the tolerance window since the 08-05
-# equalization, leaving 49 LOC of live headroom — the next routine composition
-# PR would have gone red on wiring alone. Measured with
-# `bash scripts/ci/check-composition-budget.sh --print`; ceiling, observed, and
-# the arch-test record move together in this commit, restoring the designed
-# 150-LOC working window. Not padded: set to current.
-loc_ceiling = 40524
+# Re-seeded 40423 -> 40692 on 2026-08-07 for #7157: the one-time stored-trigger
+# delivery migration must run in boot sequencing, and the notification-channel
+# capability split plus delivery wiring keep their existing mediated owners.
+# Measured on the merged tree with this gate; the 269-line increase is recorded
+# explicitly rather than hidden inside the 150-line working tolerance.
+#
+# Re-ratcheted DOWN 40692 -> 40432 on 2026-08-07, same PR, after the review-fix
+# round: per-record migration quarantine added production lines and tripped the
+# absolute ceiling, so `runtime/approval.rs`'s 417-line inline `#[cfg(test)]`
+# module was split verbatim into `runtime/approval/tests.rs` — the carve-out
+# Phase 0 this file blesses — rather than raising the ceiling to absorb it. Net
+# effect is a smaller composition than before the fixes. Measured on this tree
+# with `bash scripts/ci/check-composition-budget.sh`.
+# Union re-measured 40432 -> 40747 on 2026-08-07 after merging #7157's delivery
+# refactor with #7214's sandbox profile and binding assembly.
+# Union re-measured on the #7373 merge (2026-08-08): the gate-audit branch had
+# independently re-equalized 40423 -> 40524 for the same drift class before
+# #7157's chain (40692 -> 40432 -> 40747) landed; both chains fold into the
+# merged-tree measure below (40804 on the #7373 merge), set to current, not padded. The recurrence class
+# itself is repaired in this PR: the contracts size gate now carries upward
+# working slack, and this file's loc_tolerance keeps doing that job here.
+loc_ceiling = 40804
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -156,8 +170,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40524
-loc_observed_date = "2026-08-07"
+loc_observed = 40804
+loc_observed_date = "2026-08-08"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
@@ -191,6 +205,9 @@ loc_observed_date = "2026-08-07"
 # leaving 10 sites of live headroom. Measured with the gate's --print; set to
 # current, not padded; the WS0 record (827) stays within the effective
 # ceiling (834).
-arc_dyn_ceiling = 819
+# 2026-08-08 (#7373 merge): union re-measured 819 -> 826 — the folded #7157
+# delivery lane and siblings carry 7 more governed sites. Set to current; the
+# WS0 record (827) stays within the effective ceiling (841).
+arc_dyn_ceiling = 826
 arc_dyn_tolerance = 15
-arc_dyn_observed = 819
+arc_dyn_observed = 826
