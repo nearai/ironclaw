@@ -147,6 +147,23 @@ test("only a complete statistics record decodes into session accumulation", () =
   assert.ok(
     decodeSessionDiagnosticStats({ ...complete, calls_per_model: [{ model, calls: 0 }] }),
   );
+
+  // The host truncates the breakdown at 64 and flags it, so a longer array is
+  // rejected before it is scanned or retained. 64 exactly still decodes.
+  const entry = { model, calls: 1 };
+  assert.ok(
+    decodeSessionDiagnosticStats({
+      ...complete,
+      calls_per_model: Array.from({ length: 64 }, () => entry),
+    }),
+  );
+  assert.equal(
+    decodeSessionDiagnosticStats({
+      ...complete,
+      calls_per_model: Array.from({ length: 65 }, () => entry),
+    }),
+    null,
+  );
   assert.equal(
     decodeSessionDiagnosticStats({ ...complete, total_tool_calls: "3" }),
     null,

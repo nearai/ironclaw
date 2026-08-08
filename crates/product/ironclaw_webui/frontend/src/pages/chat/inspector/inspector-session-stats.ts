@@ -20,6 +20,14 @@ export interface SessionDiagnosticStats {
   total_latency_ms: DiagnosticMetricTotal;
 }
 
+/**
+ * Per-run breakdown ceiling, mirroring `MAX_MODELS_IN_STATS` in
+ * `ironclaw_product_contracts::inspector`. The host truncates to this length
+ * and reports `calls_per_model_truncated`, so a longer array cannot be a
+ * contract-conforming response.
+ */
+const MAX_STATS_MODELS = 64;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -62,12 +70,19 @@ export function decodeSessionDiagnosticStats(
   if (!isRecord(value)) return null;
   if (!isCount(value.total_model_calls)) return null;
   if (typeof value.calls_per_model_truncated !== "boolean") return null;
-  // Every breakdown entry, not just the array: a negative or non-integer
-  // `calls` would otherwise survive decoding and be coerced to 0 during
-  // accumulation without marking the breakdown truncated, presenting a
-  // fabricated "0 calls" for a model the host never reported that way.
+  // Bound the breakdown before scanning or retaining it. The host truncates to
+  // MAX_STATS_MODELS and sets `calls_per_model_truncated`, so a longer array is
+  // outside the contract by construction — reject it rather than scan every
+  // entry and hand the oversized array to `record`, which retains the record
+  // for up to MAX_ACTIVE_RUN_STATS runs.
+  //
+  // Then every entry, not just the array: a negative or non-integer `calls`
+  // would otherwise survive decoding and be coerced to 0 during accumulation
+  // without marking the breakdown truncated, presenting a fabricated "0 calls"
+  // for a model the host never reported that way.
   if (
     !Array.isArray(value.calls_per_model)
+    || value.calls_per_model.length > MAX_STATS_MODELS
     || !value.calls_per_model.every(isCallsPerModelEntry)
   ) {
     return null;
