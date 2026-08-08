@@ -142,8 +142,10 @@ the bot answers each participant as themselves — there is no shared subject
 user or per-channel subject route to assign, and each shared-channel message
 runs as the Slack user who sent it. Users separately install Slack from
 Extensions and complete their own OAuth flow to pair; an unpaired participant
-in an allowed shared channel gets a pairing prompt instead of a reply, and
-that personal membership and credential state does not mutate the operator
+in an allowed shared channel gets no reply at all (the bot never posts a
+one-person pairing prompt into a shared room — pairing happens through
+Extensions, and direct messages still offer the connect prompt), and that
+personal membership and credential state does not mutate the operator
 configuration.
 
 Shared Slack channels not listed in `slack_allowed_channels` fail closed

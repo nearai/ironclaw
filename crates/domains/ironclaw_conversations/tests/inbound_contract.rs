@@ -385,13 +385,14 @@ async fn stored_reply_target_revalidates_durable_run_authority_and_revocation() 
 }
 
 #[tokio::test]
-async fn stored_shared_reply_allows_participant_but_not_authority_bearing_prompt() {
+async fn stored_shared_reply_target_resolves_both_access_kinds_only_for_its_own_actor() {
+    // The origin actor resolves BOTH access kinds on their own stored reply
+    // target, and another actor resolves NEITHER on someone else's.
+    //
     // MORPHED with the per-actor shared-thread model (a run acts as its
     // invoker): a shared conversation no longer holds one widened binding
     // whose non-origin participants may ordinary-reply. Each actor owns their
-    // own row, so the origin actor resolves BOTH access kinds on their own
-    // stored reply target, and another actor resolves NEITHER on someone
-    // else's — the authority-prompt protection this test pinned became
+    // own row, so the authority-prompt protection this test pinned became
     // per-actor isolation.
     let services = InMemoryConversationServices::default();
     let alice_actor = external_actor("stored-shared-alice");

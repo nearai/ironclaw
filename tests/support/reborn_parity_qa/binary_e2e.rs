@@ -326,16 +326,16 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         // The production capability port resolves the dispatch scope
-        // owner-first from the turn's real binding subject (this harness
+        // owner-first from the turn's real binding actor (this harness
         // submits as the fixed `"alice"` actor, not the profile's default
         // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
         // setting must be seeded under that SAME resolved subject or the
         // gate never raises -- mirrors
         // `with_host_runtime_extension_lifecycle_capabilities`.
-        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        let actor_user = Self::resolve_default_binding_actor_user(conversation_id).await?;
         let host_runtime = Arc::new(
             crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
-                subject_user.as_str(),
+                actor_user.as_str(),
             )?
             .build()
             .await?,
@@ -433,7 +433,7 @@ impl RebornBinaryE2EHarness {
         // resolves to — extension_remove reads ownership under that actor, so a
         // fixed profile user makes install-then-remove see "never installed".
         // Mirrors `build_group_capability_with_base` in the group harness.
-        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        let actor_user = Self::resolve_default_binding_actor_user(conversation_id).await?;
         // Google-OAuth-CONFIGURED variant deliberately, matching the Slack
         // treatment in `harness/mod.rs`: this tier never represents a
         // provider-unconfigured instance. The base profile already seeds a
@@ -454,7 +454,7 @@ impl RebornBinaryE2EHarness {
         // (non-configured) profile via `group_constructors.rs`.
         let host_runtime = Arc::new(
             crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user(
-                subject_user.as_str(),
+                actor_user.as_str(),
             )?
             .build()
             .await?,
@@ -476,7 +476,7 @@ impl RebornBinaryE2EHarness {
     /// harness/backend): a run acts as the user who invoked it, so the
     /// binding's actor is exactly what the real turn's binding resolves to
     /// later.
-    async fn resolve_default_binding_subject_user(
+    async fn resolve_default_binding_actor_user(
         conversation_id: &str,
     ) -> HarnessResult<ironclaw_host_api::ids::UserId> {
         let ingress = RebornTestIngress::new("reborn-test", "install-1")?;

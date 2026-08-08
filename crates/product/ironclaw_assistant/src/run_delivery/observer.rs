@@ -1,3 +1,4 @@
+// arch-exempt: large_file, live source-route delivery loop pending the run_delivery split, plan #6175
 //! The live source-route half of run delivery: watch the run an inbound
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].

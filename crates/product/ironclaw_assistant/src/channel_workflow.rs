@@ -82,8 +82,10 @@ const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 
 /// The deployment identity every per-extension workflow binds under: the
-/// composed runtime's tenant/agent/project plus the operator user inbound
-/// conversations default their subject to.
+/// composed runtime's tenant/agent/project plus the fallback operator user
+/// host-initiated work is attributed to (notice-thread scopes, the durable
+/// idempotency-ledger scope). Inbound conversations run as their invoking
+/// actor, not this user.
 #[derive(Clone)]
 pub struct ChannelWorkflowIdentity {
     pub tenant_id: TenantId,

@@ -5113,6 +5113,47 @@ async fn shared_admission_gates_every_resolve_without_rebuilding_scope() {
         .await
         .expect("existing admitted binding keeps resolving");
     assert_eq!(again.thread_id, resolved.thread_id);
+
+    // Reset is the THIRD admission checkpoint (resolve, lookup, reset): a
+    // disconnected shared conversation must refuse the reset BEFORE any
+    // pairing write or thread rotation. Deleting the reset-side
+    // `ensure_shared_route_admitted` call is exactly the sabotage this leg
+    // exists to catch — before it, no test drove reset on a Shared route.
+    admission.clear_admitted();
+    let reset_error = binding
+        .reset_binding(ResetBindingRequest {
+            resolve_request: ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-reset",
+                "/new",
+                "C-eng",
+                "msg-3",
+            )),
+            expected_thread_id: again.thread_id.clone(),
+        })
+        .await
+        .expect_err("a disconnected shared conversation must not reset");
+    assert!(matches!(
+        reset_error,
+        ProductOperationFailure::BindingRequired { reason }
+            if reason.contains("not connected")
+    ));
+
+    // And the failed reset rotated nothing: re-admitting resolves the same
+    // thread the actor already owned.
+    admission.set_admitted();
+    let after_failed_reset = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&shared_envelope(
+            "shared-admission-gate-3",
+            "still my thread",
+            "C-eng",
+            "msg-4",
+        )))
+        .await
+        .expect("re-admitted conversation resolves");
+    assert_eq!(
+        after_failed_reset.thread_id, again.thread_id,
+        "a denied reset must leave the binding on its original thread"
+    );
     assert_eq!(again.actor_user_id.as_str(), "user:alice");
 
     // Event-route integrity survives the remodel: replaying an event id
@@ -5131,14 +5172,16 @@ async fn shared_admission_gates_every_resolve_without_rebuilding_scope() {
         ProductOperationFailure::BindingAccessDenied
     ));
 
-    // The resolver saw every attempt with unswapped fields.
+    // The resolver saw every attempt with unswapped fields: deny, admit,
+    // continuity resolve, the denied reset, the post-reset resolve, and the
+    // C-ops route-mismatch probe.
     let calls = admission.calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 6);
     assert_eq!(calls[0].adapter_id.as_str(), "test_adapter");
     assert_eq!(calls[0].installation_id.as_str(), "install_alpha");
     assert_eq!(calls[0].route_key.space_id(), Some("T-team"));
     assert_eq!(calls[0].route_key.conversation_id(), "C-eng");
-    assert_eq!(calls[3].route_key.conversation_id(), "C-ops");
+    assert_eq!(calls[5].route_key.conversation_id(), "C-ops");
 
     // Disconnecting stops the EXISTING binding immediately: resolve and
     // lookup both fail closed even though the thread already exists.

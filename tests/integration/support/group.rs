@@ -779,7 +779,7 @@ impl RebornIntegrationGroup {
 /// group_constructors` declaration above), so the fields stay private and the
 /// per-capability preset constructors there — including their own
 /// `build_group_capability_with_base` helper, which calls
-/// `canonical_subject_user()` — take/return this type as the opaque handoff
+/// `canonical_actor_user()` — take/return this type as the opaque handoff
 /// between `build_base` and `into_group`; `build_base`/`into_group` themselves
 /// stay module-private too.
 struct GroupBaseData {
@@ -792,7 +792,7 @@ struct GroupBaseData {
     /// group-level `ThreadScope`. Every thread in a group shares `(tenant,
     /// agent, project)` — only `thread_id` varies, and `ThreadScope` has no
     /// `thread_id` field — so this binding is a valid stand-in for the whole
-    /// group. `group_constructors.rs` reads tenant/subject user off this
+    /// group. `group_constructors.rs` reads tenant/actor user off this
     /// field directly (module-private; it's a child module of `group`).
     canonical_binding: ResolvedBinding,
 }
@@ -805,7 +805,7 @@ impl GroupBaseData {
     /// run's `(tenant, user)` with the turn-store / evidence scope resolved
     /// from the SAME `canonical_binding` (see the `canonical_binding` field
     /// docs above).
-    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
+    fn canonical_actor_user(&self) -> HarnessResult<UserId> {
         Ok(self.canonical_binding.actor_user_id.clone())
     }
 }
@@ -1069,12 +1069,12 @@ impl RebornIntegrationGroupBuilder {
         // (a second, independent computation could silently drift from what
         // the sink actually observes if either recipe changes).
         let trace_capture = if self.trace_capture {
-            let subject_user = base.canonical_subject_user()?;
+            let actor_user = base.canonical_actor_user()?;
             let (sink, scope) =
                 ironclaw_composition::test_support::trace_capture_turn_event_sink_for_test(
                     group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
                     base.canonical_binding.tenant_id.as_str(),
-                    subject_user.as_str(),
+                    actor_user.as_str(),
                 );
             Some((sink, scope))
         } else {
@@ -1166,7 +1166,7 @@ impl RebornIntegrationGroupBuilder {
             );
             let account = ResourceAccount::user(
                 base.canonical_binding.tenant_id.clone(),
-                base.canonical_subject_user()?,
+                base.canonical_actor_user()?,
             );
             (Some(accountant), Some(governor), Some(account))
         } else {
