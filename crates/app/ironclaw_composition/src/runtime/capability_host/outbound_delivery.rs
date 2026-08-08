@@ -246,8 +246,8 @@ fn invocation_effective_input_ref(
 /// the actor stays authoritative for the runs persisted before it.
 ///
 /// The same acting identity scopes the whole approval-gate dance
-/// ([`resource_scope_for_run`], [`settings_scope_for_run`],
-/// [`base_resource_scope_for_run`]): every store the dance touches is
+/// ([`LoopRunContext::acting_resource_scope`] via [`resource_scope_for_run`],
+/// plus [`settings_scope_for_run`]): every store the dance touches is
 /// scope-keyed, and a raise and its resume must derive the same scope or the
 /// approved capability strands. The owner-first split #7157 shipped here as an
 /// interim is gone; the raise/resume coverage that unification required is
@@ -260,46 +260,23 @@ pub(super) fn caller_for_run(
 ) -> ProductSurfaceCaller {
     ProductSurfaceCaller::new(
         invocation.run_context.scope.tenant_id.clone(),
-        acting_user_id(&invocation.run_context, fallback_user_id),
+        invocation.run_context.acting_user_id(fallback_user_id),
         invocation.run_context.scope.agent_id.clone(),
         invocation.run_context.scope.project_id.clone(),
     )
 }
 
-/// The authenticated actor driving this run, falling back to the thread owner
-/// only when the run carries no actor at all (a host-initiated run), and to the
-/// configured fallback when it carries neither. Delegates to the one contract
-/// derivation — the resume-side replay load in `ironclaw_loop_host`'s
-/// synthetic-capability wrap keys by the same ladder, and the two must never
-/// drift apart.
-fn acting_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
-    run_context.acting_user_id(fallback_user_id)
-}
-
+/// [`LoopRunContext::acting_resource_scope`] with the capability invocation's
+/// own id in place of the run's — the shape the gate-record store is keyed by.
+///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
 pub(super) fn resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
     invocation_id: InvocationId,
 ) -> ResourceScope {
-    let mut scope = base_resource_scope_for_run(run_context, fallback_user_id);
+    let mut scope = run_context.acting_resource_scope(fallback_user_id);
     scope.invocation_id = invocation_id;
-    scope
-}
-
-/// The acting-user resource scope with the run's own invocation id — the
-/// identity the replay-payload and gate-record stores are keyed by. Split from
-/// [`resource_scope_for_run`] (which overrides the invocation id with the
-/// capability invocation's) so every store in one gate dance derives the same
-/// user from one function.
-///
-/// `pub(super)`: called from the sibling `notification_channels_set` module.
-pub(super) fn base_resource_scope_for_run(
-    run_context: &LoopRunContext,
-    fallback_user_id: &UserId,
-) -> ResourceScope {
-    let mut scope = run_context.scope.to_resource_scope();
-    scope.user_id = acting_user_id(run_context, fallback_user_id);
     scope
 }
 
@@ -310,7 +287,7 @@ pub(super) fn settings_scope_for_run(
 ) -> ResourceScope {
     ResourceScope {
         tenant_id: run_context.scope.tenant_id.clone(),
-        user_id: acting_user_id(run_context, fallback_user_id),
+        user_id: run_context.acting_user_id(fallback_user_id),
         agent_id: None,
         project_id: None,
         mission_id: None,
@@ -897,7 +874,7 @@ mod tests {
 
         let with_actor = run_context_for_test(scope.clone(), Some(actor.clone()));
         assert_eq!(
-            acting_user_id(&with_actor, &fallback),
+            with_actor.acting_user_id(&fallback),
             actor,
             "a shared-channel participant acts as themselves"
         );
@@ -907,7 +884,7 @@ mod tests {
             "the approval-gate raise is scoped to the acting user"
         );
         assert_eq!(
-            base_resource_scope_for_run(&with_actor, &fallback).user_id,
+            with_actor.acting_resource_scope(&fallback).user_id,
             actor,
             "the replay-payload/gate-record scope matches the raise scope's user"
         );
@@ -920,7 +897,7 @@ mod tests {
         // A host-initiated run carries no actor: fall back to the owner, not to
         // the configured fallback identity.
         let actorless = run_context_for_test(scope, None);
-        assert_eq!(acting_user_id(&actorless, &fallback), owner);
+        assert_eq!(actorless.acting_user_id(&fallback), owner);
         assert_eq!(
             resource_scope_for_run(&actorless, &fallback, InvocationId::new()).user_id,
             owner,

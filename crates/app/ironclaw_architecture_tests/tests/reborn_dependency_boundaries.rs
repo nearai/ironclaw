@@ -665,7 +665,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // #7361/#7363 added +66 lines to `instruction_bundle.rs`, folded
         // in when this branch merged main. Not growth from this PR; count
         // read from this test's own failure message after the merge.
-        ("ironclaw_loop_contracts", 13_094),
+        // 13_094 -> 13_107 (2026-08-08, run-acts-as-invoker review
+        // hardening): +13 lines for `LoopRunContext::acting_resource_scope`
+        // — the raise/resume scope recipe both gate-dance crates previously
+        // hand-synced now lives once on the contract type (its callers in
+        // composition and loop_host DELETED their copies). Reason recorded
+        // in the PR body; count read from this test's failure message.
+        ("ironclaw_loop_contracts", 13_107),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

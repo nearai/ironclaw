@@ -43,10 +43,10 @@ use super::outbound_delivery::{
     ApprovedDispatchLease, ApprovedResumeDecision, OutboundDeliveryApprovalSettingsDecision,
     OutboundPreferenceOperation, approval_denied, approval_fingerprint, approval_gate_ref,
     approval_lease_outcome, approval_request_matches_capability, approval_store_error,
-    base_resource_scope_for_run, caller_for_run, input_error, invocation_id_from_resume_token,
-    invocation_replay_input, outbound_delivery_outcome, outbound_delivery_synthetic_grantee,
-    replay_payload_store_error, resource_scope_for_run, resume_token_from_invocation_id,
-    settings_scope_for_run, write_completed_result,
+    caller_for_run, input_error, invocation_id_from_resume_token, invocation_replay_input,
+    outbound_delivery_outcome, outbound_delivery_synthetic_grantee, replay_payload_store_error,
+    resource_scope_for_run, resume_token_from_invocation_id, settings_scope_for_run,
+    write_completed_result,
 };
 use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_assistant::{
@@ -262,7 +262,9 @@ impl NotificationChannelsSetHandler {
         let fingerprint = approval_fingerprint(&scope, &capability_id, &estimate, input)?;
         self.replay_payload_store
             .save(
-                base_resource_scope_for_run(&invocation.run_context, &self.fallback_user_id),
+                invocation
+                    .run_context
+                    .acting_resource_scope(&self.fallback_user_id),
                 invocation_id,
                 ironclaw_capabilities::ReplayPayload {
                     input: input.clone(),
@@ -308,7 +310,9 @@ impl NotificationChannelsSetHandler {
             })?;
         self.gate_record_store
             .save(
-                base_resource_scope_for_run(&invocation.run_context, &self.fallback_user_id),
+                invocation
+                    .run_context
+                    .acting_resource_scope(&self.fallback_user_id),
                 GateRef::for_approval_request(approval_request_id),
                 GateRecord::Approval {
                     summary: gate_summary,
@@ -338,8 +342,9 @@ impl NotificationChannelsSetHandler {
     ) -> Result<ApprovedResumeDecision, AgentLoopHostError> {
         let capability_id = notification_channels_set_capability_id()?;
         let invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
-        let replay_scope =
-            base_resource_scope_for_run(&invocation.run_context, &self.fallback_user_id);
+        let replay_scope = invocation
+            .run_context
+            .acting_resource_scope(&self.fallback_user_id);
         let replay = self
             .replay_payload_store
             .load(&replay_scope, invocation_id)

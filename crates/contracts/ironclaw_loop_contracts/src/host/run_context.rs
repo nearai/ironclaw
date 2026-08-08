@@ -2,6 +2,7 @@
 //! [`LoopRunContext`] carried across every port, and the run-info port.
 
 use ironclaw_host_api::ids::{ThreadId, UserId};
+use ironclaw_host_api::resource::ResourceScope;
 use serde::{Deserialize, Serialize};
 
 use crate::refs::{CheckpointSchemaId, LoopDriverId};
@@ -303,6 +304,18 @@ impl LoopRunContext {
             .map(|actor| actor.user_id.clone())
             .or_else(|| self.scope.explicit_owner_user_id().cloned())
             .unwrap_or_else(|| fallback_user_id.clone())
+    }
+
+    /// The acting-user resource scope: the run's scope projected to a
+    /// [`ResourceScope`] whose user is [`Self::acting_user_id`]. The raise-side
+    /// gate-dance stores (`ironclaw_composition`) and the resume-side replay
+    /// load (`ironclaw_loop_host`) both key by THIS derivation; it lives on the
+    /// contract type for the same reason as the ladder itself — the two sides
+    /// were previously byte-identical copies kept matched only by comments.
+    pub fn acting_resource_scope(&self, fallback_user_id: &UserId) -> ResourceScope {
+        let mut scope = self.scope.to_resource_scope();
+        scope.user_id = self.acting_user_id(fallback_user_id);
+        scope
     }
 
     pub fn with_resolved_model_route(mut self, snapshot: LoopModelRouteSnapshot) -> Self {

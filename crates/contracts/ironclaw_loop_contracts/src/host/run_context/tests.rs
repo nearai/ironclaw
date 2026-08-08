@@ -99,3 +99,80 @@ fn advisory_model_route_trims_and_rejects_empty_or_invalid_models() {
         Some("claude-opus-4-6".to_string())
     );
 }
+
+mod acting_identity_ladder {
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+    use ironclaw_host_api::turn::{RunProfileId, TurnThreadOwner};
+
+    use super::*;
+
+    fn ladder_context(owner: Option<&str>, actor: Option<&str>) -> LoopRunContext {
+        let mut scope = TurnScope::new(
+            TenantId::new("tenant-ladder").unwrap(),
+            Some(AgentId::new("agent-ladder").unwrap()),
+            Some(ProjectId::new("project-ladder").unwrap()),
+            ThreadId::new("thread-ladder").unwrap(),
+        );
+        scope.thread_owner =
+            TurnThreadOwner::explicit(owner.map(|owner| UserId::new(owner).unwrap()));
+        let resolved = ResolvedRunProfile::legacy_compatibility(
+            RunProfileId::interactive_default(),
+            RunProfileVersion::new(1),
+            true,
+        );
+        let context = LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved);
+        match actor {
+            Some(actor) => context.with_actor(TurnActor::new(UserId::new(actor).unwrap())),
+            None => context,
+        }
+    }
+
+    fn fallback() -> UserId {
+        UserId::new("user-configured-fallback").unwrap()
+    }
+
+    /// The one contract ladder every scope-keyed gate-dance store keys by:
+    /// actor first, explicit thread owner second, configured fallback last.
+    #[test]
+    fn acting_user_id_prefers_actor_then_owner_then_configured_fallback() {
+        let actor_wins = ladder_context(Some("user-owner"), Some("user-actor"));
+        assert_eq!(
+            actor_wins.acting_user_id(&fallback()),
+            UserId::new("user-actor").unwrap(),
+            "an authenticated actor is the identity the run acts as"
+        );
+
+        let owner_when_actorless = ladder_context(Some("user-owner"), None);
+        assert_eq!(
+            owner_when_actorless.acting_user_id(&fallback()),
+            UserId::new("user-owner").unwrap(),
+            "a host-initiated run falls back to the thread's explicit owner"
+        );
+
+        let fallback_when_neither = ladder_context(None, None);
+        assert_eq!(
+            fallback_when_neither.acting_user_id(&fallback()),
+            fallback(),
+            "no actor and no explicit owner resolves to the configured fallback"
+        );
+    }
+
+    /// The scope projection both gate-dance sides key their stores by: the
+    /// run's resource scope with `user_id` swapped for the acting user.
+    #[test]
+    fn acting_resource_scope_carries_the_acting_user_over_the_run_scope() {
+        let context = ladder_context(Some("user-owner"), Some("user-actor"));
+        let scope = context.acting_resource_scope(&fallback());
+        assert_eq!(scope.user_id, UserId::new("user-actor").unwrap());
+        assert_eq!(scope.tenant_id, context.scope.tenant_id);
+        assert_eq!(scope.agent_id, context.scope.agent_id);
+        assert_eq!(scope.project_id, context.scope.project_id);
+
+        let ownerless = ladder_context(None, None);
+        assert_eq!(
+            ownerless.acting_resource_scope(&fallback()).user_id,
+            fallback(),
+            "the resource scope's user follows the same three-rung ladder"
+        );
+    }
+}

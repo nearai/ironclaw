@@ -234,15 +234,22 @@ mod tests {
         assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
     }
 
+    /// Pin changed with the run-acts-as-invoker unification (#7377): the
+    /// runtime scope previously derived owner-first (this test pinned the
+    /// explicit owner beating the actor). Grants, mounts, and the gate dance
+    /// now all key off `LoopRunContext::acting_user_id`, so on the only run
+    /// shape where the two differ — a legacy owner≠actor run parked across
+    /// the deploy — the ACTOR is authoritative, matching its gates and
+    /// settings instead of splitting one run across two identities.
     #[tokio::test]
-    async fn visible_capability_request_uses_explicit_subject_for_runtime_scope() {
-        let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
+    async fn visible_capability_request_uses_acting_user_for_runtime_scope() {
+        let legacy_owner_user_id = UserId::new("team-agent-user").expect("owner user id");
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
-            TenantId::new("tenant-subject").expect("tenant id"),
-            Some(AgentId::new("agent-subject").expect("agent id")),
-            Some(ProjectId::new("project-subject").expect("project id")),
-            ThreadId::new("thread-subject").expect("thread id"),
-            Some(subject_user_id),
+            TenantId::new("tenant-owner").expect("tenant id"),
+            Some(AgentId::new("agent-owner").expect("agent id")),
+            Some(ProjectId::new("project-owner").expect("project id")),
+            ThreadId::new("thread-owner").expect("thread id"),
+            Some(legacy_owner_user_id),
         ))
         .await
         .with_actor(TurnActor::new(
@@ -251,10 +258,10 @@ mod tests {
         let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
         let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
 
-        assert_eq!(request.context.user_id.as_str(), "team-agent-user");
+        assert_eq!(request.context.user_id.as_str(), "slack-sender");
         assert_eq!(
             request.context.resource_scope.user_id.as_str(),
-            "team-agent-user"
+            "slack-sender"
         );
     }
 
