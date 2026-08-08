@@ -1,5 +1,13 @@
 import { registerPack } from "../../../lib/i18n";
 
+// English copy for the inspector, registered from the lazy inspector chunk
+// rather than `src/i18n/en.ts`: `en.ts` is bundled eagerly as the fallback
+// pack, and these operator-only strings push /chat over its gzip budget from
+// there. Every other locale keeps its inspector copy in `src/i18n/<locale>.ts`.
+//
+// `src/lib/i18n.test.ts` lists this file in `ENGLISH_SIDECAR_PACKS`, so these
+// keys are part of the all-locale parity gate. Adding a key here without
+// adding it to all ten locale files fails that test.
 registerPack("en", {
   "inspector.title": "Web Debug Inspector",
   "inspector.panelLabel": "Web Debug Inspector",
