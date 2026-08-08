@@ -47,12 +47,36 @@ pub(crate) fn backfill_legacy_user_skills(
 /// Copies rather than moves, so a downgrade is not destructive, and an existing database entry
 /// always wins.
 ///
-/// Runs ONCE per store, gated on [`SKILL_DISK_IMPORT_MARKER`]. "Existing entry wins" is not enough
-/// on its own: the disk copy stays behind, so a skill the user REMOVED is absent at the next boot
-/// and gets copied straight back. The marker makes this a migration, not a standing sync.
-/// One-shot marker: the host-disk skill import has run for this store. Under `/system/settings`,
-/// database-backed on every shape, so it travels with the store rather than the boot directory.
-const SKILL_DISK_IMPORT_MARKER: &str = "/system/settings/skill-disk-import.done";
+/// Runs once PER SKILL, gated on a marker under [`SKILL_DISK_IMPORT_MARKER_ROOT`]. "Existing entry
+/// wins" is not enough on its own: the disk copy stays behind, so a skill the user REMOVED would be
+/// absent at the next boot and get copied straight back. A marker makes this a migration rather than
+/// a standing sync.
+///
+/// Keyed per skill, not once for the whole store. A single store-wide marker made the import a
+/// one-time event, so a skill dropped into the store after the first boot was never copied across —
+/// and since skills read only from the database, it stayed invisible permanently, the marker
+/// outliving every restart. Per skill, one that appears later is picked up on the next boot while
+/// migrated ones stay migrated.
+///
+/// Markers live under `/system/settings`, database-backed on every shape, so they travel with the
+/// store rather than the boot directory.
+const SKILL_DISK_IMPORT_MARKER_ROOT: &str = "/system/settings/skill-disk-import";
+
+/// Record that one disk skill has been migrated. Never fatal: a missing marker costs one repeated
+/// import attempt, which "existing entry wins" already absorbs; a failed boot costs the runtime.
+async fn record_skill_disk_import(
+    filesystem: &ironclaw_filesystem::CompositeRootFilesystem,
+    marker: &ironclaw_host_api::path::VirtualPath,
+) {
+    use ironclaw_filesystem::RootFilesystem;
+    if let Err(error) = RootFilesystem::write_file(filesystem, marker, b"1").await {
+        tracing::debug!(
+            %error,
+            marker = marker.as_str(),
+            "could not record a skill disk-import marker; the import will be retried next boot"
+        );
+    }
+}
 
 pub(crate) async fn import_host_disk_skills_into_database(
     storage_root: &Path,
@@ -61,23 +85,24 @@ pub(crate) async fn import_host_disk_skills_into_database(
     use ironclaw_filesystem::RootFilesystem;
     use ironclaw_host_api::path::VirtualPath;
 
-    let marker = VirtualPath::new(SKILL_DISK_IMPORT_MARKER)?;
-    if RootFilesystem::stat(filesystem.as_ref(), &marker)
-        .await
-        .is_ok()
-    {
-        return Ok(());
-    }
-
     let tenants_root = storage_root.join("tenants");
     let mut imported = 0usize;
     for (host_path, virtual_path) in disk_skill_files(&tenants_root) {
         let target = VirtualPath::new(&virtual_path)?;
+        let marker = VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
+        // Already migrated. Re-reading the disk copy here resurrects a skill the user has deleted.
+        if RootFilesystem::stat(filesystem.as_ref(), &marker)
+            .await
+            .is_ok()
+        {
+            continue;
+        }
         // A database entry wins: it is either newer or the product of a previous import.
         if RootFilesystem::stat(filesystem.as_ref(), &target)
             .await
             .is_ok()
         {
+            record_skill_disk_import(filesystem, &marker).await;
             continue;
         }
         let Ok(bytes) = std::fs::read(&host_path) else {
@@ -87,6 +112,7 @@ pub(crate) async fn import_host_disk_skills_into_database(
             .await
             .is_ok()
         {
+            record_skill_disk_import(filesystem, &marker).await;
             imported += 1;
         }
     }
@@ -94,14 +120,6 @@ pub(crate) async fn import_host_disk_skills_into_database(
         tracing::info!(
             imported,
             "imported host-disk skills into the database-backed skill tree"
-        );
-    }
-    // Written even when nothing was imported: "nothing on disk" is as final as "all copied".
-    if let Err(error) = RootFilesystem::write_file(filesystem.as_ref(), &marker, b"1").await {
-        // Not fatal: a missing marker costs one repeated import, a failed boot costs the runtime.
-        tracing::debug!(
-            %error,
-            "could not record the skill disk-import marker; the import will be retried next boot"
         );
     }
     Ok(())
@@ -181,4 +199,112 @@ pub(crate) async fn bootstrap_standalone_host(
         .await?;
 
     Ok(default_system_prompt_path)
+}
+
+#[cfg(test)]
+mod skill_disk_import_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
+    use ironclaw_host_api::path::VirtualPath;
+
+    use super::import_host_disk_skills_into_database;
+
+    const TENANT: &str = "import-tenant";
+    const USER: &str = "import-user";
+
+    fn virtual_skill_path(name: &str) -> VirtualPath {
+        VirtualPath::new(format!(
+            "/tenants/{TENANT}/users/{USER}/skills/{name}/SKILL.md"
+        ))
+        .expect("virtual skill path")
+    }
+
+    fn seed_skill_on_disk(storage_root: &Path, name: &str) {
+        let dir = storage_root
+            .join("tenants")
+            .join(TENANT)
+            .join("users")
+            .join(USER)
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name}\n---\n\nbody\n"),
+        )
+        .expect("skill body");
+    }
+
+    fn database_filesystem() -> Arc<ironclaw_filesystem::CompositeRootFilesystem> {
+        crate::filesystem_assembly::production_database_root_filesystem(
+            Arc::new(InMemoryBackend::new()),
+            "skill-disk-import-test",
+        )
+        .expect("database root filesystem builds")
+    }
+
+    /// A skill dropped into the store AFTER the first boot must still be imported.
+    ///
+    /// The import was gated on one marker for the whole store, so it ran exactly once ever. Since
+    /// skills now read only from the database, anything that appeared on disk later was never
+    /// copied across and stayed invisible — permanently, because the marker survives restarts.
+    #[tokio::test]
+    async fn a_skill_appearing_on_disk_after_the_first_import_is_still_imported() {
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let filesystem = database_filesystem();
+
+        seed_skill_on_disk(storage.path(), "first");
+        import_host_disk_skills_into_database(storage.path(), &filesystem)
+            .await
+            .expect("first import runs");
+
+        seed_skill_on_disk(storage.path(), "second");
+        import_host_disk_skills_into_database(storage.path(), &filesystem)
+            .await
+            .expect("second import runs");
+
+        assert!(
+            RootFilesystem::stat(filesystem.as_ref(), &virtual_skill_path("second"))
+                .await
+                .is_ok(),
+            "a skill added to the store after the first import must be imported on the next boot; \
+             leaving it on disk makes it unreachable, because skills are read only from the database"
+        );
+    }
+
+    /// ...but re-running the import must NOT undo a deletion.
+    ///
+    /// This is the reason the marker existed. The disk copy stays behind when a user removes a
+    /// skill through the product, so an import that only checks "is it already in the database?"
+    /// copies it straight back. Per-skill markers keep the migration one-shot PER SKILL, which is
+    /// what lets the test above pass without resurrecting anything.
+    #[tokio::test]
+    async fn an_imported_skill_deleted_from_the_database_is_not_resurrected() {
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let filesystem = database_filesystem();
+
+        seed_skill_on_disk(storage.path(), "removed-later");
+        import_host_disk_skills_into_database(storage.path(), &filesystem)
+            .await
+            .expect("first import runs");
+
+        let path = virtual_skill_path("removed-later");
+        RootFilesystem::delete(filesystem.as_ref(), &path)
+            .await
+            .expect("user deletes the skill through the product");
+
+        import_host_disk_skills_into_database(storage.path(), &filesystem)
+            .await
+            .expect("second import runs");
+
+        assert!(
+            RootFilesystem::stat(filesystem.as_ref(), &path)
+                .await
+                .is_err(),
+            "a skill the user deleted must stay deleted; the disk copy outlives the deletion, so an \
+             import that re-reads it resurrects a skill the user removed"
+        );
+    }
 }
