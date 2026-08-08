@@ -19,6 +19,7 @@ import {
   rememberInspectorStreamCursor,
 } from "./inspector-stream-session";
 import {
+  decodeSessionDiagnosticStats,
   readInspectorSessionStats,
   recordInspectorSessionStats,
   type SessionDiagnosticStats,
@@ -151,6 +152,10 @@ export function useInspector({
   const [streamMetrics, setStreamMetrics] = React.useState(readInspectorStreamMetrics);
   const lastCursorRef = React.useRef<string | null>(null);
   const transportSequenceRef = React.useRef(0);
+  // False until the current scope has resolved a snapshot once. Only that
+  // first load may claim the shared health state; later refreshes are
+  // background reads that must not downgrade a live stream (see below).
+  const snapshotLoadedRef = React.useRef(false);
 
   React.useEffect(() => {
     const scope = threadId && runId ? `${threadId}/${runId}` : "";
@@ -159,6 +164,7 @@ export function useInspector({
     setUpdates([]);
     setError(null);
     transportSequenceRef.current = 0;
+    snapshotLoadedRef.current = false;
   }, [enabled, threadId, runId]);
 
   React.useEffect(() => {
@@ -193,15 +199,22 @@ export function useInspector({
 
     const controller = new AbortController();
     let retryTimer: number | null = null;
-    setHealth(INSPECTOR_HEALTH.LOADING);
+    // A live diagnostic update schedules a debounced snapshot refresh, which
+    // re-runs this effect through `snapshotGeneration`. Announcing LOADING for
+    // those background reads reported an open, healthy stream as "Connecting"
+    // until the next update arrived — and indefinitely once a run settled,
+    // because the settling `stats` update is the last one. Only the first load
+    // for a scope drives the shared health state.
+    if (!snapshotLoadedRef.current) setHealth(INSPECTOR_HEALTH.LOADING);
 
     function loadSnapshot(attempt: number): void {
       fetchInspectorSnapshot({ threadId, runId, signal: controller.signal })
         .then((response) => {
           if (controller.signal.aborted) return;
+          snapshotLoadedRef.current = true;
           const nextSnapshot = (response as InspectorSnapshotResponse)?.snapshot ?? null;
           setSnapshot(nextSnapshot);
-          const stats = nextSnapshot?.stats as unknown as SessionDiagnosticStats | undefined;
+          const stats = decodeSessionDiagnosticStats(nextSnapshot?.stats);
           if (stats) {
             recordInspectorSessionStats(`${threadId}/${runId}`, stats);
             refreshSessionStats();

@@ -156,8 +156,11 @@ the process restarted or bounded in-memory evidence was evicted. A temporary
 cursor or refreshes the bounded snapshot when retained history is no longer
 available.
 
-Remove `debug=true` to return to the ordinary chat layout. The inspector is
-diagnostic only: opening, closing, or navigating it never changes a run.
+The opt-in is remembered for the browser tab, so it survives route changes and
+reloads. Use `?debug=false` to clear it and return to the ordinary chat layout
+— simply dropping `debug=true` from the URL leaves the stored opt-in in place.
+The inspector is diagnostic only: opening, closing, or navigating it never
+changes a run.
 
 <Note>
 Projects, Jobs, Routines, Missions, and Logs have pages in the interface but are not yet

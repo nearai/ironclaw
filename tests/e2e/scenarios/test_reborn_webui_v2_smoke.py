@@ -541,9 +541,10 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             stats.get_by_text("Failed tool calls", exact=True).locator("..")
         ).to_contain_text("0")
         await expect(stats.get_by_text("Browser-observed stream health", exact=True)).to_be_visible()
-        await expect(page.locator("[data-testid='inspector-stream-state']")).to_have_text(
-            re.compile(r"^(Live|Connecting)$")
-        )
+        # A settled run's last diagnostic update schedules a background
+        # snapshot refresh. That refresh must not downgrade the open stream,
+        # so the browser-observed state settles on "Live" and stays there.
+        await expect(page.locator(SEL_V2["inspector_stream_state"])).to_have_text("Live")
         await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
         await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
 
@@ -580,14 +581,14 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         assert second_run_id in observed_request.url
 
         await page.locator(SEL_V2["inspector_open"]).click()
-        await page.locator("[data-testid='inspector-tab-activity']").click()
-        activity = page.locator("[data-testid='inspector-activity-content']")
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
         await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible(
             timeout=30000
         )
         await expect(activity.get_by_label("Previous turn")).to_be_enabled()
         await expect(activity.get_by_label("Next turn")).to_be_disabled()
-        await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
             second_run_id
         )
 
@@ -596,11 +597,11 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         await expect(activity.get_by_label("Previous turn")).to_be_disabled()
         await expect(activity.get_by_label("Next turn")).to_be_enabled()
         await expect(activity.get_by_label("Latest turn")).to_be_enabled()
-        await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(run_id)
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(run_id)
 
         await activity.get_by_label("Latest turn").click()
         await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
-        await expect(page.locator("[data-testid='inspector-panel']")).to_contain_text(
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
             second_run_id
         )
 
@@ -613,7 +614,7 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
               document.dispatchEvent(new Event("visibilitychange"));
             }"""
         )
-        await expect(page.locator("[data-testid='inspector-health']")).to_have_text("Idle")
+        await expect(page.locator(SEL_V2["inspector_health"])).to_have_text("Idle")
         async with page.expect_response(
             lambda response: "/operator/inspector/" in response.url
             and "/events" in response.url
@@ -631,7 +632,7 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             )
         reconnect_response = await reconnect_info.value
         assert reconnect_response.status == 200, reconnect_response.url
-        activity = page.locator("[data-testid='inspector-activity-content']")
+        activity = page.locator(SEL_V2["inspector_activity_content"])
         await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
         await expect(
             activity.locator("[data-activity-kind='model_call_started']")
@@ -640,13 +641,13 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             activity.locator("[data-activity-kind='model_call_completed']")
         ).to_have_count(1)
 
-        await page.locator("[data-testid='inspector-tab-stats']").click()
-        reconnects = page.locator("[data-testid='inspector-stream-reconnects']")
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        reconnects = page.locator(SEL_V2["inspector_stream_reconnects"])
         await expect(reconnects).to_have_text(re.compile(r"^[1-9][0-9,]*$"))
-        updates = page.locator("[data-testid='inspector-stream-updates']")
+        updates = page.locator(SEL_V2["inspector_stream_updates"])
         updates_before_reload = int((await updates.inner_text()).replace(",", ""))
         await page.reload()
-        await expect(page.locator("[data-testid='inspector-stats-content']")).to_be_visible(
+        await expect(page.locator(SEL_V2["inspector_stats_content"])).to_be_visible(
             timeout=30000
         )
         await expect(updates).to_have_text(f"{updates_before_reload:,}")
@@ -668,14 +669,14 @@ async def test_inspector_uses_the_selected_locale(
         await page.goto(
             f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
         )
-        panel = page.locator("[data-testid='inspector-panel']")
+        panel = page.locator(SEL_V2["inspector_panel"])
         await expect(panel).to_be_visible(timeout=15000)
         await expect(panel.get_by_text("Web 调试检查器", exact=True)).to_be_visible()
-        await expect(page.locator("[data-testid='inspector-health']")).to_have_text("空闲")
-        await expect(page.locator("[data-testid='inspector-close']")).to_have_attribute(
+        await expect(page.locator(SEL_V2["inspector_health"])).to_have_text("空闲")
+        await expect(page.locator(SEL_V2["inspector_close"])).to_have_attribute(
             "aria-label", "关闭检查器"
         )
-        await expect(page.locator("[data-testid='inspector-tab-prompt']")).to_have_text(
+        await expect(page.locator(SEL_V2["inspector_tab_prompt"])).to_have_text(
             "提示词"
         )
     finally:

@@ -83,6 +83,12 @@ accepted diagnostic-update count, and the last accepted update time. These
 values are tab-session diagnostics, not server accounting. They are bounded in
 `sessionStorage`, retain cursors for at most 32 observed runs, and reject
 duplicate or backwards cursors when a run is revisited or the page reloads.
+Browser-session inspector state — the observed-run index, resume cursors,
+observation counters, and page-session statistics — is namespaced by the
+resolved `(tenant_id, user_id)`, so a bearer session change inside one tab
+never inherits the previous caller's runs or counters. A background snapshot
+refresh triggered by a live update is not a reconnect and does not change the
+reported connection state.
 Closing the panel or entering the mobile layout hides only its presentation;
 while debug mode remains enabled, the browser continues observing the selected
 run so those UI choices do not create gaps in page-session statistics.
@@ -107,7 +113,9 @@ strictly newer generation.
   context, cross-scope reads, redaction, bounds, sequence/rebase behavior, and
   the absence of verbose tool data in updates.
 - Frontend tests cover activation, responsive layouts, preferences, bounded
-  reducers, pending states, cursor deduplication, and dedicated detail lookup.
+  reducers, pending states, cursor deduplication, dedicated detail lookup,
+  per-caller storage namespacing, and the refusal to accumulate an incomplete
+  statistics record as real zeros.
 - Playwright scenarios cover ordinary-chat isolation, desktop/tablet/mobile
   behavior, prompt/activity/stat rendering, multi-turn navigation, reload
   reconnect, tool detail expansion, and the 50 KiB result limit.

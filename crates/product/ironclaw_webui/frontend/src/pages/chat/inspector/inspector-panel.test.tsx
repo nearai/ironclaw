@@ -8,7 +8,7 @@ import { afterEach, beforeEach, test, vi } from "vitest";
 import "../../../i18n/en";
 import "../../../i18n/zh-CN";
 import { I18nProvider } from "../../../lib/i18n";
-import { INSPECTOR_RUN_HISTORY_KEY } from "./inspector-activity";
+import { inspectorRunHistoryKey } from "./inspector-activity";
 import { INSPECTOR_HEALTH } from "./inspector-state";
 import { InspectorPanel } from "./inspector-panel";
 import { resetInspectorSessionStats } from "./inspector-session-stats";
@@ -456,7 +456,7 @@ test("activity navigation advances when a pinned run leaves the history window",
   assert.equal(inspectorCalls.at(-1)?.runId, "run-0");
 
   sessionStorage.setItem(
-    INSPECTOR_RUN_HISTORY_KEY,
+    inspectorRunHistoryKey(),
     JSON.stringify({
       "thread-a": Array.from({ length: 32 }, (_, index) => `run-${index + 1}`),
     }),
@@ -465,15 +465,18 @@ test("activity navigation advances when a pinned run leaves the history window",
     root?.render(<InspectorPanel threadId="thread-a" runId="run-32" />),
   );
 
-  assert.equal(inspectorCalls.at(-1)?.runId, "run-1");
-  assert.match(document.body.textContent || "", /Turn 1 of 32/);
+  // The pinned run-0 was evicted from the bounded window. Rejoin the latest
+  // observed turn — the default selection — rather than the oldest retained
+  // one, so eviction never silently parks navigation on stale history.
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-32");
+  assert.match(document.body.textContent || "", /Turn 32 of 32/);
   assert.equal(
     document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.disabled,
-    true,
+    false,
   );
   assert.equal(
     document.querySelector<HTMLButtonElement>("[aria-label='Next turn']")?.disabled,
-    false,
+    true,
   );
 });
 

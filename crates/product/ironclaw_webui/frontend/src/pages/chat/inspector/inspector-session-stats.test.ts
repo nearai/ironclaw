@@ -3,6 +3,7 @@ import { test } from "vitest";
 
 import {
   InspectorSessionStatsAccumulator,
+  decodeSessionDiagnosticStats,
   type SessionDiagnosticStats,
 } from "./inspector-session-stats";
 
@@ -101,6 +102,40 @@ test("page-session stats reset when the authenticated caller changes", () => {
     total.calls_per_model.map((entry) => entry.model.content),
     ["other-model"],
   );
+});
+
+test("only a complete statistics record decodes into session accumulation", () => {
+  const complete = stats({ model: "model-a", calls: 1, inputTokens: 10, tools: 1 });
+  assert.equal(decodeSessionDiagnosticStats(complete), complete);
+
+  // An absent or partial record must stay unavailable: accumulating it would
+  // present fabricated zeros as a real "0 model calls" reading.
+  assert.equal(decodeSessionDiagnosticStats(undefined), null);
+  assert.equal(decodeSessionDiagnosticStats({}), null);
+  assert.equal(decodeSessionDiagnosticStats([complete]), null);
+  assert.equal(
+    decodeSessionDiagnosticStats({ ...complete, total_model_calls: -1 }),
+    null,
+  );
+  assert.equal(
+    decodeSessionDiagnosticStats({ ...complete, input_tokens: { known_total: 1 } }),
+    null,
+  );
+  assert.equal(
+    decodeSessionDiagnosticStats({ ...complete, calls_per_model: null }),
+    null,
+  );
+  assert.equal(
+    decodeSessionDiagnosticStats({ ...complete, total_tool_calls: "3" }),
+    null,
+  );
+
+  // Tool aggregates are optional: an older host may omit them entirely.
+  const withoutToolTotals = { ...complete };
+  delete withoutToolTotals.total_tool_calls;
+  delete withoutToolTotals.successful_tool_calls;
+  delete withoutToolTotals.failed_tool_calls;
+  assert.equal(decodeSessionDiagnosticStats(withoutToolTotals), withoutToolTotals);
 });
 
 test("page-session stats tolerate malformed snapshot fields", () => {

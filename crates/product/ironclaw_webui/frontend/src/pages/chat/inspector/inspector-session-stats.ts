@@ -20,6 +20,57 @@ export interface SessionDiagnosticStats {
   total_latency_ms: DiagnosticMetricTotal;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isMetricTotal(value: unknown): value is DiagnosticMetricTotal {
+  return isRecord(value)
+    && isCount(value.known_total)
+    && isCount(value.unavailable_samples);
+}
+
+/**
+ * Accept only a complete authoritative statistics record.
+ *
+ * A partial or empty `stats` object would otherwise accumulate as real zeros
+ * and the Stats tab would report "0 model calls" where the host actually
+ * reported nothing. The inspector contract requires an explicit unavailable
+ * state instead of a fabricated zero, so an undecodable record keeps
+ * `sessionStats` null rather than seeding the accumulator.
+ */
+export function decodeSessionDiagnosticStats(
+  value: unknown,
+): SessionDiagnosticStats | null {
+  if (!isRecord(value)) return null;
+  if (!isCount(value.total_model_calls)) return null;
+  if (typeof value.calls_per_model_truncated !== "boolean") return null;
+  if (!Array.isArray(value.calls_per_model)) return null;
+  if (
+    !isMetricTotal(value.input_tokens)
+    || !isMetricTotal(value.output_tokens)
+    || !isMetricTotal(value.cache_read_input_tokens)
+    || !isMetricTotal(value.cache_creation_input_tokens)
+    || !isMetricTotal(value.total_latency_ms)
+  ) {
+    return null;
+  }
+  // Optional tool aggregates: an older host may omit them entirely, but a
+  // present field must still be a real count rather than a coerced zero.
+  for (const field of [
+    "total_tool_calls",
+    "successful_tool_calls",
+    "failed_tool_calls",
+  ] as const) {
+    if (value[field] !== undefined && !isCount(value[field])) return null;
+  }
+  return value as unknown as SessionDiagnosticStats;
+}
+
 const MAX_ACTIVE_RUN_STATS = 128;
 const MAX_RETIRED_RUN_IDS = 1_024;
 const MAX_SESSION_MODELS = 64;

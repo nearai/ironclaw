@@ -1,6 +1,20 @@
+import { authScope } from "../../../lib/auth-scope";
 import { shouldAcceptInspectorCursor } from "./inspector-state";
 
-export const INSPECTOR_STREAM_SESSION_KEY = "ironclaw:inspector-stream-session";
+const INSPECTOR_STREAM_SESSION_KEY_PREFIX = "ironclaw:inspector-stream-session";
+
+/**
+ * Per-caller storage key for browser-observed stream state.
+ *
+ * Resume cursors and the observed-update counters describe one operator's
+ * runs, and a single tab supports bearer session changes without an explicit
+ * sign-out. Namespacing by the resolved identity keeps a later caller from
+ * resuming — or reporting — the previous caller's stream position.
+ */
+export function inspectorStreamSessionKey(): string {
+  return `${INSPECTOR_STREAM_SESSION_KEY_PREFIX}:${authScope()}`;
+}
+
 const MAX_INSPECTOR_STREAM_SCOPES = 32;
 
 export interface InspectorStreamMetrics {
@@ -43,7 +57,7 @@ function safeCount(value: unknown): number {
 
 function loadSession(storage: Pick<Storage, "getItem"> | null): InspectorStreamSession {
   try {
-    const parsed = JSON.parse(storage?.getItem(INSPECTOR_STREAM_SESSION_KEY) || "null");
+    const parsed = JSON.parse(storage?.getItem(inspectorStreamSessionKey()) || "null");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptySession();
     const rawCursors = parsed.cursors && typeof parsed.cursors === "object"
       && !Array.isArray(parsed.cursors)
@@ -75,7 +89,7 @@ function saveSession(
   storage: Pick<Storage, "setItem"> | null,
 ): void {
   try {
-    storage?.setItem(INSPECTOR_STREAM_SESSION_KEY, JSON.stringify(session));
+    storage?.setItem(inspectorStreamSessionKey(), JSON.stringify(session));
   } catch (_) {
     // Browser-observed diagnostics are best effort and never affect chat.
   }

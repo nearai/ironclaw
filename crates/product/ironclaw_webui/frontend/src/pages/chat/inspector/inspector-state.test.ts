@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import { setAuthScope } from "../../../lib/auth-scope";
 import { ActivityKind } from "./activity-kind";
 import {
-  INSPECTOR_RUN_HISTORY_KEY,
   MAX_INSPECTOR_ACTIVITY_ENTRIES,
+  inspectorRunHistoryKey,
   reduceInspectorActivity,
   rememberInspectorRun,
 } from "./inspector-activity";
@@ -18,7 +19,7 @@ import {
   writeInspectorPreferences,
 } from "./inspector-state";
 import {
-  INSPECTOR_STREAM_SESSION_KEY,
+  inspectorStreamSessionKey,
   readInspectorStreamCursor,
   readInspectorStreamMetrics,
   recordInspectorDiagnosticUpdate,
@@ -296,14 +297,14 @@ test("run navigation history is thread-scoped, deduplicated, and bounded", () =>
   assert.deepEqual(rememberInspectorRun("thread-a", "run-2", memory), ["run-1", "run-2"]);
   assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-2", "run-1"]);
   assert.deepEqual(rememberInspectorRun("thread-b", "run-b", memory), ["run-b"]);
-  const saved = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY]);
+  const saved = JSON.parse(memory.dump()[inspectorRunHistoryKey()]);
   assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
   assert.deepEqual(saved["thread-b"], ["run-b"]);
 
   for (let index = 1; index <= 33; index += 1) {
     rememberInspectorRun("bounded-thread", `run-${index}`, memory);
   }
-  const bounded = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY])["bounded-thread"];
+  const bounded = JSON.parse(memory.dump()[inspectorRunHistoryKey()])["bounded-thread"];
   assert.equal(bounded.length, 32);
   assert.equal(bounded[0], "run-2");
   assert.equal(bounded.at(-1), "run-33");
@@ -341,7 +342,7 @@ test("stream metrics persist in the browser session without duplicate update cou
   assert.equal(duplicate.metrics.receivedUpdateCount, 1);
   assert.equal(duplicate.metrics.lastUpdateAt, "2026-08-06T10:00:00.000Z");
   assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:1");
-  assert.ok(memory.dump()[INSPECTOR_STREAM_SESSION_KEY]);
+  assert.ok(memory.dump()[inspectorStreamSessionKey()]);
 
   for (let index = 0; index < 40; index += 1) {
     recordInspectorDiagnosticUpdate(
@@ -351,8 +352,46 @@ test("stream metrics persist in the browser session without duplicate update cou
       memory,
     );
   }
-  const bounded = JSON.parse(memory.dump()[INSPECTOR_STREAM_SESSION_KEY]);
+  const bounded = JSON.parse(memory.dump()[inspectorStreamSessionKey()]);
   assert.equal(bounded.scopeOrder.length, 32);
   assert.equal(Object.keys(bounded.cursors).length, 32);
   assert.equal(bounded.scopeOrder[0], "thread-8/run-8");
+});
+
+test("browser-session inspector state is namespaced by the authenticated caller", () => {
+  const memory = storage();
+  try {
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-a" });
+    rememberInspectorRun("thread-a", "run-a", memory);
+    recordInspectorDiagnosticUpdate(
+      "thread-a/run-a",
+      "stream-a:7",
+      "2026-08-08T10:00:00.000Z",
+      memory,
+    );
+    const ownerHistoryKey = inspectorRunHistoryKey();
+    const ownerStreamKey = inspectorStreamSessionKey();
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:7");
+    assert.equal(readInspectorStreamMetrics(memory).receivedUpdateCount, 1);
+
+    // A bearer session change inside one tab must not inherit the previous
+    // caller's observed runs, resume cursors, or observation counters.
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-b" });
+    assert.notEqual(inspectorRunHistoryKey(), ownerHistoryKey);
+    assert.notEqual(inspectorStreamSessionKey(), ownerStreamKey);
+    assert.deepEqual(rememberInspectorRun("thread-a", null, memory), []);
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), null);
+    assert.deepEqual(readInspectorStreamMetrics(memory), {
+      reconnectCount: 0,
+      receivedUpdateCount: 0,
+      lastUpdateAt: null,
+    });
+
+    // Returning to the first caller still finds that caller's own state.
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-a" });
+    assert.deepEqual(rememberInspectorRun("thread-a", null, memory), ["run-a"]);
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:7");
+  } finally {
+    setAuthScope(null);
+  }
 });

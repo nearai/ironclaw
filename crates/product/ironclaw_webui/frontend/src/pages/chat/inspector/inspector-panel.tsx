@@ -252,7 +252,11 @@ function ActivityShell({
     [snapshot, updates],
   );
   const requestedIndex = selectedRunId ? runHistory.indexOf(selectedRunId) : -1;
-  const selectedIndex = requestedIndex >= 0 ? requestedIndex : runHistory.length > 0 ? 0 : -1;
+  // A pinned run can fall out of the bounded history. Fall back to the latest
+  // observed turn, matching the default selection, rather than to the oldest.
+  const selectedIndex = requestedIndex >= 0
+    ? requestedIndex
+    : runHistory.length - 1;
   const previousRun = selectedIndex > 0 ? runHistory[selectedIndex - 1] : null;
   const nextRun = selectedIndex >= 0 && selectedIndex < runHistory.length - 1
     ? runHistory[selectedIndex + 1]
@@ -387,6 +391,12 @@ interface ToolDetail {
   failure_summary: BoundedDiagnosticText | null;
 }
 
+const TOOL_STATUS_LABEL_KEYS: Record<ToolDetail["status"], string> = {
+  started: "inspector.tool.statusStarted",
+  succeeded: "inspector.tool.statusSucceeded",
+  failed: "inspector.tool.statusFailed",
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -508,7 +518,7 @@ function ToolDetailDisclosure({
           {tool && (
             <>
               <p><span className="font-medium">{t("inspector.tool.capability")}:</span> {tool.capability_name.content}</p>
-              <p><span className="font-medium">{t("inspector.tool.status")}:</span> {tool.status}</p>
+              <p><span className="font-medium">{t("inspector.tool.status")}:</span> {t(TOOL_STATUS_LABEL_KEYS[tool.status])}</p>
               {tool.duration_ms != null && <p>{t("inspector.tool.duration", { count: tool.duration_ms.toLocaleString() })}</p>}
               <ToolDetailBlock label={t("inspector.tool.arguments")} value={tool.arguments} />
               <ToolDetailBlock label={t("inspector.tool.output")} value={tool.result} />
@@ -773,7 +783,9 @@ function InspectorPanelCore({
     setSelectedRunId((current) => {
       if (!selectionPinnedRef.current) return runId || history.at(-1) || null;
       if (current && history.includes(current)) return current;
-      return history[0] || runId || null;
+      // The pinned run was evicted from the bounded history: rejoin the
+      // latest observed turn rather than jumping to the oldest retained one.
+      return history.at(-1) || runId || null;
     });
   }, [threadId, runId]);
   const selectRun = React.useCallback((nextRunId: string) => {

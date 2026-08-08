@@ -198,6 +198,48 @@ test("recovers a transient snapshot failure after the diagnostics stream connect
   }
 });
 
+test("a live update's snapshot refresh does not downgrade the connected stream", async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => root?.render(<Probe />));
+    const stream = eventStreams[0];
+    await act(async () => stream.respond());
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+
+    const streamId = "550e8400-e29b-41d4-a716-446655440000";
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:1`, {
+        update: { type: "stats" },
+      });
+    });
+    // The settling `stats` update is the last one a completed run emits. Its
+    // debounced snapshot refresh must stay a background read: reporting
+    // LOADING/CONNECTING here left an open, healthy stream displayed as
+    // "Connecting" indefinitely.
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("incomplete snapshot statistics stay unavailable instead of reading as zero", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify({ snapshot: { stats: {} } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+  );
+
+  await act(async () => root?.render(<Probe />));
+
+  assert.equal(latestState?.sessionStats, null);
+});
+
 test("bounds transient snapshot retries", async () => {
   vi.useFakeTimers();
   vi.stubGlobal(
