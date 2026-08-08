@@ -19,8 +19,10 @@ use ironclaw_product_contracts::inspector::DEFAULT_MAX_RETAINED_RUNS_PER_SESSION
 mod ratchet_support;
 
 const BROWSER_CONSTANT: &str = "MAX_INSPECTOR_RUNS_PER_THREAD";
+/// Logical, family-independent spelling resolved through
+/// `ratchet_support::crate_path`, so this gate survives a crate family move.
 const BROWSER_SOURCE: &str =
-    "crates/product/ironclaw_webui/frontend/src/pages/chat/inspector/inspector-activity.ts";
+    "crates/ironclaw_webui/frontend/src/pages/chat/inspector/inspector-activity.ts";
 
 /// Read `export const MAX_INSPECTOR_RUNS_PER_THREAD = <n>;` from the SPA source.
 fn browser_turn_window(source: &str) -> Option<usize> {
@@ -41,12 +43,13 @@ fn browser_turn_window(source: &str) -> Option<usize> {
 
 #[test]
 fn reborn_inspector_retention_alignment() {
-    let path = ratchet_support::workspace_root().join(BROWSER_SOURCE);
+    let root = ratchet_support::workspace_root();
+    let path = ratchet_support::crate_path(&root, BROWSER_SOURCE);
     let source = fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "read {}: {error}. The inspector turn-navigation window is pinned to \
-             DEFAULT_MAX_RETAINED_RUNS_PER_SESSION here; if the SPA moved, update \
-             BROWSER_SOURCE rather than dropping the check.",
+             DEFAULT_MAX_RETAINED_RUNS_PER_SESSION here; if the SPA file moved within \
+             the crate, update BROWSER_SOURCE rather than dropping the check.",
             path.display()
         )
     });
@@ -64,9 +67,10 @@ fn reborn_inspector_retention_alignment() {
         "inspector turn navigation offers {browser_window} turns per thread but the host \
          retains diagnostics for only {DEFAULT_MAX_RETAINED_RUNS_PER_SESSION} runs per \
          session, so turn {} and older would render blank. Either lower \
-         `{BROWSER_CONSTANT}` in {BROWSER_SOURCE} or raise \
+         `{BROWSER_CONSTANT}` in {} or raise \
          `DEFAULT_MAX_RETAINED_RUNS_PER_SESSION` — and if you raise it, say what the \
          added resident memory buys, because diagnostic capture is unconditional.",
         DEFAULT_MAX_RETAINED_RUNS_PER_SESSION + 1,
+        path.display(),
     );
 }
