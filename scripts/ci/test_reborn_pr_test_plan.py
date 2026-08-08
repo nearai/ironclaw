@@ -381,6 +381,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
             with (
                 mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
                 mock.patch.object(
+                    planner, "_sandbox_docker_exact_paths", return_value=set()
+                ),
+                mock.patch.object(
                     planner,
                     "crate_directory",
                     return_value="crates/substrates/ironclaw_webui",
@@ -406,6 +409,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         try:
             with (
                 mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner, "_sandbox_docker_exact_paths", return_value=set()
+                ),
                 mock.patch.object(
                     planner,
                     "crate_directory",
@@ -589,6 +595,51 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     )
                     self.assertTrue(plan["run_sandbox_docker"])
         resolver.assert_any_call("ironclaw_sandbox", planner.ROOT)
+
+    def test_sandbox_docker_exact_paths_resolve_through_crate_inventory_when_nested(
+        self,
+    ) -> None:
+        """A family-moved crate among the six sandbox-Docker exact-path owners
+        still contributes its entries at the new location, and the old
+        location's entries stop appearing — the same relocation-safety
+        `_sandbox_docker_prefixes` already provides for `ironclaw_sandbox`.
+        """
+        from crate_tree import crate_directory as real_crate_directory
+
+        moved_directory = "crates/kernel-next/ironclaw_runtime_policy"
+
+        def fake_crate_directory(name: str, root: Path = planner.ROOT) -> str:
+            if name == "ironclaw_runtime_policy":
+                return moved_directory
+            return real_crate_directory(name, root)
+
+        with mock.patch.object(
+            planner, "crate_directory", side_effect=fake_crate_directory
+        ):
+            exact_paths = planner._sandbox_docker_exact_paths()
+
+        self.assertIn(f"{moved_directory}/src/planner.rs", exact_paths)
+        self.assertIn(f"{moved_directory}/src/resolver.rs", exact_paths)
+        self.assertNotIn(
+            "crates/kernel/ironclaw_runtime_policy/src/planner.rs", exact_paths
+        )
+        self.assertNotIn(
+            "crates/kernel/ironclaw_runtime_policy/src/resolver.rs", exact_paths
+        )
+        # An unrelated owner's entries are untouched by the relocation.
+        self.assertIn("crates/app/ironclaw_cli/src/runtime/mod.rs", exact_paths)
+
+    def test_sandbox_docker_exact_paths_resolution_failure_fails_closed(self) -> None:
+        """An unresolvable crate must raise, never silently drop that crate's
+        entries from the exact-path set — the same fail-closed contract as
+        `_sandbox_docker_prefixes` and `_webui_frontend_prefix`."""
+        with mock.patch.object(
+            planner, "crate_directory", side_effect=planner.CrateTreeError("boom")
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "cannot resolve the ironclaw_cli crate"
+            ):
+                planner._sandbox_docker_exact_paths()
 
     def test_sandbox_docker_paths_preserve_regular_test_inventory_selection(
         self,
