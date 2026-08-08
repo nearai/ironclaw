@@ -1150,16 +1150,17 @@ async fn codec_channel_target_resolver_decodes_or_fails_closed() {
     assert!(harness.adapter.envelopes().is_empty());
 }
 
-/// On a shared-route channel conversation the run's scope owner (the route's
-/// subject) and the authenticated actor (whoever sent the message) are
-/// different users. The catalog this tool may reach must follow the ACTOR.
+/// LEGACY kernel shape: threads created before run-acts-as-invoker could be
+/// owned by one user (the retired shared-route "subject") while a different
+/// authenticated actor drives the run, so owner ≠ actor rows still exist. The
+/// catalog this tool may reach must follow the ACTOR, never the stored owner.
 ///
-/// Otherwise any participant of a shared channel routed to some subject could
-/// name that subject's target ids and push bot-identity content into the
-/// subject's own destinations — their personal DM included — from a
-/// conversation the subject may never read.
+/// Otherwise any participant acting on such a legacy thread could name the
+/// legacy owner's target ids and push bot-identity content into that owner's
+/// own destinations — their personal DM included — from a conversation the
+/// owner may never read.
 #[tokio::test]
-async fn a_shared_route_participant_cannot_reach_the_route_subjects_targets() {
+async fn a_shared_route_participant_cannot_reach_a_legacy_owners_targets() {
     let subject = UserId::new("route-subject").expect("subject id");
     let participant = UserId::new("route-participant").expect("participant id");
 

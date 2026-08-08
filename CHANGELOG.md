@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `telegram_allowed_channels` in the Telegram extension's deployment
+  configuration: group/supergroup chats are served only when listed there
+  (fail-closed), with each participant running as themselves once paired.
+  Previously any group the bot was added to ran as the deployment operator.
+
+### Changed
+
+- **Shared channels: a run acts as the user who invoked it.** A shared channel
+  conversation now binds one thread per participant, and the bot answers each
+  participant as themselves — the configured shared-subject user is retired.
+  Unpaired participants never run as the operator: the bot stays silent toward
+  them in the channel until they pair (install the extension from Extensions
+  and complete its connect flow; DMs still offer the connect prompt). Existing
+  shared-channel threads are retained on disk but stop receiving new messages;
+  each participant's next message starts a fresh thread they own. Shared
+  channels are no longer offered as per-user notification delivery targets (DM
+  targets are unchanged), and previously stored shared-channel notification
+  preferences fail closed at resolution.
+- **Every parked gate is announced, on both delivery lanes.** Gate prompts are
+  keyed by their gate ref in the live conversation lane and the background
+  automation lane alike, so a run that parks on several approval/auth gates
+  announces each one instead of collapsing into the first prompt's delivery
+  identity. One deploy-boundary note: a gate prompt delivered but not yet
+  acknowledged when this version deploys re-announces once (its durable
+  delivery identity changed shape).
+
+### Removed
+
+- The `slack_shared_subject_user_id` and `slack_subject_routes` Slack
+  admin-configuration fields. Shared-channel admission is the
+  `slack_allowed_channels` field (a JSON array of channel ids): channels
+  previously admitted only through subject routes must be re-admitted by
+  listing them there. Legacy saved subject-route values are inert.
+
 ## [1.1.0-rc.1] - 2026-08-03
 
 First release candidate since 1.0.0. The headline work is extension reach —

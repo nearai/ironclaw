@@ -77,13 +77,31 @@ async fn reborn_identity_prompt_scope_isolation_parity() {
         alice.actor.user_id, bob.actor.user_id,
         "distinct external actors must resolve to distinct canonical users before identity can isolate"
     );
+    // Pin changed with the run-acts-as-invoker ruling (#7377). This harness's
+    // support binding service deliberately keeps ONE shared thread for the
+    // room (production channel flows bind one thread per (conversation, user)
+    // — locked at the integration tier by scenario_two_actors_own_threads) so
+    // this bin can pin the sharper property: even when two actors' turns land
+    // in one shared thread, each RUN acts as the user who invoked it — its
+    // scope is owned by its own actor, never a configured subject, and the
+    // identity context below never crosses between them.
     assert_eq!(
         alice.thread_id, bob.thread_id,
-        "BotMention submissions in the same shared room should bind to one shared thread"
+        "the shared-room fixture binds both actors into one thread"
+    );
+    assert_ne!(
+        alice.thread_scope, bob.thread_scope,
+        "each submission's thread scope follows its own invoking actor"
     );
     assert_eq!(
-        alice.thread_scope, bob.thread_scope,
-        "shared-thread identity isolation must be exercised inside one thread scope"
+        alice.thread_scope.owner_user_id,
+        Some(alice.actor.user_id.clone()),
+        "Alice's turn scope must be owned by Alice — a run acts as its invoker"
+    );
+    assert_eq!(
+        bob.thread_scope.owner_user_id,
+        Some(bob.actor.user_id.clone()),
+        "Bob's turn scope must be owned by Bob — a run acts as its invoker"
     );
     identity_source.set_identity(bob.actor.user_id.as_str(), BOB_IDENTITY);
     harness

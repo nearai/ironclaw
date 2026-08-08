@@ -385,7 +385,15 @@ async fn stored_reply_target_revalidates_durable_run_authority_and_revocation() 
 }
 
 #[tokio::test]
-async fn stored_shared_reply_allows_participant_but_not_authority_bearing_prompt() {
+async fn stored_shared_reply_target_resolves_both_access_kinds_only_for_its_own_actor() {
+    // The origin actor resolves BOTH access kinds on their own stored reply
+    // target, and another actor resolves NEITHER on someone else's.
+    //
+    // MORPHED with the per-actor shared-thread model (a run acts as its
+    // invoker): a shared conversation no longer holds one widened binding
+    // whose non-origin participants may ordinary-reply. Each actor owns their
+    // own row, so the authority-prompt protection this test pinned became
+    // per-actor isolation.
     let services = InMemoryConversationServices::default();
     let alice_actor = external_actor("stored-shared-alice");
     let bob_actor = external_actor("stored-shared-bob");
@@ -405,14 +413,10 @@ async fn stored_shared_reply_allows_participant_but_not_authority_bearing_prompt
         "stored-shared-alice-event",
     );
     alice_request.route_kind = ConversationRouteKind::Shared;
-    let resolved = services
+    let alice_resolution = services
         .resolve_or_create_binding(alice_request)
         .await
-        .expect("alice creates shared binding");
-    services
-        .add_thread_participant(&tenant(), &resolved.turn_scope.thread_id, user("bob"))
-        .await
-        .expect("bob is a thread participant");
+        .expect("alice creates her shared-route binding");
     let mut bob_request = resolve_request(
         telegram(),
         bob_actor,
@@ -423,31 +427,44 @@ async fn stored_shared_reply_allows_participant_but_not_authority_bearing_prompt
     let bob_resolution = services
         .resolve_or_create_binding(bob_request)
         .await
-        .expect("bob may enter the shared route");
+        .expect("bob creates his own shared-route binding");
 
-    let ordinary = services
-        .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
-            tenant_id: tenant(),
-            actor_user_id: user("bob"),
-            current_thread_id: bob_resolution.turn_scope.thread_id.clone(),
-            reply_target_binding_ref: bob_resolution.reply_target_binding_ref.clone(),
-            access: StoredReplyTargetAccess::OrdinaryReply,
-        })
-        .await
-        .expect("shared participant may resolve an ordinary reply");
-    assert_eq!(ordinary.route_kind, ConversationRouteKind::Shared);
+    // The origin actor resolves both access kinds on their own target.
+    for access in [
+        StoredReplyTargetAccess::OrdinaryReply,
+        StoredReplyTargetAccess::ExactOriginActor,
+    ] {
+        let resolved = services
+            .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+                tenant_id: tenant(),
+                actor_user_id: user("bob"),
+                current_thread_id: bob_resolution.turn_scope.thread_id.clone(),
+                reply_target_binding_ref: bob_resolution.reply_target_binding_ref.clone(),
+                access,
+            })
+            .await
+            .expect("the origin actor resolves their own stored reply target");
+        assert_eq!(resolved.route_kind, ConversationRouteKind::Shared);
+    }
 
-    let error = services
-        .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
-            tenant_id: tenant(),
-            actor_user_id: user("bob"),
-            current_thread_id: bob_resolution.turn_scope.thread_id,
-            reply_target_binding_ref: bob_resolution.reply_target_binding_ref,
-            access: StoredReplyTargetAccess::ExactOriginActor,
-        })
-        .await
-        .expect_err("shared widening cannot authorize an authority-bearing prompt");
-    assert!(matches!(error, InboundTurnError::AccessDenied { .. }));
+    // Another actor resolves neither access kind on someone else's target —
+    // they are not a participant of that per-actor thread.
+    for access in [
+        StoredReplyTargetAccess::OrdinaryReply,
+        StoredReplyTargetAccess::ExactOriginActor,
+    ] {
+        let error = services
+            .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+                tenant_id: tenant(),
+                actor_user_id: user("bob"),
+                current_thread_id: alice_resolution.turn_scope.thread_id.clone(),
+                reply_target_binding_ref: alice_resolution.reply_target_binding_ref.clone(),
+                access,
+            })
+            .await
+            .expect_err("another actor's stored reply target must not resolve");
+        assert!(matches!(error, InboundTurnError::AccessDenied { .. }));
+    }
 }
 
 #[tokio::test]
@@ -774,13 +791,16 @@ async fn unpair_external_actor_preserves_shared_conversation_routes() {
         .await
         .expect("alice unpair must not remove the shared conversation route");
 
-    assert_eq!(
+    // Per-actor shared threads: bob's binding is his own row, distinct from
+    // alice's, and it survives her unpair unchanged — the preservation this
+    // test always pinned, restated for the run-acts-as-invoker model.
+    assert_ne!(
         bob_before_unpair.turn_scope.thread_id,
         alice_resolution.turn_scope.thread_id
     );
     assert_eq!(
         bob_after_unpair.turn_scope.thread_id,
-        alice_resolution.turn_scope.thread_id
+        bob_before_unpair.turn_scope.thread_id
     );
 }
 
@@ -857,9 +877,18 @@ async fn unpair_external_actor_if_owned_by_preserves_shared_conversation_routes(
         .resolve_or_create_binding(bob_request)
         .await
         .expect("shared route remains available to bob");
-    assert_eq!(
+    // Per-actor shared threads: bob gets his own thread, owned by him —
+    // alice's conditional unpair cannot take the conversation away from him.
+    assert_ne!(
         bob_resolution.turn_scope.thread_id,
         alice_resolution.turn_scope.thread_id
+    );
+    assert_eq!(
+        bob_resolution
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("bob")
     );
 }
 
@@ -1053,14 +1082,37 @@ async fn trusted_scope_rejects_existing_unscoped_binding() {
         .await
         .expect("participant added");
 
+    // The scope-reinterpretation guard still holds on the binding a trusted
+    // resolve can actually address: a Direct trusted resolve against the
+    // legacy unscoped row conflicts rather than silently re-scoping it.
+    let err = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-legacy-unscoped", None),
+                "telegram-event-legacy-trusted-scope",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            None,
+        )
+        .await
+        .expect_err("trusted scope must not reinterpret legacy bindings");
+    assert!(matches!(err, InboundTurnError::BindingConflict { .. }));
+
+    // Per-actor shared threads: a Shared trusted resolve keys
+    // (conversation, actor) and cannot address the legacy conversation-keyed
+    // row at all — it creates the actor's own scoped thread beside it, and
+    // the legacy row keeps its unscoped identity.
     let mut trusted_shared = resolve_request(
         telegram(),
         external_actor("telegram-user-1"),
         external_conversation("chat-legacy-unscoped", None),
-        "telegram-event-legacy-trusted-scope",
+        "telegram-event-legacy-trusted-shared",
     );
     trusted_shared.route_kind = ConversationRouteKind::Shared;
-    let err = services
+    let alice_shared = services
         .resolve_or_create_binding_with_trusted_scope(
             trusted_shared,
             Some(AgentId::new("agent-alpha").unwrap()),
@@ -1068,26 +1120,34 @@ async fn trusted_scope_rejects_existing_unscoped_binding() {
             None,
         )
         .await
-        .expect_err("trusted scope must not reinterpret legacy bindings");
-
-    assert!(matches!(err, InboundTurnError::BindingConflict { .. }));
-
-    let mut bob_shared = resolve_request(
-        telegram(),
-        external_actor("telegram-user-2"),
-        external_conversation("chat-legacy-unscoped", None),
-        "telegram-event-legacy-bob-after-rejected-widen",
+        .expect("a shared trusted resolve binds the actor's own scoped thread");
+    assert_ne!(
+        alice_shared.turn_scope.thread_id,
+        legacy.turn_scope.thread_id
     );
-    bob_shared.route_kind = ConversationRouteKind::Shared;
-    let err = services
-        .resolve_or_create_binding(bob_shared)
+    let legacy_again = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-legacy-unscoped", None),
+            "telegram-event-legacy-direct-lookup",
+        ))
         .await
-        .expect_err("rejected trusted resolve must not widen route access");
-    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+        .expect("the legacy direct binding is retained untouched");
+    assert_eq!(
+        legacy_again.turn_scope.thread_id,
+        legacy.turn_scope.thread_id
+    );
+    assert_eq!(legacy_again.turn_scope.agent_id, None);
 }
 
+/// REPLACED the trusted-owner backfill pin: with shared-route subject binding
+/// removed, a Shared resolve never adopts or re-owns a legacy
+/// conversation-keyed binding — it binds the actor's own thread, owned by the
+/// actor, and the legacy row is retained untouched (ignore-but-retain
+/// migration; a run acts as the user who invoked it).
 #[tokio::test]
-async fn trusted_owner_backfills_legacy_shared_binding() {
+async fn shared_resolve_leaves_legacy_conversation_scoped_binding_untouched() {
     let services = InMemoryConversationServices::default();
     services
         .pair_external_actor(
@@ -1117,7 +1177,7 @@ async fn trusted_owner_backfills_legacy_shared_binding() {
         "telegram-event-legacy-owner-backfill",
     );
     trusted_owner_shared.route_kind = ConversationRouteKind::Shared;
-    let migrated = services
+    let per_actor = services
         .resolve_or_create_binding_with_trusted_scope(
             trusted_owner_shared,
             None,
@@ -1125,14 +1185,172 @@ async fn trusted_owner_backfills_legacy_shared_binding() {
             Some(user("owner-alpha")),
         )
         .await
-        .expect("trusted owner should backfill legacy shared binding");
+        .expect("the shared resolve binds the actor's own thread");
 
     assert_eq!(
-        migrated
+        per_actor
             .turn_scope
             .explicit_owner_user_id()
             .map(UserId::as_str),
-        Some("owner-alpha")
+        Some("alice"),
+        "the shared thread is owned by the actor, never a passed-in subject"
+    );
+    assert_ne!(per_actor.turn_scope.thread_id, legacy.turn_scope.thread_id);
+
+    let legacy_again = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-legacy-owner", None),
+            "telegram-event-legacy-owner-direct-lookup",
+        ))
+        .await
+        .expect("the legacy direct binding is retained");
+    assert_eq!(
+        legacy_again.turn_scope.thread_id,
+        legacy.turn_scope.thread_id
+    );
+    assert!(!legacy_again.turn_scope.has_explicit_thread_owner());
+}
+
+/// A run acts as the user who invoked it: a shared conversation binds one
+/// thread PER PAIRED ACTOR, each owned by that actor, instead of one
+/// conversation-wide thread owned by a configured subject. Stable ownership:
+/// the same actor resolves the same thread on every message.
+#[tokio::test]
+async fn shared_route_binds_one_thread_per_actor() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-2"),
+            user("bob"),
+        )
+        .await;
+
+    let mut alice_first = resolve_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-per-actor", None),
+        "telegram-event-per-actor-alice-1",
+    );
+    alice_first.route_kind = ConversationRouteKind::Shared;
+    let alice_first = services
+        .resolve_or_create_binding_with_trusted_scope(
+            alice_first,
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            None,
+        )
+        .await
+        .expect("alice binds her own shared-route thread");
+    assert_eq!(
+        alice_first
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("alice"),
+        "a shared-route thread is owned by the actor who bound it"
+    );
+
+    let mut bob_first = resolve_request(
+        telegram(),
+        external_actor("telegram-user-2"),
+        external_conversation("chat-per-actor", None),
+        "telegram-event-per-actor-bob-1",
+    );
+    bob_first.route_kind = ConversationRouteKind::Shared;
+    let bob_first = services
+        .resolve_or_create_binding_with_trusted_scope(
+            bob_first,
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            None,
+        )
+        .await
+        .expect("bob binds his own shared-route thread");
+    assert_eq!(
+        bob_first
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("bob")
+    );
+    assert_ne!(
+        alice_first.turn_scope.thread_id, bob_first.turn_scope.thread_id,
+        "two actors in one shared conversation get two isolated threads"
+    );
+
+    let mut alice_second = resolve_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-per-actor", None),
+        "telegram-event-per-actor-alice-2",
+    );
+    alice_second.route_kind = ConversationRouteKind::Shared;
+    let alice_second = services
+        .resolve_or_create_binding_with_trusted_scope(
+            alice_second,
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            None,
+        )
+        .await
+        .expect("alice resolves her existing shared-route thread");
+    assert_eq!(
+        alice_second.turn_scope.thread_id, alice_first.turn_scope.thread_id,
+        "the same actor resolves the same thread on every message"
+    );
+}
+
+/// The trusted-owner parameter exists for host-trusted lanes that bind a
+/// conversation FOR a user (the trigger fire path binds Direct conversations
+/// owned by the trigger creator). On a SHARED route the owner is always the
+/// actor — a configured subject must not be able to claim another user's
+/// shared-route thread.
+#[tokio::test]
+async fn shared_route_owner_is_the_actor_even_when_a_trusted_owner_is_passed() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let mut shared = resolve_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-owner-is-actor", None),
+        "telegram-event-owner-is-actor",
+    );
+    shared.route_kind = ConversationRouteKind::Shared;
+    let resolution = services
+        .resolve_or_create_binding_with_trusted_scope(shared, None, None, Some(user("operator")))
+        .await
+        .expect("shared bind succeeds");
+
+    assert_eq!(
+        resolution
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("alice"),
+        "a shared-route thread is owned by its actor, never a passed-in subject"
     );
 }
 
@@ -2546,6 +2764,10 @@ async fn failed_shared_route_probe_does_not_widen_direct_binding() {
         .await
         .unwrap();
 
+    // Per-actor shared threads make this protection structural: a shared
+    // probe keys (conversation, actor) and can never address — let alone
+    // widen — alice's conversation-keyed Direct binding. Bob's probe now
+    // creates his own isolated thread instead of failing against hers.
     let mut bob_probe = resolve_request(
         web(),
         external_actor("bob-web"),
@@ -2553,12 +2775,17 @@ async fn failed_shared_route_probe_does_not_widen_direct_binding() {
         "bob-probe-event",
     );
     bob_probe.route_kind = ConversationRouteKind::Shared;
-    let err = services
+    let bob_probe = services
         .resolve_or_create_binding(bob_probe)
         .await
-        .unwrap_err();
-    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+        .expect("a shared probe binds the prober's own per-actor thread");
+    assert_ne!(
+        bob_probe.turn_scope.thread_id, resolution.turn_scope.thread_id,
+        "the shared probe must not reach alice's direct thread"
+    );
 
+    // Alice's Direct binding stayed direct-owner-only: another paired actor's
+    // Direct resolve against it is still denied.
     let err = services
         .resolve_or_create_binding(resolve_request(
             web(),
@@ -2606,6 +2833,10 @@ async fn lookup_binding_shared_owner_probe_does_not_widen_direct_binding() {
         .await
         .unwrap();
 
+    // Per-actor shared threads: a Shared lookup keys (conversation, actor)
+    // and therefore cannot address a Direct binding at all — the owner's
+    // shared-kind lookup is a missing binding, not a view of the direct one,
+    // and widening-by-lookup is structurally impossible.
     let mut owner_probe = resolve_request(
         web(),
         external_actor("alice-web"),
@@ -2613,23 +2844,26 @@ async fn lookup_binding_shared_owner_probe_does_not_widen_direct_binding() {
         "alice-direct-lookup-owner-shared-probe",
     );
     owner_probe.route_kind = ConversationRouteKind::Shared;
-    services
+    let err = services
         .lookup_binding(owner_probe)
         .await
-        .expect("owner lookup may inspect shared route without widening");
+        .expect_err("a shared lookup cannot address a direct binding");
+    assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
 
-    let mut bob_shared = resolve_request(
-        web(),
-        external_actor("bob-web"),
-        external_conversation("alice-direct-lookup-probe", None),
-        "bob-after-lookup-owner-shared-probe",
-    );
-    bob_shared.route_kind = ConversationRouteKind::Shared;
-    let err = services
-        .resolve_or_create_binding(bob_shared)
+    // The direct binding is untouched: its owner still resolves it directly.
+    let direct_again = services
+        .lookup_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-direct-lookup-probe", None),
+            "alice-direct-lookup-after-shared-probe",
+        ))
         .await
-        .expect_err("lookup-only shared probe must not widen direct binding");
-    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+        .expect("the direct binding still resolves for its owner");
+    assert_eq!(
+        direct_again.turn_scope.thread_id,
+        resolution.turn_scope.thread_id
+    );
 }
 
 #[tokio::test]
@@ -2829,9 +3063,13 @@ async fn failed_resolve_does_not_reserve_external_event_route() {
         .await
         .unwrap();
 
+    // Per-actor shared threads: bob's shared resolve no longer fails against
+    // alice's direct binding (it binds his own thread), so the failing probe
+    // this test needs is an UNPAIRED actor's — the fail-closed arm every
+    // route shape still has.
     let mut denied = resolve_request(
         telegram(),
-        external_actor("bob-telegram"),
+        external_actor("mallory-telegram"),
         external_conversation("alice-direct-poison-source", None),
         "denied-event-must-not-reserve-route",
     );
@@ -2841,7 +3079,7 @@ async fn failed_resolve_does_not_reserve_external_event_route() {
             .resolve_or_create_binding(denied)
             .await
             .unwrap_err(),
-        InboundTurnError::AccessDenied { .. }
+        InboundTurnError::BindingRequired { .. }
     ));
 
     let legitimate = services

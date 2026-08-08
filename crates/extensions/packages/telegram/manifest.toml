@@ -22,6 +22,10 @@ fields = [
   { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
   { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
   { handle = "bot_username", label = "Bot username", secret = false, required = true },
+  # Shared-conversation admission (run-acts-as-invoker): group/supergroup
+  # chats are served only when listed here; unlisted groups fail closed and
+  # each participant runs as themselves once paired.
+  { handle = "telegram_allowed_channels", label = "Allowed group chats (JSON array of Telegram chat IDs)", secret = false, required = false },
 ]
 
 # ---- channel surface -------------------------------------------------------

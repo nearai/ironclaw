@@ -35,7 +35,6 @@ impl ProductBindingResolver for LandingBindingStub {
         Ok(ResolvedBinding {
             tenant_id: tenant_id(),
             actor_user_id: user_id(),
-            subject_user_id: Some(user_id()),
             thread_id: thread_id(),
             agent_id: Some(AgentId::new("agent:alpha").unwrap()),
             project_id: None,

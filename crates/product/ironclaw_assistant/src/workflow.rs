@@ -1661,12 +1661,14 @@ fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {
 }
 
 fn turn_scope_for_thread(binding: &ResolvedBinding, thread_id: ThreadId) -> TurnScope {
+    // A run acts as the user who invoked it: the turn's explicit owner is the
+    // binding's actor on every route kind.
     TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),
         binding.project_id.clone(),
         thread_id,
-        binding.subject_user_id.clone(),
+        Some(binding.actor_user_id.clone()),
     )
 }
 

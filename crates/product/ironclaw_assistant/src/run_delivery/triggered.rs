@@ -120,17 +120,15 @@ struct TriggeredNotification {
     /// DM; `audience` pre-filters, and this keeps the send-time resolver check
     /// as defense in depth against a stale snapshot.
     require_direct_message_target: bool,
-    /// Distinguishes notices that share an [`RunNotificationEventKind`].
-    ///
-    /// The delivery id is derived from the projection ref, which is derived
-    /// from `(run_id, event_kind)` — and one run can legitimately produce
-    /// SEVERAL `RunBlocked` notices (a re-auth stand-in, an unserviceable-auth
-    /// cancellation, a run-failure notice). Without this discriminator they
-    /// collide on one durable identity, so the second is answered
-    /// `AlreadyDelivered` and silently never sent while still being recorded
-    /// as delivered. `None` keeps the historical id shape for kinds that occur
-    /// at most once per run.
-    notice_discriminator: Option<&'static str>,
+    /// Distinguishes durable delivery identities within one
+    /// `(run_id, event_kind)` — the pair the projection ref (and so the
+    /// delivery id) is derived from. Two notices that collapse to one id
+    /// have the second answered `AlreadyDelivered` and silently never sent,
+    /// so: gate prompts carry their GATE REF here (a run that parks on
+    /// several gates announces each one — the observer lane keys the same
+    /// way), `RunBlocked` stand-ins compose a fixed label with the gate ref,
+    /// and the terminal failure notice keeps its fixed label.
+    notice_discriminator: Option<String>,
 }
 
 /// Everything one actionable run state produces: the messages to fan out,
@@ -937,7 +935,11 @@ async fn notification_plan_for_state(
                 .push_str(&prompts::triggered_gate_footer(trigger_label));
             Ok(Some(TriggeredNotificationPlan {
                 notifications: vec![TriggeredNotification {
-                    notice_discriminator: None,
+                    // Keyed by the gate ref: a background run that parks on a
+                    // SECOND approval gate must announce it rather than dedupe
+                    // against the first gate's delivered prompt (the exact
+                    // stuck-run collapse the observer lane fixed).
+                    notice_discriminator: Some(gate_ref.as_str().to_string()),
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
                     // Notification channels are personal DMs or picked shared
@@ -991,7 +993,9 @@ async fn notification_plan_for_state(
                     Ok(Some(TriggeredNotificationPlan {
                         notifications: vec![
                             TriggeredNotification {
-                                notice_discriminator: None,
+                                // Per-gate identity, as for approval prompts: a
+                                // second auth gate is its own durable delivery.
+                                notice_discriminator: Some(gate_ref.as_str().to_string()),
                                 event_kind: RunNotificationEventKind::AuthRequired,
                                 intent: DeliveryIntent::AuthPrompt,
                                 text: prompts::auth_prompt_text(&view, true),
@@ -1004,7 +1008,10 @@ async fn notification_plan_for_state(
                             TriggeredNotification {
                                 event_kind: RunNotificationEventKind::RunBlocked,
                                 intent: DeliveryIntent::BackgroundRunNotice,
-                                notice_discriminator: Some("reauth"),
+                                // Per-gate, like its AuthRequired sibling: a
+                                // second auth gate's redacted notice must not
+                                // dedupe against the first gate's.
+                                notice_discriminator: Some(format!("reauth:{}", gate_ref.as_str())),
                                 text: format!(
                                     "{}{}",
                                     prompts::BACKGROUND_RUN_REAUTH_MESSAGE,
@@ -1037,7 +1044,10 @@ async fn notification_plan_for_state(
                         notifications: vec![TriggeredNotification {
                             event_kind: RunNotificationEventKind::RunBlocked,
                             intent: DeliveryIntent::BackgroundRunNotice,
-                            notice_discriminator: Some("auth-unavailable"),
+                            notice_discriminator: Some(format!(
+                                "auth-unavailable:{}",
+                                gate_ref.as_str()
+                            )),
                             text: format!(
                                 "{}{}",
                                 unavailable,
@@ -1056,7 +1066,8 @@ async fn notification_plan_for_state(
             notifications: vec![TriggeredNotification {
                 event_kind: RunNotificationEventKind::RunBlocked,
                 intent: DeliveryIntent::BackgroundRunNotice,
-                notice_discriminator: Some("failed"),
+                // Terminal: one failure notice per run, no gate to key by.
+                notice_discriminator: Some("failed".to_string()),
                 text: format!(
                     "{}{}",
                     prompts::BACKGROUND_RUN_FAILED_MESSAGE,
@@ -1147,7 +1158,7 @@ async fn deliver_notification_to_target(
     let projection_id = prompts::run_notification_projection_id(
         context.run_id,
         notification.event_kind,
-        notification.notice_discriminator,
+        notification.notice_discriminator.as_deref(),
     );
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))

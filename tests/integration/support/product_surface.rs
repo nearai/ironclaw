@@ -200,11 +200,9 @@ where
             return Ok(stored.binding);
         }
 
+        // A run acts as the user who invoked it: the actor is the binding's
+        // only identity on every route kind (no shared-route subject).
         let actor_user_id = user_id_for_binding(&self.scope.tenant_id, &request)?;
-        let subject_user_id = match request.route_kind {
-            ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
-            ProductConversationRouteKind::Shared => Some(self.scope.user_id.clone()),
-        };
         let binding_key = binding_key(&self.scope, &request)?;
         let reply_target_binding_ref =
             ironclaw_turns::ReplyTargetBindingRef::new(format!("reply:harness-{binding_key}"))
@@ -214,7 +212,6 @@ where
         let binding = ResolvedBinding {
             tenant_id: self.scope.tenant_id.clone(),
             actor_user_id,
-            subject_user_id,
             thread_id: thread_id_for_binding(&self.scope, &request)?,
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),

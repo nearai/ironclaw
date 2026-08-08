@@ -653,14 +653,25 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // a production file. Net effect is a smaller crate than before the
         // fixes, so the ceiling ratchets DOWN rather than being raised. Count
         // read from this test's own failure message.
-        // 13_115 -> 13_181 (2026-08-07): +66 lines landed in
-        // `instruction_bundle.rs` from main (#7361/#7363) when this branch
-        // folded onto it. Not growth from this PR — the upward check is a hard
-        // `lines > ceiling` with ZERO headroom (TOLERANCE is the downward
-        // ratchet-nudge window only), so any commit that adds a line to a
-        // contracts crate reddens every branch until the ceiling is
-        // re-captured. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_181),
+        // 13_115 -> 13_028 (2026-08-07, run-acts-as-invoker follow-up):
+        // `LoopRunContext::acting_user_id` (+16 lines) declares the one
+        // acting-identity ladder both the composition gate raise and the
+        // loop-host resume replay load key their scope-keyed stores by —
+        // hand-synced copies of it had already diverged once. Paid for by
+        // splitting `host/run_context.rs`'s 104-line inline `#[cfg(test)]`
+        // module into its `run_context/tests.rs` sibling, so the ceiling
+        // ratchets DOWN. Count read from this test's own failure message.
+        // 13_028 -> 13_094 (2026-08-08, merge with main): main's
+        // #7361/#7363 added +66 lines to `instruction_bundle.rs`, folded
+        // in when this branch merged main. Not growth from this PR; count
+        // read from this test's own failure message after the merge.
+        // 13_094 -> 13_107 (2026-08-08, run-acts-as-invoker review
+        // hardening): +13 lines for `LoopRunContext::acting_resource_scope`
+        // — the raise/resume scope recipe both gate-dance crates previously
+        // hand-synced now lives once on the contract type (its callers in
+        // composition and loop_host DELETED their copies). Reason recorded
+        // in the PR body; count read from this test's failure message.
+        ("ironclaw_loop_contracts", 13_107),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
