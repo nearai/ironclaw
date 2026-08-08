@@ -22,6 +22,12 @@ pub enum RebornProfile {
     /// persistent volume. Intended for SSO-only Railway-style deployments while
     /// the full PostgreSQL production composition continues to mature.
     HostedSingleTenantVolume,
+    /// Hosted single-tenant volume profile whose shell/process lane runs in a
+    /// per-user sandbox on a locally reachable Docker daemon.
+    HostedSingleTenantVolumeSandboxed,
+    /// Hosted single-tenant volume profile whose per-user sandbox lifecycle is
+    /// provided by Railway Sandboxes and durable Railway checkpoints.
+    HostedSingleTenantVolumeSandboxedRailway,
     /// Production startup. Future runtime composition must fail closed here if
     /// required durable services are absent.
     Production,
@@ -31,11 +37,13 @@ pub enum RebornProfile {
 }
 
 impl RebornProfile {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Standalone,
         Self::StandaloneUnrestricted,
         Self::HostedSingleTenant,
         Self::HostedSingleTenantVolume,
+        Self::HostedSingleTenantVolumeSandboxed,
+        Self::HostedSingleTenantVolumeSandboxedRailway,
         Self::Production,
         Self::MigrationDryRun,
     ];
@@ -58,6 +66,10 @@ impl RebornProfile {
             Self::StandaloneUnrestricted => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::HostedSingleTenantVolumeSandboxed => "hosted-single-tenant-volume-sandboxed",
+            Self::HostedSingleTenantVolumeSandboxedRailway => {
+                "hosted-single-tenant-volume-sandboxed-railway"
+            }
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
@@ -66,14 +78,21 @@ impl RebornProfile {
     pub fn starts_hosted_single_tenant_listener(self) -> bool {
         matches!(
             self,
-            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+            Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantVolumeSandboxed
+                | Self::HostedSingleTenantVolumeSandboxedRailway
         )
     }
 
     pub fn uses_standalone_local_runtime_volume(self) -> bool {
         matches!(
             self,
-            Self::Standalone | Self::StandaloneUnrestricted | Self::HostedSingleTenantVolume
+            Self::Standalone
+                | Self::StandaloneUnrestricted
+                | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantVolumeSandboxed
+                | Self::HostedSingleTenantVolumeSandboxedRailway
         )
     }
 
@@ -81,6 +100,12 @@ impl RebornProfile {
         match self {
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            // The provider profile selects execution transport, not a second
+            // copy of IronClaw's durable application state.
+            Self::HostedSingleTenantVolumeSandboxed
+            | Self::HostedSingleTenantVolumeSandboxedRailway => {
+                "hosted-single-tenant-volume-sandboxed"
+            }
             Self::Standalone
             | Self::StandaloneUnrestricted
             | Self::Production
@@ -95,6 +120,8 @@ impl RebornProfile {
                 | Self::StandaloneUnrestricted
                 | Self::HostedSingleTenant
                 | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantVolumeSandboxed
+                | Self::HostedSingleTenantVolumeSandboxedRailway
         )
     }
 }
@@ -108,6 +135,10 @@ impl FromStr for RebornProfile {
             "local-dev-yolo" => Ok(Self::StandaloneUnrestricted),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
+            "hosted-single-tenant-volume-sandboxed" => Ok(Self::HostedSingleTenantVolumeSandboxed),
+            "hosted-single-tenant-volume-sandboxed-railway" => {
+                Ok(Self::HostedSingleTenantVolumeSandboxedRailway)
+            }
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             other => Err(RebornConfigError::InvalidProfile {

@@ -63,7 +63,7 @@ impl LlmKeyStore {
     /// [`Self::put`] taking a plain `String` rather than a [`SecretString`] —
     /// for callers outside this crate (namely `ironclaw_cli::onboard`)
     /// that must not depend on a secret substrate directly (see
-    /// `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
+    /// `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
     /// which pins `ironclaw_cli`'s allowed workspace dependency set).
     pub async fn put_plaintext(
         &self,

@@ -7,15 +7,71 @@ import {
 } from "../lib/connection-status";
 
 const ACTIVE_STREAM_STALL_DEADLINE_MS = 30_000;
-const SSE_CONNECTION_ID = clientActionId();
-let nextConnectionGeneration = 0;
+const SSE_CONNECTION_STORAGE_KEY = "ironclaw:v2-sse-connection";
 
-function connectionGeneration() {
-  nextConnectionGeneration =
-    nextConnectionGeneration >= Number.MAX_SAFE_INTEGER
-      ? 1
-      : nextConnectionGeneration + 1;
-  return nextConnectionGeneration;
+function newConnectionState() {
+  return { connectionId: clientActionId(), generation: 0 };
+}
+
+function isDocumentReload() {
+  try {
+    const navigation =
+      globalThis.performance?.getEntriesByType?.("navigation")[0];
+    return Boolean(
+      navigation && "type" in navigation && navigation.type === "reload",
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function loadConnectionState() {
+  // sessionStorage can be copied into a newly opened or duplicated tab. Only
+  // an actual reload may reuse the predecessor document's stream identity;
+  // every fresh top-level navigation must get an independent server slot.
+  if (!isDocumentReload()) return newConnectionState();
+  try {
+    const raw = globalThis.sessionStorage?.getItem(SSE_CONNECTION_STORAGE_KEY);
+    if (!raw) return newConnectionState();
+    const candidate = JSON.parse(raw);
+    const validConnectionId =
+      typeof candidate?.connectionId === "string" &&
+      /^[A-Za-z0-9_-]{1,64}$/.test(candidate.connectionId);
+    const validGeneration =
+      typeof candidate?.generation === "number" &&
+      Number.isSafeInteger(candidate.generation) &&
+      candidate.generation >= 0;
+    if (validConnectionId && validGeneration) {
+      return {
+        connectionId: candidate.connectionId,
+        generation: candidate.generation,
+      };
+    }
+  } catch (_) {
+    // Storage may be unavailable or contain stale data. A fresh identity still
+    // gives this document a usable stream; the server's max lifetime bounds
+    // any proxy-held stream that cannot be superseded.
+  }
+  return newConnectionState();
+}
+
+const sseConnectionState = loadConnectionState();
+
+function nextConnectionState() {
+  if (sseConnectionState.generation >= Number.MAX_SAFE_INTEGER) {
+    sseConnectionState.connectionId = clientActionId();
+    sseConnectionState.generation = 0;
+  }
+  sseConnectionState.generation += 1;
+  try {
+    globalThis.sessionStorage?.setItem(
+      SSE_CONNECTION_STORAGE_KEY,
+      JSON.stringify(sseConnectionState),
+    );
+  } catch (_) {
+    // Best effort. In-memory state still orders this document's reconnects.
+  }
+  return { ...sseConnectionState };
 }
 
 function isBrowserOffline() {
@@ -59,7 +115,6 @@ export function useSSE({
     let streamOpen = false;
     const request = eventStreamRequest({
       threadId,
-      connectionId: SSE_CONNECTION_ID,
     });
     const stream = new EventSourcePlus(request.url, {
       credentials: "same-origin",
@@ -73,6 +128,11 @@ export function useSSE({
         clearTimeout(activityWatchdog);
         activityWatchdog = null;
       }
+    }
+
+    function markTransportUnavailable() {
+      streamOpen = false;
+      clearActivityWatchdog();
     }
 
     function activityIsExpected() {
@@ -106,6 +166,7 @@ export function useSSE({
 
     function markConnected() {
       if (disposed || terminalErrorReceived) return;
+      streamOpen = true;
       connectedOnce = true;
       setStatus(CONNECTION_STATUS.CONNECTED);
     }
@@ -125,9 +186,12 @@ export function useSSE({
       controller = stream.listen({
         onRequest({ options }) {
           if (disposed || terminalErrorReceived) return;
+          markTransportUnavailable();
+          const connectionState = nextConnectionState();
           options.query = {
             ...options.query,
-            connection_generation: connectionGeneration(),
+            connection_id: connectionState.connectionId,
+            connection_generation: connectionState.generation,
           };
           setStatus(
             connectedOnce
@@ -137,6 +201,7 @@ export function useSSE({
         },
         onRequestError() {
           if (disposed || terminalErrorReceived) return;
+          markTransportUnavailable();
           setStatus(CONNECTION_STATUS.RECONNECTING);
         },
         onResponse({ response }) {
@@ -146,17 +211,17 @@ export function useSSE({
             response.headers.get("content-type")?.includes("text/event-stream")
           ) {
             markConnected();
+            scheduleActivityWatchdog();
           }
         },
         onResponseError({ response }) {
           if (disposed || terminalErrorReceived) return;
+          markTransportUnavailable();
           if (isRetryableResponseStatus(response.status)) {
             setStatus(CONNECTION_STATUS.RECONNECTING);
             return;
           }
           terminalErrorReceived = true;
-          streamOpen = false;
-          clearActivityWatchdog();
           controller?.abort("non-retryable stream response");
           setStatus(CONNECTION_STATUS.DISCONNECTED);
         },
@@ -192,6 +257,7 @@ export function useSSE({
             frame.retryable === true
           ) {
             stream.lastEventId = undefined;
+            markTransportUnavailable();
             setStatus(CONNECTION_STATUS.RECONNECTING);
             controller?.reconnect();
           }
@@ -202,8 +268,6 @@ export function useSSE({
         controller?.abort("non-retryable stream response");
         return;
       }
-      streamOpen = true;
-      scheduleActivityWatchdog();
     }
 
     function disconnectForHiddenTab() {
@@ -221,10 +285,9 @@ export function useSSE({
       } else if (!controller) {
         connect();
       } else {
-        streamOpen = true;
+        markTransportUnavailable();
         setStatus(CONNECTION_STATUS.CONNECTING);
         controller.reconnect();
-        scheduleActivityWatchdog();
       }
     }
 
@@ -235,6 +298,7 @@ export function useSSE({
 
     function handleNetworkOnline() {
       if (disposed || terminalErrorReceived) return;
+      markTransportUnavailable();
       setStatus(CONNECTION_STATUS.RECONNECTING);
       controller?.reconnect();
     }

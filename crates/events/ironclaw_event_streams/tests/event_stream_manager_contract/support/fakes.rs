@@ -728,54 +728,6 @@ impl OutboundStateStorePort for FailingOutboundStore {
         Err(OutboundError::Backend)
     }
 
-    async fn put_run_final_reply_handoff(
-        &self,
-        _record: ironclaw_outbound::RunFinalReplyHandoffRecord,
-    ) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn list_pending_run_final_reply_handoffs(
-        &self,
-        _limit: usize,
-    ) -> Result<Vec<ironclaw_outbound::RunFinalReplyHandoffRecord>, OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn complete_run_final_reply_handoff(
-        &self,
-        _record: &ironclaw_outbound::RunFinalReplyHandoffRecord,
-    ) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn load_run_final_reply_handoff_cursor(
-        &self,
-    ) -> Result<ironclaw_host_api::turn::EventCursor, OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn advance_run_final_reply_handoff_cursor(
-        &self,
-        _cursor: ironclaw_host_api::turn::EventCursor,
-    ) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn put_run_final_reply_target(
-        &self,
-        _record: ironclaw_outbound::RunFinalReplyTargetRecord,
-    ) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
-    async fn load_run_final_reply_target(
-        &self,
-        _request: ironclaw_outbound::RunFinalReplyTargetRequest,
-    ) -> Result<Option<ironclaw_outbound::RunFinalReplyTargetRecord>, OutboundError> {
-        Err(OutboundError::Backend)
-    }
-
     async fn put_thread_notification_policy(
         &self,
         _policy: ThreadNotificationPolicy,

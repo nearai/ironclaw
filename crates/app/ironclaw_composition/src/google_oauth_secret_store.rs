@@ -42,7 +42,7 @@ impl GoogleOauthSecretStore {
     /// [`Self::put`] taking a plain `String` rather than [`SecretMaterial`] —
     /// for callers outside this crate (namely `ironclaw_cli::commands::
     /// config::set`) that must not depend on `ironclaw_secrets` directly (see
-    /// `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
+    /// `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
     /// which pins `ironclaw_cli`'s allowed workspace dependency set —
     /// mirrors `LlmKeyStore::put_plaintext`'s reasoning).
     pub async fn put_plaintext(&self, value: String) -> Result<(), GoogleOauthSecretStoreError> {

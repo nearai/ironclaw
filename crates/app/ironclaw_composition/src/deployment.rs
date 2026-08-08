@@ -61,6 +61,15 @@ impl RebornReadinessDiagnostic {
         )
     }
 
+    fn hosted_single_tenant_volume_sandboxed(profile: RebornCompositionProfile) -> Self {
+        Self::composition_profile(
+            profile,
+            RebornReadinessDiagnosticReason::HostedSingleTenantVolumeSandboxedPreview,
+            RebornReadinessDiagnosticStatus::Warning,
+            true,
+        )
+    }
+
     pub fn hosted_single_tenant() -> Self {
         Self::composition_profile(
             RebornCompositionProfile::HostedSingleTenant,
@@ -440,6 +449,33 @@ impl DeploymentConfig {
         }
     }
 
+    /// Hosted single-tenant volume with per-user process execution. The
+    /// concrete Docker or Railway transport is selected by the explicit boot
+    /// profile and supplied through the same process-port contract.
+    fn hosted_single_tenant_volume_sandboxed(profile: RebornCompositionProfile) -> Self {
+        Self {
+            profile,
+            policy_request: Some(RuntimePolicyRequest {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::HostedSafe,
+                yolo_disclosure_acknowledged: false,
+                org_policy: OrgPolicyConstraints::default(),
+            }),
+            traffic: TrafficPolicy::Serve {
+                required_readiness:
+                    RebornReadinessState::HostedSingleTenantVolumeSandboxedValidated,
+                veto_on_production_blocking_diagnostic: false,
+            },
+            readiness: ReadinessContract {
+                state: RebornReadinessState::HostedSingleTenantVolumeSandboxedValidated,
+                diagnostics: vec![
+                    RebornReadinessDiagnostic::hosted_single_tenant_volume_sandboxed(profile),
+                ],
+            },
+            ..Self::hosted_single_tenant_volume()
+        }
+    }
+
     /// Production: the production-shaped substrate, serving live traffic only
     /// once readiness validates.
     pub fn production() -> Self {
@@ -504,6 +540,10 @@ impl DeploymentConfig {
             RebornCompositionProfile::HostedSingleTenant => Self::hosted_single_tenant(),
             RebornCompositionProfile::HostedSingleTenantVolume => {
                 Self::hosted_single_tenant_volume()
+            }
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+            | RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway => {
+                Self::hosted_single_tenant_volume_sandboxed(profile)
             }
             RebornCompositionProfile::Production => Self::production(),
             RebornCompositionProfile::MigrationDryRun => Self::migration_dry_run(),
@@ -639,8 +679,15 @@ pub fn local_runtime_build_input_with_options(
     root: PathBuf,
     options: RebornRuntimeProfileOptions,
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
-    if profile == RebornCompositionProfile::HostedSingleTenantVolume {
-        return hosted_single_tenant_volume_build_input(owner_id, root);
+    match profile {
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            return hosted_single_tenant_volume_build_input(owner_id, root);
+        }
+        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+        | RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway => {
+            return hosted_single_tenant_volume_sandboxed_build_input(profile, owner_id, root);
+        }
+        _ => {}
     }
 
     // Build the deployment once, here, where the operator's host-access
@@ -666,6 +713,24 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
     Ok(RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::for_profile(RebornCompositionProfile::HostedSingleTenantVolume, false),
+        owner_id,
+        root,
+    )
+    .with_runtime_policy(policy))
+}
+
+/// Build either explicit sandbox-provider profile with the shared hosted
+/// user-sandbox policy. The caller still has to supply the matching concrete
+/// process binding; production assembly validates that fail closed.
+pub(crate) fn hosted_single_tenant_volume_sandboxed_build_input(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    root: PathBuf,
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
+    let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
+        .map_err(RebornRuntimeProfileError::Policy)?;
+    Ok(RebornHostBindings::local_filesystem_from_deployment(
+        DeploymentConfig::for_profile(profile, false),
         owner_id,
         root,
     )
@@ -747,6 +812,22 @@ pub fn hosted_single_tenant_volume_runtime_policy() -> Result<EffectiveRuntimePo
         })
 }
 
+/// Resolved per-user sandbox policy shared by the local-Docker and Railway
+/// sandboxed hosted-volume profiles.
+pub fn hosted_single_tenant_volume_sandboxed_runtime_policy()
+-> Result<EffectiveRuntimePolicy, ResolveError> {
+    DeploymentConfig::hosted_single_tenant_volume_sandboxed(
+        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+    )
+    .resolve()
+    .and_then(|policy| {
+        policy.ok_or(ResolveError::IncompatibleDeployment {
+            deployment: DeploymentMode::HostedMultiTenant,
+            profile: RuntimeProfile::HostedSafe,
+        })
+    })
+}
+
 /// Resolved policy for trusted single-user deployment with inherited
 /// host environment access.
 pub fn standalone_unrestricted_runtime_policy(
@@ -820,6 +901,8 @@ mod tests {
             RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
             RebornCompositionProfile::Production,
             RebornCompositionProfile::MigrationDryRun,
         ] {
@@ -860,6 +943,16 @@ mod tests {
             ),
             (
                 RebornCompositionProfile::HostedSingleTenantVolume,
+                RuntimeSubstrate::ProductionShaped,
+                true,
+            ),
+            (
+                RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                RuntimeSubstrate::ProductionShaped,
+                true,
+            ),
+            (
+                RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
                 RuntimeSubstrate::ProductionShaped,
                 true,
             ),
@@ -909,6 +1002,8 @@ mod tests {
             RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
             RebornCompositionProfile::Production,
         ] {
             let config = DeploymentConfig::for_profile(profile, true);
@@ -941,6 +1036,8 @@ mod tests {
             RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
         ] {
             let config = DeploymentConfig::for_profile(profile, true);
             assert!(
@@ -1034,6 +1131,17 @@ mod tests {
         assert_eq!(policy.resolved_profile, RuntimeProfile::SecureDefault);
         assert_eq!(policy.process_backend, ProcessBackendKind::None);
         assert_eq!(policy.approval_policy, ApprovalPolicy::AskAlways);
+    }
+
+    #[test]
+    fn sandboxed_hosted_profiles_resolve_the_user_sandbox_process_backend() {
+        for profile in [
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+        ] {
+            let policy = resolved(DeploymentConfig::for_profile(profile, false));
+            assert_eq!(policy.process_backend, ProcessBackendKind::UserSandbox);
+        }
     }
 
     #[test]

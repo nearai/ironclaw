@@ -31,8 +31,12 @@ Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
 3. **Architecture:** dependency and composition boundaries —
    `cargo test -p ironclaw_architecture_tests`.
 4. **Backend/runtime integration:** DB-, Docker-, or runtime-shaped behavior —
-   use the owning feature-gated suite and `cargo test --features integration`
-   when required by its guide.
+   use the owning crate's feature-gated suite
+   (`cargo test -p <owning-crate> --features integration`, e.g.
+   `-p ironclaw_hooks` for the Postgres/libSQL hooks parity matrix) when its
+   guide requires it. The workspace-root `integration` feature is empty with no
+   consumers, so a bare root `cargo test --features integration` adds nothing
+   over `cargo test`.
 5. **Recorded model behavior:** hermetic fixtures for tool choice/request shape;
    validate with `scripts/ci/check-reborn-qa-fixtures.sh`.
 6. **Browser/E2E:** user-visible WebUI flows under `tests/e2e/`.

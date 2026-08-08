@@ -77,13 +77,14 @@ pub use host::{
     LoopInterruptKind, LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
     LoopModelResponse, LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef, LoopProgressEvent,
     LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRecoveryClass,
-    LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch, LoopRunContext,
-    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-    PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch,
+    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
+    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+    validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     EphemeralInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
@@ -134,9 +135,10 @@ pub use resolver::{
 };
 pub use runtime_context::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-    Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
+    ConnectedChannelSummary, ConnectedChannelsState, Locale, LocaleError, LoopRuntimeContext,
+    NotificationChannelsState, UserProfileContext,
 };
+pub use skill_context::SkillName;
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
     SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,

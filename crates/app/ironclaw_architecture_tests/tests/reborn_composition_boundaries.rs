@@ -190,13 +190,14 @@ fn composition_public_pub_use_surface_matches_snapshot() {
     let root = workspace_root();
     let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
         .expect("composition lib.rs readable");
-    let snapshot = std::fs::read_to_string(root.join("docs/plans/composition-pubuse.snapshot"))
-        .expect("composition pub-use snapshot readable");
+    let snapshot =
+        std::fs::read_to_string(root.join("docs/internal/plans/composition-pubuse.snapshot"))
+            .expect("composition pub-use snapshot readable");
 
     let actual = extract_pub_use_surface(&lib);
     assert_eq!(
         snapshot, actual,
-        "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
+        "composition public pub-use surface must match docs/internal/plans/composition-pubuse.snapshot; \
          update the snapshot only for intentional public service changes"
     );
 }
@@ -642,10 +643,11 @@ fn is_test_module_file(path: &Path) -> bool {
 /// Is this file crate guidance rather than a shipped asset?
 ///
 /// `CONTRACT.MD` belongs here for the same reason as the other three: the repo
-/// already ships it as crate-local guidance (`ironclaw_identity`,
-/// `ironclaw_trust`) and CLAUDE.md's module-spec table names it. Without it, a
-/// composition `CONTRACT.md` would be reported as prompt content and send the
-/// author to the wrong fix.
+/// ships it as crate-local guidance (`ironclaw_identity`, `ironclaw_trust`,
+/// and the module specs the root `AGENTS.md` Module Specs table names —
+/// including this crate's own `CONTRACT.md`). Without it, the composition
+/// `CONTRACT.md` would be reported as prompt content and send the author to
+/// the wrong fix.
 fn is_crate_guidance(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())

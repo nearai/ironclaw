@@ -823,7 +823,7 @@ async fn automation_service_maps_trigger_run_status_and_last_status() {
 }
 
 // Resolver tests (resolve_run_thread_scope_*) live in
-// `crates/ironclaw_composition/src/automation_resolver_tests.rs`
+// `crates/product/ironclaw_assistant/src/automation_product_service/tests/resolver_tests.rs`
 // to keep this file under the project's 800-900 line file-size target.
 
 #[tokio::test]

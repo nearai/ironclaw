@@ -154,7 +154,13 @@ impl NodeTraceSubmissionStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionReceipt {
-    #[serde(default = "default_submission_status")]
+    /// The server's explicit statement of what happened to the submission
+    /// (e.g. `"accepted"`). Deliberately NOT serde-defaulted: this field is
+    /// the acknowledgement, and callers persist it unconditionally as
+    /// `server_status` truth — a defaulted value here fabricated a
+    /// `"submitted"` receipt from a proxy's `200 {}`, the #7144 failure class
+    /// through the wire type. A 2xx body without it must fail the receipt
+    /// parse, never count as submitted.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_points_pending: Option<f32>,
@@ -408,10 +414,6 @@ pub enum TraceQueueEligibility {
     },
 }
 
-pub(crate) fn default_submission_status() -> String {
-    "submitted".to_string()
-}
-
 pub(crate) fn is_zero_f32(value: &f32) -> bool {
     value.abs() <= f32::EPSILON
 }
@@ -548,11 +550,28 @@ pub(crate) fn trace_scope_mutation_lock(scope: Option<&str>) -> Arc<tokio::sync:
         Ok(locks) => locks,
         Err(poisoned) => poisoned.into_inner(),
     };
+    // Drop entries nobody holds or is waiting on. Without this the map grew one
+    // entry per distinct (tenant, user) for the lifetime of the process — on a
+    // hosted instance, the lifetime count of distinct users (#7144).
+    //
+    // NOT the wholesale `clear()` that bounds `CREDIT_VIEW_CACHE`: these `Arc`s
+    // *are* the mutual-exclusion identity. Evicting one while a guard is alive
+    // would hand the next caller a fresh, uncontended mutex and silently break
+    // the serialization `trace_scope_flushes_serialize_same_scope_...` pins. A
+    // strong count of 1 means the map is the only owner, so no guard exists and
+    // no waiter can be queued.
+    if locks.len() > TRACE_SCOPE_MUTATION_LOCK_HIGH_WATER {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
 }
+
+/// Size at which [`trace_scope_mutation_lock`] sweeps unheld entries. A sweep is
+/// O(len) under the map lock, so it is amortized rather than run per call.
+const TRACE_SCOPE_MUTATION_LOCK_HIGH_WATER: usize = 1024;
 
 pub(crate) async fn lock_trace_scope_for_mutation(scope: Option<&str>) -> OwnedMutexGuard<()> {
     trace_scope_mutation_lock(scope).lock_owned().await

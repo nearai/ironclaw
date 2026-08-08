@@ -1994,7 +1994,7 @@ impl CapabilityLeaseStorePort for CoordinatedClaimConflictLeaseStore {
 // the `claim`/`begin_dispatch_claimed` CAS writes in the same `resume_json` call,
 // so a backend fault cannot isolate the consume failure this test needs. This is
 // the documented FaultInjecting limitation ("can't fault only versioned writes";
-// ironclaw_filesystem/CLAUDE.md), not a domain-double.
+// ironclaw_filesystem/CONTRACT.md), not a domain-double.
 struct ConsumeFailingLeaseStore {
     inner: CapabilityLeaseStore<InMemoryBackend>,
 }

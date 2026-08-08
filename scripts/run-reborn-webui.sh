@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch IronClaw Reborn with the WebChat v2 web UI for local testing.
 #
-# Handles the setup footguns from docs/reborn-binary.md for you:
+# Handles the setup footguns from docs/internal/reborn-binary.md for you:
 #   - keeps the Reborn home OUTSIDE the repo (serve uses the cwd as the
 #     local-dev workspace root and rejects overlap with it);
 #   - configures the model route via `models set-provider`;

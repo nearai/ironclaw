@@ -64,7 +64,9 @@ use ironclaw_config::BudgetDefaults;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
+use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy, ids::UserId, resource::ResourceScope,
+};
 use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_contracts::{
@@ -73,9 +75,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
-    HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
-    ZeroCostTable,
+    CapabilitySurfaceProfileResolver, HostManagedModelGateway, HostUserProfileSource,
+    JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ZeroCostTable,
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
@@ -142,7 +143,7 @@ mod group_constructors;
 
 /// Optional-runtime-wiring setters (`storage`, `safety_context`,
 /// `with_turn_event_sink`, `with_trace_capture`, `with_tool_disclosure_bridged`,
-/// `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
+/// `with_narrowed_capability_surface_policy_for_bridged_test`, `budget_accounting`,
 /// `communication_context_provider`,
 /// `hook_dispatcher_builder_factory`) on
 /// [`RebornIntegrationGroupBuilder`]. A private child module (not `pub mod`
@@ -392,7 +393,7 @@ impl GroupCapability {
             Self::HostRuntime(harness) => harness
                 .reborn_services_for_test()
                 .and_then(|runtime| runtime.outbound_delivery_stores_for_test())
-                .map(|(_, _, _, reply_attachment_intents)| reply_attachment_intents)
+                .map(|(_, _, _, reply_attachment_intents, _)| reply_attachment_intents)
                 .unwrap_or_else(fresh_store),
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 fresh_store()
@@ -480,7 +481,7 @@ impl RebornIntegrationGroup {
             // General integration groups stay hermetic across production
             // default changes. Disclosure-specific tests opt into Bridged.
             tool_disclosure: ToolDisclosureMode::Off,
-            narrowed_bridged_allow_set: None,
+            narrowed_bridged_policy: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -601,8 +602,17 @@ impl RebornIntegrationGroup {
             .ok_or("source delivery target requires composed Reborn runtime")?;
         let target_id = ironclaw_assistant::RebornOutboundDeliveryTargetId::new(target_id)?;
         let display_name = target_id.as_str().to_string();
+        // Registry-key the registration by the TARGET id (always unique per
+        // call), never by `provider_key`/channel: the registry's
+        // `providers.insert` silently REPLACES whatever already sits at a
+        // given key (`OutboundDeliveryTargetRegistrationOutcome::Replaced`),
+        // so two targets on the SAME channel (e.g. two Slack DMs) registered
+        // under the shared channel-named key would leave only the
+        // last-registered one resolvable — the first would look
+        // unregistered to the model that named it.
+        let registry_key = target_id.as_str().to_string();
         runtime.register_static_outbound_delivery_target_for_test(
-            provider_key,
+            registry_key,
             target_id,
             provider_key,
             display_name.as_str(),
@@ -821,10 +831,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
     /// `Bridged` only by `.with_tool_disclosure_bridged()`.
     tool_disclosure: ToolDisclosureMode,
-    /// #5647 RED-pin seam: opt-in override of the forced `CapabilityAllowSet::All`
+    /// #5647 RED-pin seam: opt-in override of the forced `CapabilitySurfacePolicy::allow_all()`
     /// for Bridged-mode groups. `None` preserves today's behavior; only
     /// consumed when `tool_disclosure == Bridged` (`into_group` fails fast otherwise).
-    narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
+    narrowed_bridged_policy: Option<CapabilitySurfacePolicy>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -955,11 +965,11 @@ impl RebornIntegrationGroupBuilder {
         let restart_builder = self.clone();
         // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
         // if the override is set without Bridged mode also selected.
-        if self.narrowed_bridged_allow_set.is_some()
+        if self.narrowed_bridged_policy.is_some()
             && self.tool_disclosure != ToolDisclosureMode::Bridged
         {
             return Err(
-                "with_narrowed_capability_allow_set_for_bridged_test() was set but \
+                "with_narrowed_capability_surface_policy_for_bridged_test() was set but \
                  tool_disclosure is not Bridged — the override only applies to \
                  bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
                     .into(),
@@ -1006,17 +1016,17 @@ impl RebornIntegrationGroupBuilder {
             self.trajectory_observer.clone(),
         )?;
 
-        // Enabler (b): production resolves `CapabilityAllowSet::All` for a
+        // Enabler (b): production resolves `CapabilitySurfacePolicy::allow_all()` for a
         // top-level user turn; mirror that for bridged groups (narrowed
         // override = the #5647 seam). Bridge ids now survive narrowing via
-        // the filter's host-exempt set, so this is production parity, not a
-        // bug dodge.
+        // disclosure's synthetic bridge surface, so this is production parity,
+        // not a bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if self.tool_disclosure == ToolDisclosureMode::Bridged {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
-                    allow_set: self
-                        .narrowed_bridged_allow_set
-                        .unwrap_or(CapabilityAllowSet::All),
+                    policy: self
+                        .narrowed_bridged_policy
+                        .unwrap_or(CapabilitySurfacePolicy::allow_all()),
                 })
             } else {
                 capability_surface_resolver
@@ -1300,6 +1310,9 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            prompt_diagnostic_sink: Some(Arc::new(
+                ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default(),
+            )),
             reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the

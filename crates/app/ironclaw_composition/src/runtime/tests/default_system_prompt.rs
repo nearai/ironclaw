@@ -100,9 +100,9 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
     assert!(
         !recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
-                && message.content.contains("Outbound delivery target:")
+                && message.content.contains("Background-run notifications:")
         }),
-        "plain WebUI chat should not resolve an unrelated outbound delivery target"
+        "plain WebUI chat should not resolve an unrelated notification-channel slice"
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {

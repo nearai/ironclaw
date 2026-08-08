@@ -11,12 +11,11 @@ mod delivery_resolution;
 mod delivery_targets;
 mod error;
 mod ids;
+mod model_channel_delivery;
 mod outbound_state_store;
 mod reply_attachment_intents;
 mod resolution_engine;
 mod run_delivery_cleanup;
-mod run_final_reply_handoff;
-mod run_final_reply_target;
 mod service;
 mod store;
 mod triggered_run_delivery;
@@ -28,8 +27,8 @@ pub mod test_support;
 
 pub use communication_preferences::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, VersionedCommunicationPreferenceRecord,
-    WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, NOTIFICATION_TARGETS_CAP,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 pub use delivered_gate_routes::{
     DELIVERED_GATE_ROUTE_TTL, DeliveredGateRouteRecord, DeliveredGateRouteStore,
@@ -40,20 +39,20 @@ pub use delivery_resolution::{
     CommunicationDeliveryResolution, CommunicationDeliveryResolutionRequest, CommunicationModality,
     DeliveryTargetCapabilities, RequestedOutboundContext, RequestedOutboundKind,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
-    SystemEventReasonCode, TriggerCommunicationContext, TriggerSourceKind,
+    SystemEventReasonCode,
 };
 pub use delivery_targets::{
-    HostOwnedOutboundDeliveryTargetProvider, MutableOutboundDeliveryTargetRegistry,
-    OutboundDeliveryTargetChannel, OutboundDeliveryTargetDescription,
-    OutboundDeliveryTargetDisplayName, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
-    OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetRegistry,
-    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetChannel,
+    OutboundDeliveryTargetDescription, OutboundDeliveryTargetDisplayName,
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
+    OutboundDeliveryTargetRegistry, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 pub use error::OutboundError;
-pub use ids::{
-    OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
-    TriggerOriginRef,
+pub use ids::{OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef};
+pub use model_channel_delivery::{
+    MODEL_DELIVERY_MAX_CONTENT_BYTES, MODEL_DELIVERY_PER_RUN_CAP, ModelChannelDelivery,
+    ModelChannelDeliveryError, ModelChannelDeliveryEvidence, ModelChannelDeliveryRequest,
 };
 pub use outbound_state_store::OutboundStateStore;
 pub use reply_attachment_intents::{
@@ -62,19 +61,13 @@ pub use reply_attachment_intents::{
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
 };
-pub use run_final_reply_handoff::{MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, RunFinalReplyHandoffRecord};
-pub use run_final_reply_target::{
-    RouteCurrentRunFinalReply, RouteCurrentRunFinalReplyError, RouteCurrentRunFinalReplyRequest,
-    RunFinalReplyDestination, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
-};
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
 pub use store::OutboundStateStorePort;
 pub use triggered_run_delivery::{
-    TriggeredRunDelivery, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
-    TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
+    TriggeredFireFailureDeliveryRequest, TriggeredRunDelivery, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
 };
 pub use types::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind,

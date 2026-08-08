@@ -1,4 +1,4 @@
-//! The `handlers.rs` module-charter map in `CLAUDE.md` is a contract, not a
+//! The `handlers.rs` module-charter map in `CONTRACT.md` is a contract, not a
 //! comment.
 //!
 //! `src/webui_v2/handlers.rs` is the largest file in this crate and carries a
@@ -94,7 +94,7 @@ fn strip_visibility(line: &str) -> &str {
     }
 }
 
-/// Every chartable item, keyed the way `CLAUDE.md` names it: bare for
+/// Every chartable item, keyed the way `CONTRACT.md` names it: bare for
 /// `handlers.rs`, `handlers/<file>.rs::<name>` for a submodule.
 fn charted_surface() -> Vec<String> {
     let dir = handlers_dir();
@@ -129,11 +129,11 @@ fn charted_surface() -> Vec<String> {
 /// An item listed under two sub-owners keeps both entries so the caller can
 /// report the ambiguity rather than silently taking the last one.
 fn charter_assignments() -> BTreeMap<String, Vec<String>> {
-    let doc = std::fs::read_to_string(crate_root().join("CLAUDE.md")).expect("read CLAUDE.md");
+    let doc = std::fs::read_to_string(crate_root().join("CONTRACT.md")).expect("read CONTRACT.md");
     let section = doc
         .split("## `handlers.rs` module-charter map")
         .nth(1)
-        .expect("CLAUDE.md must contain a '## `handlers.rs` module-charter map' section");
+        .expect("CONTRACT.md must contain a '## `handlers.rs` module-charter map' section");
     // Stop at the next top-level heading so neighbouring tables are not read —
     // this file sits immediately above the 92-row frozen route table.
     let section = section.split("\n## ").next().unwrap_or(section);
@@ -242,7 +242,7 @@ fn every_handler_item_has_exactly_one_sub_owner() {
         .collect();
     assert!(
         unassigned.is_empty(),
-        "{} handler item(s) have no sub-owner in CLAUDE.md's '## `handlers.rs` \
+        "{} handler item(s) have no sub-owner in CONTRACT.md's '## `handlers.rs` \
          module-charter map'.\nAdd each to the row of the concern it belongs to \
          (see PROPOSAL §6.9.1). A helper belongs to the concern whose request \
          shape it reads, not to `dispatch`, unless more than one concern calls \

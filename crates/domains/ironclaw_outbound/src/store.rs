@@ -6,11 +6,10 @@ use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPushCandidate,
-    OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
+    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
+    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -29,70 +28,6 @@ pub trait OutboundStateStorePort: Send + Sync {
         &self,
         record: &RunDeliveryCleanupRecord,
     ) -> Result<(), OutboundError>;
-
-    /// Persist the minimal completed-run projection key used to resume final
-    /// reply delivery after a process crash.
-    async fn put_run_final_reply_handoff(
-        &self,
-        record: RunFinalReplyHandoffRecord,
-    ) -> Result<(), OutboundError>;
-
-    async fn list_pending_run_final_reply_handoffs(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError>;
-
-    /// Continue a stable `(event_cursor, run_id)` scan after `after`.
-    ///
-    /// The production filesystem store overrides this with an indexed keyset
-    /// query so callers may delete settled rows between pages without
-    /// shifting or skipping later records. The default preserves compatibility
-    /// for test/error stores that only implement the original first-page API.
-    async fn list_pending_run_final_reply_handoffs_after(
-        &self,
-        after: Option<&RunFinalReplyHandoffRecord>,
-        limit: usize,
-    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
-        let mut records = self.list_pending_run_final_reply_handoffs(limit).await?;
-        if let Some(after) = after {
-            records.retain(|record| {
-                (record.event_cursor, record.run_id) > (after.event_cursor, after.run_id)
-            });
-        }
-        Ok(records)
-    }
-
-    async fn complete_run_final_reply_handoff(
-        &self,
-        record: &RunFinalReplyHandoffRecord,
-    ) -> Result<(), OutboundError>;
-
-    async fn load_run_final_reply_handoff_cursor(
-        &self,
-    ) -> Result<ironclaw_host_api::turn::EventCursor, OutboundError>;
-
-    async fn advance_run_final_reply_handoff_cursor(
-        &self,
-        cursor: ironclaw_host_api::turn::EventCursor,
-    ) -> Result<(), OutboundError>;
-
-    /// Seal the final-reply destination for one run.
-    ///
-    /// Implementations must make an identical retry idempotent and reject a
-    /// different record for the same run. A run target is not a user-wide
-    /// preference and must not mutate communication defaults.
-    async fn put_run_final_reply_target(
-        &self,
-        record: RunFinalReplyTargetRecord,
-    ) -> Result<(), OutboundError>;
-
-    /// Load a run target only for the exact actor and turn scope.
-    ///
-    /// Missing and unauthorized records are deliberately indistinguishable.
-    async fn load_run_final_reply_target(
-        &self,
-        request: RunFinalReplyTargetRequest,
-    ) -> Result<Option<RunFinalReplyTargetRecord>, OutboundError>;
 
     async fn put_thread_notification_policy(
         &self,
@@ -167,6 +102,21 @@ pub trait OutboundStateStorePort: Send + Sync {
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError>;
 
+    /// Load one attempt by its durable id under the exact caller scope.
+    /// Implementations should use the point-addressed row; the default keeps
+    /// lightweight test doubles source-compatible.
+    async fn load_delivery_attempt(
+        &self,
+        scope: TurnScope,
+        delivery_id: OutboundDeliveryId,
+    ) -> Result<Option<OutboundDeliveryAttempt>, OutboundError> {
+        Ok(self
+            .list_delivery_attempts(scope)
+            .await?
+            .into_iter()
+            .find(|attempt| attempt.delivery_id == delivery_id))
+    }
+
     async fn list_delivery_attempts(
         &self,
         scope: TurnScope,
@@ -185,7 +135,10 @@ fn plan_push_targets_from_policy(
 
     let mut seen = HashSet::<ReplyTargetBindingRef>::new();
     let mut candidates = Vec::new();
-    if request.kind == OutboundPushKind::FinalReply {
+    if matches!(
+        request.kind,
+        OutboundPushKind::FinalReply | OutboundPushKind::ModelDelivery
+    ) {
         push_candidate(
             &request,
             request.reply_target.clone(),
@@ -196,7 +149,7 @@ fn plan_push_targets_from_policy(
 
     for target in &policy.targets {
         let allowed = match request.kind {
-            OutboundPushKind::FinalReply => target.final_replies,
+            OutboundPushKind::FinalReply | OutboundPushKind::ModelDelivery => target.final_replies,
             OutboundPushKind::Progress
             | OutboundPushKind::GateRequired
             | OutboundPushKind::AuthPrompt

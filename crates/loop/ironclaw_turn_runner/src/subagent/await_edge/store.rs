@@ -71,6 +71,7 @@ impl AwaitEdgeStore {
                     reply_target_binding_ref: submitted.reply_target_binding_ref,
                     subagent_kind: submitted.subagent_kind,
                     spawn_capability_id: submitted.spawn_capability_id,
+                    spawn_provider_call_id: submitted.spawn_provider_call_id,
                     result_ref: submitted.result_ref,
                     mode: submitted.mode,
                     state: AwaitEdgeState::Open,
@@ -370,6 +371,7 @@ mod tests {
                     ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
                 )
                 .expect("capability"),
+                spawn_provider_call_id: Some("spawn-call-store-transition".to_string()),
                 result_ref: LoopResultRef::new("result:store-transition").expect("result"),
                 mode: SpawnSubagentMode::Blocking,
                 state: AwaitEdgeState::Open,
@@ -484,6 +486,7 @@ mod tests {
             reply_target_binding_ref: edge.reply_target_binding_ref.clone(),
             subagent_kind: edge.subagent_kind.clone(),
             spawn_capability_id: edge.spawn_capability_id.clone(),
+            spawn_provider_call_id: edge.spawn_provider_call_id.clone(),
             result_ref: edge.result_ref.clone(),
             mode: edge.mode,
         };

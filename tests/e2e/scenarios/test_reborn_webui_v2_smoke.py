@@ -40,6 +40,7 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    open_reborn_v2_page,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_first_run_server,  # noqa: F401 - imported fixture
@@ -382,6 +383,149 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         assert urlparse(anon_page.url).path == "/login"
     finally:
         await anon_ctx.close()
+
+
+async def test_inspector_debug_activation_and_responsive_shell(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """The opt-in inspector adapts without changing the ordinary chat shell."""
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    panel = page.locator(SEL_V2["inspector_panel"])
+    try:
+        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await expect(panel).to_have_count(0)
+
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(panel).to_have_attribute("data-layout", "sidebar")
+
+        stats_tab = page.locator(SEL_V2["inspector_tab_stats"])
+        await stats_tab.click()
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+        await page.locator(SEL_V2["inspector_close"]).click()
+        await expect(panel).to_have_count(0)
+        await page.locator(SEL_V2["inspector_open"]).click()
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+
+        await page.set_viewport_size({"width": 900, "height": 900})
+        await expect(panel).to_have_attribute("data-layout", "overlay")
+        await page.set_viewport_size({"width": 500, "height": 900})
+        await expect(panel).to_have_count(0)
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await expect(panel).to_have_attribute("data-layout", "sidebar")
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+
+        await page.reload()
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(panel).to_have_count(0)
+    finally:
+        await context.close()
+
+
+async def test_inspector_prompt_and_stats_render_host_diagnostics(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
+    marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+        )
+    run_id = assistant.get("turn_run_id") or submitted.get("run_id")
+    assert run_id, f"completed turn did not expose its run id: {assistant!r}"
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    try:
+        await open_reborn_v2_page(
+            page,
+            reborn_v2_server,
+            path=f"/chat/{thread_id}?debug=true",
+            ready_selector=SEL_V2["inspector_prompt_content"],
+        )
+        prompt = page.locator(SEL_V2["inspector_prompt_content"])
+        await expect(prompt).to_be_visible(timeout=30000)
+        await expect(prompt.get_by_text("Estimated prompt tokens", exact=True)).to_be_visible()
+        await expect(prompt.get_by_text("mock-model", exact=True).first).to_be_visible()
+
+        conversation = prompt.locator("details").filter(has_text=marker).first
+        await expect(conversation).to_have_count(1)
+        await conversation.locator("summary").click()
+        await expect(conversation.locator("pre")).to_contain_text(marker)
+        await expect(
+            prompt.get_by_text(
+                "Reconstructed content reflects the latest host prompt boundary",
+            )
+        ).to_have_count(1)
+
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        await expect(activity).to_be_visible(timeout=30000)
+        await expect(
+            activity.locator("[data-activity-kind='turn_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='prompt_prepared']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
+        activity_kinds = await activity.locator("[data-activity-kind]").evaluate_all(
+            "entries => entries.map(entry => entry.dataset.activityKind)"
+        )
+        assert activity_kinds.index("turn_started") < activity_kinds.index(
+            "prompt_prepared"
+        )
+        assert activity_kinds.index("model_call_started") < activity_kinds.index(
+            "model_call_completed"
+        )
+        await expect(activity.get_by_text("Turn 1 of 1", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        stats = page.locator(SEL_V2["inspector_stats_content"])
+        await expect(stats).to_be_visible()
+        model_calls = (
+            stats.get_by_text("Model calls", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
+        )
+        await expect(model_calls).to_have_text("1")
+        input_tokens = (
+            stats.get_by_text("Input tokens", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
+        )
+        await expect(input_tokens).to_have_text("10")
+        await expect(stats.get_by_text("Output tokens", exact=True).locator("..")).not_to_contain_text(
+            "Unavailable"
+        )
+        await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
+        await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
+    finally:
+        await context.close()
 
 
 @pytest.mark.parametrize(
