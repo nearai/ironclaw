@@ -44,6 +44,19 @@ def _webui_frontend_prefix() -> str:
     return f"{directory}/frontend/"
 
 
+@functools.lru_cache(maxsize=None)
+def _wasm_wit_prefix() -> str:
+    """`<ironclaw_wasm crate dir>/wit/`, resolved once per process."""
+    try:
+        directory = crate_directory("ironclaw_wasm", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_wasm crate, so "
+            f"the WIT path prefix used to route Platform & Compat is unknown: {error}"
+        ) from error
+    return f"{directory}/wit/"
+
+
 def _sandbox_docker_prefixes() -> tuple[str, ...]:
     """Sandbox source prefixes whose changes require the Docker lane."""
     try:
@@ -755,6 +768,19 @@ def build_plan(
                 and path not in integration_inventory
             ):
                 continue
+        # The WIT directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so a
+        # bare `wit/` path no longer occurs on disk; both prefixes are kept so
+        # neither the historical root location nor the current crate-owned
+        # one falls through to the crate's own production-package lane, which
+        # would duplicate `has_direct_wasm_abi_risk`'s coverage. The
+        # crate-owned prefix is resolved by crate NAME through the shared
+        # inventory (`_wasm_wit_prefix`), not a literal `crates/ironclaw_wasm`
+        # path, for the same reason `_webui_frontend_prefix` is: under the
+        # target-architecture family move (PROPOSAL §5) a literal prefix stops
+        # matching and WIT diffs silently stop routing here.
+        if path.startswith("wit/") or path.startswith(_wasm_wit_prefix()):
+            reasons.append(f"Platform & Compat owns WIT compatibility: {path}")
+            continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
