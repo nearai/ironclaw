@@ -4512,6 +4512,7 @@ mod tests {
             None,
             Some(outbound_preferences_service),
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring

@@ -153,7 +153,12 @@ observed_date = "2026-08-07"
 # with `bash scripts/ci/check-composition-budget.sh`.
 # Union re-measured 40432 -> 40747 on 2026-08-07 after merging #7157's delivery
 # refactor with #7214's sandbox profile and binding assembly.
-loc_ceiling = 40747
+# Re-measured 40747 -> 40811 on 2026-08-08 after merging main (#7157 squashed +
+# #7214) into run-acts-as-invoker: the acting-user scope helper
+# (base_resource_scope_for_run) and the shared-admission wiring add +64
+# production LOC on the merged tree. Recorded here rather than parked in the
+# 150-line tolerance; measured with `bash scripts/ci/check-composition-budget.sh`.
+loc_ceiling = 40811
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -164,8 +169,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40747
-loc_observed_date = "2026-08-07"
+loc_observed = 40811
+loc_observed_date = "2026-08-08"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
