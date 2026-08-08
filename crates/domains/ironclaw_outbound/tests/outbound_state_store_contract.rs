@@ -101,6 +101,9 @@ fn delivery_attempt_with_status(
         status,
         attempted_at: now(),
         failure_kind,
+        // `prepared_delivery_attempt` (the only caller) always builds a
+        // fresh `Prepared` reservation — pre-egress by construction.
+        vendor_egress: Some(VendorEgressProvenance::NotAttempted),
     }
 }
 
@@ -491,6 +494,7 @@ async fn delivery_attempt_point_read_returns_only_the_exact_scoped_row() {
         status: OutboundDeliveryStatus::Delivered,
         attempted_at: now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::Attempted),
     };
     store
         .record_delivery_attempt(attempt.clone())
@@ -539,6 +543,7 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -654,6 +659,11 @@ async fn record_delivery_attempt_reopen_race_loser_defers_to_concurrent_winner()
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+            // Pre-egress channel-resolution failure shape — required so the
+            // subsequent `record_delivery_attempt(prepared)` call below
+            // actually attempts a reopen (the behavior this test exercises)
+            // instead of no-opping on the new `vendor_egress` gate.
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .expect("settle the exhausted-retry terminal failure");
@@ -761,6 +771,203 @@ async fn record_delivery_attempt_reopens_only_reopen_permitted_failed_rows() {
             assert_eq!(attempts[0].failure_kind, Some(kind));
         }
     }
+}
+
+/// Rollout duplicate-send guard: `vendor_egress` is a second, independent
+/// reopen gate alongside `failure_kind::permits_reopen()`. A
+/// `Failed(TransportUnavailable)` row written by a binary predating this
+/// field has no `vendor_egress` key on the wire at all — indistinguishable
+/// by byte shape from a pre-this-PR binary's now-removed, ambiguous
+/// post-`adapter.deliver` retry-exhaustion write, which used to settle the
+/// same kind before this PR reclassified that case to
+/// `VendorContactAmbiguous`. That legacy shape must never reopen. The
+/// identical row WITH `vendor_egress: Some(NotAttempted)` — the shape this
+/// PR's binary actually writes for a pre-claim `TransportUnavailable`
+/// failure — must reopen exactly as before this field existed.
+///
+/// Each case reuses one `base` `Prepared` attempt (built via
+/// `prepared_delivery_attempt`) for both the seed and the replay, mirroring
+/// `record_delivery_attempt_reopens_only_reopen_permitted_failed_rows`
+/// above: `validate_delivery_identity` requires the two calls to carry an
+/// identical `candidate`, and building it twice would bake in two different
+/// `turn_run_id`s.
+#[tokio::test]
+async fn record_delivery_attempt_reopen_gate_requires_vendor_egress_not_attempted() {
+    let scope = turn_scope();
+
+    // Legacy shape: `vendor_egress` stripped from the wire entirely (not
+    // just left at its struct default), simulating a row written before
+    // this field existed. `#[serde(default)]` deserializes the missing key
+    // to `None`, which must fail closed.
+    //
+    // Seeded through the normal indexed write path first (so the delivery
+    // scope/tenant index projections — opaque `Entry::indexed` metadata the
+    // backend keys `list_delivery_attempts` queries on, not derived from
+    // `body` — land correctly), then the durable JSON body is overwritten
+    // in place with `vendor_egress` stripped, preserving the entry's index
+    // and version.
+    {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(Arc::clone(&backend));
+        let delivery_id = OutboundDeliveryId::new();
+        let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-legacy-provenance");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+        store
+            .record_delivery_attempt(seeded.clone())
+            .await
+            .expect("seed failed row");
+
+        let legacy_path = VirtualPath::new(format!(
+            "{TEST_OUTBOUND_ROOT}/deliveries/{delivery_id}.json"
+        ))
+        .unwrap();
+        let versioned = backend
+            .get(&legacy_path)
+            .await
+            .unwrap()
+            .expect("seeded row exists");
+        let mut legacy_json = serde_json::to_value(&seeded).unwrap();
+        legacy_json
+            .as_object_mut()
+            .expect("attempt serializes to a JSON object")
+            .remove("vendor_egress");
+        let legacy_entry = Entry {
+            body: serde_json::to_vec(&legacy_json).unwrap(),
+            ..versioned.entry
+        };
+        backend
+            .put(
+                &legacy_path,
+                legacy_entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
+            .unwrap();
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error for a no-op");
+        let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            OutboundDeliveryStatus::Failed,
+            "a legacy row missing vendor_egress on the wire must fail closed and never reopen"
+        );
+        assert_eq!(attempts[0].vendor_egress, None);
+    }
+
+    // Modern shape: `vendor_egress: Some(NotAttempted)` present, exactly as
+    // this PR's pre-claim `TransportUnavailable` writer produces. Must
+    // reopen.
+    {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(backend);
+        let delivery_id = OutboundDeliveryId::new();
+        let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-modern-provenance");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+        assert_eq!(
+            seeded.vendor_egress,
+            Some(VendorEgressProvenance::NotAttempted),
+            "prepared_delivery_attempt must build the modern, provenance-carrying shape"
+        );
+        store
+            .record_delivery_attempt(seeded)
+            .await
+            .expect("seed failed row");
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error");
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            OutboundDeliveryStatus::Prepared,
+            "a modern row with vendor_egress: Some(NotAttempted) must reopen"
+        );
+        assert_eq!(attempts[0].failure_kind, None);
+    }
+}
+
+/// Issue 2 hygiene guard: `DeliveryFailureKind::Unrecognized` (the
+/// `#[serde(other)]` catch-all for a kind this binary does not model) must
+/// never permit reopen — an unknown kind proves nothing about vendor
+/// contact. Constructed via raw JSON with a `failure_kind` tag this enum
+/// does not define, simulating a row written by a binary with a kind this
+/// one predates (e.g. read during a rollback).
+///
+/// Seeded through the normal indexed write path first (so the delivery
+/// scope/tenant index projections land correctly — see the comment in
+/// `record_delivery_attempt_reopen_gate_requires_vendor_egress_not_attempted`
+/// above), then the durable JSON body is overwritten in place with an
+/// unrecognized `failure_kind` tag, preserving the entry's index and
+/// version.
+#[tokio::test]
+async fn record_delivery_attempt_never_reopens_a_row_with_unrecognized_failure_kind() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-unrecognized-kind");
+    let mut seeded = base.clone();
+    seeded.status = OutboundDeliveryStatus::Failed;
+    seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+    store
+        .record_delivery_attempt(seeded.clone())
+        .await
+        .expect("seed failed row");
+
+    let path = VirtualPath::new(format!(
+        "{TEST_OUTBOUND_ROOT}/deliveries/{delivery_id}.json"
+    ))
+    .unwrap();
+    let versioned = backend
+        .get(&path)
+        .await
+        .unwrap()
+        .expect("seeded row exists");
+    let mut seeded_json = serde_json::to_value(&seeded).unwrap();
+    seeded_json["failure_kind"] = serde_json::json!("a_future_kind_this_binary_predates");
+    let unrecognized_entry = Entry {
+        body: serde_json::to_vec(&seeded_json).unwrap(),
+        ..versioned.entry
+    };
+    backend
+        .put(
+            &path,
+            unrecognized_entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .unwrap();
+
+    // The unrecognized tag must not break `list_delivery_attempts` for the
+    // whole scope (Issue 2's actual bug) — it folds to `Unrecognized`.
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(DeliveryFailureKind::Unrecognized)
+    );
+
+    store
+        .record_delivery_attempt(base)
+        .await
+        .expect("record call must not error for a no-op");
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        OutboundDeliveryStatus::Failed,
+        "an unrecognized failure kind must never permit reopen"
+    );
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
@@ -1574,6 +1781,7 @@ async fn delivery_send_claim_fails_closed_on_unsupported_cas_mount() {
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -1744,6 +1952,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
         status: OutboundDeliveryStatus::Pending,
         attempted_at: now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::NotAttempted),
     };
     store
         .record_delivery_attempt(initial_attempt.clone())
@@ -1756,6 +1965,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await;
     assert!(matches!(
@@ -1770,6 +1980,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -1797,6 +2008,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await;
     assert!(matches!(
@@ -2042,6 +2254,7 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -2102,6 +2315,7 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             status: OutboundDeliveryStatus::Unknown,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await;
     assert!(matches!(
@@ -2116,6 +2330,7 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             status: OutboundDeliveryStatus::Unknown,
             updated_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await
         .unwrap();
@@ -2156,6 +2371,7 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -2202,6 +2418,7 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -2222,6 +2439,7 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
             status: OutboundDeliveryStatus::Delivered,
             updated_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await
         .unwrap();
@@ -2272,6 +2490,7 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
         status: OutboundDeliveryStatus::Pending,
         attempted_at: now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::NotAttempted),
     };
     store.record_delivery_attempt(attempt).await.unwrap();
 
@@ -2282,6 +2501,7 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
             status: OutboundDeliveryStatus::Delivered,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await;
     assert!(matches!(
@@ -2296,6 +2516,7 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await;
     assert!(matches!(
@@ -2383,6 +2604,7 @@ async fn full_turn_scope_isolation(store: &impl OutboundStateStorePort, original
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -3119,6 +3341,7 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
                 status: OutboundDeliveryStatus::Pending,
                 attempted_at: now(),
                 failure_kind: None,
+                vendor_egress: Some(VendorEgressProvenance::NotAttempted),
             })
             .await
             .unwrap();
@@ -3237,6 +3460,7 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -3295,6 +3519,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();

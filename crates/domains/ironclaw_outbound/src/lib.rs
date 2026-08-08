@@ -79,4 +79,5 @@ pub use types::{
     ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
     ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
     ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    VendorEgressProvenance,
 };

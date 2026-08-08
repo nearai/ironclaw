@@ -53,7 +53,7 @@ use ironclaw_outbound::{
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
     OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
     PrepareCommunicationDeliveryRequest, ReplyAttachmentIntent, UpdateDeliveryStatusRequest,
-    ValidatedReplyTargetBinding,
+    ValidatedReplyTargetBinding, VendorEgressProvenance,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -401,6 +401,10 @@ impl DeliveryCoordinator {
                     status: OutboundDeliveryStatus::Unknown,
                     updated_at: chrono::Utc::now(),
                     failure_kind: None,
+                    // A `Sending` row means a claim was taken and the
+                    // process could have called the adapter before
+                    // crashing — provenance can't prove otherwise.
+                    vendor_egress: Some(VendorEgressProvenance::Attempted),
                 })
                 .await?;
             recovered += 1;
@@ -526,6 +530,7 @@ impl DeliveryCoordinator {
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: chrono::Utc::now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         };
         self.store.record_delivery_attempt(attempt.clone()).await?;
 
@@ -567,7 +572,7 @@ impl DeliveryCoordinator {
             Err(error) => {
                 let kind =
                     crate::outbound_delivery::delivery_failure_kind_for_surface_error(&error);
-                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
+                self.mark_terminal_pre_egress(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                     .await;
                 return Err(CoordinatedDeliveryError::Workflow(error));
             }
@@ -584,8 +589,12 @@ impl DeliveryCoordinator {
             Ok(parts) => parts,
             Err(error) => {
                 let failure_kind = workspace_materialization_failure_kind(&error);
-                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(failure_kind))
-                    .await;
+                self.mark_terminal_pre_egress(
+                    &attempt,
+                    OutboundDeliveryStatus::Failed,
+                    Some(failure_kind),
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -634,7 +643,7 @@ impl DeliveryCoordinator {
     ) -> Result<(ResolvedChannelDelivery, Option<Vec<u8>>), CoordinatedDeliveryError> {
         // Resolve the channel from ONE snapshot read (generation-pinned).
         let Some(channel) = self.resolver.resolve_channel_delivery(extension_id) else {
-            self.mark_terminal(
+            self.mark_terminal_pre_egress(
                 attempt,
                 OutboundDeliveryStatus::Failed,
                 Some(DeliveryFailureKind::TransportUnavailable),
@@ -717,7 +726,11 @@ impl DeliveryCoordinator {
 
                     if all_sent && !report.parts.is_empty() {
                         let confirmed = self
-                            .mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
+                            .mark_terminal_post_egress(
+                                &attempt,
+                                OutboundDeliveryStatus::Delivered,
+                                None,
+                            )
                             .await;
                         if !confirmed {
                             return Ok(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
@@ -734,8 +747,12 @@ impl DeliveryCoordinator {
                     }
                     if unauthorized {
                         let kind = DeliveryFailureKind::AuthorizationRevoked;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -745,8 +762,12 @@ impl DeliveryCoordinator {
                         // Partial multipart (OUT-7): retrying the whole
                         // envelope would duplicate already-accepted parts.
                         let kind = DeliveryFailureKind::Rejected;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -766,8 +787,12 @@ impl DeliveryCoordinator {
                         // reopen) — see
                         // `DeliveryFailureKind::VendorContactAmbiguous`.
                         let kind = DeliveryFailureKind::VendorContactAmbiguous;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -789,8 +814,12 @@ impl DeliveryCoordinator {
                         // can safely reopen) — see
                         // `DeliveryFailureKind::VendorContactAmbiguous`.
                         let kind = DeliveryFailureKind::VendorContactAmbiguous;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -868,11 +897,20 @@ impl DeliveryCoordinator {
     /// the `Delivered` caller must downgrade to
     /// [`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`] — a success it
     /// cannot durably confirm is not a success it may claim.
+    ///
+    /// `vendor_egress` is not `Option` and has no default: every caller must
+    /// state explicitly whether an `adapter.deliver` call was made for this
+    /// delivery id, so a future call site can't silently omit it. Prefer the
+    /// [`Self::mark_terminal_pre_egress`] / [`Self::mark_terminal_post_egress`]
+    /// wrappers over calling this directly — they hardcode the provenance
+    /// for their respective call sites and remove the chance of a
+    /// copy-paste mistake picking the wrong one.
     async fn mark_terminal(
         &self,
         attempt: &OutboundDeliveryAttempt,
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
+        vendor_egress: VendorEgressProvenance,
     ) -> bool {
         match self
             .store
@@ -882,6 +920,7 @@ impl DeliveryCoordinator {
                 status,
                 updated_at: chrono::Utc::now(),
                 failure_kind,
+                vendor_egress: Some(vendor_egress),
             })
             .await
         {
@@ -895,6 +934,44 @@ impl DeliveryCoordinator {
                 false
             }
         }
+    }
+
+    /// Terminal write for a failure settled before any `adapter.deliver`
+    /// call was made (surface-error, workspace-materialization, and
+    /// channel-resolution failure paths in `drive_authorized` /
+    /// `resolve_channel_context`).
+    async fn mark_terminal_pre_egress(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        status: OutboundDeliveryStatus,
+        failure_kind: Option<DeliveryFailureKind>,
+    ) -> bool {
+        self.mark_terminal(
+            attempt,
+            status,
+            failure_kind,
+            VendorEgressProvenance::NotAttempted,
+        )
+        .await
+    }
+
+    /// Terminal write for an outcome settled during or after `drive_prepared`
+    /// has called `adapter.deliver` at least once — the `Delivered` success
+    /// path and every failure classification reached after that call,
+    /// including `VendorContactAmbiguous`.
+    async fn mark_terminal_post_egress(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        status: OutboundDeliveryStatus,
+        failure_kind: Option<DeliveryFailureKind>,
+    ) -> bool {
+        self.mark_terminal(
+            attempt,
+            status,
+            failure_kind,
+            VendorEgressProvenance::Attempted,
+        )
+        .await
     }
 }
 

@@ -1063,6 +1063,11 @@ where
             }
             attempt.status = OutboundDeliveryStatus::Unknown;
             attempt.failure_kind = None;
+            // A `Sending` row means a claim was taken and the process could
+            // have called the adapter before crashing — provenance can't
+            // prove otherwise, so this settles `Attempted`, not a reused
+            // pre-claim value.
+            attempt.vendor_egress = Some(crate::VendorEgressProvenance::Attempted);
             let entry = delivery_attempt_entry(&attempt)?;
             match self
                 .filesystem
@@ -1102,6 +1107,7 @@ where
             }
             attempt.status = request.status;
             attempt.failure_kind = request.failure_kind;
+            attempt.vendor_egress = request.vendor_egress;
             match self
                 .put_delivery_attempt_indexed(
                     &resource_scope,
@@ -1355,18 +1361,27 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
 ///
 /// Reopening is limited to genuine retries: `incoming` must be a fresh
 /// `Prepared` reservation (every current caller constructs one this way),
-/// `existing` must be `Failed`, and its failure kind must permit reopen (see
-/// [`crate::DeliveryFailureKind::permits_reopen`]). Any other existing
-/// status — including a `Failed` row with a kind that does not permit
-/// reopen — keeps the existing no-op behavior, so this never reopens a row
-/// another worker already advanced to `Sending`, `Delivered`, or a
-/// permanently terminal state.
+/// `existing` must be `Failed`, its recorded [`crate::VendorEgressProvenance`]
+/// must prove no `adapter.deliver` call was ever made for this row, and its
+/// failure kind must independently permit reopen (see
+/// [`crate::DeliveryFailureKind::permits_reopen`]). Both gates are required:
+/// `vendor_egress` distinguishes a row written by this codebase's current,
+/// provably-safe pre-claim writers from a byte-identical row an older binary
+/// wrote for a since-reclassified, ambiguous case (pre-this-PR binaries wrote
+/// `TransportUnavailable` for post-`adapter.deliver` retry exhaustion too) —
+/// `None` (a row from a binary predating this field) fails closed. Any other
+/// existing status — including a `Failed` row with a kind that does not
+/// permit reopen, or one whose provenance cannot prove no egress occurred —
+/// keeps the existing no-op behavior, so this never reopens a row another
+/// worker already advanced to `Sending`, `Delivered`, or a permanently
+/// terminal state, and never reopens a row this binary cannot prove is safe.
 fn attempt_reopens_stale_failure(
     existing: &OutboundDeliveryAttempt,
     incoming: &OutboundDeliveryAttempt,
 ) -> bool {
     incoming.status == OutboundDeliveryStatus::Prepared
         && existing.status == OutboundDeliveryStatus::Failed
+        && existing.vendor_egress == Some(crate::VendorEgressProvenance::NotAttempted)
         && existing
             .failure_kind
             .is_some_and(crate::DeliveryFailureKind::permits_reopen)

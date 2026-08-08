@@ -24,7 +24,7 @@ use ironclaw_outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryAttempt, OutboundDeliveryId,
     OutboundDeliveryStatus, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry, OutboundDeliveryTargetSummary,
-    OutboundPushCandidate, OutboundPushKind,
+    OutboundPushCandidate, OutboundPushKind, VendorEgressProvenance,
 };
 use ironclaw_product_contracts::delivery::{ChannelDeliveryResolver, ResolvedChannelDelivery};
 use ironclaw_turns::{
@@ -473,6 +473,7 @@ fn sample_attempt() -> OutboundDeliveryAttempt {
         status: OutboundDeliveryStatus::Delivered,
         attempted_at: Utc::now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::Attempted),
     }
 }
 

@@ -250,6 +250,24 @@ pub enum DeliveryFailureKind {
     /// this delivery id stay Failed forever" finds an explicit answer instead
     /// of an `Unknown` catch-all.
     VendorContactAmbiguous,
+    /// A `failure_kind` this binary does not model — e.g. a row written by a
+    /// newer release. Deserialization of a delivery row is all-or-nothing and
+    /// `list_delivery_attempts` fails the whole scope on one bad row, so an
+    /// unrecognized kind must fold here rather than making crash recovery
+    /// unloadable for every delivery in the scope. Never written by this
+    /// codebase; never reopenable, because an unknown kind proves nothing
+    /// about vendor contact.
+    ///
+    /// Round-trips lossily: `#[serde(other)]` does not preserve the original
+    /// unknown tag string, so re-serializing a loaded `Unrecognized` value
+    /// does not reproduce the wire form that produced it. This is expected
+    /// and harmless — no write path in this codebase re-serializes a
+    /// previously-read `failure_kind` unchanged; every write constructs a
+    /// fresh value from current logic (see `update_delivery_status`, which
+    /// always takes `failure_kind` from the incoming request, never from a
+    /// prior read of the row it's overwriting).
+    #[serde(other)]
+    Unrecognized,
 }
 
 impl DeliveryFailureKind {
@@ -264,6 +282,7 @@ impl DeliveryFailureKind {
         Self::Rejected,
         Self::Unknown,
         Self::VendorContactAmbiguous,
+        Self::Unrecognized,
     ];
 
     /// Whether a `Failed` row carrying this kind may be reopened to a fresh
@@ -280,9 +299,28 @@ impl DeliveryFailureKind {
             Self::AuthorizationRevoked
             | Self::Rejected
             | Self::Unknown
-            | Self::VendorContactAmbiguous => false,
+            | Self::VendorContactAmbiguous
+            | Self::Unrecognized => false,
         }
     }
+}
+
+/// Whether the writer of an [`OutboundDeliveryAttempt`] row could prove, at
+/// write time, that no `adapter.deliver` call had been made for this
+/// delivery id. Recorded by the code that knows the answer, at the moment it
+/// knows it — never re-derived from `failure_kind`, whose meaning can change
+/// across releases (pre-this-PR binaries wrote `TransportUnavailable` for
+/// post-`adapter.deliver` retry exhaustion too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorEgressProvenance {
+    /// No `adapter.deliver` call was made before this row settled.
+    NotAttempted,
+    /// An `adapter.deliver` call was made, or the writer cannot prove one
+    /// wasn't. Also the `#[serde(other)]` landing spot, so an unrecognized
+    /// future value fails closed.
+    #[serde(other)]
+    Attempted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,6 +414,10 @@ pub struct OutboundDeliveryAttempt {
     pub status: OutboundDeliveryStatus,
     pub attempted_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+    /// `None` means a binary predating this field wrote the row — fail
+    /// closed (never reopen). See [`VendorEgressProvenance`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_egress: Option<VendorEgressProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -397,6 +439,8 @@ pub struct UpdateDeliveryStatusRequest {
     pub status: OutboundDeliveryStatus,
     pub updated_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_egress: Option<VendorEgressProvenance>,
 }
 
 /// Atomic ownership claim for the sole vendor-egress writer of a prepared
@@ -451,7 +495,8 @@ mod tests {
                 DeliveryFailureKind::AuthorizationRevoked
                 | DeliveryFailureKind::Rejected
                 | DeliveryFailureKind::Unknown
-                | DeliveryFailureKind::VendorContactAmbiguous => false,
+                | DeliveryFailureKind::VendorContactAmbiguous
+                | DeliveryFailureKind::Unrecognized => false,
             };
             assert_eq!(kind.permits_reopen(), expected, "{kind:?}");
         }
@@ -484,6 +529,7 @@ mod tests {
             DeliveryFailureKind::Rejected,
             DeliveryFailureKind::Unknown,
             DeliveryFailureKind::VendorContactAmbiguous,
+            DeliveryFailureKind::Unrecognized,
         ];
         let mut seen = std::collections::HashSet::new();
         for kind in DeliveryFailureKind::ALL {

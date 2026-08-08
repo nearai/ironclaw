@@ -2387,6 +2387,7 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
             status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
             updated_at: Utc::now(),
             failure_kind: None,
+            vendor_egress: Some(ironclaw_outbound::VendorEgressProvenance::Attempted),
         })
         .await
         .unwrap();
@@ -2682,6 +2683,7 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
         status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
         attempted_at: Utc::now(),
         failure_kind: None,
+        vendor_egress: Some(ironclaw_outbound::VendorEgressProvenance::Attempted),
     };
     store
         .record_delivery_attempt(stray.clone())

@@ -226,6 +226,7 @@ fn delivery_failure_summary(kind: DeliveryFailureKind) -> &'static str {
         DeliveryFailureKind::VendorContactAmbiguous => {
             "the delivery attempt failed: vendor_contact_ambiguous"
         }
+        DeliveryFailureKind::Unrecognized => "the delivery attempt failed: unrecognized",
     }
 }
 
