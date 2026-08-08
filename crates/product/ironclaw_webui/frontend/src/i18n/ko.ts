@@ -127,12 +127,10 @@ registerPack("ko", {
 
   // Chat — thread sidebar
   "chat.conversations": "대화",
-  "chat.threads": "{count}개 스레드",
   "chat.newThread": "새로 만들기",
   "chat.creating": "생성 중",
   "chat.selectConversation": "대화 선택",
   "chat.noConversations": "아직 대화가 없습니다. 작성기 제안에서 스레드를 시작하세요.",
-  "chat.turns": "{count}개 턴",
 
   // Chat — connection
   "connection.connected": "연결됨",

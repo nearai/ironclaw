@@ -127,12 +127,10 @@ registerPack("zh-CN", {
 
   // Chat — thread sidebar
   "chat.conversations": "对话",
-  "chat.threads": "{count} 个线程",
   "chat.newThread": "新建",
   "chat.creating": "创建中",
   "chat.selectConversation": "选择对话",
   "chat.noConversations": "暂无对话。从编辑器建议开始一个线程。",
-  "chat.turns": "{count} 轮",
 
   // Chat — connection
   "connection.connected": "已连接",

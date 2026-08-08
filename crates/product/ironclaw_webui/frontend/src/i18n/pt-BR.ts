@@ -127,12 +127,10 @@ registerPack("pt-BR", {
 
   // Chat — thread sidebar
   "chat.conversations": "Conversas",
-  "chat.threads": "Tópicos {count}",
   "chat.newThread": "Novo",
   "chat.creating": "Criando",
   "chat.selectConversation": "Selecionar conversa",
   "chat.noConversations": "Ainda não há conversas. Inicie um thread pelas sugestões do composer.",
-  "chat.turns": "{count} turnos",
 
   // Chat — connection
   "connection.connected": "Conectado",
