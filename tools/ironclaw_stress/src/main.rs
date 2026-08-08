@@ -230,8 +230,8 @@ pub(crate) struct Args {
     /// Scripted tool-call workload for api-user-capacity: each operation is
     /// driven through a configured builtin/memory tool sequence and verified
     /// by its read-back verdict (issue #7360 Phase 1).
-    #[arg(long)]
-    pub(crate) api_scripted_tool: Option<String>,
+    #[arg(long, value_enum)]
+    pub(crate) api_scripted_tool: Option<scripted::ScriptKey>,
 
     /// Document sizes in bytes to cycle through for scripted operations.
     #[arg(
@@ -1134,11 +1134,13 @@ fn validate_args(args: &Args) -> Result<(), String> {
         if !args.scenario.is_api_capacity() {
             return Err("--api-scripted-tool requires --scenario api-user-capacity".to_string());
         }
-        if scripted::ScriptKey::parse(key).is_none() {
-            return Err(format!(
-                "unknown --api-scripted-tool {key:?}; expected one of {}",
-                scripted::ScriptKey::known_keys().join(", ")
-            ));
+        if *key == scripted::ScriptKey::WriteFileRoundtrip && args.api_hot_writers > 0 {
+            return Err(
+                "--api-hot-writers requires a memory script (memory_roundtrip, memory_grow, \
+                 or memory_mixed); write_file_roundtrip targets a per-operation path and \
+                 cannot exercise shared-document contention"
+                    .to_string(),
+            );
         }
         if args.mock_llm_bind.is_none() {
             return Err("--api-scripted-tool requires --mock-llm-bind".to_string());

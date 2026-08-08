@@ -116,7 +116,11 @@ struct ScriptedFlowContext {
     key: scripted::ScriptKey,
     identity: ScriptedTaskIdentity,
     expected_tool_results: usize,
-    previous_tool_result_count: usize,
+    /// Highest message sequence observed in the timeline before this
+    /// operation's marker was submitted. Tool results with a sequence above
+    /// the baseline belong to this operation, so per-op tool evidence stays
+    /// correct even once the thread outgrows one timeline page.
+    baseline_sequence: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -338,8 +342,8 @@ impl MockLlmState {
         let scripted = self
             .scripted_counters
             .lock()
-            .map(|counters| counters.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         MockLlmSummary {
             base_url,
             model: self.model.clone(),
@@ -584,7 +588,7 @@ pub(crate) async fn run(
 
 /// Aggregate scripted operation samples into per-document-size buckets.
 fn summarize_scripted(samples: &[ScriptedOpSample], args: &Args) -> Option<ApiScriptedSummary> {
-    let script = args.api_scripted_tool.as_deref()?;
+    let script = args.api_scripted_tool?;
     if samples.is_empty() {
         return None;
     }
@@ -594,6 +598,7 @@ fn summarize_scripted(samples: &[ScriptedOpSample], args: &Args) -> Option<ApiSc
         let size_key = sample.size_bytes.to_string();
         let bucket = size_buckets.entry(size_key.clone()).or_default();
         bucket.attempted += 1;
+        bucket.tool_results += sample.tools_executed as u64;
         match &sample.failure {
             Some(failure) => {
                 bucket.failed += 1;
@@ -625,24 +630,23 @@ fn summarize_scripted(samples: &[ScriptedOpSample], args: &Args) -> Option<ApiSc
                 .or_default()
                 .push(latency.as_micros());
         }
-        let bucket = size_buckets.get_mut(&sample.size_bytes.to_string());
-        if let Some(bucket) = bucket {
-            bucket.tool_results += sample.tools_executed as u64;
-        }
     }
     for (size_key, stages) in stage_latencies {
         let bucket = size_buckets.get_mut(&size_key);
         let Some(bucket) = bucket else {
             continue;
         };
-        for (stage, values) in stages {
+        for (stage, mut values) in stages {
+            // `latency_summary` reads percentiles and min/max by index, so
+            // values must be sorted before aggregation.
+            values.sort_unstable();
             bucket
                 .stage_latency_us
                 .insert(stage, latency_summary(&values));
         }
     }
     Some(ApiScriptedSummary {
-        script: script.to_string(),
+        script: script.as_str().to_string(),
         doc_sizes: args.api_scripted_doc_sizes.clone(),
         hot_writers: args.api_hot_writers,
         size_buckets,
@@ -694,6 +698,7 @@ async fn run_window(
 ) -> Result<WindowResult, String> {
     let mut background_tasks = JoinSet::new();
     let mut writer_tasks = JoinSet::new();
+    let mut hot_writer_tasks = JoinSet::new();
     let mut read_tasks = JoinSet::new();
     let stop_reads = Arc::new(ReadShutdown::new());
 
@@ -733,6 +738,10 @@ async fn run_window(
     // Scripted hot writers: extra concurrent writers on distinct threads of
     // the first user so several operations contend on the same per-user
     // durable memory document at once (CAS contention on one document).
+    // They drain in their own JoinSet after the regular writer loop so a hot
+    // writer finishing never triggers a `run_virtual_user` refill — hot
+    // writers are deliberately extra concurrency beyond `--concurrency`,
+    // not part of the writer accounting.
     if args.api_scripted_tool.is_some()
         && args.api_hot_writers > 0
         && let Some(hot_user) = users.first().cloned()
@@ -743,7 +752,7 @@ async fn run_window(
             let args = args.clone();
             let operation_namespace = operation_namespace.to_string();
             let user = hot_user.clone();
-            writer_tasks.spawn(async move {
+            hot_writer_tasks.spawn(async move {
                 run_hot_writer(
                     &args,
                     &operation_namespace,
@@ -793,6 +802,15 @@ async fn run_window(
                 run_virtual_user(&args, &operation_namespace, harness, user, progress).await
             });
         }
+    }
+
+    while let Some(joined) = hot_writer_tasks.join_next().await {
+        let result =
+            joined.map_err(|error| format!("api hot-writer task join failed: {error}"))??;
+        flow_samples.extend(result.flow_samples);
+        background_flow_samples.extend(result.background_flow_samples);
+        api_samples.extend(result.api_samples);
+        scripted_samples.extend(result.scripted_samples);
     }
 
     stop_reads.stop();
@@ -950,10 +968,7 @@ async fn run_virtual_user_with_identity(
     progress: Arc<ProgressCounters>,
     scripted_identity: Option<ScriptedTaskIdentity>,
 ) -> Result<TaskResult, String> {
-    let script_key = args
-        .api_scripted_tool
-        .as_deref()
-        .and_then(scripted::ScriptKey::parse);
+    let script_key = args.api_scripted_tool;
     let identity = scripted_identity.or_else(|| {
         script_key.map(|_| ScriptedTaskIdentity {
             op_prefix: String::new(),
@@ -964,7 +979,7 @@ async fn run_virtual_user_with_identity(
     let started = Instant::now();
     let mut operation_index = 0;
     let mut expected_finalized_assistant_count = 0usize;
-    let mut expected_tool_result_count = 0usize;
+    let mut max_sequence_seen = 0u64;
     let mut flow_samples = Vec::with_capacity(args.initial_worker_sample_capacity());
     let mut api_samples = Vec::new();
     let mut scripted_samples = Vec::new();
@@ -981,50 +996,44 @@ async fn run_virtual_user_with_identity(
             "{operation_namespace}:{}:{}:{op_prefix}{}",
             user.label, user.index, operation_index
         );
-        let (
-            flow,
-            mut operation_api_samples,
-            updated_finalized_assistant_count,
-            tool_result_count,
-            scripted_op,
-        ) = match (script_key, identity.as_ref()) {
-            (Some(key), Some(identity)) => {
-                let flow_context = ScriptedFlowContext {
-                    key,
-                    identity: identity.clone(),
-                    expected_tool_results: key.expected_tool_results(),
-                    previous_tool_result_count: expected_tool_result_count,
-                };
-                let (flow, api, finalized, tools, op_sample) = run_scripted_full_flow(
-                    args,
-                    &harness,
-                    &user,
-                    operation_index,
-                    &operation_ref,
-                    ApiFlowKind::Foreground,
-                    &flow_context,
-                )
-                .await;
-                scripted_samples.push(op_sample);
-                (flow, api, finalized, tools, Some(()))
-            }
-            _ => {
-                let (flow, api, finalized) = run_full_flow(
-                    args,
-                    &harness,
-                    &user,
-                    operation_index,
-                    &operation_ref,
-                    expected_finalized_assistant_count,
-                    ApiFlowKind::Foreground,
-                )
-                .await;
-                (flow, api, finalized, expected_tool_result_count, None)
-            }
-        };
+        let (flow, mut operation_api_samples, updated_finalized_assistant_count, max_sequence) =
+            match (script_key, identity.as_ref()) {
+                (Some(key), Some(identity)) => {
+                    let flow_context = ScriptedFlowContext {
+                        key,
+                        identity: identity.clone(),
+                        expected_tool_results: key.expected_tool_results(),
+                        baseline_sequence: max_sequence_seen,
+                    };
+                    let (flow, api, finalized, sequence, op_sample) = run_scripted_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        ApiFlowKind::Foreground,
+                        &flow_context,
+                    )
+                    .await;
+                    scripted_samples.push(op_sample);
+                    (flow, api, finalized, sequence)
+                }
+                _ => {
+                    let (flow, api, finalized) = run_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        expected_finalized_assistant_count,
+                        ApiFlowKind::Foreground,
+                    )
+                    .await;
+                    (flow, api, finalized, max_sequence_seen)
+                }
+            };
         expected_finalized_assistant_count = updated_finalized_assistant_count;
-        expected_tool_result_count = tool_result_count;
-        let _ = scripted_op;
+        max_sequence_seen = max_sequence;
         progress.record(flow.error.is_some(), flow.latency);
         api_samples.append(&mut operation_api_samples);
         flow_samples.push(flow);
@@ -1050,16 +1059,17 @@ async fn run_background_user(
     harness: ApiHarness,
     user: ApiUser,
 ) -> Result<TaskResult, String> {
-    let script_key = args
-        .api_scripted_tool
-        .as_deref()
-        .and_then(scripted::ScriptKey::parse);
+    let script_key = args.api_scripted_tool;
+    // Background users are namespaced `b{index}` so their marker identities
+    // cannot collide with foreground user `u{index}` operations: a real
+    // cross-cohort isolation violation would otherwise read back as its own
+    // token and be reported `confirmed`.
     let identity = script_key.map(|_| ScriptedTaskIdentity {
         op_prefix: String::new(),
-        marker_user: format!("u{}", user.index),
+        marker_user: format!("b{}", user.index),
     });
     let mut expected_finalized_assistant_count = 0usize;
-    let mut expected_tool_result_count = 0usize;
+    let mut max_sequence_seen = 0u64;
     let mut background_flow_samples = Vec::with_capacity(args.api_background_operations);
     let mut api_samples = Vec::new();
     let mut scripted_samples = Vec::new();
@@ -1073,50 +1083,44 @@ async fn run_background_user(
             "{operation_namespace}:background:{}:{}:{op_prefix}{}",
             user.label, user.index, operation_index
         );
-        let (
-            flow,
-            mut operation_api_samples,
-            updated_finalized_assistant_count,
-            tool_result_count,
-            scripted_op,
-        ) = match (script_key, identity.as_ref()) {
-            (Some(key), Some(identity)) => {
-                let flow_context = ScriptedFlowContext {
-                    key,
-                    identity: identity.clone(),
-                    expected_tool_results: key.expected_tool_results(),
-                    previous_tool_result_count: expected_tool_result_count,
-                };
-                let (flow, api, finalized, tools, op_sample) = run_scripted_full_flow(
-                    args,
-                    &harness,
-                    &user,
-                    operation_index,
-                    &operation_ref,
-                    ApiFlowKind::Background,
-                    &flow_context,
-                )
-                .await;
-                scripted_samples.push(op_sample);
-                (flow, api, finalized, tools, Some(()))
-            }
-            _ => {
-                let (flow, api, finalized) = run_full_flow(
-                    args,
-                    &harness,
-                    &user,
-                    operation_index,
-                    &operation_ref,
-                    expected_finalized_assistant_count,
-                    ApiFlowKind::Background,
-                )
-                .await;
-                (flow, api, finalized, expected_tool_result_count, None)
-            }
-        };
+        let (flow, mut operation_api_samples, updated_finalized_assistant_count, max_sequence) =
+            match (script_key, identity.as_ref()) {
+                (Some(key), Some(identity)) => {
+                    let flow_context = ScriptedFlowContext {
+                        key,
+                        identity: identity.clone(),
+                        expected_tool_results: key.expected_tool_results(),
+                        baseline_sequence: max_sequence_seen,
+                    };
+                    let (flow, api, finalized, sequence, op_sample) = run_scripted_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        ApiFlowKind::Background,
+                        &flow_context,
+                    )
+                    .await;
+                    scripted_samples.push(op_sample);
+                    (flow, api, finalized, sequence)
+                }
+                _ => {
+                    let (flow, api, finalized) = run_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        expected_finalized_assistant_count,
+                        ApiFlowKind::Background,
+                    )
+                    .await;
+                    (flow, api, finalized, max_sequence_seen)
+                }
+            };
         expected_finalized_assistant_count = updated_finalized_assistant_count;
-        expected_tool_result_count = tool_result_count;
-        let _ = scripted_op;
+        max_sequence_seen = max_sequence;
         api_samples.append(&mut operation_api_samples);
         background_flow_samples.push(flow);
     }
@@ -1260,13 +1264,7 @@ async fn run_scripted_full_flow(
     operation_ref: &str,
     flow_kind: ApiFlowKind,
     flow: &ScriptedFlowContext,
-) -> (
-    Sample,
-    Vec<ApiRequestSample>,
-    usize,
-    usize,
-    ScriptedOpSample,
-) {
+) -> (Sample, Vec<ApiRequestSample>, usize, u64, ScriptedOpSample) {
     let started = Instant::now();
     let mut api_samples = Vec::new();
     let key = flow.key;
@@ -1297,13 +1295,13 @@ async fn run_scripted_full_flow(
     // count at completion.
     let mut verdict: Option<scripted::Verdict> = None;
     let mut failure: Option<FailureCause> = None;
-    let mut tools_seen = flow.previous_tool_result_count;
+    let mut tools_seen = 0usize;
+    let mut latest_sequence = flow.baseline_sequence;
     let mut tool_visible_latency: Option<Duration> = None;
     let mut finalize_latency: Option<Duration> = None;
 
     match send_value {
         Ok(value) if submitted_or_already_submitted(&value) => {
-            let target_tool_visible = flow.previous_tool_result_count + 1;
             let verdict_prefix = format!("{} {}", scripted::RESULT_PREFIX, op.identity());
             let deadline = Instant::now() + Duration::from_millis(args.api_terminal_timeout_ms);
             let mut placeholder_seen = false;
@@ -1319,9 +1317,13 @@ async fn run_scripted_full_flow(
                 api_samples.push(timeline.sample);
                 match value {
                     Ok(value) => {
-                        let tools = timeline_tool_result_count(&value);
-                        tools_seen = tools;
-                        if tool_visible_latency.is_none() && tools >= target_tool_visible {
+                        // Count only tool results that landed after this
+                        // operation's baseline: subtracting page-limited
+                        // absolute counts would under-count once the thread
+                        // outgrows a single timeline page.
+                        tools_seen = timeline_tool_results_after(&value, flow.baseline_sequence);
+                        latest_sequence = timeline_max_sequence(&value).max(latest_sequence);
+                        if tool_visible_latency.is_none() && tools_seen >= 1 {
                             tool_visible_latency = Some(started.elapsed());
                         }
                         placeholder_seen |= timeline_has_placeholder(&value);
@@ -1341,11 +1343,12 @@ async fn run_scripted_full_flow(
                 tokio::time::sleep(Duration::from_millis(args.api_poll_interval_ms)).await;
             }
 
-            verdict = my_final_content
+            let final_verdict = my_final_content
                 .as_ref()
                 .and_then(|content| scripted::parse_result_verdict(content, &op));
+            verdict = final_verdict;
             failure = failure.or_else(|| match &my_final_content {
-                Some(content) => match scripted::parse_result_verdict(content, &op) {
+                Some(_) => match final_verdict {
                     Some(parsed) if !parsed.is_failure() => None,
                     Some(parsed) => Some(FailureCause::new(
                         format!("scripted_verdict_{}", parsed.as_str()),
@@ -1379,13 +1382,12 @@ async fn run_scripted_full_flow(
                     ),
                 )),
             });
-            let tools_executed = tools_seen.saturating_sub(flow.previous_tool_result_count);
-            if failure.is_none() && tools_executed < flow.expected_tool_results {
+            if failure.is_none() && tools_seen < flow.expected_tool_results {
                 failure = Some(FailureCause::new(
                     "scripted_tools_not_executed",
                     flow_kind.wait_sample_name(),
                     format!(
-                        "operation {} finalized with {tools_executed}/{} tool results",
+                        "operation {} finalized with {tools_seen}/{} tool results",
                         op.identity(),
                         flow.expected_tool_results
                     ),
@@ -1406,7 +1408,6 @@ async fn run_scripted_full_flow(
 
     let latency = started.elapsed();
     let error = failure.as_ref().map(|cause| cause.bucket.clone());
-    let tools_executed = tools_seen.saturating_sub(flow.previous_tool_result_count);
     (
         Sample {
             latency,
@@ -1416,11 +1417,11 @@ async fn run_scripted_full_flow(
         },
         api_samples,
         operation_index + 1,
-        tools_seen,
+        latest_sequence,
         ScriptedOpSample {
             size_bytes: op.size_bytes,
             verdict,
-            tools_executed,
+            tools_executed: tools_seen,
             tool_visible_latency,
             finalize_latency,
             failure,
@@ -1428,7 +1429,7 @@ async fn run_scripted_full_flow(
     )
 }
 
-fn timeline_tool_result_count(value: &Value) -> usize {
+fn timeline_tool_results_after(value: &Value, baseline_sequence: u64) -> usize {
     value
         .get("messages")
         .and_then(Value::as_array)
@@ -1436,8 +1437,23 @@ fn timeline_tool_result_count(value: &Value) -> usize {
         .flatten()
         .filter(|message| {
             message.get("kind").and_then(Value::as_str) == Some("tool_result_reference")
+                && message
+                    .get("sequence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|sequence| sequence > baseline_sequence)
         })
         .count()
+}
+
+fn timeline_max_sequence(value: &Value) -> u64 {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.get("sequence").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
 }
 
 fn timeline_has_placeholder(value: &Value) -> bool {
@@ -1455,6 +1471,10 @@ fn timeline_has_placeholder(value: &Value) -> bool {
 }
 
 fn timeline_finalized_verdict_content(value: &Value, verdict_prefix: &str) -> Option<String> {
+    // Match the prefix followed by a space so operation `1` cannot
+    // terminate on operation `10`'s finalized message (`u0__1 ` is not a
+    // substring of `...u0__10 confirmed`).
+    let delimited = format!("{verdict_prefix} ");
     value
         .get("messages")
         .and_then(Value::as_array)
@@ -1465,7 +1485,7 @@ fn timeline_finalized_verdict_content(value: &Value, verdict_prefix: &str) -> Op
                 && message.get("status").and_then(Value::as_str) == Some("finalized")
         })
         .filter_map(|message| message.get("content").and_then(Value::as_str))
-        .find(|content| content.contains(verdict_prefix))
+        .find(|content| content.contains(&delimited))
         .map(str::to_string)
 }
 
@@ -2393,10 +2413,7 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         jitter_ms: args.mock_llm_jitter_ms,
         output_bytes: args.mock_llm_output_bytes,
         failure_rate: args.mock_llm_failure_rate,
-        scripted: args
-            .api_scripted_tool
-            .clone()
-            .and_then(|key| ScriptKey::parse(&key)),
+        scripted: args.api_scripted_tool,
     };
     let listener = TcpListener::bind(config.bind)
         .await
@@ -2655,11 +2672,11 @@ fn scripted_decision_for(state: &MockLlmState, request: &Value) -> ScriptedDecis
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let Some(op) = scripted::latest_op(&messages) else {
+    let available = available_tool_names(request);
+    let (decision, op) = scripted::decide_with_op(&messages, &available);
+    let Some(op) = op else {
         return ScriptedDecision::None;
     };
-    let available = available_tool_names(request);
-    let decision = scripted::decide(&messages, &available);
     let mut counters = state
         .scripted_counters
         .lock()
@@ -3170,17 +3187,21 @@ mod tests {
     }
 
     #[test]
-    fn timeline_counts_tool_result_references() {
+    fn timeline_counts_tool_results_after_baseline_sequence() {
         let value = json!({
             "messages": [
-                {"kind": "user", "status": "finalized"},
-                {"kind": "assistant", "status": "finalized", "content": "ok"},
-                {"kind": "tool_result_reference", "tool_result_ref": "r1"},
-                {"kind": "tool_result_reference", "tool_result_ref": "r2"}
+                {"kind": "user", "status": "finalized", "sequence": 1},
+                {"kind": "assistant", "status": "finalized", "content": "ok", "sequence": 2},
+                {"kind": "tool_result_reference", "tool_result_ref": "r1", "sequence": 3},
+                {"kind": "tool_result_reference", "tool_result_ref": "r2", "sequence": 4},
+                {"kind": "tool_result_reference", "tool_result_ref": "r3", "sequence": 7}
             ]
         });
-        assert_eq!(timeline_tool_result_count(&value), 2);
-        assert_eq!(timeline_tool_result_count(&json!({"messages": []})), 0);
+        assert_eq!(timeline_tool_results_after(&value, 2), 3);
+        assert_eq!(timeline_tool_results_after(&value, 4), 1);
+        assert_eq!(timeline_tool_results_after(&value, 7), 0);
+        assert_eq!(timeline_max_sequence(&value), 7);
+        assert_eq!(timeline_tool_results_after(&json!({"messages": []}), 0), 0);
     }
 
     #[test]
@@ -3200,6 +3221,23 @@ mod tests {
         assert_eq!(
             timeline_finalized_verdict_content(&value, "ironclaw-stress-tool result u0__2"),
             None
+        );
+        // `u0__1` must not match `u0__10`: the prefix is delimited by the
+        // following space so op 1 cannot terminate on op 10's message.
+        let longer_op = json!({
+            "messages": [
+                {"kind": "assistant", "status": "finalized",
+                 "content": "ironclaw-stress-tool result u0__10 confirmed"}
+            ]
+        });
+        assert_eq!(
+            timeline_finalized_verdict_content(&longer_op, "ironclaw-stress-tool result u0__1"),
+            None
+        );
+        assert_eq!(
+            timeline_finalized_verdict_content(&longer_op, "ironclaw-stress-tool result u0__10")
+                .as_deref(),
+            Some("ironclaw-stress-tool result u0__10 confirmed")
         );
     }
 
@@ -3223,7 +3261,7 @@ mod tests {
     #[test]
     fn scripted_summary_buckets_by_size_and_verdict() {
         let mut args = parsed_api_args(&[]);
-        args.api_scripted_tool = Some("memory_roundtrip".to_string());
+        args.api_scripted_tool = Some(scripted::ScriptKey::MemoryRoundtrip);
         args.api_scripted_doc_sizes = vec![4096, 32768];
         let samples = vec![
             ScriptedOpSample {
@@ -3276,7 +3314,7 @@ mod tests {
         let args = parsed_api_args(&[]);
         assert!(summarize_scripted(&[], &args).is_none());
         let mut scripted = parsed_api_args(&[]);
-        scripted.api_scripted_tool = Some("memory_roundtrip".to_string());
+        scripted.api_scripted_tool = Some(scripted::ScriptKey::MemoryRoundtrip);
         assert!(summarize_scripted(&[], &scripted).is_none());
     }
 }

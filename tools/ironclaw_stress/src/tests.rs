@@ -152,7 +152,7 @@ fn scripted_api_args() -> Args {
     let mut args = test_args();
     args.scenario = Scenario::ApiUserCapacity;
     args.api_base_url = Some("http://127.0.0.1:4216".to_string());
-    args.api_scripted_tool = Some("memory_roundtrip".to_string());
+    args.api_scripted_tool = Some(scripted::ScriptKey::MemoryRoundtrip);
     args.mock_llm_bind = Some("127.0.0.1:19090".parse().expect("bind address parses"));
     args
 }
@@ -165,16 +165,6 @@ fn scripted_api_requires_api_scenario() {
     let error = validate_args(&args).expect_err("scripted mode needs the api scenario");
 
     assert!(error.contains("--api-scripted-tool requires --scenario api-user-capacity"));
-}
-
-#[test]
-fn scripted_api_rejects_unknown_script_key() {
-    let mut args = scripted_api_args();
-    args.api_scripted_tool = Some("not_a_script".to_string());
-
-    let error = validate_args(&args).expect_err("unknown script key should be rejected");
-
-    assert!(error.contains("unknown --api-scripted-tool"));
 }
 
 #[test]
@@ -200,11 +190,89 @@ fn scripted_api_requires_wait_for_assistant() {
 #[test]
 fn scripted_api_rejects_out_of_range_doc_sizes() {
     let mut args = scripted_api_args();
+
+    // Below the floor: 1024 bytes cannot survive the /4 memory-grow split
+    // and stay above the read-back token, so the recorded size bucket would
+    // not describe the bytes actually written.
     args.api_scripted_doc_sizes = vec![1024];
-
     let error = validate_args(&args).expect_err("sub-4KiB documents are meaningless");
-
     assert!(error.contains("--api-scripted-doc-sizes values must be between 4096 and"));
+
+    // Above the ceiling: stops an operator from requesting a multi-gigabyte
+    // durable write against the hosted Postgres target.
+    args.api_scripted_doc_sizes = vec![scripted::MAX_SCRIPTED_DOC_SIZE_BYTES + 1];
+    let error = validate_args(&args).expect_err("oversized documents are rejected");
+    assert!(error.contains("--api-scripted-doc-sizes values must be between"));
+
+    args.api_scripted_doc_sizes = Vec::new();
+    let error = validate_args(&args).expect_err("an empty size list is rejected");
+    assert!(error.contains("--api-scripted-doc-sizes must not be empty"));
+}
+
+#[test]
+fn scripted_api_hot_writers_reject_file_roundtrip_script() {
+    let mut args = scripted_api_args();
+    args.api_scripted_tool = Some(scripted::ScriptKey::WriteFileRoundtrip);
+    args.api_hot_writers = 2;
+
+    let error = validate_args(&args)
+        .expect_err("hot writers need a shared document; write_file_roundtrip uses per-op paths");
+
+    assert!(error.contains("--api-hot-writers requires a memory script"));
+}
+
+#[test]
+fn scripted_cli_flag_combination_parses_and_gates_execution() {
+    // Drive the scripted flag combination through the CLI parser (clap
+    // typing and default resolution) and then through the validation gate
+    // that runs before any workload starts.
+    let args = Args::try_parse_from([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--scenario",
+        "api-user-capacity",
+        "--api-base-url",
+        "http://127.0.0.1:4216",
+        "--api-scripted-tool",
+        "memory_roundtrip",
+        "--mock-llm-bind",
+        "127.0.0.1:19090",
+    ])
+    .expect("scripted flag combination parses");
+    assert_eq!(
+        args.api_scripted_tool,
+        Some(scripted::ScriptKey::MemoryRoundtrip)
+    );
+    assert_eq!(
+        args.api_scripted_doc_sizes,
+        vec![4096, 32768, 131072, 1048576]
+    );
+    validate_args(&args).expect("valid scripted configuration passes the startup gate");
+
+    // An unknown script key is rejected by clap itself before validation.
+    let parse_error = Args::try_parse_from([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--scenario",
+        "api-user-capacity",
+        "--api-base-url",
+        "http://127.0.0.1:4216",
+        "--api-scripted-tool",
+        "not_a_script",
+        "--mock-llm-bind",
+        "127.0.0.1:19090",
+    ])
+    .expect_err("unknown script key is rejected at parse time");
+    assert!(parse_error.to_string().contains("possible values"));
+
+    // A valid key without the required sidecar is rejected by validation
+    // before any workload starts.
+    let mut missing_sidecar = args;
+    missing_sidecar.mock_llm_bind = None;
+    let error = validate_args(&missing_sidecar).expect_err("sidecar is required");
+    assert!(error.contains("--api-scripted-tool requires --mock-llm-bind"));
 }
 
 #[test]

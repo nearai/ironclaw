@@ -37,6 +37,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -63,6 +64,10 @@ pub(crate) const UNDISCLOSED_ATTEMPTS: usize = 2;
 /// Separator between the user part and the op part of a marker identity.
 /// `-` and `.` can appear in user labels, so `__` is the split token.
 const IDENTITY_SEPARATOR: &str = "__";
+/// Upper bound for one marker identity part (`user` or `op`), in bytes. Keeps
+/// read-back tokens and tool arguments bounded regardless of the configured
+/// document size.
+const MAX_IDENTITY_PART_LEN: usize = 64;
 /// Interim text the sidecar emits while a scripted tool is not yet
 /// advertised. The driver detects it in the timeline and classifies the op
 /// as `undisclosed` instead of a plain timeout.
@@ -70,33 +75,35 @@ pub(crate) const PLACEHOLDER_TEXT: &str =
     "ironclaw-stress-tool pending \u{2014} I'll perform the stress tool action next.";
 
 /// Scripted workload keys. The wire key is what the driver puts in the
-/// marker and the sidecar switches on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// marker and the sidecar switches on. The string mapping lives in the clap
+/// value names so the CLI flag, the marker wire format, and any parsing
+/// share one source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ScriptKey {
     /// `builtin.write_file` then `builtin.read_file` of the same unique
     /// workspace path.
+    #[value(name = "write_file_roundtrip")]
     WriteFileRoundtrip,
     /// `ironclaw.memory.write` (replace) then `ironclaw.memory.read` of the
     /// shared relative memory target.
+    #[value(name = "memory_roundtrip")]
     MemoryRoundtrip,
     /// `ironclaw.memory.write` (quarter) then append (three quarters) then
     /// read of the shared target — growing-append slope workload.
+    #[value(name = "memory_grow")]
     MemoryGrow,
     /// `ironclaw.memory.write` (half), read, append (half), read of the
     /// shared target — mixed read/write workload.
+    #[value(name = "memory_mixed")]
     MemoryMixed,
 }
 
 impl ScriptKey {
+    /// Parse a wire-format key from a marker message. Delegates to clap's
+    /// value mapping so the CLI and the marker format cannot drift apart.
     pub(crate) fn parse(key: &str) -> Option<Self> {
-        match key {
-            "write_file_roundtrip" => Some(Self::WriteFileRoundtrip),
-            "memory_roundtrip" => Some(Self::MemoryRoundtrip),
-            "memory_grow" => Some(Self::MemoryGrow),
-            "memory_mixed" => Some(Self::MemoryMixed),
-            _ => None,
-        }
+        Self::from_str(key, false).ok()
     }
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -106,15 +113,6 @@ impl ScriptKey {
             Self::MemoryGrow => "memory_grow",
             Self::MemoryMixed => "memory_mixed",
         }
-    }
-
-    pub(crate) fn known_keys() -> &'static [&'static str] {
-        &[
-            "write_file_roundtrip",
-            "memory_roundtrip",
-            "memory_grow",
-            "memory_mixed",
-        ]
     }
 
     /// Number of tool-result messages the driver must observe in the
@@ -325,7 +323,13 @@ pub(crate) fn parse_marker(content: &str) -> Option<ScriptedOp> {
         return None;
     }
     let (user, op) = identity.split_once(IDENTITY_SEPARATOR)?;
-    if user.is_empty() || op.is_empty() {
+    if user.is_empty()
+        || op.is_empty()
+        || user.len() > MAX_IDENTITY_PART_LEN
+        || op.len() > MAX_IDENTITY_PART_LEN
+        || !is_readback_compatible(user)
+        || !is_readback_compatible(op)
+    {
         return None;
     }
     Some(ScriptedOp {
@@ -334,6 +338,15 @@ pub(crate) fn parse_marker(content: &str) -> Option<ScriptedOp> {
         op: op.to_string(),
         size_bytes,
     })
+}
+
+/// Whether an identity part survives `readback_tokens` scanning: ASCII
+/// alphanumerics plus `-`, `_`, and `.`. Any other character truncates the
+/// read-back token at that character, so the scripted call could never
+/// produce a matching verdict.
+fn is_readback_compatible(part: &str) -> bool {
+    part.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 /// Pick the document size for an operation index from a size list, cycling.
@@ -394,18 +407,20 @@ impl Conversation {
 }
 
 /// Decide what the mock LLM sidecar should answer for a chat completion
-/// request. Pure function of the conversation and the advertised tools.
-pub(crate) fn decide(
+/// request, together with the scripted operation the decision applies to.
+/// Pure function of the conversation and the advertised tools; the message
+/// array is walked exactly once.
+pub(crate) fn decide_with_op(
     messages: &[Value],
     available_tool_names: &HashSet<String>,
-) -> ScriptedDecision {
+) -> (ScriptedDecision, Option<ScriptedOp>) {
     let conversation = Conversation::from_messages(messages);
     let Some((marker_position, op)) = find_latest_op(&conversation) else {
-        return ScriptedDecision::None;
+        return (ScriptedDecision::None, None);
     };
 
     if conversation_has_result(&conversation, marker_position, &op) {
-        return ScriptedDecision::None;
+        return (ScriptedDecision::None, Some(op));
     }
 
     let tool_results_after = conversation
@@ -419,11 +434,14 @@ pub(crate) fn decide(
     if step_index < steps.len() {
         let step = &steps[step_index];
         if let Some(wire_name) = resolve_wire_name(available_tool_names, step.capability_id) {
-            let arguments = build_arguments(&op, step);
-            return ScriptedDecision::ToolCall(ToolCallSpec {
-                wire_name,
-                arguments,
-            });
+            let arguments = build_arguments(&op, step, step_index);
+            return (
+                ScriptedDecision::ToolCall(ToolCallSpec {
+                    wire_name,
+                    arguments,
+                }),
+                Some(op),
+            );
         }
         let assistant_turns_after = conversation
             .assistant_messages
@@ -432,13 +450,36 @@ pub(crate) fn decide(
             .count();
         if assistant_turns_after >= UNDISCLOSED_ATTEMPTS {
             let verdict = result_text(&op, Verdict::Undisclosed);
-            return ScriptedDecision::FinalText(verdict);
+            return (ScriptedDecision::FinalText(verdict), Some(op));
         }
-        return ScriptedDecision::Placeholder;
+        return (ScriptedDecision::Placeholder, Some(op));
     }
 
-    let verdict = compute_verdict(&op, &tool_results_after);
-    ScriptedDecision::FinalText(result_text(&op, verdict))
+    // The verdict must come from what the read steps returned: write tool
+    // results may echo the written content, which embeds this operation's
+    // read-back token, and would mask `missing`/`contended` verdicts.
+    let read_results = steps
+        .iter()
+        .zip(&tool_results_after)
+        .filter(|(step, _)| matches!(step.kind, StepKind::ReadFile | StepKind::MemoryRead))
+        .map(|(_, text)| *text)
+        .collect::<Vec<_>>();
+    let verdict = compute_verdict(&op, &read_results);
+    (
+        ScriptedDecision::FinalText(result_text(&op, verdict)),
+        Some(op),
+    )
+}
+
+/// Convenience wrapper returning only the decision; the mock sidecar uses
+/// [`decide_with_op`] so the conversation is parsed once. Test-only in the
+/// current crate.
+#[cfg(test)]
+pub(crate) fn decide(
+    messages: &[Value],
+    available_tool_names: &HashSet<String>,
+) -> ScriptedDecision {
+    decide_with_op(messages, available_tool_names).0
 }
 
 /// Sidecar-side counters for scripted workloads, reported in the run
@@ -457,12 +498,6 @@ pub(crate) struct ScriptedMockCounters {
     /// Final verdict texts emitted, per verdict.
     #[serde(default)]
     pub(crate) final_verdicts: BTreeMap<String, u64>,
-}
-
-/// Find the latest scripted marker among the user messages of a
-/// conversation.
-pub(crate) fn latest_op(messages: &[Value]) -> Option<ScriptedOp> {
-    find_latest_op(&Conversation::from_messages(messages)).map(|(_, op)| op)
 }
 
 /// Find the latest scripted marker among the user messages.
@@ -540,14 +575,15 @@ fn result_text(op: &ScriptedOp, verdict: Verdict) -> String {
 }
 
 /// Resolve the advertised wire name for a capability id, accepting the
-/// `__`-encoded form, the dotted capability id, and the bare tool name.
+/// `__`-encoded form or the dotted capability id. The bare tool name is
+/// deliberately not a candidate: an extension could export a same-named
+/// tool and the script would silently drive a different capability.
 pub(crate) fn resolve_wire_name(
     available_tool_names: &HashSet<String>,
     capability_id: &str,
 ) -> Option<String> {
     let encoded = capability_id.replace('.', "__");
-    let bare = capability_id.rsplit('.').next().unwrap_or(capability_id);
-    for candidate in [encoded.as_str(), capability_id, bare] {
+    for candidate in [encoded.as_str(), capability_id] {
         if let Some(name) = available_tool_names.get(candidate) {
             return Some(name.clone());
         }
@@ -556,7 +592,9 @@ pub(crate) fn resolve_wire_name(
 }
 
 /// Build the arguments for a script step from the operation marker.
-pub(crate) fn build_arguments(op: &ScriptedOp, step: &ScriptStep) -> Value {
+/// `step_index` locates the step in `op.key.steps()` so split writes can
+/// derive their chunk from cumulative fraction boundaries.
+pub(crate) fn build_arguments(op: &ScriptedOp, step: &ScriptStep, step_index: usize) -> Value {
     match step.kind {
         StepKind::WriteFile => {
             let path = format!("stress/{}.txt", sanitize_path_segment(&op.identity()));
@@ -568,7 +606,17 @@ pub(crate) fn build_arguments(op: &ScriptedOp, step: &ScriptStep) -> Value {
             serde_json::json!({ "path": path })
         }
         StepKind::MemoryWrite { append, fraction } => {
-            let size = fraction_size(op.size_bytes, fraction);
+            let cumulative_after = op
+                .key
+                .steps()
+                .iter()
+                .take(step_index + 1)
+                .filter_map(|candidate| match candidate.kind {
+                    StepKind::MemoryWrite { fraction, .. } => Some(fraction),
+                    _ => None,
+                })
+                .sum::<u8>();
+            let size = fraction_chunk(op.size_bytes, fraction, cumulative_after);
             serde_json::json!({
                 "target": SHARED_MEMORY_TARGET,
                 "content": scripted_content(op, size),
@@ -581,9 +629,15 @@ pub(crate) fn build_arguments(op: &ScriptedOp, step: &ScriptStep) -> Value {
     }
 }
 
-/// Content share of the operation's total size: fraction out of 4.
-fn fraction_size(size_bytes: usize, fraction: u8) -> usize {
-    (size_bytes * fraction as usize) / 4
+/// Size of the `fraction`/4 chunk of `size_bytes` ending at the cumulative
+/// fraction boundary `cumulative_after` (the sum of write fractions up to
+/// and including this step). Deriving each chunk from cumulative boundaries
+/// assigns any size remainder exactly once, so a split write persists
+/// exactly `size_bytes` in total.
+fn fraction_chunk(size_bytes: usize, fraction: u8, cumulative_after: u8) -> usize {
+    let after = (size_bytes * cumulative_after as usize) / 4;
+    let before = (size_bytes * (cumulative_after - fraction) as usize) / 4;
+    after - before
 }
 
 /// Build deterministic write content of exactly `size_bytes` carrying the
@@ -613,9 +667,13 @@ pub(crate) fn sanitize_path_segment(identity: &str) -> String {
 }
 
 /// Parse the verdict out of a finalized assistant message for this operation.
+/// The marker is located with substring matching (like
+/// `conversation_has_result`) so a host wrapper around the content does not
+/// make the operation unparseable.
 pub(crate) fn parse_result_verdict(content: &str, op: &ScriptedOp) -> Option<Verdict> {
     let prefix = format!("{RESULT_PREFIX} {}", op.identity());
-    let rest = content.strip_prefix(&prefix)?.trim_start();
+    let start = content.find(&prefix)?;
+    let rest = content[start + prefix.len()..].trim_start();
     let verdict = rest.split_whitespace().next()?;
     Verdict::parse(verdict)
 }
@@ -701,6 +759,32 @@ mod tests {
         );
         assert_eq!(
             parse_marker("ironclaw-stress-tool memory_roundtrip __1 4096"),
+            None
+        );
+        // A `/` truncates the read-back token and can never produce a
+        // verdict, so the identity is rejected up front.
+        assert_eq!(
+            parse_marker("ironclaw-stress-tool memory_roundtrip u0/x__1 4096"),
+            None
+        );
+        assert_eq!(
+            parse_marker("ironclaw-stress-tool memory_roundtrip u0__1/x 4096"),
+            None
+        );
+        // Oversized identity parts are bounded to keep read-back tokens and
+        // tool arguments small.
+        let oversized_user = "u".repeat(MAX_IDENTITY_PART_LEN + 1);
+        assert_eq!(
+            parse_marker(&format!(
+                "ironclaw-stress-tool memory_roundtrip {oversized_user}__1 4096"
+            )),
+            None
+        );
+        let oversized_op = "o".repeat(MAX_IDENTITY_PART_LEN + 1);
+        assert_eq!(
+            parse_marker(&format!(
+                "ironclaw-stress-tool memory_roundtrip u0__{oversized_op} 4096"
+            )),
             None
         );
     }
@@ -810,6 +894,30 @@ mod tests {
     }
 
     #[test]
+    fn write_result_echo_does_not_mask_missing_read() {
+        // The write tool result echoes the written content (which embeds the
+        // operation's own read-back token); the read returns nothing. The
+        // verdict must come from the read step alone: Missing, not Confirmed.
+        let parsed = op(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
+        let token = parsed.readback_token();
+        let marker = marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
+        let messages = vec![
+            user(&marker),
+            tool_result(&format!("Tool write returned: wrote {token}")),
+            tool_result("Tool read returned: (empty)"),
+        ];
+        match decide(
+            &messages,
+            &tools(&["ironclaw__memory__write", "ironclaw__memory__read"]),
+        ) {
+            ScriptedDecision::FinalText(text) => {
+                assert_eq!(text, "ironclaw-stress-tool result u0__1 missing");
+            }
+            other => panic!("expected missing verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn verdict_leak_takes_precedence_over_own_token() {
         let parsed = op(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
         let own = parsed.readback_token();
@@ -899,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_name_resolution_accepts_encoded_dotted_and_bare() {
+    fn wire_name_resolution_accepts_encoded_and_dotted_only() {
         let encoded = tools(&["builtin__write_file"]);
         assert_eq!(
             resolve_wire_name(&encoded, "builtin.write_file").as_deref(),
@@ -910,11 +1018,10 @@ mod tests {
             resolve_wire_name(&dotted, "builtin.write_file").as_deref(),
             Some("builtin.write_file")
         );
+        // The bare name is not a candidate: an extension could export a
+        // same-named tool and the script would silently bind to it.
         let bare = tools(&["write_file"]);
-        assert_eq!(
-            resolve_wire_name(&bare, "builtin.write_file").as_deref(),
-            Some("write_file")
-        );
+        assert_eq!(resolve_wire_name(&bare, "builtin.write_file"), None);
         assert_eq!(resolve_wire_name(&tools(&[]), "builtin.write_file"), None);
     }
 
@@ -973,6 +1080,28 @@ mod tests {
                 assert_eq!(spec.arguments["content"].as_str().unwrap().len(), 16384);
             }
             other => panic!("expected first write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_writes_preserve_exact_configured_size() {
+        // 4097 is not divisible by 4. Chunks derived from cumulative
+        // fraction boundaries must still persist exactly the configured
+        // size across the split writes.
+        for (key, expected_chunks) in [
+            (ScriptKey::MemoryGrow, vec![1024, 3073]),
+            (ScriptKey::MemoryMixed, vec![2048, 2049]),
+        ] {
+            let parsed = op(key, "u0", "1", 4097);
+            let mut chunks = Vec::new();
+            for (index, step) in key.steps().iter().enumerate() {
+                if matches!(step.kind, StepKind::MemoryWrite { .. }) {
+                    let arguments = build_arguments(&parsed, step, index);
+                    chunks.push(arguments["content"].as_str().expect("string").len());
+                }
+            }
+            assert_eq!(chunks, expected_chunks, "chunks for {key:?}");
+            assert_eq!(chunks.iter().sum::<usize>(), 4097, "total for {key:?}");
         }
     }
 
