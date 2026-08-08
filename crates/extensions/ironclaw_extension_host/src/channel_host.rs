@@ -80,6 +80,41 @@ fn admin_configuration_fields(
         .collect()
 }
 
+/// The manifest-driven default admission resolver, or `None` (= reject every
+/// shared conversation). `None` when the manifest declares no
+/// `*_allowed_channels` handle — and unconditionally when the channel's actor
+/// identity is not per-user: an operator-resolver channel that admitted a
+/// group would run every participant as the operator, the exact exposure the
+/// run-acts-as-invoker rule removed.
+fn default_shared_admission(
+    actor_identity_is_per_user: bool,
+    source: &HostedChannelSource,
+    adapter_id: &ProductAdapterId,
+    installation_id: &AdapterInstallationId,
+    channel_config: &Arc<ChannelConfigService>,
+) -> Result<Option<Arc<dyn SharedConversationAdmission>>, String> {
+    if !actor_identity_is_per_user {
+        return Ok(None);
+    }
+    let fields = admin_configuration_fields(source.resolved());
+    let Some(handle) =
+        ironclaw_extension_host::channel_shared_admission::shared_channel_admission_handle(&fields)
+    else {
+        return Ok(None);
+    };
+    let extension_id = ExtensionId::new(source.extension_id())
+        .map_err(|error| format!("invalid extension id: {error}"))?;
+    Ok(Some(Arc::new(
+        ironclaw_extension_host::channel_shared_admission::ChannelConfigSharedAdmission::new(
+            adapter_id.clone(),
+            installation_id.clone(),
+            extension_id,
+            handle,
+            Arc::clone(channel_config),
+        ),
+    )))
+}
+
 /// Derive the trusted-evidence shape the generic inbound sink mints from the
 /// resolved contract's ingress verification recipe — the mint mirrors the
 /// recipe the generic router executed. `None` for `kind = "none"` recipes:
@@ -144,8 +179,9 @@ struct StoredChannelExtras {
 }
 
 /// The deployment identity every per-extension workflow binds under: the
-/// composed runtime's tenant/agent/project plus the operator user inbound
-/// conversations default their subject to.
+/// composed runtime's tenant/agent/project plus the operator user that
+/// host-initiated work is attributed to. Inbound conversations run as their
+/// invoking actor, never as this operator identity.
 #[derive(Clone)]
 pub struct ChannelHostIdentity {
     pub tenant_id: TenantId,
@@ -613,6 +649,10 @@ impl GenericChannelHostAssembly {
         let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
         let actor_user_resolver = self.actor_user_resolver(source);
+        // Per-user identity iff a provider lookup exists (OAuth vendor or
+        // pairing strategy); the `None` arm is the operator resolver, which
+        // must never be combined with shared-conversation admission.
+        let actor_identity_is_per_user = self.provider_identity_lookup(source).1.is_some();
         let graph = self
             .deps
             .channel_workflow
@@ -622,6 +662,7 @@ impl GenericChannelHostAssembly {
                 adapter_id.clone(),
                 command_roles,
                 Arc::clone(&actor_user_resolver),
+                actor_identity_is_per_user,
             )?)
             .await?;
         let dm_target_backfill =
@@ -748,10 +789,10 @@ impl GenericChannelHostAssembly {
     ///
     /// Everything here is host policy: where the durable state lives, which
     /// identity policy resolves a verified actor, whether shared conversations
-    /// route to a subject, which commands the manifest declares, and how the
-    /// channel words its connect notices. What product does with them — the
-    /// installation scope, the binding service, the surface, the observer — is
-    /// behind the port.
+    /// are admitted (the `*_allowed_channels` connected-channel list), which
+    /// commands the manifest declares, and how the channel words its connect
+    /// notices. What product does with them — the installation scope, the
+    /// binding service, the surface, the observer — is behind the port.
     fn workflow_request(
         &self,
         source: &HostedChannelSource,
@@ -759,6 +800,7 @@ impl GenericChannelHostAssembly {
         adapter_id: ProductAdapterId,
         command_roles: Arc<dyn ironclaw_product_contracts::command::CommandActorRoleResolver>,
         actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+        actor_identity_is_per_user: bool,
     ) -> Result<ChannelWorkflowRequest, String> {
         let identity = &self.deps.identity;
         let storage_roots = match &extras.storage_roots {
@@ -774,31 +816,22 @@ impl GenericChannelHostAssembly {
         // `*_allowed_channels` config convention gets the default resolver
         // over its `[channel.config]` value, and a channel declaring no
         // admission handle gets `None`, which rejects every shared
-        // conversation.
-        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> = match &extras
-            .shared_admission
-        {
-            Some(resolver) => Some(Arc::clone(resolver)),
-            None => {
-                let fields = admin_configuration_fields(source.resolved());
-                let handles = ironclaw_extension_host::shared_channel_admission_handles(&fields);
-                if handles.declared() {
-                    let extension_id = ExtensionId::new(source.extension_id())
-                        .map_err(|error| format!("invalid extension id: {error}"))?;
-                    Some(Arc::new(
-                        ironclaw_extension_host::ChannelConfigSharedAdmission::new(
-                            adapter_id.clone(),
-                            installation_id.clone(),
-                            extension_id,
-                            handles,
-                            Arc::clone(&self.deps.channel_config),
-                        ),
-                    ))
-                } else {
-                    None
-                }
-            }
-        };
+        // conversation. A channel WITHOUT per-user actor identity (no OAuth
+        // vendor, no pairing strategy) never admits shared conversations at
+        // all, allowlisted or not: every participant there resolves to the
+        // operator, which is exactly the exposure run-acts-as-invoker
+        // removed — closed structurally rather than by manifest inventory.
+        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> =
+            match &extras.shared_admission {
+                Some(resolver) => Some(Arc::clone(resolver)),
+                None => default_shared_admission(
+                    actor_identity_is_per_user,
+                    source,
+                    &adapter_id,
+                    &installation_id,
+                    &self.deps.channel_config,
+                )?,
+            };
         let channel = source.resolved().channel.as_ref();
         Ok(ChannelWorkflowRequest {
             adapter_id,

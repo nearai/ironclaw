@@ -1720,6 +1720,49 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "a rejected update must not add a turn delivery; earlier pairing feedback is preserved"
     );
 
+    // Fail-closed group admission at the caller path: a correctly-signed
+    // update from a supergroup NOT listed in `telegram_allowed_channels` is
+    // acknowledged on the wire (no vendor retry storm) but produces no turn
+    // and no reply — the conversation is simply not connected.
+    let unlisted_body = json!({
+        "update_id": 502,
+        "message": {
+            "message_id": 12,
+            "message_thread_id": 5,
+            "date": 1710000001,
+            "text": "@itest_delivery_bot are you there?",
+            "entities": [{"type": "mention", "offset": 0, "length": 19}],
+            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+            "chat": {"id": -1009999999_i64, "type": "supergroup"}
+        }
+    })
+    .to_string();
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &unlisted_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unlisted group's update is acknowledged, not retried"
+    );
+    ingress.drain().await;
+    assert_eq!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .filter(|request| request.url.ends_with("/sendMessage"))
+            .count(),
+        send_message_count_before_rejected_update,
+        "an unlisted supergroup must produce no turn delivery and no reply"
+    );
+
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
@@ -1787,7 +1830,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     assert_eq!(
         vendor_scope.explicit_owner_user_id(),
         Some(&paired_user),
-        "the Telegram topic's shared route must retain its configured subject account"
+        "the Telegram topic's thread must be owned by the invoking paired actor"
     );
     let durable_reply = inbound
         .thread_service_for_test()

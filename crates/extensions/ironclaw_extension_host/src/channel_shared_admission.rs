@@ -44,30 +44,15 @@ pub fn handle_declares_field(handle: &str, name: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('_'))
 }
 
-/// The admission config handle one extension's `[channel.config]` declares.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SharedChannelAdmissionHandles {
-    pub allowed_channels: Option<String>,
-}
-
-impl SharedChannelAdmissionHandles {
-    pub fn declared(&self) -> bool {
-        self.allowed_channels.is_some()
-    }
-}
-
-/// Scan the manifest's `[channel.config]` field descriptors for the
-/// admission handle (non-secret fields only — admission config is operator
-/// routing data, never secret material).
-pub fn shared_channel_admission_handles(
-    fields: &[RecipeSecretField],
-) -> SharedChannelAdmissionHandles {
-    let allowed_channels = fields
+/// Scan the manifest's `[channel.config]` field descriptors for the admission
+/// handle an extension declares, if any (non-secret fields only — admission
+/// config is operator routing data, never secret material).
+pub fn shared_channel_admission_handle(fields: &[RecipeSecretField]) -> Option<String> {
+    fields
         .iter()
         .filter(|field| !field.secret)
         .find(|field| handle_declares_field(field.handle.as_str(), ALLOWED_CHANNELS_FIELD))
-        .map(|field| field.handle.as_str().to_string());
-    SharedChannelAdmissionHandles { allowed_channels }
+        .map(|field| field.handle.as_str().to_string())
 }
 
 /// The generic admission resolver: a shared conversation is admitted iff the
@@ -79,7 +64,10 @@ pub struct ChannelConfigSharedAdmission {
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
     extension_id: ExtensionId,
-    handles: SharedChannelAdmissionHandles,
+    /// The manifest-declared `*_allowed_channels` handle. A resolver exists
+    /// only for a channel that declares one — "installed but handle-less" is
+    /// not a representable state.
+    allowed_channels_handle: String,
     channel_config: Arc<ChannelConfigService>,
 }
 
@@ -88,14 +76,14 @@ impl ChannelConfigSharedAdmission {
         adapter_id: ProductAdapterId,
         installation_id: AdapterInstallationId,
         extension_id: ExtensionId,
-        handles: SharedChannelAdmissionHandles,
+        allowed_channels_handle: String,
         channel_config: Arc<ChannelConfigService>,
     ) -> Self {
         Self {
             adapter_id,
             installation_id,
             extension_id,
-            handles,
+            allowed_channels_handle,
             channel_config,
         }
     }
@@ -128,7 +116,7 @@ impl std::fmt::Debug for ChannelConfigSharedAdmission {
         formatter
             .debug_struct("ChannelConfigSharedAdmission")
             .field("extension_id", &self.extension_id)
-            .field("handles", &self.handles)
+            .field("allowed_channels_handle", &self.allowed_channels_handle)
             .finish_non_exhaustive()
     }
 }
@@ -144,8 +132,9 @@ impl SharedConversationAdmission for ChannelConfigSharedAdmission {
             return Ok(false);
         }
         let conversation_id = request.route_key.conversation_id();
-        if let Some(handle) = &self.handles.allowed_channels
-            && let Some(raw) = self.config_value(handle).await?
+        if let Some(raw) = self
+            .config_value(self.allowed_channels_handle.as_str())
+            .await?
         {
             match serde_json::from_str::<Vec<String>>(&raw) {
                 Ok(allowed) => {
@@ -157,7 +146,7 @@ impl SharedConversationAdmission for ChannelConfigSharedAdmission {
                     tracing::warn!(
                         target: "ironclaw::reborn::channel_host",
                         extension_id = %self.extension_id,
-                        handle = %handle,
+                        handle = %self.allowed_channels_handle,
                         %error,
                         "allowed-channel config value is not a JSON array; treating as empty"
                     );
@@ -178,7 +167,7 @@ mod tests {
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         host_port::HostPortCatalog,
-        ids::{InvocationId, TenantId, UserId},
+        ids::{InvocationId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
@@ -238,7 +227,6 @@ supports_markdown = false
 supports_threads = false
 "#;
 
-    const TENANT: &str = "tenant-alpha";
     const INSTALLATION: &str = "vendorx-install-1";
 
     struct Fixture {
@@ -354,14 +342,11 @@ supports_threads = false
             )
             .with_admin_configuration(admin, scope),
         );
-        let handles = SharedChannelAdmissionHandles {
-            allowed_channels: Some("vendorx_allowed_channels".to_string()),
-        };
         let resolver = ChannelConfigSharedAdmission::new(
             ProductAdapterId::new("vendorx").expect("adapter id"),
             AdapterInstallationId::new(INSTALLATION).expect("installation id"),
             extension_id.clone(),
-            handles,
+            "vendorx_allowed_channels".to_string(),
             Arc::clone(&channel_config),
         );
         Fixture {
@@ -457,14 +442,8 @@ supports_threads = false
                 secret: field.secret,
             })
             .collect::<Vec<_>>();
-        let handles = shared_channel_admission_handles(&fields);
-        assert_eq!(
-            handles,
-            SharedChannelAdmissionHandles {
-                allowed_channels: Some("vendorx_allowed_channels".to_string()),
-            }
-        );
-        assert!(handles.declared());
+        let handle = shared_channel_admission_handle(&fields);
+        assert_eq!(handle.as_deref(), Some("vendorx_allowed_channels"));
         // A secret field never declares admission config, whatever its name.
         let secret_only = [RecipeSecretField {
             handle: ironclaw_host_api::ids::SecretHandle::new("vendorx_allowed_channels")
@@ -472,7 +451,7 @@ supports_threads = false
             label: "secret impostor".to_string(),
             secret: true,
         }];
-        assert!(!shared_channel_admission_handles(&secret_only).declared());
+        assert_eq!(shared_channel_admission_handle(&secret_only), None);
     }
 
     #[tokio::test]
@@ -484,7 +463,6 @@ supports_threads = false
             .await
             .expect("admission resolves");
         assert!(!admitted, "no saved config admits nothing");
-        let _ = TenantId::new(TENANT).expect("tenant id remains valid fixture data");
     }
 
     #[tokio::test]

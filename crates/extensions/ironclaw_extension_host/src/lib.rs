@@ -156,10 +156,6 @@ pub use channel_lifecycle::{
     channel_connect_strategy, channel_connection_requirement,
     package_declares_inbound_product_adapter,
 };
-pub use channel_shared_admission::{
-    ChannelConfigSharedAdmission, SharedChannelAdmissionHandles, handle_declares_field,
-    shared_channel_admission_handles,
-};
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,
 };

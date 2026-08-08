@@ -42,7 +42,7 @@ use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::channel_host::GenericChannelHostAssembly;
 use ironclaw_extension_host::ChannelConfigService;
-use ironclaw_extension_host::handle_declares_field;
+use ironclaw_extension_host::channel_shared_admission::handle_declares_field;
 use ironclaw_extension_host::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
