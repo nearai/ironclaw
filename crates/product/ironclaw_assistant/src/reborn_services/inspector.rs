@@ -196,7 +196,12 @@ mod tests {
             },
         )
         .expect("owner snapshot");
-        assert!(exact.payload["snapshot"].is_object());
+        let activity = exact.payload["snapshot"]["activity"]
+            .as_array()
+            .expect("snapshot activity");
+        assert!(activity.iter().any(|event| {
+            event["event"]["summary"]["content"] == serde_json::json!("owner-only activity")
+        }));
 
         for (read_caller, thread_id, requested_run) in [
             (caller("tenant-b", "user-a"), "thread-a", run_id),

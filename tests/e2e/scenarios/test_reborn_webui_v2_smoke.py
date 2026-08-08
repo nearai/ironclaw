@@ -437,7 +437,8 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
 ):
     """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
     marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
-    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
         submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
         assistant = await _wait_for_assistant_message(

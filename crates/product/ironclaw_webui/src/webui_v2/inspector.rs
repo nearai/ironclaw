@@ -53,14 +53,22 @@ pub struct InspectorUpdatesQuery {
     connection_generation: Option<u64>,
 }
 
-fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
-    connection_id.filter(|connection_id| {
-        !connection_id.is_empty()
-            && connection_id.len() <= 64
-            && connection_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    })
+fn stream_connection_id(connection_id: Option<&str>) -> Result<Option<&str>, WebUiV2HttpError> {
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    if !connection_id.is_empty()
+        && connection_id.len() <= 64
+        && connection_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Ok(Some(connection_id));
+    }
+    Err(
+        ProductSurfaceError::validation("connection_id", ProductSurfaceValidationCode::InvalidId)
+            .into(),
+    )
 }
 
 fn require_operator(
@@ -192,7 +200,14 @@ pub async fn stream_inspector_updates(
     if let Some(value) = cursor.as_deref() {
         DiagnosticCursor::parse(value).map_err(|_| invalid_cursor())?;
     }
-    let connection_id = stream_connection_id(query.connection_id.as_deref());
+    let connection_id = stream_connection_id(query.connection_id.as_deref())?;
+    if connection_id.is_none() && query.connection_generation.is_some() {
+        return Err(ProductSurfaceError::validation(
+            "connection_generation",
+            ProductSurfaceValidationCode::InvalidValue,
+        )
+        .into());
+    }
     let slot = match state.sse_capacity().try_acquire_ordered(
         &caller.tenant_id,
         &caller.user_id,
