@@ -430,6 +430,13 @@ impl LlmProvider for FailoverProvider {
         self.providers[self.last_used.load(Ordering::Relaxed)].cache_read_discount()
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.providers
+            .iter()
+            .chain(self.explicit_route_providers.iter().flatten())
+            .any(|provider| provider.supports_deferred_tool_loading())
+    }
+
     async fn complete(
         &self,
         mut request: CompletionRequest,

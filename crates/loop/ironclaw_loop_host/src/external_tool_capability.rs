@@ -33,10 +33,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityProgress,
-    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, resolution,
+    CapabilitySurfaceVersion, ConcurrencyHint, DeferredProviderToolSurface, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -259,6 +259,33 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             definitions.sort_by(|left, right| left.name.cmp(&right.name));
         }
         Ok(definitions)
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let Some(mut deferred_surface) = self.inner.deferred_tool_surface()? else {
+            return Ok(None);
+        };
+        let surface = self.surface.lock().map_err(|_| surface_lock_error())?;
+        if let Some(surface) = surface.as_ref() {
+            for (capability_id, spec) in &surface.specs_by_capability_id {
+                if !deferred_surface
+                    .eager
+                    .iter()
+                    .chain(&deferred_surface.deferred)
+                    .any(|definition| &definition.capability_id == capability_id)
+                {
+                    deferred_surface
+                        .eager
+                        .push(spec.tool_definition(capability_id));
+                }
+            }
+            deferred_surface
+                .eager
+                .sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(Some(deferred_surface))
     }
 
     fn provider_tool_call_capability_ids(

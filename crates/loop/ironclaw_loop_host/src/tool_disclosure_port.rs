@@ -12,10 +12,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureDetail,
-    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
-    LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, DeferredProviderToolSurface,
+    LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    resolution,
 };
 use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
@@ -217,6 +218,39 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             "reborn live tool disclosure surface"
         );
         Ok(state.active.definitions.clone())
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let state = self.turn_state()?;
+        let Some(state) = state.as_ref() else {
+            return Ok(None);
+        };
+        let eager = select_active_set(
+            &state.catalog,
+            &PromotedSet::default(),
+            self.caps,
+            &self.policy,
+        );
+        if !eager.deferred {
+            return Ok(None);
+        }
+        let eager_names = eager
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        let deferred = state
+            .catalog
+            .effective_definitions(&self.policy)
+            .filter(|definition| !eager_names.contains(definition.name.as_str()))
+            .cloned()
+            .collect();
+        Ok(Some(DeferredProviderToolSurface {
+            eager: eager.definitions,
+            deferred,
+        }))
     }
 
     fn provider_tool_call_capability_ids(
@@ -1947,6 +1981,10 @@ mod tests {
             "visible surface must preserve inner descriptor metadata"
         );
         let advertised = port.tool_definitions().expect("tool definitions");
+        let stable_surface = port
+            .deferred_tool_surface()
+            .expect("stable deferred surface")
+            .expect("large catalog uses deferred loading");
         for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
             assert!(
                 advertised
@@ -2069,6 +2107,14 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name.as_str() == "hidden_tool"),
             "successful deferred tool_call should promote the target on the next turn"
+        );
+        assert_eq!(
+            next_turn
+                .deferred_tool_surface()
+                .expect("next stable deferred surface")
+                .expect("large catalog uses deferred loading"),
+            stable_surface,
+            "promotion must not mutate the provider's advertised tool array"
         );
     }
 

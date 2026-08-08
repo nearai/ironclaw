@@ -133,6 +133,10 @@ impl LlmProvider for TokenRefreshingProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.inner.supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.ensure_fresh_token().await;
 

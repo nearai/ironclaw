@@ -20,10 +20,10 @@ pub use capability::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptionTrust,
     CapabilityDescriptorView, CapabilityFailure, CapabilityProgress, CapabilityResultMessage,
-    ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
-    ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    ConcurrencyHint, DeferredProviderToolSurface, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 pub use checkpoint::{
     LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCheckpointKind, LoopCheckpointPort,

@@ -30,7 +30,9 @@ and the loop tier's system-prompt content assets.
   `NoExtraLoopInputPort`.
 - Progressive tool disclosure (`tool_disclosure*.rs`): catalog/selector, the
   deferring `LoopCapabilityPort` decorator, the `REBORN_TOOL_DISCLOSURE`
-  switch.
+  switch. Providers with native deferred loading receive one stable authorized
+  tool array for the run; discovery emits provider tool references instead of
+  mutating that array when a tool is promoted.
 - Prompt-context builders (`identity_context.rs`, `skill_context.rs`) and
   `skill_activation/` (the dissolved `ironclaw_first_party_extension_ports`
   crate, WS8).

@@ -160,6 +160,18 @@ pub struct ProviderToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// A provider-facing tool surface whose ordering and membership remain stable
+/// while deferred tools are discovered and invoked.
+///
+/// Providers with native deferred loading send both vectors on every request,
+/// marking only `deferred` definitions for on-demand expansion. Providers that
+/// do not support that wire contract continue to use [`LoopCapabilityPort::tool_definitions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredProviderToolSurface {
+    pub eager: Vec<ProviderToolDefinition>,
+    pub deferred: Vec<ProviderToolDefinition>,
+}
+
 impl ProviderToolDefinition {
     pub fn from_parts(
         capability_id: CapabilityId,
@@ -546,6 +558,15 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 pub trait LoopCapabilityPort: Send + Sync {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         Ok(Vec::new())
+    }
+
+    /// Return a promotion-stable eager/deferred surface when this port owns a
+    /// native deferred-loading catalog. The default preserves compatibility for
+    /// ordinary capability ports and explicit provider fallbacks.
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        Ok(None)
     }
 
     fn provider_tool_call_capability_ids(

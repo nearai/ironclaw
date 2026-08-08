@@ -415,6 +415,13 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         self.current_port()?.tool_definitions()
     }
 
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<ironclaw_loop_contracts::DeferredProviderToolSurface>, AgentLoopHostError>
+    {
+        self.current_port()?.deferred_tool_surface()
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

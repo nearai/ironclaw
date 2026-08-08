@@ -1,6 +1,9 @@
 //! LLM provider trait and types.
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -571,6 +574,14 @@ pub struct ToolResult {
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    /// Provider tool names whose definitions must stay in the request but be
+    /// omitted from the initial rendered prompt until referenced.
+    pub deferred_tool_names: BTreeSet<String>,
+    /// Deferred tool references keyed by the client tool-use id whose result
+    /// discovered them. Provider adapters that support native deferred loading
+    /// encode these inside that tool result; other adapters ignore this map and
+    /// receive the complete tool list as their explicit fallback.
+    pub tool_references: BTreeMap<String, Vec<String>>,
     /// Optional per-request model override.
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
@@ -588,6 +599,8 @@ impl ToolCompletionRequest {
         Self {
             messages,
             tools,
+            deferred_tool_names: BTreeSet::new(),
+            tool_references: BTreeMap::new(),
             model: None,
             max_tokens: None,
             temperature: None,
@@ -610,6 +623,8 @@ impl ToolCompletionRequest {
         Self {
             messages,
             tools,
+            deferred_tool_names: BTreeSet::new(),
+            tool_references: BTreeMap::new(),
             model,
             max_tokens,
             temperature,
@@ -729,6 +744,12 @@ pub trait LlmProvider: Send + Sync {
     /// is a provider identity.
     fn provider_id(&self) -> String {
         "unknown".to_string()
+    }
+
+    /// Whether this provider can keep the complete tool array stable while
+    /// loading selected definitions inline from tool-result references.
+    fn supports_deferred_tool_loading(&self) -> bool {
+        false
     }
 
     /// Get the model name.

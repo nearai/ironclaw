@@ -12,10 +12,10 @@ use ironclaw_host_runtime::{
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, LoopCapabilityPort,
-    LoopRequest, LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView,
+    DeferredProviderToolSurface, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 pub fn wrap_surface_disclosure(
@@ -42,6 +42,18 @@ impl LoopCapabilityPort for HostSurfaceDisclosurePort {
             self.disclosure.apply_to_tool_definition(definition);
         }
         Ok(definitions)
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let Some(mut surface) = self.inner.deferred_tool_surface()? else {
+            return Ok(None);
+        };
+        for definition in surface.eager.iter_mut().chain(&mut surface.deferred) {
+            self.disclosure.apply_to_tool_definition(definition);
+        }
+        Ok(Some(surface))
     }
 
     fn provider_tool_call_capability_ids(

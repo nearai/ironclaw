@@ -381,6 +381,10 @@ impl LlmProvider for RetryProvider {
         self.inner.cache_read_discount()
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.inner.supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let inner = &self.inner;
         self.retry_loop(

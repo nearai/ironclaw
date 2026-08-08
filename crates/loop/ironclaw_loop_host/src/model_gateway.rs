@@ -1377,9 +1377,31 @@ where
     } = request_context;
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
-        let tool_definitions = capabilities
-            .tool_definitions()
-            .map_err(map_capability_host_error)?;
+        let deferred_surface = if provider.supports_deferred_tool_loading() {
+            capabilities
+                .deferred_tool_surface()
+                .map_err(map_capability_host_error)?
+        } else {
+            None
+        };
+        let (tool_definitions, deferred_tool_names) = match deferred_surface {
+            Some(surface) => {
+                let deferred_tool_names = surface
+                    .deferred
+                    .iter()
+                    .map(|definition| definition.name.as_str().to_string())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let mut definitions = surface.eager;
+                definitions.extend(surface.deferred);
+                (definitions, deferred_tool_names)
+            }
+            None => (
+                capabilities
+                    .tool_definitions()
+                    .map_err(map_capability_host_error)?,
+                std::collections::BTreeSet::new(),
+            ),
+        };
         if tracing::enabled!(tracing::Level::DEBUG) {
             let tool_name_sample = tool_definitions
                 .iter()
@@ -1393,10 +1415,16 @@ where
             );
         }
         if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
-            let est_tool_schema_tokens = estimate_tool_schema_tokens(&tool_definitions);
+            let visible_definitions = tool_definitions
+                .iter()
+                .filter(|definition| !deferred_tool_names.contains(definition.name.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let est_tool_schema_tokens = estimate_tool_schema_tokens(&visible_definitions);
             debug!(
                 target: CONTEXT_SHADOW_TARGET,
-                tool_definition_count = tool_definitions.len(),
+                tool_definition_count = visible_definitions.len(),
+                deferred_tool_definition_count = deferred_tool_names.len(),
                 est_tool_schema_tokens,
                 "reborn tool surface shadow measurement"
             );
@@ -1413,8 +1441,11 @@ where
                 })
                 .collect::<Vec<_>>();
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
-            let tool_request =
+            let mut tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
+            tool_request.tool_references =
+                deferred_tool_references(&tool_request.messages, &deferred_tool_names);
+            tool_request.deferred_tool_names = deferred_tool_names;
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
@@ -1689,6 +1720,62 @@ fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDe
         description: definition.description,
         parameters: definition.parameters,
     }
+}
+
+fn deferred_tool_references(
+    messages: &[ChatMessage],
+    deferred_tool_names: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut references = std::collections::BTreeMap::new();
+    for message in messages {
+        if message.role != Role::Tool {
+            continue;
+        }
+        let Some(tool_call_id) = message.tool_call_id.as_ref() else {
+            continue;
+        };
+        let names = match message.name.as_deref() {
+            Some("tool_search") => serde_json::from_str::<serde_json::Value>(&message.content)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("results")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                })
+                .into_iter()
+                .flatten()
+                .filter_map(|result| {
+                    result
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>(),
+            Some("tool_describe" | "capability_info") => {
+                serde_json::from_str::<serde_json::Value>(&message.content)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            Some(name) if deferred_tool_names.contains(name) => vec![name.to_string()],
+            _ => Vec::new(),
+        };
+        let names = names
+            .into_iter()
+            .filter(|name| deferred_tool_names.contains(name))
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            references.insert(tool_call_id.clone(), names);
+        }
+    }
+    references
 }
 
 fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
@@ -2873,6 +2960,43 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn deferred_tool_references_only_include_advertised_deferred_tools() {
+        let messages = vec![
+            ChatMessage::tool_result(
+                "search-call",
+                "tool_search",
+                r#"{"results":[{"name":"calendar_create"},{"name":"policy_denied"}]}"#,
+            ),
+            ChatMessage::tool_result("describe-call", "tool_describe", r#"{"name":"email_send"}"#),
+            ChatMessage::tool_result(
+                "info-call",
+                "capability_info",
+                r#"{"name":"calendar_create"}"#,
+            ),
+            ChatMessage::tool_result("direct-call", "email_send", "done"),
+        ];
+        let deferred = std::collections::BTreeSet::from([
+            "calendar_create".to_string(),
+            "email_send".to_string(),
+        ]);
+
+        let references = deferred_tool_references(&messages, &deferred);
+
+        assert_eq!(
+            references,
+            std::collections::BTreeMap::from([
+                ("describe-call".to_string(), vec!["email_send".to_string()]),
+                ("direct-call".to_string(), vec!["email_send".to_string()]),
+                ("info-call".to_string(), vec!["calendar_create".to_string()]),
+                (
+                    "search-call".to_string(),
+                    vec!["calendar_create".to_string()]
+                ),
+            ])
+        );
+    }
 
     #[derive(Default)]
     struct RecordingSafeTextSink {

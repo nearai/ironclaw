@@ -1,12 +1,12 @@
-//! Anthropic OAuth provider (direct HTTP, `Authorization: Bearer`).
+//! Anthropic Messages API provider with API-key or OAuth authentication.
 //!
-//! This provider exists because the `rig-core` Anthropic client hardcodes the
-//! `x-api-key` header, which is rejected by Anthropic's OAuth tokens from
-//! `claude login`. OAuth tokens require `Authorization: Bearer <token>` instead.
+//! The direct encoder preserves Anthropic-only request contracts that the
+//! pinned `rig-core` types cannot express, including OAuth bearer auth,
+//! `defer_loading`, and `tool_reference` result blocks.
 //!
 //! Pattern follows `nearai_chat.rs`: direct HTTP calls via `reqwest::Client`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic_thinking::{AnthropicThinking, thinking_for_request};
-use crate::config::RegistryProviderConfig;
+use crate::config::{CacheRetention, RegistryProviderConfig};
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
@@ -91,23 +91,49 @@ const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
-/// Anthropic provider using OAuth Bearer authentication.
-pub(crate) struct AnthropicOAuthProvider {
+/// Anthropic tool search is model-gated. Keep this allowlist aligned with the
+/// provider compatibility table; unknown and older models fail safe to the
+/// stable full-list fallback rather than sending unsupported wire fields.
+fn supports_anthropic_deferred_tools(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    [
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ]
+    .iter()
+    .any(|supported| model.contains(supported))
+}
+
+enum AnthropicAuth {
+    ApiKey(SecretString),
+    OAuth(std::sync::RwLock<SecretString>),
+}
+
+/// Direct Anthropic Messages API provider.
+pub(crate) struct AnthropicProvider {
     client: Client,
     streaming_client: Client,
     stream_idle_timeout: Duration,
-    /// OAuth token, wrapped in RwLock so it can be updated after a successful
-    /// Keychain refresh (fixes #1136: stale token reuse after expiry).
-    token: std::sync::RwLock<SecretString>,
+    auth: AnthropicAuth,
+    provider_id: String,
     model: String,
     base_url: Option<String>,
     active_model: std::sync::RwLock<String>,
+    cache_retention: CacheRetention,
+    models_endpoint: Option<crate::rig_adapter::ModelsEndpoint>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
 }
 
-impl AnthropicOAuthProvider {
-    pub(crate) fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
+impl AnthropicProvider {
+    pub(crate) fn new_oauth(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
         let token = config
             .oauth_token
             .clone()
@@ -115,19 +141,55 @@ impl AnthropicOAuthProvider {
                 provider: "anthropic_oauth".to_string(),
             })?;
 
-        let client =
-            crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS)
-                .build()
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: "anthropic_oauth".to_string(),
-                    reason: format!("Failed to build HTTP client: {}", e),
-                })?;
-        let streaming_client = crate::config::hardened_streaming_client_builder()
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
-                reason: format!("Failed to build streaming HTTP client: {e}"),
-            })?;
+        Self::new_with_auth(
+            config,
+            AnthropicAuth::OAuth(std::sync::RwLock::new(token)),
+            None,
+        )
+    }
+
+    pub(crate) fn new_api_key(
+        config: &RegistryProviderConfig,
+        request_timeout_secs: u64,
+        models_endpoint: crate::rig_adapter::ModelsEndpoint,
+    ) -> Result<Self, LlmError> {
+        let api_key = config.api_key.clone().ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+        let client = crate::provider_http_client(
+            &config.provider_id,
+            &config.base_url,
+            request_timeout_secs,
+        )?;
+        Self::new_with_auth(
+            config,
+            AnthropicAuth::ApiKey(api_key),
+            Some((client, models_endpoint)),
+        )
+    }
+
+    fn new_with_auth(
+        config: &RegistryProviderConfig,
+        auth: AnthropicAuth,
+        api_key_clients: Option<(Client, crate::rig_adapter::ModelsEndpoint)>,
+    ) -> Result<Self, LlmError> {
+        let provider_id = match &auth {
+            AnthropicAuth::ApiKey(_) => config.provider_id.clone(),
+            AnthropicAuth::OAuth(_) => "anthropic_oauth".to_string(),
+        };
+        let client = match api_key_clients.as_ref() {
+            Some((client, _)) => client.clone(),
+            None => crate::url_check::build_http_client(
+                &config.provider_id,
+                &config.base_url,
+                crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+            )?,
+        };
+        let streaming_client = crate::url_check::build_http_client(
+            &config.provider_id,
+            &config.base_url,
+            crate::config::hardened_streaming_client_builder(),
+        )?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let base_url = if config.base_url.is_empty() {
@@ -143,10 +205,13 @@ impl AnthropicOAuthProvider {
             client,
             streaming_client,
             stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
-            token: std::sync::RwLock::new(token),
+            auth,
+            provider_id,
             model: config.model.clone(),
             base_url,
             active_model,
+            cache_retention: config.cache_retention,
+            models_endpoint: api_key_clients.map(|(_, endpoint)| endpoint),
             unsupported_params,
         })
     }
@@ -164,25 +229,64 @@ impl AnthropicOAuthProvider {
     fn api_url(&self) -> String {
         if let Some(ref base) = self.base_url {
             let base = base.trim_end_matches('/');
-            format!("{}/v1/messages", base)
+            if base.ends_with("/v1/messages") {
+                base.to_string()
+            } else if base.ends_with("/v1") {
+                format!("{base}/messages")
+            } else {
+                format!("{base}/v1/messages")
+            }
         } else {
             ANTHROPIC_API_URL.to_string()
         }
     }
 
     /// Read the current token from the RwLock.
-    fn current_token(&self) -> String {
-        match self.token.read() {
-            Ok(guard) => guard.expose_secret().to_string(),
-            Err(poisoned) => poisoned.into_inner().expose_secret().to_string(),
+    fn current_oauth_token(&self) -> Option<String> {
+        match &self.auth {
+            AnthropicAuth::ApiKey(_) => None,
+            AnthropicAuth::OAuth(token) => Some(match token.read() {
+                Ok(guard) => guard.expose_secret().to_string(),
+                Err(poisoned) => poisoned.into_inner().expose_secret().to_string(),
+            }),
         }
     }
 
     /// Update the stored token after a successful Keychain refresh.
     fn update_token(&self, new_token: SecretString) {
-        match self.token.write() {
+        let AnthropicAuth::OAuth(token) = &self.auth else {
+            return;
+        };
+        match token.write() {
             Ok(mut guard) => *guard = new_token,
             Err(poisoned) => *poisoned.into_inner() = new_token,
+        }
+    }
+
+    fn authenticate(
+        &self,
+        request: reqwest::RequestBuilder,
+        oauth_token: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        match &self.auth {
+            AnthropicAuth::ApiKey(api_key) => {
+                Ok(request.header("x-api-key", api_key.expose_secret()))
+            }
+            AnthropicAuth::OAuth(_) => {
+                let token = oauth_token.ok_or_else(|| LlmError::AuthFailed {
+                    provider: self.provider_id.clone(),
+                })?;
+                Ok(request
+                    .bearer_auth(token)
+                    .header("anthropic-beta", ANTHROPIC_OAUTH_BETA))
+            }
+        }
+    }
+
+    fn error_adapter(&self) -> crate::error::ProductionModelAdapter {
+        match &self.auth {
+            AnthropicAuth::ApiKey(_) => crate::error::ProductionModelAdapter::Anthropic,
+            AnthropicAuth::OAuth(_) => crate::error::ProductionModelAdapter::AnthropicOauth,
         }
     }
 
@@ -192,20 +296,18 @@ impl AnthropicOAuthProvider {
     ) -> Result<R, LlmError> {
         let url = self.api_url();
 
-        tracing::debug!("Sending request to Anthropic OAuth: {}", url);
+        tracing::debug!(provider = %self.provider_id, "Sending request to Anthropic: {url}");
 
+        let oauth_token = self.current_oauth_token();
         let response = self
-            .client
-            .post(&url)
-            .bearer_auth(self.current_token())
+            .authenticate(self.client.post(&url), oauth_token.as_deref())?
             .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
             .header("Content-Type", "application/json")
             .json(body)
             .send()
             .await
             .map_err(|e| LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: e.to_string(),
             })?;
 
@@ -223,7 +325,7 @@ impl AnthropicOAuthProvider {
                 .await
                 .unwrap_or_else(|e| format!("(failed to read error body: {e})"));
 
-            if status.as_u16() == 401 {
+            if status.as_u16() == 401 && matches!(&self.auth, AnthropicAuth::OAuth(_)) {
                 // OAuth tokens from `claude login` expire in ~8-12h. Attempt
                 // to re-extract a fresh token from the OS credential store
                 // (macOS Keychain / Linux credentials file) before giving up.
@@ -236,17 +338,14 @@ impl AnthropicOAuthProvider {
                     let fresh_token = SecretString::from(fresh);
                     // Retry once with the refreshed token
                     let retry = self
-                        .client
-                        .post(&url)
-                        .bearer_auth(fresh_token.expose_secret())
+                        .authenticate(self.client.post(&url), Some(fresh_token.expose_secret()))?
                         .header("anthropic-version", ANTHROPIC_API_VERSION)
-                        .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
                         .header("Content-Type", "application/json")
                         .json(body)
                         .send()
                         .await
                         .map_err(|e| LlmError::RequestFailed {
-                            provider: "anthropic_oauth".to_string(),
+                            provider: self.provider_id.clone(),
                             reason: e.to_string(),
                         })?;
                     let retry_status = retry.status();
@@ -257,13 +356,13 @@ impl AnthropicOAuthProvider {
                         tracing::info!("Anthropic OAuth token refreshed from credential store");
 
                         let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
-                            provider: "anthropic_oauth".to_string(),
+                            provider: self.provider_id.clone(),
                             reason: format!("Failed to read response body: {}", e),
                         })?;
                         return serde_json::from_str(&text).map_err(|e| {
                             let truncated = ironclaw_common::truncate_for_preview(&text, 512);
                             LlmError::InvalidResponse {
-                                provider: "anthropic_oauth".to_string(),
+                                provider: self.provider_id.clone(),
                                 reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
                             }
                         });
@@ -282,7 +381,7 @@ impl AnthropicOAuthProvider {
                     );
                     return Err(crate::error::map_provider_http_error(
                         crate::error::ProviderHttpError {
-                            adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                            adapter: self.error_adapter(),
                             model: &self.active_model_name(),
                             status: retry_status.as_u16(),
                             body: &retry_text,
@@ -291,12 +390,12 @@ impl AnthropicOAuthProvider {
                     ));
                 }
                 return Err(LlmError::AuthFailed {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                 });
             }
             return Err(crate::error::map_provider_http_error(
                 crate::error::ProviderHttpError {
-                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    adapter: self.error_adapter(),
                     model: &self.active_model_name(),
                     status: status.as_u16(),
                     body: &response_text,
@@ -306,7 +405,7 @@ impl AnthropicOAuthProvider {
         }
 
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
+            provider: self.provider_id.clone(),
             reason: format!("Failed to read response body: {}", e),
         })?;
 
@@ -319,7 +418,7 @@ impl AnthropicOAuthProvider {
         serde_json::from_str(&response_text).map_err(|e| {
             let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
             LlmError::InvalidResponse {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
             }
         })
@@ -331,12 +430,12 @@ impl AnthropicOAuthProvider {
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<AnthropicStreamingResponse, LlmError> {
         let url = self.api_url();
-        let current_token = self.current_token();
+        let current_token = self.current_oauth_token();
         let mut response = self
-            .send_streaming_http_request(&url, body, &current_token)
+            .send_streaming_http_request(&url, body, current_token.as_deref())
             .await?;
 
-        if response.status().as_u16() == 401 {
+        if response.status().as_u16() == 401 && matches!(&self.auth, AnthropicAuth::OAuth(_)) {
             drop(response);
             // OAuth tokens from `claude login` expire in ~8-12h. Match the
             // buffered request path by allowing Claude Code's asynchronous
@@ -344,12 +443,12 @@ impl AnthropicOAuthProvider {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let Some(fresh) = refresh_claude_oauth_token() else {
                 return Err(LlmError::AuthFailed {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                 });
             };
             let fresh_token = SecretString::from(fresh);
             response = self
-                .send_streaming_http_request(&url, body, fresh_token.expose_secret())
+                .send_streaming_http_request(&url, body, Some(fresh_token.expose_secret()))
                 .await?;
             if response.status().is_success() {
                 self.update_token(fresh_token);
@@ -365,7 +464,7 @@ impl AnthropicOAuthProvider {
             );
             if status.as_u16() == 401 {
                 return Err(LlmError::AuthFailed {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                 });
             }
             // silent-ok: the bounded provider error body is diagnostic only;
@@ -381,7 +480,7 @@ impl AnthropicOAuthProvider {
             let response_text = String::from_utf8_lossy(&response_body);
             return Err(crate::error::map_provider_http_error(
                 crate::error::ProviderHttpError {
-                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    adapter: self.error_adapter(),
                     model: &self.active_model_name(),
                     status: status.as_u16(),
                     body: response_text.as_ref(),
@@ -399,7 +498,7 @@ impl AnthropicOAuthProvider {
             let next = tokio::time::timeout(self.stream_idle_timeout, events.next())
                 .await
                 .map_err(|_| LlmError::StreamInterrupted {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                     reason: format!(
                         "SSE stream was idle for {} seconds",
                         self.stream_idle_timeout.as_secs()
@@ -409,59 +508,63 @@ impl AnthropicOAuthProvider {
                 break;
             };
             let event = event.map_err(|error| LlmError::StreamInterrupted {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: format!("Failed to read SSE stream: {error}"),
             })?;
-            ingest_anthropic_event(&mut streamed, &event.event, &event.data, sink.as_ref()).await?;
+            ingest_anthropic_event(
+                &mut streamed,
+                &event.event,
+                &event.data,
+                sink.as_ref(),
+                &self.provider_id,
+            )
+            .await?;
             if streamed.terminal {
                 break;
             }
         }
         if !streamed.terminal {
             return Err(LlmError::StreamInterrupted {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: "stream ended before message_stop or a stop reason".to_string(),
             });
         }
-        streamed.finish()
+        streamed.finish(&self.provider_id)
     }
 
     async fn send_streaming_http_request(
         &self,
         url: &str,
         body: &AnthropicRequest,
-        token: &str,
+        oauth_token: Option<&str>,
     ) -> Result<reqwest::Response, LlmError> {
         tokio::time::timeout(
             self.stream_idle_timeout,
-            self.streaming_client
-                .post(url)
-                .bearer_auth(token)
+            self.authenticate(self.streaming_client.post(url), oauth_token)?
                 .header("anthropic-version", ANTHROPIC_API_VERSION)
-                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
                 .header("Content-Type", "application/json")
                 .json(body)
                 .send(),
         )
         .await
         .map_err(|_| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
+            provider: self.provider_id.clone(),
             reason: format!(
                 "timed out waiting {}s for streaming response headers",
                 self.stream_idle_timeout.as_secs()
             ),
         })?
         .map_err(|e| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
+            provider: self.provider_id.clone(),
             reason: e.to_string(),
         })
     }
 }
 
 #[async_trait]
-impl LlmProvider for AnthropicOAuthProvider {
+impl LlmProvider for AnthropicProvider {
     fn provider_id(&self) -> String {
-        "anthropic_oauth".to_string()
+        self.provider_id.clone()
     }
 
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -469,7 +572,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
+        let (system, messages) = convert_messages(req.messages, &BTreeMap::new());
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let request = AnthropicRequest {
@@ -480,8 +583,10 @@ impl LlmProvider for AnthropicOAuthProvider {
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: None,
             tool_choice: None,
+            cache_control: anthropic_cache_control(self.cache_retention),
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -514,7 +619,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
+        let (system, messages) = convert_messages(req.messages, &BTreeMap::new());
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let request = AnthropicRequest {
             stream: true,
@@ -524,8 +629,10 @@ impl LlmProvider for AnthropicOAuthProvider {
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: None,
             tool_choice: None,
+            cache_control: anthropic_cache_control(self.cache_retention),
         };
         let response = self.send_streaming_request(&request, sink).await?;
         Ok(CompletionResponse {
@@ -547,9 +654,23 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
+        let native_deferred_loading = supports_anthropic_deferred_tools(&model);
+        let empty_references = BTreeMap::new();
+        let empty_deferred_names = BTreeSet::new();
+        let tool_references = if native_deferred_loading {
+            &req.tool_references
+        } else {
+            &empty_references
+        };
+        let deferred_tool_names = if native_deferred_loading {
+            &req.deferred_tool_names
+        } else {
+            &empty_deferred_names
+        };
+        let (system, messages) = convert_messages(req.messages, tool_references);
 
-        let tools = convert_anthropic_tools(req.tools);
+        let original_tools = req.tools.clone();
+        let tools = convert_anthropic_tools(req.tools, deferred_tool_names);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -572,12 +693,19 @@ impl LlmProvider for AnthropicOAuthProvider {
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: opt_tools,
             tool_choice,
+            cache_control: anthropic_cache_control(self.cache_retention),
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
-        let extracted = extract_response_content(&response);
+        let mut extracted = extract_response_content(&response);
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut extracted.tool_calls,
+            &original_tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullOnly,
+        );
 
         let finish_reason = match response.stop_reason.as_deref() {
             Some("end_turn") | Some("stop") => FinishReason::Stop,
@@ -614,8 +742,22 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
-        let tools = convert_anthropic_tools(req.tools);
+        let native_deferred_loading = supports_anthropic_deferred_tools(&model);
+        let empty_references = BTreeMap::new();
+        let empty_deferred_names = BTreeSet::new();
+        let tool_references = if native_deferred_loading {
+            &req.tool_references
+        } else {
+            &empty_references
+        };
+        let deferred_tool_names = if native_deferred_loading {
+            &req.deferred_tool_names
+        } else {
+            &empty_deferred_names
+        };
+        let (system, messages) = convert_messages(req.messages, tool_references);
+        let original_tools = req.tools.clone();
+        let tools = convert_anthropic_tools(req.tools, deferred_tool_names);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let has_tools = !tools.is_empty();
@@ -631,10 +773,17 @@ impl LlmProvider for AnthropicOAuthProvider {
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: has_tools.then_some(tools),
             tool_choice,
+            cache_control: anthropic_cache_control(self.cache_retention),
         };
-        let response = self.send_streaming_request(&request, sink).await?;
+        let mut response = self.send_streaming_request(&request, sink).await?;
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut response.tool_calls,
+            &original_tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullOnly,
+        );
         let has_tool_calls = !response.tool_calls.is_empty();
         Ok(ToolCompletionResponse {
             content: (!response.content.is_empty()).then_some(response.content),
@@ -661,6 +810,29 @@ impl LlmProvider for AnthropicOAuthProvider {
         costs::model_cost(&model).unwrap_or_else(costs::default_cost)
     }
 
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        match &self.models_endpoint {
+            Some(endpoint) => endpoint.fetch_models().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        match self.cache_retention {
+            CacheRetention::None => Decimal::ONE,
+            CacheRetention::Short => Decimal::new(125, 2),
+            CacheRetention::Long => Decimal::TWO,
+        }
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        if self.cache_retention == CacheRetention::None {
+            Decimal::ONE
+        } else {
+            Decimal::new(10, 0)
+        }
+    }
+
     fn active_model_name(&self) -> String {
         match self.active_model.read() {
             Ok(guard) => guard.clone(),
@@ -679,6 +851,10 @@ impl LlmProvider for AnthropicOAuthProvider {
         }
         Ok(())
     }
+
+    fn supports_deferred_tool_loading(&self) -> bool {
+        true
+    }
 }
 
 // --- Anthropic Messages API types ---
@@ -694,11 +870,37 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    cache_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
+}
+
+fn anthropic_cache_control(retention: CacheRetention) -> Option<AnthropicCacheControl> {
+    match retention {
+        CacheRetention::None => None,
+        CacheRetention::Short => Some(AnthropicCacheControl {
+            cache_type: "ephemeral",
+            ttl: None,
+        }),
+        CacheRetention::Long => Some(AnthropicCacheControl {
+            cache_type: "ephemeral",
+            ttl: Some("1h"),
+        }),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -731,8 +933,22 @@ enum AnthropicContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: AnthropicToolResultContent,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum AnthropicToolResultContent {
+    Text(String),
+    Blocks(Vec<AnthropicToolResultContentBlock>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum AnthropicToolResultContentBlock {
+    #[serde(rename = "tool_reference")]
+    ToolReference { tool_name: String },
 }
 
 /// Inline base64 image source for an Anthropic `image` content block.
@@ -749,6 +965,12 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "is_false")]
+    defer_loading: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Serialize)]
@@ -825,11 +1047,11 @@ struct AnthropicStreamingResponse {
 }
 
 impl AnthropicStreamingResponse {
-    fn finish(mut self) -> Result<Self, LlmError> {
+    fn finish(mut self, provider_id: &str) -> Result<Self, LlmError> {
         for state in self.tool_call_parts.values() {
             if state.id.is_empty() || state.name.is_empty() {
                 return Err(LlmError::InvalidResponse {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: provider_id.to_string(),
                     reason: "streamed tool_use block is missing its id or name".to_string(),
                 });
             }
@@ -842,7 +1064,7 @@ impl AnthropicStreamingResponse {
                 } else {
                     serde_json::from_str(&state.input_json).map_err(|error| {
                         LlmError::InvalidResponse {
-                            provider: "anthropic_oauth".to_string(),
+                            provider: provider_id.to_string(),
                             reason: format!("streamed tool arguments are invalid JSON: {error}"),
                         }
                     })?
@@ -867,10 +1089,11 @@ async fn ingest_anthropic_event(
     event_name: &str,
     data: &str,
     sink: &dyn CompletionStreamSink,
+    provider_id: &str,
 ) -> Result<(), LlmError> {
     let body: serde_json::Value =
         serde_json::from_str(data).map_err(|error| LlmError::InvalidResponse {
-            provider: "anthropic_oauth".to_string(),
+            provider: provider_id.to_string(),
             reason: format!(
                 "stream JSON parse error: {error}. Raw: {}",
                 ironclaw_common::truncate_for_preview(data, 512)
@@ -980,7 +1203,7 @@ async fn ingest_anthropic_event(
                 .and_then(|value| value.as_str())
                 .unwrap_or("Anthropic streaming error");
             return Err(LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
+                provider: provider_id.to_string(),
                 reason: reason.to_string(),
             });
         }
@@ -1043,13 +1266,20 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
         .collect()
 }
 
-fn convert_anthropic_tools(tools: Vec<ToolDefinition>) -> Vec<AnthropicTool> {
+fn convert_anthropic_tools(
+    tools: Vec<ToolDefinition>,
+    deferred_tool_names: &BTreeSet<String>,
+) -> Vec<AnthropicTool> {
     tools
         .into_iter()
-        .map(|tool| AnthropicTool {
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.parameters,
+        .map(|tool| {
+            let defer_loading = deferred_tool_names.contains(&tool.name);
+            AnthropicTool {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.parameters,
+                defer_loading,
+            }
         })
         .collect()
 }
@@ -1080,7 +1310,10 @@ fn convert_anthropic_tool_choice(choice: Option<String>) -> Option<AnthropicTool
 /// Extracts system messages to the top-level `system` parameter (Anthropic
 /// doesn't allow system messages in the `messages` array). Tool-call/tool-result
 /// pairs are converted to content blocks.
-fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<AnthropicMessage>) {
+fn convert_messages(
+    messages: Vec<ChatMessage>,
+    tool_references: &BTreeMap<String, Vec<String>>,
+) -> (Option<String>, Vec<AnthropicMessage>) {
     let mut system_parts: Vec<String> = Vec::new();
     let mut anthropic_msgs: Vec<AnthropicMessage> = Vec::new();
 
@@ -1141,9 +1374,21 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     continue;
                 };
                 // Tool results go into a user message with tool_result blocks
+                let content = match tool_references.get(&tool_call_id) {
+                    Some(references) if !references.is_empty() => {
+                        let blocks = references
+                            .iter()
+                            .map(|tool_name| AnthropicToolResultContentBlock::ToolReference {
+                                tool_name: tool_name.clone(),
+                            })
+                            .collect::<Vec<_>>();
+                        AnthropicToolResultContent::Blocks(blocks)
+                    }
+                    _ => AnthropicToolResultContent::Text(msg.content),
+                };
                 let block = AnthropicContentBlock::ToolResult {
                     tool_use_id: tool_call_id,
-                    content: msg.content,
+                    content,
                 };
                 // If the last message is already a user message of *only*
                 // tool-result blocks, append to it (Anthropic requires
@@ -1272,6 +1517,7 @@ mod tests {
             "message_start",
             r#"{"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":3}}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("message start");
@@ -1280,6 +1526,7 @@ mod tests {
             "content_block_delta",
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("text delta");
@@ -1296,6 +1543,7 @@ mod tests {
             "content_block_start",
             r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":{}}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("tool start");
@@ -1308,6 +1556,7 @@ mod tests {
                     serde_json::to_string(partial_json).expect("partial JSON string")
                 ),
                 &sink,
+                "anthropic_oauth",
             )
             .await
             .expect("tool delta");
@@ -1317,10 +1566,11 @@ mod tests {
             "message_delta",
             r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("terminal delta");
-        let response = response.finish().expect("complete stream");
+        let response = response.finish("anthropic_oauth").expect("complete stream");
         assert_eq!(response.content, "hello ");
         assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(response.usage.input_tokens, 11);
@@ -1348,7 +1598,7 @@ mod tests {
             );
 
             assert!(matches!(
-                response.finish(),
+                response.finish("anthropic_oauth"),
                 Err(LlmError::InvalidResponse { provider, reason })
                     if provider == "anthropic_oauth"
                         && reason == "streamed tool_use block is missing its id or name"
@@ -1368,7 +1618,7 @@ mod tests {
             },
         );
 
-        match response.finish() {
+        match response.finish("anthropic_oauth") {
             Err(LlmError::InvalidResponse { provider, reason }) => {
                 assert_eq!(provider, "anthropic_oauth");
                 assert!(reason.starts_with("streamed tool arguments are invalid JSON: "));
@@ -1413,7 +1663,7 @@ mod tests {
             "claude-test",
         );
         config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let provider = AnthropicProvider::new_oauth(&config).expect("provider");
         let error = provider
             .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
             .await
@@ -1428,6 +1678,118 @@ mod tests {
                 retry_after: None,
             } if provider == "anthropic_oauth"
         ));
+    }
+
+    #[tokio::test]
+    async fn api_key_request_sends_stable_deferred_tools_and_tool_references() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = socket.read(&mut chunk).await.expect("read request");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .expect("content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let body = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            String::from_utf8(request).expect("UTF-8 request")
+        });
+
+        let config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic",
+            Some(SecretString::from("test-api-key".to_string())),
+            base_url,
+            "claude-sonnet-4-6",
+        );
+        let provider = AnthropicProvider::new_with_auth(
+            &config,
+            AnthropicAuth::ApiKey(SecretString::from("test-api-key".to_string())),
+            None,
+        )
+        .expect("provider");
+        let mut request = ToolCompletionRequest::new(
+            vec![ChatMessage::tool_result(
+                "search-call",
+                "tool_search",
+                r#"{"results":[{"name":"calendar_create"}]}"#,
+            )],
+            vec![
+                ToolDefinition {
+                    name: "tool_search".to_string(),
+                    description: "Search tools".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                ToolDefinition {
+                    name: "calendar_create".to_string(),
+                    description: "Create an event".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ],
+        );
+        request.deferred_tool_names = BTreeSet::from(["calendar_create".to_string()]);
+        request.tool_references = BTreeMap::from([(
+            "search-call".to_string(),
+            vec!["calendar_create".to_string()],
+        )]);
+
+        provider
+            .complete_with_tools(request)
+            .await
+            .expect("tool completion");
+        let raw_request = server.await.expect("loopback server");
+        let (headers, body) = raw_request.split_once("\r\n\r\n").expect("HTTP request");
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("x-api-key: test-api-key")
+        );
+        assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+        assert!(!headers.to_ascii_lowercase().contains("anthropic-beta:"));
+        let body: serde_json::Value = serde_json::from_str(body).expect("request body JSON");
+        assert_eq!(body["tools"][1]["defer_loading"], true);
+        assert_eq!(
+            body["messages"][0]["content"][0]["content"][0],
+            serde_json::json!({
+                "type": "tool_reference",
+                "tool_name": "calendar_create"
+            })
+        );
     }
 
     #[tokio::test]
@@ -1471,7 +1833,7 @@ mod tests {
             "claude-test",
         );
         config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let provider = AnthropicProvider::new_oauth(&config).expect("provider");
         let sink = Arc::new(RecordingSink::default());
         let error = provider
             .complete_streaming(
@@ -1541,7 +1903,7 @@ mod tests {
             ChatMessage::system("You are helpful."),
             ChatMessage::user("Hello"),
         ];
-        let (system, msgs) = convert_messages(messages);
+        let (system, msgs) = convert_messages(messages, &BTreeMap::new());
         assert_eq!(system, Some("You are helpful.".to_string()));
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
@@ -1554,7 +1916,7 @@ mod tests {
             ChatMessage::system("System 2"),
             ChatMessage::user("Hello"),
         ];
-        let (system, msgs) = convert_messages(messages);
+        let (system, msgs) = convert_messages(messages, &BTreeMap::new());
         assert_eq!(system, Some("System 1\n\nSystem 2".to_string()));
         assert_eq!(msgs.len(), 1);
     }
@@ -1570,7 +1932,7 @@ mod tests {
                 },
             }],
         )];
-        let (_system, msgs) = convert_messages(messages);
+        let (_system, msgs) = convert_messages(messages, &BTreeMap::new());
         assert_eq!(msgs.len(), 1);
         // Text rides as the first block, the image as a base64 `image` block.
         let value = serde_json::to_value(&msgs[0]).expect("serialize");
@@ -1587,7 +1949,7 @@ mod tests {
     #[test]
     fn test_convert_messages_text_only_user_stays_a_string() {
         let messages = vec![ChatMessage::user("just text")];
-        let (_system, msgs) = convert_messages(messages);
+        let (_system, msgs) = convert_messages(messages, &BTreeMap::new());
         let value = serde_json::to_value(&msgs[0]).expect("serialize");
         // No inline images → compact string content, not a blocks array.
         assert_eq!(value["content"], "just text");
@@ -1608,13 +1970,79 @@ mod tests {
             ChatMessage::assistant_with_tool_calls(Some("Let me search.".to_string()), tool_calls),
             ChatMessage::tool_result("call_1", "search", "found it"),
         ];
-        let (system, msgs) = convert_messages(messages);
+        let (system, msgs) = convert_messages(messages, &BTreeMap::new());
         assert!(system.is_none());
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[1].role, "assistant");
         // Tool result should be a user message
         assert_eq!(msgs[2].role, "user");
+    }
+
+    #[test]
+    fn deferred_tools_serialize_with_anthropic_defer_loading() {
+        let tools = vec![
+            ToolDefinition {
+                name: "tool_search".to_string(),
+                description: "Search tools".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "calendar_create".to_string(),
+                description: "Create an event".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let deferred = BTreeSet::from(["calendar_create".to_string()]);
+
+        let encoded = serde_json::to_value(convert_anthropic_tools(tools, &deferred))
+            .expect("serialize tools");
+
+        assert!(encoded[0].get("defer_loading").is_none());
+        assert_eq!(encoded[1]["defer_loading"], true);
+    }
+
+    #[test]
+    fn deferred_loading_is_gated_to_supported_anthropic_models() {
+        assert!(supports_anthropic_deferred_tools("claude-sonnet-4-6"));
+        assert!(supports_anthropic_deferred_tools(
+            "claude-haiku-4-5-20251001"
+        ));
+        assert!(!supports_anthropic_deferred_tools(
+            "claude-sonnet-4-20250514"
+        ));
+        assert!(!supports_anthropic_deferred_tools(
+            "claude-3-5-sonnet-20241022"
+        ));
+    }
+
+    #[test]
+    fn tool_search_results_serialize_anthropic_tool_references() {
+        let messages = vec![ChatMessage::tool_result(
+            "search-call",
+            "tool_search",
+            r#"{"results":[{"name":"calendar_create"}]}"#,
+        )];
+        let references = BTreeMap::from([(
+            "search-call".to_string(),
+            vec!["calendar_create".to_string()],
+        )]);
+
+        let (_, encoded_messages) = convert_messages(messages, &references);
+        let encoded = serde_json::to_value(&encoded_messages[0]).expect("serialize message");
+
+        assert_eq!(encoded["content"][0]["type"], "tool_result");
+        assert_eq!(
+            encoded["content"][0]["content"][0],
+            serde_json::json!({
+                "type": "tool_reference",
+                "tool_name": "calendar_create"
+            })
+        );
+        assert_eq!(
+            encoded["content"][0]["content"].as_array().unwrap().len(),
+            1
+        );
     }
 
     #[test]

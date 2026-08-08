@@ -211,6 +211,14 @@ impl CapabilityCatalog {
         self.entries.iter().map(|entry| &entry.definition)
     }
 
+    pub(crate) fn effective_definitions<'a>(
+        &'a self,
+        policy: &'a CapabilitySurfacePolicy,
+    ) -> impl Iterator<Item = &'a ProviderToolDefinition> + 'a {
+        self.effective_entries(policy)
+            .map(|entry| &entry.definition)
+    }
+
     /// Names of the discoverable (non-core) tools, for the always-on catalog index
     /// carried in the `tool_search` description.
     ///

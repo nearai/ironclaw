@@ -197,6 +197,10 @@ impl LlmProvider for CachedProvider {
         self.inner.cache_read_discount()
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.inner.supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let effective_model = self.inner.effective_model_name(request.model.as_deref());
         let key = cache_key(&effective_model, &request);
@@ -600,6 +604,8 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             tool_choice: None,
+            deferred_tool_names: Default::default(),
+            tool_references: Default::default(),
             metadata: Default::default(),
         };
 

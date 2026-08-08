@@ -24,10 +24,11 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
     CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
-    CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-    LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    CapabilityInputRef, ConcurrencyHint, DeferredProviderToolSurface, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    resolution, sanitize_model_visible_text,
 };
 use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
 use ironclaw_threads::{
@@ -1168,6 +1169,26 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             definitions.sort_by(|left, right| left.name.cmp(&right.name));
         }
         Ok(definitions)
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let Some(mut surface) = self.inner.deferred_tool_surface()? else {
+            return Ok(None);
+        };
+        if !surface
+            .eager
+            .iter()
+            .chain(&surface.deferred)
+            .any(|definition| definition.capability_id == self.spawn_id)
+        {
+            surface.eager.push(self.spawn_tool_definition());
+            surface
+                .eager
+                .sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(Some(surface))
     }
 
     fn provider_tool_call_capability_ids(

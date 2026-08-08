@@ -23,8 +23,8 @@ pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
 
 /// Prompt cache retention policy for Anthropic.
 ///
-/// Controls Anthropic's automatic prompt caching via a top-level
-/// `cache_control` field injected through rig-core's `additional_params`.
+/// Controls Anthropic's automatic prompt caching via the direct Messages API's
+/// top-level `cache_control` field.
 /// - `None` — caching disabled, no `cache_control` injected.
 /// - `Short` — 5-minute TTL (default), `{"type": "ephemeral"}`, 1.25× write surcharge.
 /// - `Long` — 1-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`, 2× write surcharge.

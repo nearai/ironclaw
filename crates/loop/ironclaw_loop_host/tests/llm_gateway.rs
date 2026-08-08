@@ -16,14 +16,15 @@ use ironclaw_llm::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-    CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore,
-    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionMaterializationStore,
-    InstructionSafetyContext, LoopCapabilityPort, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
-    LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-    LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
-    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
+    CapabilitySurfaceVersion, DeferredProviderToolSurface,
+    EphemeralInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
+    LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopContextSnippet,
+    LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
+    LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRuntimeContext,
+    MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId, ParentLoopOutput,
+    PromptMode, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
     RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
 };
@@ -277,6 +278,100 @@ async fn gateway_records_prompt_cache_break_on_tool_capable_path_when_tool_surfa
     assert!(
         logs_contain("system_prompt_changed=false"),
         "the unchanged system prompt must not be blamed for the break"
+    );
+}
+
+#[traced_test]
+#[tokio::test]
+async fn gateway_keeps_native_deferred_tool_surface_stable_across_promotion() {
+    let provider = Arc::new(
+        ToolAwareProvider::tool_response_sequence(vec![
+            tool_stop_reply_with_cache_read("before promotion", 200_000),
+            ToolCompletionResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_promoted".to_string(),
+                    name: "demo__extra".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 50_000,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            },
+        ])
+        .with_deferred_tool_loading(),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let request = model_request(interactive_model());
+    let run_id = request.run_id;
+    gateway
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_native_deferred_surface(false)),
+        )
+        .await
+        .unwrap();
+
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    let promoted_capabilities = Arc::new(GatewayCapabilityPort::with_native_deferred_surface(true));
+    gateway
+        .stream_model_with_capabilities(request, promoted_capabilities.clone())
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["demo__echo", "demo__extra"]
+        );
+        assert_eq!(
+            request.deferred_tool_names.iter().collect::<Vec<_>>(),
+            vec!["demo__extra"]
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(&requests[0].tools).expect("serialize initial tool array"),
+        serde_json::to_value(&requests[1].tools).expect("serialize promoted tool array"),
+        "the complete advertised tool array must remain byte-equivalent after promotion"
+    );
+    drop(requests);
+
+    assert_eq!(
+        promoted_capabilities
+            .registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|tool_call| tool_call.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["demo__extra"],
+        "the promoted deferred tool must remain callable through the gateway"
+    );
+
+    assert!(logs_contain("prompt cache break detected"));
+    assert!(
+        logs_contain("tool_definitions_changed=false"),
+        "promotion must not change the cache signature for native deferred loading"
     );
 }
 
@@ -4588,6 +4683,7 @@ struct ToolAwareProvider {
     streaming_tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     plain_response: Mutex<Option<CompletionResponse>>,
     tool_responses: Mutex<VecDeque<ToolCompletionResponse>>,
+    supports_deferred_tool_loading: bool,
 }
 
 impl ToolAwareProvider {
@@ -4606,6 +4702,7 @@ impl ToolAwareProvider {
                 cache_creation_input_tokens: 0,
             })),
             tool_responses: Mutex::new(VecDeque::new()),
+            supports_deferred_tool_loading: false,
         }
     }
 
@@ -4665,12 +4762,22 @@ impl ToolAwareProvider {
             streaming_tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(None),
             tool_responses: Mutex::new(responses.into()),
+            supports_deferred_tool_loading: false,
         }
+    }
+
+    fn with_deferred_tool_loading(mut self) -> Self {
+        self.supports_deferred_tool_loading = true;
+        self
     }
 }
 
 #[async_trait]
 impl LlmProvider for ToolAwareProvider {
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.supports_deferred_tool_loading
+    }
+
     fn model_name(&self) -> &str {
         "tool-aware-provider"
     }
@@ -4727,6 +4834,7 @@ struct GatewayCapabilityPort {
     /// second provider-tool loop is genuinely reached (setting
     /// `validation_error` would short-circuit in the earlier validation loop).
     registration_error: Option<AgentLoopHostErrorKind>,
+    deferred_surface: Option<DeferredProviderToolSurface>,
 }
 
 impl GatewayCapabilityPort {
@@ -4749,6 +4857,7 @@ impl GatewayCapabilityPort {
             registered: Mutex::new(Vec::new()),
             validation_error: None,
             registration_error: None,
+            deferred_surface: None,
         }
     }
 
@@ -4775,6 +4884,7 @@ impl GatewayCapabilityPort {
             registered: Mutex::new(Vec::new()),
             validation_error: None,
             registration_error: None,
+            deferred_surface: None,
         }
     }
 
@@ -4797,6 +4907,32 @@ impl GatewayCapabilityPort {
         });
         port.resolvable_definitions = port.definitions.clone();
         port
+    }
+
+    fn with_native_deferred_surface(promoted: bool) -> Self {
+        let eager = Self::with_tool_surface().definitions;
+        let extra = Self::with_extended_tool_surface()
+            .definitions
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "demo__extra")
+            .expect("extra tool definition");
+        let mut definitions = eager.clone();
+        if promoted {
+            definitions.push(extra.clone());
+        }
+        let mut resolvable_definitions = eager.clone();
+        resolvable_definitions.push(extra.clone());
+        Self {
+            definitions,
+            resolvable_definitions,
+            registered: Mutex::new(Vec::new()),
+            validation_error: None,
+            registration_error: None,
+            deferred_surface: Some(DeferredProviderToolSurface {
+                eager,
+                deferred: vec![extra],
+            }),
+        }
     }
 
     fn with_hidden_resolvable_tool_surface() -> Self {
@@ -4836,6 +4972,7 @@ impl GatewayCapabilityPort {
             registered: Mutex::new(Vec::new()),
             validation_error: None,
             registration_error: None,
+            deferred_surface: None,
         }
     }
 
@@ -4869,6 +5006,12 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
     ) -> Result<Vec<ProviderToolDefinition>, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(self.definitions.clone())
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        Ok(self.deferred_surface.clone())
     }
 
     fn provider_tool_call_capability_ids(

@@ -193,6 +193,10 @@ impl LlmProvider for SwappableLlmProvider {
         read(&self.state).cost_per_token
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.current().supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.current().complete(request).await
     }

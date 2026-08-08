@@ -916,6 +916,10 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.cache_read_discount()
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.primary.supports_deferred_tool_loading() || self.cheap.supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 

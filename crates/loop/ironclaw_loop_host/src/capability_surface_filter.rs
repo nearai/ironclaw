@@ -11,8 +11,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-    CapabilityDeniedReasonKind, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    CapabilityDeniedReasonKind, DeferredProviderToolSurface, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
     RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     resolution,
 };
@@ -83,6 +83,25 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
             })
         });
         Ok(definitions)
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let Some(mut surface) = self.inner.deferred_tool_surface()? else {
+            return Ok(None);
+        };
+        surface.eager.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        surface.deferred.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        Ok(Some(surface))
     }
 
     fn provider_tool_call_capability_ids(
@@ -180,6 +199,25 @@ impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
             })
         });
         Ok(definitions)
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let Some(mut surface) = self.inner.deferred_tool_surface()? else {
+            return Ok(None);
+        };
+        surface.eager.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        surface.deferred.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        Ok(Some(surface))
     }
 
     fn provider_tool_call_capability_ids(

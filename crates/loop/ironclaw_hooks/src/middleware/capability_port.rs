@@ -238,6 +238,13 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<ironclaw_loop_contracts::DeferredProviderToolSurface>, AgentLoopHostError>
+    {
+        self.inner.deferred_tool_surface()
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

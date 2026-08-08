@@ -1301,6 +1301,10 @@ impl LlmProvider for RecordingLlm {
         self.inner.cache_read_discount()
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.inner.supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
         let response = self.inner.complete(request).await?;

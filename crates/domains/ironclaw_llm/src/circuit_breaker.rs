@@ -315,6 +315,10 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.cache_read_discount()
     }
 
+    fn supports_deferred_tool_loading(&self) -> bool {
+        self.inner.supports_deferred_tool_loading()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let admission = self.check_allowed().await?;
         match self.inner.complete(request).await {

@@ -333,7 +333,7 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
 /// which is why a self-hosted local provider (Ollama, vLLM, …) fails even
 /// though `curl` to the same URL works. Remote hosts keep default proxy
 /// behavior, so this is a no-op for hosted providers behind a corporate proxy.
-fn provider_http_client(
+pub(crate) fn provider_http_client(
     provider_id: &str,
     base_url: &str,
     request_timeout_secs: u64,
@@ -453,11 +453,8 @@ fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    const DEFAULT_MAX_TOKENS: u32 = 8192;
-
     // Route to OAuth provider when an OAuth token is present and no real API
-    // key was provided. When both are set, the API key takes priority (standard
-    // x-api-key auth via rig-core).
+    // key was provided. When both are set, the API key takes priority.
     let api_key_is_placeholder = config
         .api_key
         .as_ref()
@@ -469,12 +466,9 @@ fn create_anthropic_from_registry(
             base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
             "Using Anthropic OAuth API"
         );
-        let provider = anthropic_oauth::AnthropicOAuthProvider::new(config)?;
+        let provider = anthropic_oauth::AnthropicProvider::new_oauth(config)?;
         return Ok(Arc::new(provider));
     }
-
-    use crate::config::CacheRetention;
-    use rig::providers::anthropic;
 
     let api_key = config
         .api_key
@@ -484,34 +478,10 @@ fn create_anthropic_from_registry(
             provider: config.provider_id.clone(),
         })?;
 
-    // Build with the proxy-aware client (same as the OpenAI-compatible path) so
-    // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
-    // proxy for live chat too — not just model discovery. Remote hosts keep
-    // default proxy behavior.
-    let mut builder =
-        anthropic::Client::builder()
-            .api_key(&api_key)
-            .http_client(provider_http_client(
-                &config.provider_id,
-                &config.base_url,
-                request_timeout_secs,
-            )?);
-    if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
-    }
-    let client: anthropic::Client = builder.build().map_err(|e| LlmError::RequestFailed {
-        provider: config.provider_id.clone(),
-        reason: format!("Failed to create Anthropic client: {e}"),
-    })?;
-
-    let cache_retention = config.cache_retention;
-
-    let model = client.completion_model(&config.model);
-
-    if cache_retention != CacheRetention::None {
+    if config.cache_retention != crate::config::CacheRetention::None {
         tracing::debug!(
             model = %config.model,
-            retention = %cache_retention,
+            retention = %config.cache_retention,
             "Anthropic automatic prompt caching enabled"
         );
     }
@@ -547,14 +517,11 @@ fn create_anthropic_from_registry(
         extra_headers: reqwest::header::HeaderMap::new(),
     };
 
-    Ok(Arc::new(
-        RigAdapter::new(model, &config.model)
-            .with_provider_id(config.provider_id.clone())
-            .with_cache_retention(cache_retention)
-            .with_default_max_tokens(DEFAULT_MAX_TOKENS)
-            .with_unsupported_params(config.unsupported_params.clone())
-            .with_model_listing(models_endpoint),
-    ))
+    Ok(Arc::new(anthropic_oauth::AnthropicProvider::new_api_key(
+        config,
+        request_timeout_secs,
+        models_endpoint,
+    )?))
 }
 
 fn create_ollama_from_registry(
@@ -1872,7 +1839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rig_registry_factories_keep_streaming_on_the_buffered_fallback() {
+    async fn registry_factories_use_only_terminal_aware_native_streaming() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1954,11 +1921,20 @@ mod tests {
                 .expect("loopback server task");
             let body: serde_json::Value =
                 serde_json::from_str(&body).expect("request body is valid JSON");
-            assert_ne!(
-                body.get("stream").and_then(serde_json::Value::as_bool),
-                Some(true),
-                "{provider_id} must not use rig-core streaming until terminal events are observable"
-            );
+            let streams_natively = body.get("stream").and_then(serde_json::Value::as_bool);
+            if protocol == ProviderProtocol::Anthropic {
+                assert_eq!(
+                    streams_natively,
+                    Some(true),
+                    "direct Anthropic streaming observes authoritative SSE terminal events"
+                );
+            } else {
+                assert_ne!(
+                    streams_natively,
+                    Some(true),
+                    "{provider_id} must not use rig-core streaming until terminal events are observable"
+                );
+            }
             assert!(receiver.try_recv().is_err());
         }
     }

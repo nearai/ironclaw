@@ -16,10 +16,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
-    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
-    LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, DeferredProviderToolSurface,
+    LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::CapabilityActivityId;
 
@@ -423,6 +423,41 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
         }
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(definitions)
+    }
+
+    fn deferred_tool_surface(
+        &self,
+    ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+        let Some(mut surface) = self.inner.deferred_tool_surface()? else {
+            return Ok(None);
+        };
+        if self
+            .current_surface_version
+            .lock()
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "synthetic capability surface lock failed",
+                )
+            })?
+            .is_some()
+        {
+            for capability in self.capabilities_by_id.values() {
+                let definition = capability.descriptor.tool_definition();
+                if !surface
+                    .eager
+                    .iter()
+                    .chain(&surface.deferred)
+                    .any(|existing| existing.capability_id == definition.capability_id)
+                {
+                    surface.eager.push(definition);
+                }
+            }
+            surface
+                .eager
+                .sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(Some(surface))
     }
 
     fn provider_tool_call_capability_ids(
