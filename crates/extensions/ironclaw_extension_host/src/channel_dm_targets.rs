@@ -158,6 +158,13 @@ impl FilesystemChannelDmTargetStore {
 
     /// Upsert one user's DM target for an extension. `created_at` is
     /// preserved across updates.
+    ///
+    /// An unchanged record short-circuits without writing. The post-admission
+    /// backfill calls this for EVERY inbound direct message, and after the
+    /// first one the stored row is already correct — so without this the
+    /// steady state is one durable write per message, forever, whose only
+    /// effect is a new `updated_at`. The existing record is loaded here
+    /// anyway (to preserve `created_at`), so the comparison is free.
     pub async fn upsert(
         &self,
         extension_id: &str,
@@ -165,9 +172,14 @@ impl FilesystemChannelDmTargetStore {
         external_actor_id: String,
         target: serde_json::Value,
     ) -> Result<ChannelDmTargetRecord, ChannelDmTargetError> {
-        let created_at = self
-            .load(extension_id, user_id)
-            .await?
+        let existing = self.load(extension_id, user_id).await?;
+        if let Some(existing) = &existing
+            && existing.external_actor_id == external_actor_id
+            && existing.target == target
+        {
+            return Ok(existing.clone());
+        }
+        let created_at = existing
             .map(|existing| existing.created_at)
             .unwrap_or_else(Utc::now);
         let record = ChannelDmTargetRecord {
@@ -272,5 +284,63 @@ mod tests {
             .delete("vendorx", &user)
             .await
             .expect("second delete is idempotent");
+    }
+
+    /// The post-admission backfill calls `upsert` for EVERY inbound direct
+    /// message, so an unchanged record must not rewrite the row — otherwise
+    /// the steady state is one durable write per message whose only effect is
+    /// a new `updated_at`.
+    #[tokio::test]
+    async fn unchanged_upsert_does_not_rewrite_the_record() {
+        let store = store();
+        let user = UserId::new("user-steady").expect("user");
+        let target = serde_json::json!({"dm_channel_id": "D42"});
+
+        let first = store
+            .upsert("vendorx", &user, "U123".to_string(), target.clone())
+            .await
+            .expect("first upsert");
+
+        let again = store
+            .upsert("vendorx", &user, "U123".to_string(), target.clone())
+            .await
+            .expect("identical upsert");
+
+        assert_eq!(
+            again, first,
+            "an identical upsert must return the stored record untouched"
+        );
+        assert_eq!(
+            again.updated_at, first.updated_at,
+            "an identical upsert must not bump updated_at — that is the write it avoided"
+        );
+
+        // A genuine change still writes.
+        let changed = store
+            .upsert(
+                "vendorx",
+                &user,
+                "U123".to_string(),
+                serde_json::json!({"dm_channel_id": "D99"}),
+            )
+            .await
+            .expect("changed upsert");
+        assert_eq!(changed.target["dm_channel_id"], "D99");
+        assert_eq!(
+            changed.created_at, first.created_at,
+            "created_at still survives a real update"
+        );
+
+        // So does a change of external actor alone.
+        let reactored = store
+            .upsert(
+                "vendorx",
+                &user,
+                "U999".to_string(),
+                serde_json::json!({"dm_channel_id": "D99"}),
+            )
+            .await
+            .expect("actor change upsert");
+        assert_eq!(reactored.external_actor_id, "U999");
     }
 }

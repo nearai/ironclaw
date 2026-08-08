@@ -1073,9 +1073,9 @@ def test_external_delivery_variants_name_exact_caller_evidence():
     slack_destinations = {
         address.conversation_id for address in by_surface.get("slack", [])
     }
-    assert {"D-TRIGGER-DEFAULT", "C-TRIGGER-OVERRIDE"} <= slack_destinations, (
-        "Slack's existing DM and shared-channel caller proofs must remain "
-        "independently citable"
+    assert {"D-JOURNEY", "C777"} <= slack_destinations, (
+        "Slack's explicit-tool DM proof and shared-channel reply proof must "
+        "remain independently citable"
     )
 
 

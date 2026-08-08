@@ -209,7 +209,7 @@ async fn hook_deny_blocks_capability_without_wedging_run() {
 /// `build_text_only_host*` — i.e. once per run. The legacy
 /// `with_hook_dispatcher(Arc<HookDispatcher>)` adapter deliberately does the
 /// opposite and clones one dispatcher into every build. Nothing failed if a
-/// caller swapped one for the other, and `crates/ironclaw_hooks/CLAUDE.md` once
+/// caller swapped one for the other, and `crates/loop/ironclaw_hooks/CLAUDE.md` once
 /// claimed a regression test — naming a file and two tests that never existed
 /// — which is the gap #6945 tracks.
 ///

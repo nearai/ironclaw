@@ -40,10 +40,10 @@ const DRIVER_LINKED_CRATES: &[&str] = &[
     // decision; read the one that argues for an entry before removing it.
     "ironclaw_auth",
     "ironclaw_filesystem",
-    // ADR 0004 (`docs/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
+    // ADR 0004 (`docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
     "ironclaw_hooks",
     "ironclaw_host_runtime",
-    // ADR 0003 (`docs/adr/0003-triggers-keeps-hand-written-sql.md`).
+    // ADR 0003 (`docs/internal/adr/0003-triggers-keeps-hand-written-sql.md`).
     "ironclaw_triggers",
     // Owns the TLS/driver cone for durable event/audit logs (§6.3.2).
     "ironclaw_event_store",
@@ -175,7 +175,7 @@ fn assert_driver_allowlist(driver: &str, allowed: &[&str]) {
 /// than its docs claimed": the scan used a flat `read_dir`, so the word "every"
 /// held only while `src/` stayed flat. A later `src/postgres/pool.rs` — exactly
 /// where a driver mention would go — would have been skipped, and a skipped file
-/// is indistinguishable from a clean one. `crates/ironclaw_event_store/src`
+/// is indistinguishable from a clean one. `crates/events/ironclaw_event_store/src`
 /// is flat today, so this was latent rather than live; it is fixed here so the
 /// doc sentence is true by construction rather than by luck.
 #[test]

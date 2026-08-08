@@ -488,7 +488,8 @@ async fn model_cancelled_returns_cancelled_without_retry() {
         "model cancelled",
     )]);
     let executor = CanonicalAgentLoopExecutor;
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.iteration = 3;
 
     let result = executor
         .execute_family(&crate::families::default(), &host, state)
@@ -496,6 +497,7 @@ async fn model_cancelled_returns_cancelled_without_retry() {
 
     assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
     assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(host.model_requests()[0].iteration, 3);
 }
 
 #[tokio::test]

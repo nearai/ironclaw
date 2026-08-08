@@ -223,7 +223,7 @@ impl HookManifestEntry {
     pub fn validate(&self) -> Result<(), HookManifestValidationError> {
         // Note: the previous empty-id guard here is unreachable now that
         // `HookLocalId::new` rejects empty strings at construction time
-        // (see `crates/ironclaw_hooks/src/identity.rs`), so manifest
+        // (see `crates/loop/ironclaw_hooks/src/identity.rs`), so manifest
         // deserialization fails before this method is ever called. Removed
         // per henrypark133 review of PR #3912 (finding L1).
         //

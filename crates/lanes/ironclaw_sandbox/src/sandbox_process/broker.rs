@@ -6,7 +6,7 @@ use ironclaw_host_api::process::RuntimeProcessError;
 
 use super::reject_nul;
 
-const REBORN_NETWORK_MODE_ENV: &str = "IRONCLAW_REBORN_NETWORK_MODE";
+pub(super) const REBORN_NETWORK_MODE_ENV: &str = "IRONCLAW_REBORN_NETWORK_MODE";
 const REBORN_HTTP_PROXY_ENV: &str = "IRONCLAW_REBORN_HTTP_PROXY";
 const REBORN_HTTP_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_SOCKET";
 const REBORN_HTTP_BROKER_URL_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_URL";
@@ -31,7 +31,7 @@ const CONTAINER_HTTP_BROKER_SOCKET: &str = "/tmp/ironclaw-http-broker.sock";
 const CONTAINER_SECRET_BROKER_SOCKET: &str = "/tmp/ironclaw-secret-broker.sock";
 const CONTAINER_BROKER_URL: &str = "http://ironclaw-broker";
 
-/// Broker affordance exposed to tenant sandbox commands.
+/// Broker affordance exposed to user sandbox commands.
 ///
 /// The Unix-socket variant preserves Docker `--network none`; the HTTP-proxy
 /// variant intentionally requires Docker network attachment and is for
@@ -117,7 +117,7 @@ impl RebornSandboxNetworkBroker {
     }
 }
 
-/// Secret broker affordance exposed to tenant sandbox commands.
+/// Secret broker affordance exposed to user sandbox commands.
 ///
 /// The value is an endpoint, not secret material. Concrete brokers remain
 /// responsible for authentication, one-shot leases, redaction, and audit.
@@ -186,13 +186,18 @@ impl RebornSandboxSecretBroker {
 pub(super) fn push_broker_env(
     network_broker: Option<&RebornSandboxNetworkBroker>,
     secret_broker: Option<&RebornSandboxSecretBroker>,
+    direct_network: bool,
     env: &mut Vec<String>,
 ) -> Result<(), RuntimeProcessError> {
     reject_reserved_broker_env_overrides(env)?;
     if let Some(broker) = network_broker {
         broker.push_env(env)?;
     } else {
-        push_reserved_env(env, REBORN_NETWORK_MODE_ENV, "disabled")?;
+        push_reserved_env(
+            env,
+            REBORN_NETWORK_MODE_ENV,
+            if direct_network { "direct" } else { "disabled" },
+        )?;
     }
     if let Some(broker) = secret_broker {
         broker.push_env(env)?;
