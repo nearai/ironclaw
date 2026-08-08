@@ -674,7 +674,6 @@ fn binding() -> ironclaw_product_contracts::binding::ResolvedBinding {
     ironclaw_product_contracts::binding::ResolvedBinding {
         tenant_id: tenant(),
         actor_user_id: user(),
-        subject_user_id: Some(user()),
         thread_id: ThreadId::new("thread-a").expect("thread"),
         agent_id: Some(agent()),
         project_id: None,
@@ -1517,6 +1516,144 @@ async fn observer_records_gate_route_after_approval_prompt() {
     );
 }
 
+/// One run can park on several approval gates in sequence — the blocked-state
+/// loop re-announces whenever the (status, gate) marker changes. Each gate's
+/// prompt is a distinct durable delivery fact: the projection id must be keyed
+/// by the gate ref, or the second prompt collapses into the first prompt's
+/// delivery identity, comes back `AlreadyDelivered` from the coordinator, and
+/// is silently never sent — the user is never told about the gate their run is
+/// parked on, and its reply route is never recorded, so a bare `approve`
+/// cannot resolve it either.
+#[tokio::test]
+async fn observer_delivers_a_prompt_for_each_distinct_approval_gate() {
+    const FIRST_GATE: &str = "gate:approval-00000000000000000000000000000001";
+    const SECOND_GATE: &str = "gate:approval-00000000000000000000000000000002";
+    let harness = build_harness(
+        vec![
+            // The observer issues one pre-loop `get_run_state` (the foreign-run
+            // guard) before the announce loop starts polling, so the first gate
+            // appears twice: once for that probe, once for the announce poll.
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(SECOND_GATE)),
+        ],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-two-gates"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    let prompts: Vec<&String> = texts
+        .iter()
+        .filter(|text| text.contains("Approval needed"))
+        .collect();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "each distinct approval gate must deliver its own prompt: {texts:?}"
+    );
+    // Both announced gates must also be reply-routable: the recorded route is
+    // what lets a bare `approve` in the conversation resolve the right gate.
+    for gate_ref in [FIRST_GATE, SECOND_GATE] {
+        let route = harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), gate_ref)
+            .await
+            .expect("route lookup")
+            .unwrap_or_else(|| panic!("announced gate {gate_ref} must record a reply route"));
+        assert_eq!(route.run_id, run_id);
+        assert!(
+            !route.delivered_conversation_fingerprints.is_empty(),
+            "gate {gate_ref} route must carry delivered-conversation fingerprints"
+        );
+    }
+}
+
+/// A RE-announcement of the same gate must still dedupe: the durable
+/// projection id is identical both times, the coordinator answers
+/// `AlreadyDelivered`, and the observer treats that as success rather than a
+/// delivery failure. Pins the g1 → g2 → g1 marker sequence the two-gate test
+/// above cannot reach (consecutive identical markers are suppressed).
+#[tokio::test]
+async fn observer_dedupes_a_reannounced_gate_and_still_delivers_the_next() {
+    const FIRST_GATE: &str = "gate:approval-00000000000000000000000000000001";
+    const SECOND_GATE: &str = "gate:approval-00000000000000000000000000000002";
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(SECOND_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+        ],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-reannounced-gate"),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    let prompts: Vec<&String> = texts
+        .iter()
+        .filter(|text| text.contains("Approval needed"))
+        .collect();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "the re-announced first gate dedupes instead of double-posting: {texts:?}"
+    );
+}
+
+/// The gate-ref keying applies to AUTH gates too: a run that blocks on auth
+/// for two different providers in sequence announces both prompts. Reverting
+/// only the `BlockedAuth` arm's discriminator to `None` collapses the second
+/// prompt into the first's delivery identity and fails exactly this test.
+#[tokio::test]
+async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-provider-one")),
+            scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-provider-one")),
+            scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-provider-two")),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_millis(40),
+    );
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-two-auth-gates"),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    let prompts: Vec<&String> = texts
+        .iter()
+        .filter(|text| text.contains("Authentication required"))
+        .collect();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "each distinct auth gate must deliver its own prompt: {texts:?}"
+    );
+}
+
 #[tokio::test]
 async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
     // `vendor_message_ref` is an unvalidated vendor string, so a channel can
@@ -1601,6 +1738,11 @@ async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_rout
 
 #[tokio::test]
 async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
+    // The shared-origin leg below is ALSO the run-acts-as-invoker silence
+    // contract: an unpaired participant in an admitted shared channel gets no
+    // reply and no pairing prompt in the channel (a one-person nudge must
+    // never land in a shared room; pairing happens via Extensions, and DMs
+    // still nudge) — the operator docs and CHANGELOG document this silence.
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],
         true,
@@ -2431,6 +2573,61 @@ async fn triggered_gate_prompt_fans_out_to_every_notification_target() {
             "gate route must cover {conversation_id}: {:?}",
             route.delivered_conversation_fingerprints
         );
+    }
+}
+
+/// The triggered/background lane keys gate prompts by gate ref exactly like
+/// the live observer: an automation run that parks on a SECOND approval gate
+/// must announce it. Before the fix, the second plan minted the identical
+/// undiscriminated projection id, the coordinator answered `AlreadyDelivered`
+/// (empty delivery set), the watcher recorded the whole delivery Failed, and
+/// gate two was never announced and never reply-routable.
+#[tokio::test]
+async fn triggered_second_gate_announces_instead_of_deduping_against_the_first() {
+    const FIRST_GATE: &str = "gate:approval-00000000000000000000000000000021";
+    const SECOND_GATE: &str = "gate:approval-00000000000000000000000000000022";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(FIRST_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(SECOND_GATE)),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "a deduped second gate would record Failed here"
+    );
+    let texts = harness.adapter.texts();
+    let prompts: Vec<&String> = texts
+        .iter()
+        .filter(|text| text.contains("Approval needed"))
+        .collect();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "each parked gate of a background run must be announced: {texts:?}"
+    );
+    // Both gates are reply-routable: a bare `approve` in the notification
+    // conversation can resolve either one.
+    for gate_ref in [FIRST_GATE, SECOND_GATE] {
+        let route = harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), gate_ref)
+            .await
+            .expect("route lookup")
+            .unwrap_or_else(|| panic!("announced gate {gate_ref} must record a reply route"));
+        assert_eq!(route.run_id, run_id);
     }
 }
 

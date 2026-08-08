@@ -31,21 +31,18 @@ use crate::inbound::{ProductInboundEnvelope, ProductInboundPayload};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedBinding {
     pub tenant_id: TenantId,
-    /// Real paired human actor who sent or authorized the external action.
+    /// Real paired human actor who sent or authorized the external action —
+    /// and the user scope whose agent/context/tools/memory execute the turn:
+    /// a run acts as the user who invoked it, on every route kind.
     ///
     /// The `user_id` alias is a sanctioned one-time wire-fold for persisted
     /// binding rows written before the actor/subject split — a durable-data
     /// migration concern, not a runtime compatibility path (new
-    /// serializations emit `actor_user_id` only).
+    /// serializations emit `actor_user_id` only). Rows persisted while the
+    /// retired `subject_user_id` field existed still deserialize; the field
+    /// is ignored (see the persisted-shape test below).
     #[serde(alias = "user_id")]
     pub actor_user_id: UserId,
-    /// User scope whose agent/context/tools/memory execute the turn.
-    ///
-    /// Direct/personal routes set this to the actor. Shared routes set this to
-    /// the configured team/agent subject; routes without an explicit subject
-    /// are rejected before turn submission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject_user_id: Option<UserId>,
     pub thread_id: ThreadId,
     /// Required for user-message turn submission because Reborn `ThreadScope`
     /// and `TurnScope` are agent-scoped. Product bindings that are only
@@ -226,8 +223,13 @@ where
 mod tests {
     use super::*;
 
+    /// Persisted-shape compatibility: rows written before the actor/subject
+    /// split (the `user_id` spelling) AND rows written while the retired
+    /// `subject_user_id` field existed must both keep deserializing. The
+    /// subject value is deliberately dropped on read — a run acts as the user
+    /// who invoked it, so the actor is the only identity the binding carries.
     #[test]
-    fn resolved_binding_accepts_legacy_user_id_actor_field() {
+    fn resolved_binding_accepts_legacy_user_id_and_retired_subject_field() {
         let binding: ResolvedBinding = serde_json::from_value(serde_json::json!({
             "tenant_id": "tenant:legacy",
             "user_id": "user:legacy-actor",
@@ -239,9 +241,5 @@ mod tests {
         .expect("legacy binding should deserialize");
 
         assert_eq!(binding.actor_user_id.as_str(), "user:legacy-actor");
-        assert_eq!(
-            binding.subject_user_id.as_ref().map(UserId::as_str),
-            Some("user:legacy-subject")
-        );
     }
 }

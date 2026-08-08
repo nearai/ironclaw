@@ -129,19 +129,27 @@ Save:
 | Team ID | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
 | App ID | Slack app id, visible as `api_app_id` in Events API payloads. |
 | Bot user ID | Slack member id for the app's bot user (for example, the `U…` id returned at installation). |
-| Shared subject | Optional Reborn user scope available for shared-channel routing. |
+| Allowed channels | Optional JSON array of Slack channel ids (for example `["C0123ABCD"]`) the bot may serve as shared channels. Shared channels not listed here fail closed. |
 | Bot token | Slack bot token. Stored in the Reborn secret store; never returned by the API. |
 | Signing secret | Slack signing secret. Stored in the Reborn secret store; never returned by the API. |
 | OAuth client ID | Client id for the Slack app's user OAuth flow. |
 | OAuth client secret | Client secret for the Slack app's user OAuth flow. Stored in the Reborn secret store. |
 
-After Slack deployment configuration is saved, use its allowed-channel and
-subject-route fields to map Slack channel ids to team agents. Users separately
-install Slack from Extensions and complete their own OAuth flow; that personal
-membership and credential state does not mutate the operator configuration.
+After Slack deployment configuration is saved, list the shared Slack channel
+ids the bot should serve in the Allowed channels field
+(`slack_allowed_channels`). That is the whole shared-channel configuration:
+the bot answers each participant as themselves — there is no shared subject
+user or per-channel subject route to assign, and each shared-channel message
+runs as the Slack user who sent it. Users separately install Slack from
+Extensions and complete their own OAuth flow to pair; an unpaired participant
+in an allowed shared channel gets no reply at all (the bot never posts a
+one-person pairing prompt into a shared room — pairing happens through
+Extensions, and direct messages still offer the connect prompt), and that
+personal membership and credential state does not mutate the operator
+configuration.
 
-Unrouted shared Slack channels fail closed instead of silently inheriting a
-personal/default user scope.
+Shared Slack channels not listed in `slack_allowed_channels` fail closed
+instead of silently inheriting a personal/default user scope.
 
 ### Migrating an existing config.toml
 
@@ -366,7 +374,11 @@ Confirm the app is invited to the channel, app_mention is subscribed, and the Te
 
 ### Shared-channel turns are rejected
 
-Configure Shared subject or use the WebUI Slack channel picker to allow the channel.
+Add the channel id to the Allowed channels field (`slack_allowed_channels`) in
+Admin Configuration for Slack; shared channels not listed there fail closed.
+If the bot instead answers a specific user with a pairing prompt, that user has
+not connected Slack yet — they complete the Slack OAuth connect from
+Extensions, since every shared-channel participant runs as themselves.
 
 ### Slash command outside the bot DM is denied
 

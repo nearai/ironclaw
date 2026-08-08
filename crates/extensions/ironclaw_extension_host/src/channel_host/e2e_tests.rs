@@ -651,7 +651,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             &ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
             ChannelExtras {
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
-                subject_route_resolver: None,
+                shared_admission: None,
                 storage_roots: None,
             },
         )
@@ -2384,10 +2384,15 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
 
 /// Generic shared-channel admission (§5.3): an unconfigured shared channel
 /// fails closed (no turn, no reply, vendor still gets its 2xx); saving the
-/// channel into `slack_allowed_channels` admits the next event under the
-/// managed derived subject (the retired lane's `user:slack-channel:{sha16}`
-/// value shape); an explicit `slack_subject_routes` entry runs its channel
-/// as the configured subject. Saves take effect per request — no rebuild.
+/// channel into `slack_allowed_channels` admits the next event, and the turn
+/// runs AS THE PAIRED ACTOR who invoked it — the thread owner is the actor's
+/// canonical user, with no derived or configured subject. A channel outside
+/// the saved list stays rejected. Saves take effect per request — no rebuild.
+///
+/// Pin changed with the run-acts-as-invoker ruling: the managed derived
+/// subject (`user:slack-channel:{sha16}`) and the `slack_subject_routes`
+/// override this test used to assert are retired; admission is the only
+/// routing question left, and the invoker owns the thread.
 #[tokio::test]
 async fn shared_channel_admission_follows_saved_channel_config() {
     let harness = build_harness(TurnMode::Complete {
@@ -2428,49 +2433,27 @@ async fn shared_channel_admission_follows_saved_channel_config() {
     harness.drain().await;
     let scopes = harness.coordinator.submitted_scopes();
     assert_eq!(scopes.len(), 1, "the admitted channel submits one turn");
-    let expected_managed_subject = ironclaw_extension_host::managed_channel_subject_user_id(
-        ADAPTER,
-        &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        &ironclaw_host_api::product_adapter::AdapterInstallationId::new(INSTALLATION)
-            .expect("installation"), // safety: static test installation id is valid.
-        Some(TEAM),
-        "C777",
-    )
-    .expect("managed subject derivation");
+    let expected_actor = UserId::new(USER).expect("user"); // safety: static test user id is valid.
     assert_eq!(
         scopes[0].thread_owner.explicit_owner_user_id(),
-        Some(&expected_managed_subject),
-        "an allowed channel runs under the managed derived subject"
+        Some(&expected_actor),
+        "an admitted shared channel runs as the paired actor who invoked it"
     );
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], "C777");
     assert_eq!(messages[0]["text"], "channel reply");
 
-    // An explicit subject route wins for its channel.
-    harness
-        .channel_config
-        .save(
-            &extension_id,
-            vec![(
-                "slack_subject_routes".to_string(),
-                r#"{"C888":"user:ops-agent"}"#.to_string(),
-            )],
-        )
-        .await
-        .expect("save subject routes"); // safety: manifest declares the handle.
-    let routed = harness.post_event(SHARED_CHANNEL_ROUTED).await;
-    assert_eq!(routed.status(), StatusCode::OK);
+    // Admission is per-conversation: admitting C777 does not admit C888,
+    // which stays rejected until the operator lists it too.
+    let unlisted = harness.post_event(SHARED_CHANNEL_ROUTED).await;
+    assert_eq!(unlisted.status(), StatusCode::OK, "vendor keeps its 2xx");
     harness.drain().await;
     let scopes = harness.coordinator.submitted_scopes();
-    assert_eq!(scopes.len(), 2);
     assert_eq!(
-        scopes[1]
-            .thread_owner
-            .explicit_owner_user_id()
-            .map(|user| user.as_str()),
-        Some("user:ops-agent"),
-        "an explicit subject route runs its channel as the configured subject"
+        scopes.len(),
+        1,
+        "an unlisted shared channel submits no turn even after another was admitted"
     );
 }
 
@@ -4582,7 +4565,10 @@ use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
 /// durable extension installation id (`INSTALLATION`) the active snapshot
 /// carries. Stored beta preferences embed this id in their binding refs.
 const RETIRED_INSTALLATION: &str = "retired-setup-install";
-/// A shared channel routed to the operator through `slack_subject_routes`.
+/// A shared channel id as stored preferences from the retired subject-route
+/// model reference it. Pin changed with the run-acts-as-invoker ruling: no
+/// configured subject owns a shared channel any more, so refs naming it must
+/// fail closed rather than resolve to a per-user delivery target.
 const ROUTED_CHANNEL: &str = "C777";
 
 fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
@@ -4624,35 +4610,43 @@ fn operator_caller() -> OutboundDeliveryTargetScope {
     )
 }
 
-/// Save the `[channel.config]` values the generic target provider reads:
-/// the workspace claim (space id) and one explicit subject route assigning
-/// `ROUTED_CHANNEL` to the operator.
+/// Save the `[channel.config]` value the generic target provider reads: the
+/// workspace claim (space id). Pin changed with the run-acts-as-invoker
+/// ruling: the manifest no longer declares `slack_subject_routes`, and no
+/// saved value can assign a shared channel to a user any more.
 async fn save_outbound_target_config(harness: &Harness) {
     harness
         .channel_config
         .save(
             &ExtensionId::new(ADAPTER).expect("extension id"), // safety: static id is valid.
-            vec![
-                ("slack_team_id".to_string(), TEAM.to_string()),
-                (
-                    "slack_subject_routes".to_string(),
-                    format!(r#"{{"{ROUTED_CHANNEL}":"{USER}"}}"#),
-                ),
-            ],
+            vec![("slack_team_id".to_string(), TEAM.to_string())],
         )
         .await
-        .expect("save outbound target config"); // safety: manifest declares the handles.
+        .expect("save outbound target config"); // safety: manifest declares the handle.
 }
 
+// Pin changed with the run-acts-as-invoker ruling: shared channels are no
+// longer per-user delivery targets, so the registry now exposes the caller's
+// provisioned personal DM instead of a subject-routed shared channel.
 #[tokio::test]
 async fn generic_outbound_target_registration_exposes_provider_through_registry() {
     let harness = build_harness(TurnMode::Running).await;
     save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("provision DM target");
     let registry = ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default();
 
     register_generic_channel_outbound_targets(
         &registry,
-        generic_outbound_target_deps(&harness, generic_dm_target_store()),
+        generic_outbound_target_deps(&harness, dm_targets),
     );
 
     let caller = operator_caller();
@@ -4668,7 +4662,7 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
     let registered = &listed[0];
     assert_eq!(
         registered.summary.target_id.as_str(),
-        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}")
+        format!("slack:personal-dm:{TEAM}:{USER}")
     );
     assert_eq!(registered.summary.channel.as_str(), ADAPTER);
     assert!(registered.owner.matches_scope(&caller));
@@ -4676,12 +4670,15 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
         .conversation_for_target(&registered.destination)
         .expect("registered target should retain its Slack destination");
     assert_eq!(conversation.space_id(), Some(TEAM));
-    assert_eq!(conversation.conversation_id(), ROUTED_CHANNEL);
+    assert_eq!(conversation.conversation_id(), CHANNEL);
 }
 
-/// The generic provider lists the operator's routed shared channel (from
-/// `slack_subject_routes`) and their provisioned personal DM (from the
-/// generic DM-target store) — no lane-owned state anywhere.
+/// The generic provider lists the caller's provisioned personal DM (from the
+/// generic DM-target store) — no lane-owned state anywhere. Pin changed with
+/// the run-acts-as-invoker ruling: shared channels are no longer per-user
+/// delivery targets (their ownership came from the retired subject routes),
+/// so only the DM is listed and a stored shared-channel target id fails
+/// closed at resolution.
 #[tokio::test]
 async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store() {
     let harness = build_harness(TurnMode::Running).await;
@@ -4703,24 +4700,28 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         .list_outbound_delivery_targets(&operator_caller())
         .await
         .expect("target list");
-    assert_eq!(listed.len(), 2, "one shared + one DM target: {listed:?}");
-
-    let shared = listed
-        .iter()
-        .find(|entry| entry.summary.target_id.as_str().contains("shared-channel"))
-        .expect("shared-channel target listed");
-    assert_eq!(
-        shared.summary.target_id.as_str(),
-        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"),
-        "generic ids keep the retired lane's shape"
+    assert_eq!(listed.len(), 1, "only the DM target is listed: {listed:?}");
+    assert!(
+        listed
+            .iter()
+            .all(|entry| !entry.summary.target_id.as_str().contains("shared-channel")),
+        "no shared-channel target may be offered: {listed:?}"
     );
-    let shared_reply_target = &shared.destination;
-    let shared_conversation = codec
-        .conversation_for_target(shared_reply_target)
-        .expect("shared binding ref decodes");
-    assert_eq!(shared_conversation.conversation_id(), ROUTED_CHANNEL);
-    assert_eq!(shared_conversation.space_id(), Some(TEAM));
-    assert!(!codec.is_personal_direct_message(shared_reply_target));
+
+    // A stored shared-channel target id from the retired subject model fails
+    // closed at resolution — no per-user owner exists for it any more.
+    let retired_shared_target_id = ironclaw_outbound::OutboundDeliveryTargetId::new(format!(
+        "slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"
+    ))
+    .expect("retired target id builds");
+    assert!(
+        provider
+            .resolve_outbound_delivery_target(&operator_caller(), &retired_shared_target_id)
+            .await
+            .expect("resolve succeeds")
+            .is_none(),
+        "a stored shared-channel target id must not resolve"
+    );
 
     let dm = listed
         .iter()
@@ -4779,7 +4780,7 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
             .await
             .expect("list succeeds")
             .is_empty(),
-        "another user sees neither the operator's routed channel nor their DM"
+        "another user does not see the operator's DM target"
     );
     for entry in &listed {
         assert!(
@@ -4883,10 +4884,13 @@ async fn generic_dm_target_rejects_record_from_a_different_workspace() {
 }
 
 /// REGRESSION (migration tolerance): stored beta preferences embed the
-/// RETIRED setup installation id in their binding refs. Resolution must
-/// tolerate both ids — ownership is proven against caller-scoped generic
-/// state, never against the ref's installation segment — and each resolve
-/// returns a freshly encoded ref carrying the DURABLE installation id.
+/// RETIRED setup installation id in their binding refs. Personal-DM
+/// resolution must tolerate both ids — ownership is proven against
+/// caller-scoped generic state, never against the ref's installation segment
+/// — and each resolve returns a freshly encoded ref carrying the DURABLE
+/// installation id. Pin changed with the run-acts-as-invoker ruling: stored
+/// SHARED-conversation refs now fail closed whichever id they carry — their
+/// per-user ownership came from the retired subject routes.
 #[tokio::test]
 async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs() {
     let harness = build_harness(TurnMode::Running).await;
@@ -4909,7 +4913,8 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
     let project = ProjectId::new(PROJECT).expect("project"); // safety: static test project id is valid.
     let durable_segment = format!("installation:{}:{INSTALLATION};", INSTALLATION.len());
 
-    // Shared-channel preference saved under the retired setup id.
+    // Shared-channel preference saved under the retired setup id: fails
+    // closed — no per-user owner exists for a shared conversation any more.
     let retired_shared = ironclaw_slack_extension::slack_shared_channel_reply_target_binding_ref(
         &retired_installation,
         &agent,
@@ -4918,18 +4923,13 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         ROUTED_CHANNEL,
     )
     .expect("retired shared ref builds");
-    let resolved_shared = provider
-        .resolve_reply_target_binding(&operator_caller(), &retired_shared)
-        .await
-        .expect("resolve succeeds")
-        .expect("retired-id shared preference still resolves");
     assert!(
-        resolved_shared
-            .destination
-            .as_str()
-            .contains(&durable_segment),
-        "re-resolved ref carries the durable installation id: {}",
-        resolved_shared.destination.as_str()
+        provider
+            .resolve_reply_target_binding(&operator_caller(), &retired_shared)
+            .await
+            .expect("resolve succeeds")
+            .is_none(),
+        "a stored shared-conversation preference must fail closed"
     );
 
     // Personal-DM preference saved under the retired setup id.
@@ -4953,8 +4953,8 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         resolved_dm.destination.as_str()
     );
 
-    // Fail-closed arms: a tampered actor never resolves; an unrouted
-    // conversation never resolves (regardless of which id the ref carries).
+    // Fail-closed arms: a tampered actor never resolves; every other shared
+    // conversation fails closed too (regardless of which id the ref carries).
     let tampered_actor = ironclaw_slack_extension::slack_personal_dm_reply_target_binding_ref(
         &retired_installation,
         &agent,
@@ -4986,7 +4986,7 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
             .await
             .expect("resolve succeeds")
             .is_none(),
-        "an unrouted shared conversation must not resolve"
+        "a shared-conversation ref must not resolve"
     );
 }
 

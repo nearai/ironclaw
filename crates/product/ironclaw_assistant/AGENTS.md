@@ -36,7 +36,7 @@ service over thread, turn, and projection ports.
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
 | `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
-| `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes. **Declared in `ironclaw_product_contracts::subject_route`** since WS2.2 — product consumes it, `ironclaw_extension_host` implements it |
+| `SharedConversationAdmission` | Host-owned shared-conversation admission — answers only "is this shared conversation connected", fail-closed both without a wired port and for unlisted conversations; product workflow checks it before binding a shared conversation. **Declared in `ironclaw_product_contracts::shared_admission`** — product consumes it, `ironclaw_extension_host` implements it |
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
@@ -53,8 +53,9 @@ WS2 moved the twelve product-side ports this crate declared whose
 implementation sits outside it (PROPOSAL §6.1.3) — **ten** implemented by
 `ironclaw_extension_host` (the set
 `crates/app/ironclaw_architecture_tests/tests/reborn_extension_host_port_inversion.rs`
-enumerates and pins as `INVERTED_PORTS`; WS2.1 moved nine and WS2.2 added
-`ProductConversationSubjectRouteResolver` once the boundary error made it
+enumerates and pins as `INVERTED_PORTS`; WS2.1 moved nine and WS2.2 added the
+shared-route resolver — since reshaped admission-only as
+`SharedConversationAdmission` — once the boundary error made it
 declarable) and two by `ironclaw_composition` (`AdminUserService`,
 `RebornOperatorToolCatalog`). That test is the enforced inventory; this list is
 prose and defers to it.
@@ -72,7 +73,7 @@ any other consumer — there is deliberately **no re-export** (the port half of
 `lifecycle_service::{LifecycleProductService, LifecycleProductContext, LifecycleProductSurfaceContext}` ·
 `admin_users::{AdminUserService, AdminUser*, AdminCreate*}` ·
 `operator_tools::{RebornOperatorToolCatalog, RebornOperatorToolInfo}` ·
-`subject_route::{ProductConversationSubjectRouteResolver, ProductConversationSubjectRouteResolutionRequest, ProductConversationRouteKey}` (WS2.2) ·
+`shared_admission::{SharedConversationAdmission, SharedConversationAdmissionRequest, ProductConversationRouteKey}` (WS2.2, inverted as `ProductConversationSubjectRouteResolver`; reshaped admission-only when shared-route subjects retired) ·
 `error::ProductOperationFailure` (WS2.2 — the boundary error, not a port) ·
 `llm_config::{LlmConfigService, ActiveModelReader, + 15 DTOs}` and
 `operator_service::{OperatorStatusService, OperatorLogsService, OperatorServiceLifecycleService, + 12 DTOs, normalize_operator_log_context_value}`
@@ -269,10 +270,14 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
-Shared-route subject users are also first-bind scope, not a live overlay on
-existing external conversation bindings. Route admin updates apply to new
-bindings; existing Slack threads must continue resolving under the owner that
-created their thread scope.
+A run acts as its invoker: a shared channel conversation binds one thread per
+(conversation, actor), each thread owned by the actor who invoked the bot —
+there is no configured subject user. The only installation configuration for a
+shared conversation is admission (the `*_allowed_channels` connected-channel
+list, consulted through `SharedConversationAdmission`), and it is checked
+fail-closed on resolve, lookup, and reset: no admission port wired, or a
+conversation the saved value does not list, means rejection — never a fallback
+owner.
 
 Outbound delivery orchestration starts only after `ironclaw_outbound` resolves
 and validates a communication delivery candidate. `OutboundPolicyService`

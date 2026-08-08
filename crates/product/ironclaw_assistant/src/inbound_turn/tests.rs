@@ -441,7 +441,6 @@ fn legacy_replay_without_actor_id_uses_owner_as_actor() {
     };
 
     assert_eq!(submission.binding.actor_user_id, user_id());
-    assert_eq!(submission.binding.subject_user_id, Some(user_id()));
     assert_eq!(submission.message_id, message_id);
 }
 
@@ -456,12 +455,14 @@ fn prepared_replay_uses_fresh_binding_scope_over_persisted_scope() {
         None,
     );
     replay.scope.owner_user_id = None;
-    let subject_user_id = UserId::new("user:team-subject").unwrap();
+    // Pin changed with the run-acts-as-invoker ruling: the fresh scope's
+    // owner is the ACTOR (there is no subject overlay); what this test keeps
+    // pinning is that the freshly prepared scope wins over the persisted
+    // replay scope (which carries no owner).
     let prepared = PreparedUserMessage {
         binding: ResolvedBinding {
             tenant_id: tenant_id(),
             actor_user_id: user_id(),
-            subject_user_id: Some(subject_user_id.clone()),
             thread_id: thread_id(),
             agent_id: Some(AgentId::new("agent:alpha").unwrap()),
             project_id: None,
@@ -470,7 +471,7 @@ fn prepared_replay_uses_fresh_binding_scope_over_persisted_scope() {
             tenant_id: tenant_id(),
             agent_id: AgentId::new("agent:alpha").unwrap(),
             project_id: None,
-            owner_user_id: Some(subject_user_id.clone()),
+            owner_user_id: Some(user_id()),
             mission_id: None,
         },
         source_binding_id: "src:alpha".to_string(),
@@ -492,11 +493,7 @@ fn prepared_replay_uses_fresh_binding_scope_over_persisted_scope() {
         panic!("expected prepared replay to require a new turn submission")
     };
 
-    assert_eq!(
-        submission.binding.subject_user_id,
-        Some(subject_user_id.clone())
-    );
-    assert_eq!(submission.thread_scope.owner_user_id, Some(subject_user_id));
+    assert_eq!(submission.thread_scope.owner_user_id, Some(user_id()));
     assert_eq!(submission.message_id, message_id);
 }
 
@@ -512,7 +509,6 @@ async fn shared_user_message_records_channel_surface_type() {
         binding: ResolvedBinding {
             tenant_id: tenant_id(),
             actor_user_id: user_id(),
-            subject_user_id: Some(user_id()),
             thread_id: thread_id(),
             agent_id: Some(AgentId::new("agent:alpha").unwrap()),
             project_id: None,

@@ -261,7 +261,7 @@ async fn nearai_hosted_mcp_isolates_provider_accounts_across_actors() {
         .await
         .expect("actor B lifecycle thread builds");
     assert_ne!(
-        actor_a.binding.subject_user_id, actor_b.binding.subject_user_id,
+        actor_a.binding.actor_user_id, actor_b.binding.actor_user_id,
         "the isolation test requires distinct authenticated actors"
     );
     actor_b

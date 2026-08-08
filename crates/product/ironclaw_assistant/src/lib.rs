@@ -143,10 +143,10 @@ pub use commands::{
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
 pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
-// `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
-// and `ProductConversationSubjectRouteResolver` are deliberately absent: they
-// moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
-// grants no second import path (`reborn_product_contract_location_scan.rs`).
+// `ProductConversationRouteKey`, `SharedConversationAdmissionRequest`, and
+// `SharedConversationAdmission` are deliberately absent: they live in
+// `ironclaw_product_contracts::shared_admission` (WS2.2 lineage), and that
+// crate grants no second import path (`reborn_product_contract_location_scan.rs`).
 // `ProductActorUserResolutionRequest`, `ProductActorUserResolver` and
 // `ResolvedProductActorUser` left for the same reason and under the same rule:
 // `ironclaw_product_contracts::actor_identity` (WS2.5).

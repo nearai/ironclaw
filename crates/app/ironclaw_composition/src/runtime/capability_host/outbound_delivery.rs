@@ -241,27 +241,17 @@ fn invocation_effective_input_ref(
 ///
 /// This answers an AUTHORIZATION question — whose delivery targets may this
 /// call see, whose notification channels may it rewrite — so it follows the
-/// ACTING user, not the thread's owner.
+/// ACTING user, not the thread's owner. A run acts as the user who invoked
+/// it; owner and actor coincide on every binding created under that rule, and
+/// the actor stays authoritative for the runs persisted before it.
 ///
-/// The two agree on a direct message and on an automation fire. They diverge
-/// on a shared-route channel conversation, where the scope owner is the
-/// route's configured subject (the deployment operator by default, see
-/// `channel_workflow.rs`) and the actor is whoever posted. Resolving the owner
-/// there let any participant of a shared channel enumerate the operator's
-/// connected destinations and rewrite where the operator's approval and
-/// re-auth notices are delivered.
-///
-/// This REVERSES a previously pinned preference for the owner. That pin was
-/// written before shared-route subjects defaulted to the operator, and it is
-/// wrong under the product rule that a run acts as whoever invoked it.
-///
-/// INTERIM: the same owner-preference still governs
-/// [`resource_scope_for_run`] and [`settings_scope_for_run`], which scope the
-/// approval-gate raise and the capability lease and must stay matched between
-/// raise and resume. Unifying those is the follow-up that also removes
-/// shared-route subject binding outright, so a shared channel runs entirely as
-/// its invoker; it needs approval raise/resume coverage that does not exist
-/// yet, which is why it is not folded in here.
+/// The same acting identity scopes the whole approval-gate dance
+/// ([`LoopRunContext::acting_resource_scope`] via [`resource_scope_for_run`],
+/// plus [`settings_scope_for_run`]): every store the dance touches is
+/// scope-keyed, and a raise and its resume must derive the same scope or the
+/// approved capability strands. The owner-first split #7157 shipped here as an
+/// interim is gone; the raise/resume coverage that unification required is
+/// `notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor`.
 ///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
 pub(super) fn caller_for_run(
@@ -270,32 +260,22 @@ pub(super) fn caller_for_run(
 ) -> ProductSurfaceCaller {
     ProductSurfaceCaller::new(
         invocation.run_context.scope.tenant_id.clone(),
-        acting_user_id(&invocation.run_context, fallback_user_id),
+        invocation.run_context.acting_user_id(fallback_user_id),
         invocation.run_context.scope.agent_id.clone(),
         invocation.run_context.scope.project_id.clone(),
     )
 }
 
-/// The authenticated actor driving this run, falling back to the thread owner
-/// only when the run carries no actor at all (a host-initiated run), and to the
-/// configured fallback when it carries neither.
-fn acting_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
-    run_context
-        .actor
-        .as_ref()
-        .map(|actor| actor.user_id.clone())
-        .or_else(|| run_context.scope.explicit_owner_user_id().cloned())
-        .unwrap_or_else(|| fallback_user_id.clone())
-}
-
+/// [`LoopRunContext::acting_resource_scope`] with the capability invocation's
+/// own id in place of the run's — the shape the gate-record store is keyed by.
+///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
 pub(super) fn resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
     invocation_id: InvocationId,
 ) -> ResourceScope {
-    let mut scope = run_context.scope.to_resource_scope();
-    scope.user_id = effective_user_id(run_context, fallback_user_id);
+    let mut scope = run_context.acting_resource_scope(fallback_user_id);
     scope.invocation_id = invocation_id;
     scope
 }
@@ -307,27 +287,13 @@ pub(super) fn settings_scope_for_run(
 ) -> ResourceScope {
     ResourceScope {
         tenant_id: run_context.scope.tenant_id.clone(),
-        user_id: effective_user_id(run_context, fallback_user_id),
+        user_id: run_context.acting_user_id(fallback_user_id),
         agent_id: None,
         project_id: None,
         mission_id: None,
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
-}
-
-fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
-    run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| {
-            run_context
-                .actor
-                .as_ref()
-                .map(|actor| actor.user_id.clone())
-        })
-        .unwrap_or_else(|| fallback_user_id.clone())
 }
 
 /// Shared synthetic-provider grantee/principal for every capability
@@ -886,13 +852,16 @@ mod tests {
         assert!(error.to_string().contains("unsupported field `unexpected`"));
     }
 
-    /// The interim split this PR ships: the AUTHORIZATION identity follows the
-    /// actor, while the approval-gate and lease scopes still follow the owner
-    /// so a raise and its resume keep matching. Unifying them is the follow-up
-    /// that removes shared-route subject binding.
+    /// A run acts as the user who invoked it: the authorization identity AND
+    /// the approval-gate/lease/settings scopes all follow the actor. This test
+    /// previously pinned the interim #7157 split (approval scope
+    /// owner-first); that split is deliberately removed with shared-route
+    /// subject binding — the raise/resume dance under owner ≠ actor is pinned
+    /// end-to-end by
+    /// `notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor`.
     #[test]
-    fn authorization_identity_follows_the_actor_while_approval_scope_follows_the_owner() {
-        let owner = UserId::new("user-route-subject").expect("owner id");
+    fn authorization_and_approval_scopes_both_follow_the_actor() {
+        let owner = UserId::new("user-legacy-owner").expect("owner id");
         let actor = UserId::new("user-participant").expect("actor id");
         let fallback = UserId::new("user-fallback").expect("fallback id");
         let scope = ironclaw_turns::TurnScope::new_with_owner(
@@ -905,20 +874,35 @@ mod tests {
 
         let with_actor = run_context_for_test(scope.clone(), Some(actor.clone()));
         assert_eq!(
-            acting_user_id(&with_actor, &fallback),
+            with_actor.acting_user_id(&fallback),
             actor,
-            "a shared-channel participant acts as themselves, not as the route subject"
+            "a shared-channel participant acts as themselves"
         );
         assert_eq!(
-            effective_user_id(&with_actor, &fallback),
-            owner,
-            "approval/lease scoping deliberately still follows the owner (interim)"
+            resource_scope_for_run(&with_actor, &fallback, InvocationId::new()).user_id,
+            actor,
+            "the approval-gate raise is scoped to the acting user"
+        );
+        assert_eq!(
+            with_actor.acting_resource_scope(&fallback).user_id,
+            actor,
+            "the replay-payload/gate-record scope matches the raise scope's user"
+        );
+        assert_eq!(
+            settings_scope_for_run(&with_actor, &fallback).user_id,
+            actor,
+            "approval settings are read as the acting user"
         );
 
         // A host-initiated run carries no actor: fall back to the owner, not to
         // the configured fallback identity.
         let actorless = run_context_for_test(scope, None);
-        assert_eq!(acting_user_id(&actorless, &fallback), owner);
+        assert_eq!(actorless.acting_user_id(&fallback), owner);
+        assert_eq!(
+            resource_scope_for_run(&actorless, &fallback, InvocationId::new()).user_id,
+            owner,
+            "an actorless run's gate dance stays scoped to the thread owner"
+        );
     }
 
     #[allow(clippy::items_after_test_module)]

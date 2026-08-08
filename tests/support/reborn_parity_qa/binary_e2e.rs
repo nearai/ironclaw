@@ -326,16 +326,16 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         // The production capability port resolves the dispatch scope
-        // owner-first from the turn's real binding subject (this harness
+        // owner-first from the turn's real binding actor (this harness
         // submits as the fixed `"alice"` actor, not the profile's default
         // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
         // setting must be seeded under that SAME resolved subject or the
         // gate never raises -- mirrors
         // `with_host_runtime_extension_lifecycle_capabilities`.
-        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        let actor_user = Self::resolve_default_binding_actor_user(conversation_id).await?;
         let host_runtime = Arc::new(
             crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
-                subject_user.as_str(),
+                actor_user.as_str(),
             )?
             .build()
             .await?,
@@ -433,7 +433,7 @@ impl RebornBinaryE2EHarness {
         // resolves to — extension_remove reads ownership under that actor, so a
         // fixed profile user makes install-then-remove see "never installed".
         // Mirrors `build_group_capability_with_base` in the group harness.
-        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        let actor_user = Self::resolve_default_binding_actor_user(conversation_id).await?;
         // Google-OAuth-CONFIGURED variant deliberately, matching the Slack
         // treatment in `harness/mod.rs`: this tier never represents a
         // provider-unconfigured instance. The base profile already seeds a
@@ -454,7 +454,7 @@ impl RebornBinaryE2EHarness {
         // (non-configured) profile via `group_constructors.rs`.
         let host_runtime = Arc::new(
             crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user(
-                subject_user.as_str(),
+                actor_user.as_str(),
             )?
             .build()
             .await?,
@@ -468,15 +468,15 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    /// Resolve the `(tenant, subject-user)` a default `submit_text` call
+    /// Resolve the `(tenant, actor-user)` a default `submit_text` call
     /// (actor `"alice"`, adapter `"reborn-test"`, installation `"install-1"`)
     /// will bind to for `conversation_id`, WITHOUT depending on the harness
     /// under construction. Deterministic and side-effect-free from the
     /// caller's perspective (its own throwaway `filesystem_temp` product
-    /// harness/backend): direct-chat routes set `subject_user_id` to the
-    /// resolved actor (`ResolvedBinding` doc comment), so this reproduces
-    /// exactly what the real turn's binding resolves to later.
-    async fn resolve_default_binding_subject_user(
+    /// harness/backend): a run acts as the user who invoked it, so the
+    /// binding's actor is exactly what the real turn's binding resolves to
+    /// later.
+    async fn resolve_default_binding_actor_user(
         conversation_id: &str,
     ) -> HarnessResult<ironclaw_host_api::ids::UserId> {
         let ingress = RebornTestIngress::new("reborn-test", "install-1")?;
@@ -493,7 +493,7 @@ impl RebornBinaryE2EHarness {
             .binding_service()?
             .resolve_binding(binding_request)
             .await?;
-        Ok(binding.subject_user_id.unwrap_or(binding.actor_user_id))
+        Ok(binding.actor_user_id)
     }
 
     pub async fn with_host_runtime_skill_management_capabilities(
@@ -763,7 +763,7 @@ impl RebornBinaryE2EHarness {
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
         let thread_harness = if let Some(storage) = shared_storage.as_ref() {
             RebornThreadHarness::filesystem_shared_backend(
@@ -1059,7 +1059,7 @@ impl RebornBinaryE2EHarness {
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
         let ack = self.workflow.submit_inbound(envelope).await?;
@@ -1601,7 +1601,8 @@ fn thread_scope_from_binding_with_route_kind(
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        // A run acts as the user who invoked it: the actor owns the scope.
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })
 }

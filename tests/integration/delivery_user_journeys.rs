@@ -611,7 +611,7 @@ async fn preresolve_slack_scope(
         binding.agent_id.clone(),
         binding.project_id.clone(),
         binding.thread_id.clone(),
-        binding.subject_user_id.clone(),
+        Some(binding.actor_user_id.clone()),
     )
 }
 
@@ -636,7 +636,7 @@ fn slack_run_delivery_services(
         harness.binding.project_id.clone(),
         ironclaw_host_api::ids::ThreadId::new("slack-journey-channel-notices")
             .expect("notice thread id"),
-        harness.binding.subject_user_id.clone(),
+        Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, live source-route delivery loop pending the run_delivery split, plan #6175
 //! The live source-route half of run delivery: watch the run an inbound
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
@@ -807,8 +808,16 @@ impl RunDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id =
-            prompts::run_notification_projection_id(run_id, notification.event_kind, None);
+        // Key gate prompts by their gate ref: one run can park on several
+        // gates in sequence, and each is its own durable delivery fact (a
+        // repeat announcement of the SAME gate still dedupes to
+        // `AlreadyDelivered`). Kinds that carry no gate ref keep the
+        // historical undiscriminated id shape.
+        let projection_id = prompts::run_notification_projection_id(
+            run_id,
+            notification.event_kind,
+            notification.gate_ref_for_routing.as_deref(),
+        );
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {
