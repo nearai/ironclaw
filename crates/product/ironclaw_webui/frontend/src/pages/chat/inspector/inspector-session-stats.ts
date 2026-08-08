@@ -34,6 +34,19 @@ function isMetricTotal(value: unknown): value is DiagnosticMetricTotal {
     && isCount(value.unavailable_samples);
 }
 
+function isBoundedDiagnosticText(value: unknown): value is BoundedDiagnosticText {
+  return isRecord(value)
+    && typeof value.content === "string"
+    && isCount(value.original_bytes)
+    && typeof value.truncated === "boolean";
+}
+
+function isCallsPerModelEntry(value: unknown): boolean {
+  return isRecord(value)
+    && isBoundedDiagnosticText(value.model)
+    && isCount(value.calls);
+}
+
 /**
  * Accept only a complete authoritative statistics record.
  *
@@ -49,7 +62,16 @@ export function decodeSessionDiagnosticStats(
   if (!isRecord(value)) return null;
   if (!isCount(value.total_model_calls)) return null;
   if (typeof value.calls_per_model_truncated !== "boolean") return null;
-  if (!Array.isArray(value.calls_per_model)) return null;
+  // Every breakdown entry, not just the array: a negative or non-integer
+  // `calls` would otherwise survive decoding and be coerced to 0 during
+  // accumulation without marking the breakdown truncated, presenting a
+  // fabricated "0 calls" for a model the host never reported that way.
+  if (
+    !Array.isArray(value.calls_per_model)
+    || !value.calls_per_model.every(isCallsPerModelEntry)
+  ) {
+    return null;
+  }
   if (
     !isMetricTotal(value.input_tokens)
     || !isMetricTotal(value.output_tokens)

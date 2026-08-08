@@ -125,6 +125,28 @@ test("only a complete statistics record decodes into session accumulation", () =
     decodeSessionDiagnosticStats({ ...complete, calls_per_model: null }),
     null,
   );
+
+  // Nested breakdown entries, not just the array. A negative `calls` would
+  // otherwise decode and then coerce to 0 during accumulation, silently
+  // reporting a model as having made zero calls.
+  const model = { content: "model-a", original_bytes: 7, truncated: false };
+  for (const entry of [
+    null,
+    { calls: 4 },
+    { model, calls: -1 },
+    { model, calls: 1.5 },
+    { model: "model-a", calls: 1 },
+    { model: { content: "model-a" }, calls: 1 },
+  ]) {
+    assert.equal(
+      decodeSessionDiagnosticStats({ ...complete, calls_per_model: [entry] }),
+      null,
+      `entry should be rejected: ${JSON.stringify(entry)}`,
+    );
+  }
+  assert.ok(
+    decodeSessionDiagnosticStats({ ...complete, calls_per_model: [{ model, calls: 0 }] }),
+  );
   assert.equal(
     decodeSessionDiagnosticStats({ ...complete, total_tool_calls: "3" }),
     null,
