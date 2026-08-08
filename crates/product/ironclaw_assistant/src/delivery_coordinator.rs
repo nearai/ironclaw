@@ -37,7 +37,8 @@ use ironclaw_outbound::{
     ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
     OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
-    ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    RecoverInterruptedDeliveryRequest, ReplyAttachmentIntent, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -348,35 +349,56 @@ impl DeliveryCoordinator {
         }
     }
 
-    /// Crash recovery (OUT-6): every attempt still `Sending` in this scope
-    /// crashed between vendor egress and the result write. Mark each
-    /// `Unknown`; never blindly resend.
+    /// Crash recovery (OUT-6): attempts still `Sending` in this scope are
+    /// assumed to have crashed between vendor egress and the result write,
+    /// and are marked `Unknown`; never blindly resend. This is not a
+    /// guarantee that every such attempt actually crashed: a genuinely
+    /// concurrent `deliver()` call for this scope can still be `Sending`
+    /// when the scan runs and gets marked `Unknown` transiently — that
+    /// delivery's own eventual `mark_terminal` call overwrites it with the
+    /// real terminal status, so the row self-heals. A per-attempt failure
+    /// does not abandon the captured snapshot: recovery continues, then
+    /// returns the first typed store error after all remaining attempts
+    /// have been guarded.
     pub async fn recover_interrupted_deliveries(
         &self,
         scope: ironclaw_turns::TurnScope,
     ) -> Result<usize, ironclaw_outbound::OutboundError> {
         let attempts = self.store.list_delivery_attempts(scope.clone()).await?;
         let mut recovered = 0usize;
+        let mut first_error = None;
         for attempt in attempts {
             if attempt.status != OutboundDeliveryStatus::Sending {
                 continue;
             }
-            self.store
-                .update_delivery_status(UpdateDeliveryStatusRequest {
+            match self
+                .store
+                .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
                     delivery_id: attempt.delivery_id,
                     scope: scope.clone(),
-                    status: OutboundDeliveryStatus::Unknown,
-                    updated_at: chrono::Utc::now(),
-                    failure_kind: None,
                 })
-                .await?;
-            recovered += 1;
+                .await
+            {
+                Ok(true) => recovered += 1,
+                Ok(false) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(error) => {
+                    debug!(
+                        delivery_id = %attempt.delivery_id,
+                        error = %error,
+                        "delivery coordinator: additional recovery attempt failed after first error was captured"
+                    );
+                }
+            }
         }
         if recovered > 0 {
             debug!(
                 recovered,
                 "delivery coordinator: interrupted deliveries marked Unknown (never resent)"
             );
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(recovered)
     }

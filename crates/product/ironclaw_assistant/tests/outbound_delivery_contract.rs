@@ -19,14 +19,18 @@ use ironclaw_host_api::{
     product_adapter::AdapterInstallationId,
 };
 use ironclaw_outbound::{
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, OutboundDeliveryAttempt, OutboundError,
-    OutboundPolicyService, OutboundStateStore, OutboundStateStorePort, ReplyTargetBindingClaim,
-    ReplyTargetBindingValidator, RunNotificationContext, RunNotificationEventKind,
-    RunNotificationOrigin, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
-    ThreadProjectionAccessRequest, VersionedCommunicationPreferenceRecord,
-    WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, DeliveryFailureKind,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    OutboundPolicyService, OutboundPushPlan, OutboundPushTargetRequest, OutboundStateStore,
+    OutboundStateStorePort, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_threads::{AttachmentKind, AttachmentRef, ThreadScope};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
@@ -244,6 +248,7 @@ use ironclaw_assistant::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
 };
+use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
@@ -252,6 +257,150 @@ use ironclaw_extension_contracts::channel_adapter::{
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
+use tokio::sync::Barrier;
+
+// `OutboundError` intentionally does not derive `Clone` in production (see its
+// doc comments on `CasConflict`), so a scripted-failure map can't hold owned
+// `OutboundError` values without cloning them out on lookup. This mirror
+// carries just enough of the variant to reconstruct a fresh `OutboundError`
+// per lookup, so two attempts in the same scan can be scripted to fail with
+// two distinct, identifiable errors.
+#[derive(Clone, Copy)]
+enum ScriptedRecoveryFailure {
+    Backend,
+    Serialization,
+}
+
+impl From<ScriptedRecoveryFailure> for OutboundError {
+    fn from(failure: ScriptedRecoveryFailure) -> Self {
+        match failure {
+            ScriptedRecoveryFailure::Backend => OutboundError::Backend,
+            ScriptedRecoveryFailure::Serialization => OutboundError::Serialization,
+        }
+    }
+}
+
+// Keep this decorator local despite the contract file's size: it exercises recovery-only
+// store seams, and extracting the two uses would prematurely create shared test support.
+struct RecoveryTestStore {
+    inner: Arc<OutboundStateStore<InMemoryBackend>>,
+    pause_after_snapshot: Option<(Arc<Barrier>, Arc<Barrier>)>,
+    // Maps a delivery_id to the typed store error that recovery should surface for
+    // that attempt, so a single test can script distinct failures on distinct
+    // attempts (e.g. to prove the coordinator returns the *first* one).
+    fail_recovery_for: HashMap<ironclaw_outbound::OutboundDeliveryId, ScriptedRecoveryFailure>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for RecoveryTestStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: RunDeliveryCleanupRequest,
+    ) -> Result<Vec<RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+
+    async fn load_thread_notification_policy(
+        &self,
+        scope: TurnScope,
+    ) -> Result<ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+
+    async fn plan_push_targets(
+        &self,
+        request: OutboundPushTargetRequest,
+    ) -> Result<OutboundPushPlan, OutboundError> {
+        self.inner.plan_push_targets(request).await
+    }
+
+    async fn upsert_subscription(
+        &self,
+        record: ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+
+    async fn load_subscription_cursor(
+        &self,
+        request: LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+
+    async fn advance_subscription_cursor(
+        &self,
+        request: AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.advance_subscription_cursor(request).await
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        if let Some(failure) = self.fail_recovery_for.get(&request.delivery_id) {
+            return Err((*failure).into());
+        }
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+
+    async fn update_delivery_status(
+        &self,
+        request: UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.update_delivery_status(request).await
+    }
+
+    async fn list_delivery_attempts(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        let attempts = self.inner.list_delivery_attempts(scope).await?;
+        if let Some((snapshot_listed, resume_recovery)) = &self.pause_after_snapshot {
+            snapshot_listed.wait().await;
+            resume_recovery.wait().await;
+        }
+        Ok(attempts)
+    }
+}
 
 struct CoordinatorDenyAllEgress;
 
@@ -1747,6 +1896,299 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
         ironclaw_outbound::OutboundDeliveryStatus::Unknown
     );
     assert_eq!(adapter.deliver_calls(), 1, "adapter never called again");
+}
+
+#[tokio::test]
+async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let first_attempted_at = Utc::now();
+    let mut seeded = Vec::new();
+    for index in 0..3 {
+        let attempt = OutboundDeliveryAttempt {
+            delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+            scope: scope.clone(),
+            candidate: ironclaw_outbound::OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: None,
+                target: validated_reply_target(),
+                kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+                projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(format!(
+                    "projection:recovery-scan:{index}"
+                ))
+                .expect("projection ref"),
+                requires_reply_target_revalidation: false,
+            },
+            status: OutboundDeliveryStatus::Sending,
+            attempted_at: first_attempted_at + chrono::Duration::milliseconds(index),
+            failure_kind: None,
+        };
+        store
+            .record_delivery_attempt(attempt.clone())
+            .await
+            .expect("seed ordered sending attempt");
+        seeded.push(attempt);
+    }
+    let listed_ids: Vec<_> = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("load ordered recovery snapshot")
+        .into_iter()
+        .map(|attempt| attempt.delivery_id)
+        .collect();
+    assert_eq!(
+        listed_ids,
+        seeded
+            .iter()
+            .map(|attempt| attempt.delivery_id)
+            .collect::<Vec<_>>()
+    );
+
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let recovery_store = Arc::new(RecoveryTestStore {
+        inner: Arc::clone(&store),
+        pause_after_snapshot: None,
+        fail_recovery_for: HashMap::from([(
+            seeded[1].delivery_id,
+            ScriptedRecoveryFailure::Backend,
+        )]),
+    });
+    let coordinator = DeliveryCoordinator::new(
+        recovery_store as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter,
+            unavailable: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let result = coordinator
+        .recover_interrupted_deliveries(scope.clone())
+        .await;
+    assert!(matches!(result, Err(OutboundError::Backend)));
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempts after recovery scan");
+    assert_eq!(attempts.len(), 3);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Unknown);
+    assert_eq!(attempts[1].status, OutboundDeliveryStatus::Sending);
+    assert_eq!(attempts[2].status, OutboundDeliveryStatus::Unknown);
+}
+
+#[tokio::test]
+async fn coordinator_recovery_returns_the_first_store_error_not_a_later_one() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let first_attempted_at = Utc::now();
+    let mut seeded = Vec::new();
+    for index in 0..3 {
+        let attempt = OutboundDeliveryAttempt {
+            delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+            scope: scope.clone(),
+            candidate: ironclaw_outbound::OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: None,
+                target: validated_reply_target(),
+                kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+                projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(format!(
+                    "projection:recovery-scan-first-error:{index}"
+                ))
+                .expect("projection ref"),
+                requires_reply_target_revalidation: false,
+            },
+            status: OutboundDeliveryStatus::Sending,
+            attempted_at: first_attempted_at + chrono::Duration::milliseconds(index),
+            failure_kind: None,
+        };
+        store
+            .record_delivery_attempt(attempt.clone())
+            .await
+            .expect("seed ordered sending attempt");
+        seeded.push(attempt);
+    }
+    let listed_ids: Vec<_> = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("load ordered recovery snapshot")
+        .into_iter()
+        .map(|attempt| attempt.delivery_id)
+        .collect();
+    assert_eq!(
+        listed_ids,
+        seeded
+            .iter()
+            .map(|attempt| attempt.delivery_id)
+            .collect::<Vec<_>>()
+    );
+
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    // Two distinct attempts fail with two distinct typed errors: the earlier
+    // attempt (index 0) fails with `Serialization`, the later attempt
+    // (index 2) fails with `Backend`. Recovery must still process every
+    // captured attempt (including the middle, successfully recovered one)
+    // and must surface the earlier error, not the later one.
+    let recovery_store = Arc::new(RecoveryTestStore {
+        inner: Arc::clone(&store),
+        pause_after_snapshot: None,
+        fail_recovery_for: HashMap::from([
+            (
+                seeded[0].delivery_id,
+                ScriptedRecoveryFailure::Serialization,
+            ),
+            (seeded[2].delivery_id, ScriptedRecoveryFailure::Backend),
+        ]),
+    });
+    let coordinator = DeliveryCoordinator::new(
+        recovery_store as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter,
+            unavailable: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let result = coordinator
+        .recover_interrupted_deliveries(scope.clone())
+        .await;
+    assert!(
+        matches!(result, Err(OutboundError::Serialization)),
+        "recovery must return the earlier (Serialization) error, not the later (Backend) one: {result:?}"
+    );
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempts after recovery scan");
+    assert_eq!(attempts.len(), 3);
+    // The failing attempts are untouched by their own failed recovery calls...
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
+    // ...but recovery still gave the attempt between them its opportunity.
+    assert_eq!(attempts[1].status, OutboundDeliveryStatus::Unknown);
+    assert_eq!(attempts[2].status, OutboundDeliveryStatus::Sending);
+}
+
+async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
+    terminal_status: OutboundDeliveryStatus,
+    terminal_failure_kind: Option<DeliveryFailureKind>,
+) {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: ironclaw_outbound::OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: None,
+            target: validated_reply_target(),
+            kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                "projection:concurrent-delivery",
+            )
+            .expect("projection ref"),
+            requires_reply_target_revalidation: false,
+        },
+        status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+        attempted_at: Utc::now(),
+        failure_kind: None,
+    };
+    store
+        .record_delivery_attempt(attempt.clone())
+        .await
+        .expect("seed sending attempt");
+
+    let snapshot_listed = Arc::new(Barrier::new(2));
+    let resume_recovery = Arc::new(Barrier::new(2));
+    let pausing_store = Arc::new(RecoveryTestStore {
+        inner: Arc::clone(&store),
+        pause_after_snapshot: Some((Arc::clone(&snapshot_listed), Arc::clone(&resume_recovery))),
+        fail_recovery_for: HashMap::new(),
+    });
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        pausing_store as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter,
+            unavailable: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let recovery_scope = scope.clone();
+    let recovery = tokio::spawn(async move {
+        coordinator
+            .recover_interrupted_deliveries(recovery_scope)
+            .await
+    });
+    snapshot_listed.wait().await;
+
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            status: terminal_status,
+            updated_at: Utc::now(),
+            failure_kind: terminal_failure_kind,
+        })
+        .await
+        .expect("concurrent worker commits terminal status");
+    resume_recovery.wait().await;
+
+    let recovered = recovery
+        .await
+        .expect("recovery task joins")
+        .expect("recovery scans");
+    assert_eq!(recovered, 0, "terminal attempt was not recovered");
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load final attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status, terminal_status,
+        "stale recovery must preserve the concurrent terminal transition"
+    );
+    assert_eq!(
+        attempts[0].failure_kind, terminal_failure_kind,
+        "stale recovery must preserve the terminal failure classification"
+    );
+}
+
+#[tokio::test]
+async fn coordinator_recovery_never_clobbers_concurrent_terminal_statuses() {
+    for (status, failure_kind) in [
+        (OutboundDeliveryStatus::Delivered, None),
+        (
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::TransportUnavailable),
+        ),
+    ] {
+        assert_coordinator_recovery_preserves_concurrent_terminal_status(status, failure_kind)
+            .await;
+    }
 }
 
 #[tokio::test]
