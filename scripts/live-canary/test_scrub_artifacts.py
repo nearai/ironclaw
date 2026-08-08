@@ -302,6 +302,37 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertEqual(trace.read_text(encoding="utf-8"), original + "\n")
             self.assertNotIn("Potential secret material", result.stdout)
 
+    def test_bearer_length_boundary(self) -> None:
+        # Pin the exact {16,} floor on the shell side too (the emitter's
+        # mirror rule pins it in test_emit_results_json.py): 15 token-alphabet
+        # chars after "bearer" pass through untouched, 16 trip the guardrail.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            below = root / "below.log"
+            below.write_text("bearer abcdefghijklmno\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(
+                below.read_text(encoding="utf-8"),
+                "bearer abcdefghijklmno\n",
+            )
+            self.assertNotIn("Potential secret material", result.stdout)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            at_floor = root / "at-floor.log"
+            at_floor.write_text("bearer abcdefghijklmnop\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn(
+                "bearer <REDACTED>",
+                at_floor.read_text(encoding="utf-8"),
+            )
+
     def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

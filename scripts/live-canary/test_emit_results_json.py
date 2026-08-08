@@ -341,6 +341,19 @@ class TokenRedactionTests(unittest.TestCase):
         )
         self.assertEqual(emit.redact(prose), prose)
 
+    def test_bearer_length_boundary(self):
+        # Pin the exact {16,} floor: 15 token-alphabet chars pass through,
+        # 16 get redacted. The prose test alone would not catch a {15,}
+        # regression.
+        self.assertEqual(
+            emit.redact("Bearer abcdefghijklmno"),
+            "Bearer abcdefghijklmno",
+        )
+        self.assertEqual(
+            emit.redact("Bearer abcdefghijklmnop"),
+            "Bearer <REDACTED>",
+        )
+
     def test_anthropic_key_wins_over_openai_pattern(self):
         # Both `sk-ant-…` and `sk-…` are valid prefixes. The Anthropic
         # rule is listed first so the dedicated label survives — and
