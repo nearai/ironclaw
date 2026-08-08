@@ -9,6 +9,20 @@ use crate::host::{WasmHttpRequest, WitToolHost};
 use crate::types::{WasmLogLevel, WasmLogRecord};
 use ironclaw_wasm_limiter::WasmResourceLimiter;
 
+// ── Security model: per-capability Nostr gating ─────────────────────────
+//
+// The `WitToolHost` is built per-scope in the composition layer
+// (`host_for_scope` in the runtime adapter). The `nostr` field defaults to
+// `DenyWasmHostNostr`, which refuses all Nostr operations. Nostr is only
+// available when the composition layer explicitly wires a non-deny
+// `WasmHostNostr` implementation via `WitToolHost::with_nostr()` — and it
+// should only do so when the capability's authority grants Nostr access.
+//
+// This means the store does NOT need to check Nostr authority itself: the
+// wiring decision at the adapter level IS the gate. If `nostr` is deny,
+// every nostr_sign_event / nostr_publish_event / nostr_subscribe_events
+// call returns an "not configured" error to the WASM guest.
+
 pub(crate) struct StoreData {
     host: WitToolHost,
     pub(crate) limiter: WasmResourceLimiter,
@@ -173,6 +187,71 @@ impl bindings::near::agent::host::Host for StoreData {
             return false;
         }
         exists
+    }
+
+    fn nostr_sign_event(&mut self, unsigned_event_json: String) -> Result<String, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let result = self
+            .host
+            .nostr
+            .sign_event(&unsigned_event_json)
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
+    }
+
+    fn nostr_publish_event(
+        &mut self,
+        relay_url: String,
+        signed_event_json: String,
+    ) -> Result<String, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let remaining_deadline_ms = self.remaining_timeout_ms(None);
+        // Egress bytes: NIP-01 frame is ["EVENT",<event_json>] — overhead is ~12 bytes
+        // for the JSON array wrapper. The relay module builds the actual frame.
+        let egress_bytes = signed_event_json.len() as u64 + 12;
+        self.record_network_egress(egress_bytes);
+        let result = self
+            .host
+            .nostr
+            .publish_event(&relay_url, &signed_event_json, remaining_deadline_ms)
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
+    }
+
+    fn nostr_subscribe_events(
+        &mut self,
+        relay_url: String,
+        filter_json: String,
+        timeout_ms: u32,
+    ) -> Result<String, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let remaining_deadline_ms = self.remaining_timeout_ms(Some(timeout_ms));
+        let effective_timeout = remaining_deadline_ms.unwrap_or(timeout_ms);
+        let _req_id = "wasm-subscribe";
+        // Egress bytes: NIP-01 REQ frame is ["REQ",<id>,<filters>...] — overhead ~20 bytes
+        let egress_bytes = filter_json.len() as u64 + 20;
+        self.record_network_egress(egress_bytes);
+        let result = self
+            .host
+            .nostr
+            .subscribe_events(&relay_url, &filter_json, effective_timeout, remaining_deadline_ms)
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
     }
 }
 

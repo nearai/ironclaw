@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     panic::AssertUnwindSafe,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, LazyLock, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
@@ -30,7 +30,8 @@ use super::{
     ResourceReservationId, ResourceScope, RootFilesystem, RuntimeAdapterResult,
     RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane, ScriptError, ScriptExecutionRequest,
     ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
-    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
+    WasmHostError, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
+    DenyWasmHostNostr, WasmHostNostr, WitToolHost,
     WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::obligations::RuntimeSecretInjectionStore;
@@ -905,6 +906,7 @@ pub(super) struct WasmRuntimeAdapter {
     runtime_http_egress: SharedRuntimeHttpEgress,
     credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
+    nostr_host: Option<Arc<dyn WasmHostNostr>>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -916,6 +918,7 @@ impl WasmRuntimeAdapter {
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
+        nostr_host: Option<Arc<dyn WasmHostNostr>>,
     ) -> Self {
         Self {
             runtime,
@@ -924,6 +927,7 @@ impl WasmRuntimeAdapter {
             runtime_http_egress,
             credential_provider,
             secret_injections,
+            nostr_host,
             prepared: Mutex::new(HashMap::new()),
         }
     }
@@ -935,6 +939,7 @@ impl WasmRuntimeAdapter {
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
+        nostr_host: Option<Arc<dyn WasmHostNostr>>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
@@ -943,6 +948,7 @@ impl WasmRuntimeAdapter {
             runtime_http_egress,
             credential_provider,
             secret_injections,
+            nostr_host,
         ))
     }
 
@@ -967,7 +973,7 @@ impl WasmRuntimeAdapter {
         );
         let egress = runtime_http_egress(&self.runtime_http_egress);
         let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
-            return if egress.is_some() {
+            let mut host = if egress.is_some() {
                 self.host
                     .clone()
                     .with_http(Arc::new(DenyWasmHostHttp))
@@ -975,13 +981,18 @@ impl WasmRuntimeAdapter {
             } else {
                 self.host.clone().with_secrets(Arc::new(secrets))
             };
+            // No network policy → deny nostr (fail-closed)
+            host = host.with_nostr(Arc::new(DenyWasmHostNostr));
+            return host;
         };
         let Some(egress) = egress else {
-            return self
+            let mut host = self
                 .host
                 .clone()
                 .with_http(Arc::new(DenyWasmHostHttp))
                 .with_secrets(Arc::new(secrets));
+            host = host.with_nostr(Arc::new(DenyWasmHostNostr));
+            return host;
         };
         let mut adapter =
             WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy)
@@ -991,10 +1002,16 @@ impl WasmRuntimeAdapter {
         if let Some(provider) = &self.credential_provider {
             adapter = adapter.with_credential_provider(Arc::clone(provider));
         }
-        self.host
+        let mut host = self
+            .host
             .clone()
             .with_http(Arc::new(adapter))
-            .with_secrets(Arc::new(secrets))
+            .with_secrets(Arc::new(secrets));
+        // Wire production Nostr if available
+        if let Some(nostr) = &self.nostr_host {
+            host = host.with_nostr(Arc::clone(nostr));
+        }
+        host
     }
 }
 
@@ -1206,5 +1223,114 @@ pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kernel adapter-level Nostr host
+// ---------------------------------------------------------------------------
+
+use ironclaw_wasm::{decode_nostr_private_key, sign_nostr_event};
+use ironclaw_wasm::{publish_nostr_event, subscribe_nostr_events};
+
+/// Dedicated Tokio runtime for Nostr relay egress.
+///
+/// Uses a single worker thread (same pattern as `FILESYSTEM_RUNTIME` in
+/// `http_body.rs`). The runtime is lazily initialised on first use; if
+/// construction fails the error is stored and returned on every subsequent
+/// call.
+static NOSTR_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHostError>> =
+    LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("ironclaw-nostr-egress")
+            .enable_all()
+            .build()
+            .map_err(|e| WasmHostError::Failed(format!("nostr egress runtime: {e}")))
+    });
+
+/// Production Nostr host for the kernel adapter layer.
+///
+/// Resolves the signing key from the secret store and delegates relay I/O
+/// to the publicly exported `ironclaw_wasm::nostr_relay` / `nostr_signer`
+/// functions. SSRF protection (private IP rejection, wss://-only enforcement)
+/// is handled by those modules; mediation (network policy gating) happens
+/// at the `host_for_scope` adapter level.
+pub(super) struct KernelNostrHost {
+    private_key_bytes: [u8; 32],
+}
+
+impl KernelNostrHost {
+    /// Build a kernel Nostr host from a hex or nsec private key.
+    pub(super) fn new(hex_or_nsec_key: &str) -> Result<Self, WasmHostError> {
+        let private_key_bytes = decode_nostr_private_key(hex_or_nsec_key)
+            .map_err(|e| WasmHostError::Failed(format!("nostr key: {e}")))?;
+        Ok(Self { private_key_bytes })
+    }
+
+    /// Block on an async future using the dedicated Nostr egress runtime.
+    ///
+    /// Uses the same thread-scope + block_on pattern as the kernel's
+    /// `block_on_filesystem` in http_body.rs: spawn a dedicated thread inside
+    /// `std::thread::scope`, call `block_on` there, and wrap the result in
+    /// `catch_unwind` so panics are reported as errors rather than aborting.
+    fn block_on_nostr<F, T>(future: F) -> Result<T, WasmHostError>
+    where
+        F: std::future::Future<Output = Result<T, WasmHostError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let runtime = NOSTR_EGRESS_RUNTIME.as_ref().map_err(|e| e.clone())?;
+        let handle = runtime.handle().clone();
+        std::thread::scope(|scope| {
+            let joined = scope.spawn(move || {
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| handle.block_on(future)));
+                match result {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err(WasmHostError::Failed(
+                        "Nostr egress task panicked".to_string(),
+                    )),
+                }
+            });
+            joined.join().unwrap_or_else(|_| {
+                Err(WasmHostError::Failed(
+                    "Nostr egress thread panicked".to_string(),
+                ))
+            })
+        })
+    }
+}
+
+impl WasmHostNostr for KernelNostrHost {
+    fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
+        sign_nostr_event(unsigned_event_json, &self.private_key_bytes)
+            .map_err(|e| WasmHostError::Failed(format!("nostr sign: {e}")))
+    }
+
+    fn publish_event(
+        &self,
+        relay_url: &str,
+        signed_event_json: &str,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        let url = relay_url.to_string();
+        let event = signed_event_json.to_string();
+        Self::block_on_nostr(async move {
+            publish_nostr_event(&url, &event, remaining_deadline_ms).await
+        })
+    }
+
+    fn subscribe_events(
+        &self,
+        relay_url: &str,
+        filter_json: &str,
+        timeout_ms: u32,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        let url = relay_url.to_string();
+        let filter = filter_json.to_string();
+        Self::block_on_nostr(async move {
+            subscribe_nostr_events(&url, &filter, timeout_ms, remaining_deadline_ms).await
+        })
     }
 }
