@@ -618,9 +618,17 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
                 f"retention-depth-e2e-{uuid.uuid4()}",
                 expected=3,
             )
-        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible(
+        # An operator who navigated to a turn keeps it: the arriving turn widens
+        # the window without yanking the selection to the newest run. Following
+        # it is an explicit "Latest" click.
+        await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible(
             timeout=30000
         )
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
 
         await activity.get_by_label("Previous turn").click()
         await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible()
