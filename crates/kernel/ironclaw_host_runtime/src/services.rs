@@ -78,7 +78,7 @@ use crate::{
     HostRuntimeError, HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest,
     InvocationServicesResolver, PostEditCheckConfig, ProcessObligationLifecycleStore,
     RuntimeBackendHealth, RuntimeProcessPort, RuntimeSecretMaterialStager, RuntimeSecretStageError,
-    TenantSandboxProcessPort, ToolCallHttpEgress,
+    ToolCallHttpEgress, UserSandboxProcessPort,
 };
 use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
@@ -157,7 +157,7 @@ where
     tool_call_http_egress: SharedToolCallHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
     managed_process_port: bool,
-    tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
+    user_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -469,7 +469,7 @@ where
             tool_call_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(HostProcessPort::new()),
             managed_process_port: true,
-            tenant_sandbox_process_port: None,
+            user_sandbox_process_port: None,
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
@@ -508,7 +508,7 @@ where
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<HostProcessPort>(),
-                tenant_sandbox_process_port: None,
+                user_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -616,9 +616,9 @@ where
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
         }
-        if let Some(process_port) = &self.tenant_sandbox_process_port {
+        if let Some(process_port) = &self.user_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
-                .with_tenant_sandbox_process_port(Arc::clone(process_port));
+                .with_user_sandbox_process_port(Arc::clone(process_port));
         }
         if let Some(post_edit_check) = &self.post_edit_check {
             invocation_services_resolver =

@@ -54,6 +54,31 @@ fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_targe
         !TRIGGER_CREATE_DESCRIPTION.contains("delivery_target_id"),
         "trigger_create description must not advertise the retired stored delivery target: {TRIGGER_CREATE_DESCRIPTION}"
     );
+    // The web-app no-delivery default must be scoped to "no external
+    // destination named". The earlier categorical phrasing ("never call
+    // builtin__outbound_deliver in a web-app-created routine") was observed
+    // live being over-applied when the user DID name a destination: creation
+    // turns reasoned "web app → never outbound_deliver" and wrote vendor
+    // send_message steps to reach the requester instead.
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("no external destination named"),
+        "the web-app no-delivery default must be scoped to unnamed destinations: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        !TRIGGER_CREATE_DESCRIPTION.contains("never call builtin__outbound_deliver"),
+        "the categorical web-app never-clause invites vendor-send improvisation when a destination IS named: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    // The named-destination rule: reaching the requester on an external
+    // surface is bot delivery through the pinned target, never an
+    // act-as-user integration messaging tool.
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("names an external destination"),
+        "the named-destination case must be explicit, web app included: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("never through integration messaging tools"),
+        "messages to the requester must be steered away from act-as-user vendor sends: {TRIGGER_CREATE_DESCRIPTION}"
+    );
 }
 
 #[test]

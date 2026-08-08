@@ -725,6 +725,7 @@ use super::{RebornSkillActivationSource, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const PRODUCTION_SHAPED_BUILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
     runtime.turn_scheduler.stop_for_test().await;
@@ -765,6 +766,11 @@ struct ToolCallingGateway {
     calls: StdMutex<usize>,
     stream_model_calls: StdMutex<usize>,
     requests: StdMutex<Vec<HostManagedModelRequest>>,
+}
+
+#[derive(Debug, Default)]
+struct SandboxShellCallingGateway {
+    calls: StdMutex<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -970,6 +976,97 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 id: "call-1".to_string(),
                 name: echo_tool.name,
                 arguments: serde_json::json!({"message": "hello from tool"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_capability_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for SandboxShellCallingGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "expected capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("shell gateway lock poisoned");
+            let call_index = *calls;
+            *calls += 1;
+            call_index
+        };
+        if call_index == 1 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                .expect("second model call should include shell result");
+            assert!(
+                tool_result.content.contains("railway-sandbox-marker"),
+                "shell result should come from the configured sandbox transport: {}",
+                tool_result.content
+            );
+            let envelope: serde_json::Value = serde_json::from_str(&tool_result.content)
+                .expect("tool result should be a structured reference envelope");
+            let preview = envelope["model_observation"]["detail"]["preview"]
+                .as_str()
+                .expect("tool result should include an inline preview");
+            let shell_output: serde_json::Value =
+                serde_json::from_str(preview).expect("shell preview should be structured JSON");
+            assert_eq!(
+                shell_output["sandboxed"],
+                serde_json::json!(true),
+                "model-visible shell result must report sandbox execution"
+            );
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "sandbox shell ok",
+            ));
+        }
+
+        let surface = capabilities
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .map_err(model_capability_error)?;
+        let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
+            .expect("shell capability id");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id == shell_id),
+            "builtin shell must be visible for a sandboxed hosted profile"
+        );
+        let shell_tool = capabilities
+            .tool_definitions()
+            .map_err(model_capability_error)?
+            .into_iter()
+            .find(|definition| definition.capability_id == shell_id)
+            .expect("shell provider tool definition");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("provider-turn-shell".to_string()),
+                id: "shell-call-1".to_string(),
+                name: shell_tool.name,
+                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
@@ -2820,16 +2917,14 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2882,16 +2977,14 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2955,16 +3048,14 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_tool_disclosure(ToolDisclosureMode::Off)
@@ -3048,6 +3139,126 @@ impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTra
             duration: Duration::ZERO,
         })
     }
+}
+
+#[derive(Debug, Default)]
+struct ShellRecordingSandboxTransport {
+    requests: StdMutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
+    shutdown_calls: AtomicUsize,
+}
+
+#[test]
+fn user_sandbox_shutdown_error_preserves_runtime_process_source() {
+    use std::error::Error as _;
+
+    let source = ironclaw_host_api::process::RuntimeProcessError::ExecutionFailed(
+        "sanitized checkpoint failure".to_string(),
+    );
+    let error = super::RebornRuntimeError::UserSandboxShutdown(source.clone());
+
+    assert_eq!(
+        error.source().map(ToString::to_string),
+        Some(source.to_string())
+    );
+}
+
+#[async_trait]
+impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        request: ironclaw_host_api::process::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
+    > {
+        self.requests
+            .lock()
+            .expect("sandbox request lock poisoned")
+            .push(request);
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
+            output: "railway-sandbox-marker".to_string(),
+            saved_output: None,
+            exit_code: 0,
+            // The trusted process adapter, rather than a provider transport,
+            // owns this provenance bit and must normalize it to true.
+            sandboxed: false,
+            duration: Duration::ZERO,
+        })
+    }
+
+    async fn shutdown(&self) -> Result<(), ironclaw_host_api::process::RuntimeProcessError> {
+        self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(SandboxShellCallingGateway::default());
+    let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+            "runtime-railway-shell-owner",
+            root.path().join("sandboxed"),
+        )
+        .with_runtime_policy(
+            crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
+                .expect("hosted sandbox policy resolves"),
+        )
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(sandbox_transport.clone()),
+        ))),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-railway-shell-tenant".to_string(),
+        agent_id: "runtime-railway-shell-agent".to_string(),
+        source_binding_id: "runtime-railway-shell-source".to_string(),
+        reply_target_binding_id: "runtime-railway-shell-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime =
+        tokio::time::timeout(PRODUCTION_SHAPED_BUILD_TIMEOUT, build_reborn_runtime(input))
+            .await
+            .expect("sandboxed Railway runtime build should finish")
+            .expect("sandboxed Railway runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
+    let reply = tokio::time::timeout(
+        RUNTIME_SEND_TIMEOUT,
+        runtime.send_user_message(&conversation, "run the shell marker"),
+    )
+    .await
+    .expect("sandbox shell turn should finish")
+    .expect("sandbox shell turn succeeds");
+
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("sandbox shell ok"));
+    {
+        let requests = sandbox_transport
+            .requests
+            .lock()
+            .expect("sandbox request lock poisoned");
+        assert_eq!(
+            requests.len(),
+            1,
+            "shell must use the sandbox transport once"
+        );
+        assert_eq!(requests[0].command, "printf railway-sandbox-marker");
+    }
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, runtime.shutdown())
+        .await
+        .expect("runtime shutdown should finish")
+        .expect("runtime shutdown");
+    assert_eq!(sandbox_transport.shutdown_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

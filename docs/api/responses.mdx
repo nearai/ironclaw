@@ -102,6 +102,7 @@ curl -X POST https://your-host/api/v1/responses \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
+    "model": "default",
     "input": "What time is it?"
   }'
 ```
@@ -135,7 +136,7 @@ The OpenAI Python and TypeScript SDKs work as-is. Point `base_url` at `https://y
 from openai import OpenAI
 
 client = OpenAI(base_url="https://your-host/api/v1", api_key=TOKEN)
-resp = client.responses.create(input="What time is it?")
+resp = client.responses.create(model="default", input="What time is it?")
 print(resp.output_text)
 ```
 
@@ -158,19 +159,32 @@ print(resp.output_text)
 | Field | Required | Description |
 |-------|----------|-------------|
 | `input` | yes | A string, or an array of `message` / `function_call_output` items. See [External tools](#external-tools) for the array form. |
-| `model` | no | Must be `"default"`. Per-request model override is not yet supported; configure providers via settings. |
+| `model` | yes | Any well-formed model name: non-empty, no surrounding whitespace, no control characters, at most 256 bytes. Carried through as a server-side routing hint and echoed back in the response; provider and model selection is configured via settings. `"default"` is the conventional placeholder. |
 | `instructions` | no | System/developer instructions. Injected ahead of `input` as an `<instructions>` block and stored as part of the persisted user message. See [Per-request instructions](#per-request-instructions) for the IronClaw-specific replay caveat. |
 | `previous_response_id` | no | The `id` from a prior response. Resumes the same thread; see [Session continuity](#session-continuity). |
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
-| `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). |
+| `temperature` | no | Sampling temperature, `0.0`–`2.0` inclusive; values outside the range are rejected with `400`. Validated and carried in the submitted turn payload; it is not currently applied as a provider sampling parameter. |
+| `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). An empty `tools: []` is treated as omitted. |
+| `tool_choice` | no | Accepted and ignored — there is no per-request tool-choice surface. |
 | `x_context` | no | IronClaw extension. Structured JSON context (≤ 10 KB) prepended as `<user-context>`. The alias `context` is also accepted but may collide with future OpenAI fields. Prefer `x_context`. |
 
-These fields are rejected with `400` so callers know they were ignored rather than silently dropped:
+These are rejected with `400` so callers know they were not honoured:
 
-- `tool_choice` (no per-request tool surface to enforce against)
-- `temperature` (configure via settings)
-- `max_output_tokens` (not yet wired)
-- Any `model` other than `"default"`
+- `temperature` outside `0.0`–`2.0`
+- A malformed `model` (empty, surrounding whitespace, over 256 bytes, or control characters)
+- `x_context` larger than 10 KB
+
+Other OpenAI request fields not listed above (for example `max_output_tokens`)
+are **accepted and ignored**: the endpoint deliberately tolerates unknown
+fields so newer SDK payloads keep working, but unlisted fields have no effect.
+
+<Note>
+External-tools support is always wired on a standard `ironclaw serve`
+deployment, which is why `tools` and `tool_choice` are accepted above. A
+custom composition that mounts the Responses routes without external-tool
+wiring instead rejects non-empty `tools` and any `tool_choice` with `400`
+naming the field.
+</Note>
 
 ---
 
@@ -180,6 +194,7 @@ Each response embeds its thread UUID in the `id`. Pass the previous `id` back as
 
 ```json
 {
+  "model": "default",
   "input": "What did I just ask?",
   "previous_response_id": "resp_abc...xyz"
 }
@@ -196,7 +211,7 @@ curl https://your-host/api/v1/responses/$ID \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Returns the output items reconstructed from the stored conversation. Token usage is not retained per-message; the `usage` field on a retrieved response is zero.
+Returns the output items reconstructed from the stored conversation. The `usage` field is read best-effort from persisted run state (token totals plus USD cost); it can be zero when the run reported no usage.
 
 ---
 
@@ -208,7 +223,7 @@ Set `"stream": true` to receive Server-Sent Events:
 curl -N -X POST https://your-host/api/v1/responses \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"input":"Summarize the news.","stream":true}'
+  -d '{"model":"default","input":"Summarize the news.","stream":true}'
 ```
 
 Events follow the OpenAI Responses streaming format. The SSE `event:` field matches the JSON `type`:
@@ -238,6 +253,7 @@ This is a function-calling round-trip, not a prompt-level convention. The wire s
 
 ```json
 {
+  "model": "default",
   "input": "What is the weather in NYC?",
   "tools": [
     {
@@ -289,6 +305,7 @@ Execute the call locally, then POST a follow-up with a `function_call_output` it
 
 ```json
 {
+  "model": "default",
   "previous_response_id": "resp_...",
   "input": [
     {
@@ -318,6 +335,7 @@ You can interleave a fresh user message with the tool output by adding a `messag
 
 ```json
 {
+  "model": "default",
   "input": [
     { "type": "function_call_output", "call_id": "...", "output": "..." },
     { "type": "message", "role": "user", "content": "Also, what about tomorrow?" }
@@ -349,6 +367,7 @@ For integrations that need to pass structured state alongside the user message (
 
 ```json
 {
+  "model": "default",
   "input": "Process the latest webhook.",
   "x_context": {
     "webhook": { "source": "stripe", "event": "invoice.paid", "amount_cents": 4200 }
@@ -368,6 +387,7 @@ Use `instructions` to inject a one-turn system/developer message:
 
 ```json
 {
+  "model": "default",
   "input": "Summarize this.",
   "instructions": "Respond in three bullet points, no preamble."
 }
@@ -427,11 +447,12 @@ client = OpenAI(
 )
 
 # Basic
-resp = client.responses.create(input="Hello.")
+resp = client.responses.create(model="default", input="Hello.")
 print(resp.output_text)
 
 # With session continuity
 follow_up = client.responses.create(
+    model="default",
     input="What did I just say?",
     previous_response_id=resp.id,
 )
@@ -440,6 +461,7 @@ follow_up = client.responses.create(
 import json
 
 resp = client.responses.create(
+    model="default",
     input="What is the weather in NYC?",
     tools=[
         {
@@ -460,6 +482,7 @@ call = next(item for item in resp.output if item.type == "function_call")
 result = {"temp_f": 72, "conditions": "sunny"}  # your code
 
 final = client.responses.create(
+    model="default",
     previous_response_id=resp.id,
     input=[
         {
@@ -482,6 +505,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.responses.create({
+  model: "default",
   input: "What is the weather in NYC?",
   tools: [
     {
@@ -501,6 +525,7 @@ const call = resp.output.find((it) => it.type === "function_call");
 if (call) {
   const result = { temp_f: 72, conditions: "sunny" };
   const final = await client.responses.create({
+    model: "default",
     previous_response_id: resp.id,
     input: [
       {
@@ -523,12 +548,12 @@ if (call) {
 
 - **Rate limit**: 30 requests per 60 seconds per user (shared with `/api/chat/send`).
 - **Body size**: 14 MiB request limit at the gateway.
-- **Turn timeout (non-streaming)**: 120 seconds. Use `stream: true` for long-running work.
+- **Turn timeout (non-streaming)**: 30 seconds. Use `stream: true` for long-running work.
 - **Tool batching**: one external-tool call per round trip. The engine resumes the next call on the next turn.
 - **Approvals and auth gates**: not surfaced over the Responses API. Resolve them via the web UI before retrying.
-- **`tool_choice`, `temperature`, `max_output_tokens`**: not yet supported. Requests carrying these fields are rejected so callers see they were not honoured.
-- **`model`**: must be `"default"`. Provider and model selection is server-side via settings.
-- **Token usage on retrieval**: `GET /api/v1/responses/{id}` returns reconstructed output items but `usage` is zero because per-message token counts are not persisted.
+- **`tool_choice`**: accepted and ignored — there is no per-request tool-choice surface. `max_output_tokens` and other unlisted OpenAI fields are likewise accepted and ignored.
+- **`model`**: required, any well-formed name (≤ 256 bytes). It is a routing hint echoed back in the response; provider and model selection is server-side via settings.
+- **Token usage on retrieval**: `GET /api/v1/responses/{id}` reads `usage` best-effort from persisted run state (token totals plus USD cost); it can be zero when the run reported no usage.
 
 ---
 

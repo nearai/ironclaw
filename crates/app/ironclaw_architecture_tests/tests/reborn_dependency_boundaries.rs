@@ -631,7 +631,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
-        ("ironclaw_host_api", 18_784),
+        // Raised 18_784 -> 18_799 by #7214: the user-sandbox backend rename
+        // preserves the legacy `tenant_sandbox` wire value, and the neutral
+        // sandbox transport now exposes graceful lifecycle release. This is
+        // contract vocabulary; execution and provider cleanup remain in the
+        // sandbox runtime lane.
+        ("ironclaw_host_api", 18_799),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -656,12 +661,20 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // splitting `host/run_context.rs`'s 104-line inline `#[cfg(test)]`
         // module into its `run_context/tests.rs` sibling, so the ceiling
         // ratchets DOWN. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_028),
+        // 13_028 -> 13_094 (2026-08-08, merge with main): main's
+        // #7361/#7363 added +66 lines to `instruction_bundle.rs`, folded
+        // in when this branch merged main. Not growth from this PR; count
+        // read from this test's own failure message after the merge.
+        ("ironclaw_loop_contracts", 13_094),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
         // non-contract crates.
-        ("ironclaw_product_contracts", 15_758),
+        // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
+        // growth is the three admin scrape request DTOs and the wire
+        // `RebornListThreadsResponse` reuse — declarations only; authorization,
+        // audit, and artifact building stay in ironclaw_assistant.
+        ("ironclaw_product_contracts", 15_800),
         ("ironclaw_prompt_envelope", 832),
     ];
 

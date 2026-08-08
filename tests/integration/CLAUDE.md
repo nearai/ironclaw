@@ -77,10 +77,12 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
    façade removes.
 3. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
    gateway or stub internals.
-4. **Zero setup.** Must pass offline via a plain `cargo test --test reborn_<name>`
-   — no services, no API keys, no `integration` feature, no Docker, no special
-   linker. Hermetic env (keychain off, `TZ=UTC`, passthrough LLM config) is baked
-   into `build()`.
+4. **Zero setup by default.** Ordinary bins pass offline via a plain
+   `cargo test --test reborn_integration_<name>` — no services, API keys, Docker, or special
+   linker. The sole exception is `reborn_integration_sandbox_shell_turn`, a backend/runtime
+   integration test selected by a dedicated Docker CI lane; locally it skips
+   visibly unless Docker and the worker image are available, and CI sets
+   `IRONCLAW_REQUIRE_DOCKER_TESTS=1` so those prerequisites fail closed.
 5. **Minimal, inert edges.** The harness defaults every network/IO boundary to
    captured or inert — no real network, process, or channel. Wire only the
    boundaries your scenario actually crosses; a text-only turn needs no
@@ -115,7 +117,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   (`HarnessCapabilityRecorder`, `RecordedCapabilityResult`), and
   `harness/profiles/<domain>.rs` — one file per capability domain (`attachment`,
   `coding_read`, `core_builtin`, `extension`, `file`, `github`, `mock_mcp`,
-  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `skill`,
+  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `sandbox_shell`, `skill`,
   `trace_commons`, `trigger`, `web_access`) — each returning a `ToolsProfile` via
   a constructor like `profiles::file::file_tools_requiring_approval()` or
   `profiles::core_builtin::core_builtin_tools(CoreBuiltinOptions)`.
@@ -275,6 +277,12 @@ spawning any OS process.
 `HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
+
+**`.with_sandbox_shell_tools()`** — dedicated runtime-integration opt-in. It
+builds the explicit local-Docker sandbox profile through production composition
+and dispatches `builtin.shell` into the hardened Python worker. Only
+`reborn_sandbox_shell_turn.rs` selects it; the Docker availability gate remains
+owned by that test.
 
 ### MCP
 

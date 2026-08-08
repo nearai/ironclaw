@@ -439,12 +439,17 @@ pub(super) async fn build_backend_production(
     let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
-    let capability_policy =
-        Arc::new(
-            builtin_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
+    let runtime_policy = production_wiring.runtime_policy.clone();
+    let capability_policy = Arc::new(
+        builtin_capability_policy()
+            .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("capability policy is invalid: {error}"),
+            })?
+            .for_process_backend(runtime_policy.process_backend)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("capability policy is invalid for the process backend: {error}"),
             })?,
-        );
+    );
     let tool_permission_overrides = Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
@@ -462,7 +467,6 @@ pub(super) async fn build_backend_production(
             as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         persistent_approval_policies_for_settings,
     ));
-    let runtime_policy = production_wiring.runtime_policy.clone();
     let runtime_policy_for_return = Some(runtime_policy.clone());
     let authorizer = capability_authorizer(
         Some(&runtime_policy),
@@ -680,6 +684,10 @@ pub(super) async fn build_backend_production(
         services.with_runtime_process_port(Arc::new(process_port))
     } else {
         services
+    };
+    let user_sandbox_process_port = match &production_wiring.runtime_process_binding {
+        RebornRuntimeProcessBinding::None => None,
+        RebornRuntimeProcessBinding::UserSandbox { process_port } => Some(Arc::clone(process_port)),
     };
     let services = apply_production_runtime_process_binding(
         services,
@@ -1272,6 +1280,7 @@ pub(super) async fn build_backend_production(
 
     Ok(RebornRuntimeStores {
         host_runtime,
+        user_sandbox_process_port,
         #[cfg(test)]
         turn_coordinator,
         readiness: readiness_for(profile, true, true, product_auth_ready),
@@ -1286,7 +1295,6 @@ pub(super) async fn build_backend_production(
         persistent_approval_policies: Arc::clone(&stores.persistent_approval_policies),
         tool_permission_overrides: Arc::clone(&tool_permission_overrides),
         auto_approve_settings: Arc::clone(&auto_approve_settings),
-        #[cfg(any(test, feature = "test-support"))]
         capability_policy: Arc::clone(&capability_policy),
         outbound_preferences: outbound_stores.outbound_preferences,
         outbound_delivery_targets: Arc::clone(&outbound_delivery_targets),

@@ -56,6 +56,7 @@ use ironclaw_host_api::{
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
+    process::RuntimeProcessError,
     resource::ResourceScope,
     scope::Principal,
 };
@@ -117,7 +118,7 @@ use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
@@ -515,6 +516,8 @@ pub enum RebornRuntimeError {
     SkillExecutionUnavailable,
     #[error("skill execution failed: {0}")]
     SkillExecution(String),
+    #[error("user sandbox shutdown failed: {0}")]
+    UserSandboxShutdown(#[source] RuntimeProcessError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -544,6 +547,7 @@ pub(crate) struct OutboundTestStores {
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
+    user_sandbox_process_port: Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
@@ -2421,6 +2425,12 @@ impl RebornRuntime {
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
+        if let Some(process_port) = self.user_sandbox_process_port {
+            process_port
+                .shutdown()
+                .await
+                .map_err(RebornRuntimeError::UserSandboxShutdown)?;
+        }
         Ok(())
     }
 
@@ -3350,6 +3360,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         durable_milestone_sink,
         live_projection_publisher,
     );
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
     let (
         capability_factory,
         capability_input_resolver,
@@ -3359,12 +3373,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
         builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            tracing::error!(%error, "capability policy is invalid");
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("capability policy is invalid: {error}"),
-            }
-        })?);
+        let builtin_capability_policy = Arc::clone(&services.capability_policy);
+        let tool_diagnostic_sink = Arc::new(
+            ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+                diagnostic_store_impl.clone()
+                    as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+                ironclaw_loop_host::DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY,
+            )
+            .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+        )
+            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3375,6 +3393,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
+            Some(tool_diagnostic_sink),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -3635,10 +3654,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
-    let diagnostic_store_impl =
-        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
-    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
-        diagnostic_store_impl.clone();
     let prompt_diagnostic_sink = Arc::new(
         ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
             diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
@@ -4230,6 +4245,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
+        user_sandbox_process_port: services.user_sandbox_process_port.clone(),
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
         skill_management: services.skill_management.clone(),
