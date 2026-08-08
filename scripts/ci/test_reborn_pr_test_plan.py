@@ -629,6 +629,51 @@ class RebornPrTestPlanTests(unittest.TestCase):
         # An unrelated owner's entries are untouched by the relocation.
         self.assertIn("crates/app/ironclaw_cli/src/runtime/mod.rs", exact_paths)
 
+    def test_sandbox_docker_exact_paths_route_relocated_crate_through_build_plan(
+        self,
+    ) -> None:
+        """The sibling test above pins that a relocated crate's entries
+        appear in `_sandbox_docker_exact_paths()`'s returned set. That alone
+        would stay green even if `build_plan()` stopped consuming the
+        resolved set or stopped setting `run_sandbox_docker` for a matched
+        path — the exact silent loss of Docker coverage this change exists
+        to prevent. Drive `build_plan()` itself, the same way
+        `test_sandbox_docker_prefix_follows_crate_inventory_when_nested`
+        already does for `_sandbox_docker_prefixes`, and assert the emitted
+        Docker-lane flag."""
+        from crate_tree import crate_directory as real_crate_directory
+
+        moved_directory = "crates/kernel-next/ironclaw_runtime_policy"
+        moved_metadata = metadata()
+        next(
+            package
+            for package in moved_metadata["packages"]
+            if package["id"] == "alpha"
+        )["manifest_path"] = str(ROOT / moved_directory / "Cargo.toml")
+
+        def fake_crate_directory(name: str, root: Path = planner.ROOT) -> str:
+            if name == "ironclaw_runtime_policy":
+                return moved_directory
+            return real_crate_directory(name, root)
+
+        with mock.patch.object(
+            planner, "crate_directory", side_effect=fake_crate_directory
+        ):
+            plan = planner.build_plan(
+                event="pull_request",
+                changed_paths=[f"{moved_directory}/src/planner.rs"],
+                metadata=moved_metadata,
+                canonical_packages=self.canonical,
+            )
+
+        # `mode` must be "selected", not "full" — a package-resolution miss
+        # falls back to the exhaustive plan (see `build_plan`'s "a crate path
+        # maps to no workspace package" arm), which also sets
+        # `run_sandbox_docker`, but for the wrong reason and without
+        # exercising the exact-path routing this test targets.
+        self.assertEqual(plan["mode"], "selected")
+        self.assertTrue(plan["run_sandbox_docker"])
+
     def test_sandbox_docker_exact_paths_resolution_failure_fails_closed(self) -> None:
         """An unresolvable crate must raise, never silently drop that crate's
         entries from the exact-path set — the same fail-closed contract as
