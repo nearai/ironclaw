@@ -12,8 +12,8 @@ use crate::ironhub::{
     model::{
         IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
         IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry,
-        IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES, MAX_TOOL_SCHEMA_ARTIFACTS,
-        MAX_WASM_BYTES, SignedManifestEnvelope,
+        IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES, MAX_TOOL_PROMPT_ARTIFACTS,
+        MAX_TOOL_SCHEMA_ARTIFACTS, MAX_WASM_BYTES, SignedManifestEnvelope,
     },
 };
 
@@ -219,6 +219,13 @@ pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
         digest_material.push_str(&artifact.sha256);
         digest_material.push('\0');
     }
+    for (path, artifact) in &entry.prompts {
+        digest_material.push_str("prompt:");
+        digest_material.push_str(path);
+        digest_material.push('\0');
+        digest_material.push_str(&artifact.sha256);
+        digest_material.push('\0');
+    }
     sha256_digest_token(digest_material.as_bytes())
 }
 
@@ -291,6 +298,23 @@ fn validate_manifest_artifacts(
                 },
             )?;
             validate_artifact_for_origin(schema, MAX_METADATA_BYTES, origin)?;
+        }
+        if entry.prompts.len() > MAX_TOOL_PROMPT_ARTIFACTS {
+            return Err(catalog(format!(
+                "tool '{}' publishes more than {} prompt artifacts",
+                entry.name, MAX_TOOL_PROMPT_ARTIFACTS
+            )));
+        }
+        for (path, prompt) in &entry.prompts {
+            ironclaw_extension_contracts::runtime::ExtensionAssetPath::new(path.clone()).map_err(
+                |error| {
+                    catalog(format!(
+                        "tool '{}' publishes an invalid prompt path: {error}",
+                        entry.name
+                    ))
+                },
+            )?;
+            validate_artifact_for_origin(prompt, MAX_METADATA_BYTES, origin)?;
         }
     }
     for entry in &manifest.skills {

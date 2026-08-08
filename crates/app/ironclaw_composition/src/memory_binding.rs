@@ -28,7 +28,9 @@ fn deployment_profile(profile: RebornCompositionProfile) -> MemoryDeploymentProf
         // model as plain hosted-single-tenant, so it gets the same memory
         // deployment classification (and the same binding-certification rules).
         RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume => {
+        | RebornCompositionProfile::HostedSingleTenantVolume
+        | RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+        | RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway => {
             MemoryDeploymentProfile::HostedSingleTenant
         }
         RebornCompositionProfile::Production => MemoryDeploymentProfile::Production,

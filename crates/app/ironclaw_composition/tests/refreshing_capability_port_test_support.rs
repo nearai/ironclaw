@@ -400,6 +400,7 @@ fn test_parts(
     RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
+        surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         fallback_user_id: UserId::new("user-stub").expect("user id"),
         workspace_mounts: ironclaw_host_api::mount::MountView::default(),
         skill_mounts: ironclaw_host_api::mount::MountView::default(),
@@ -413,7 +414,7 @@ fn test_parts(
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_service: None,
-        outbound_delivery_target_set_requires_approval: false,
+        outbound_preference_write_requires_approval: false,
         tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),

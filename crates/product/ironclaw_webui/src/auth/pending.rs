@@ -24,7 +24,7 @@
 //! ticket — never an auth bypass. Note the composition product-auth setup
 //! path has since solved this same shape by moving its raw PKCE verifiers
 //! into the injected durable `SecretStorePort` (`product-auth-setup-pkce-…`,
-//! TTL-bounded, one-shot `lease_once`/`consume`) — and its CLAUDE.md now
+//! TTL-bounded, one-shot `lease_once`/`consume`) — and its CONTRACT.md now
 //! forbids reintroducing a process-local verifier cache there. Porting that
 //! pattern here additionally needs a decision about the storage scope for
 //! PRE-authentication material (there is no authenticated user to scope a

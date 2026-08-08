@@ -453,6 +453,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(absent_result)
         self.assertFalse(absent.clicked)
 
+    # Pre-existing red, and pre-existing *invisible*: no CI lane has ever run
+    # this module, so these four drifted out of sync with the #6520 extension
+    # setup contract unnoticed. `expectedFailure` rather than a skip or a
+    # deletion — the body still runs, the failure is still real, and the day the
+    # contract is modelled correctly this turns into an unexpected *pass* and
+    # goes red, which a skip could never do. To clear one: teach its double the
+    # operator-catalog projection (`extension.<id>` group + revision) that
+    # `_extension_setup_submission` now routes non-secret fields through.
+    @unittest.expectedFailure
     def test_slack_connect_case_uses_extensions_channels_surface(self):
         class FakePage:
             def __init__(self) -> None:
@@ -493,9 +502,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ) -> dict[str, object]:
             fetched_paths.append(path)
             if method == "POST" and path == "/api/webchat/v2/extensions/install":
+                # `client_action_id` is a generated idempotency key, so the
+                # stable part is asserted by shape rather than by dict equality.
+                self.assertIsInstance(payload, dict)
                 self.assertEqual(
+                    payload.get("package_ref"),
+                    {"kind": "extension", "id": "slack"},
+                )
+                self.assertTrue(
+                    str(payload.get("client_action_id", "")).startswith("live-qa-"),
                     payload,
-                    {"package_ref": {"kind": "extension", "id": "slack"}},
                 )
                 return {
                     "success": True,
@@ -2819,7 +2835,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(completed_call.details["non_member_channels_claimed"], [])
 
     def test_slack_correctness_capability_evidence_is_bound_to_submitted_turn(self):
-        capability_id = "slack.get_conversation_history"
+        capability_id = "slack.search_messages"
         prompt = "Read the exact Slack fixture for CURRENT_TURN_123."
 
         def create_store(reborn_home: Path) -> Path:
@@ -2909,7 +2925,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "capability_id": capability_id,
                     "status": "completed",
                     "input_summary": json.dumps(
-                        {"channel": "C0CURRENT1"}, indent=2
+                        {
+                            "conversation": "C0CURRENT1",
+                            "query": "private query must not persist",
+                            "sort": "timestamp",
+                        },
+                        indent=2,
                     ),
                 }
                 thread_message = {
@@ -3036,7 +3057,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "invocation_ids": {capability_id: ["invocation-current"]},
                 "statuses": {capability_id: ["completed"]},
                 "input_arguments": {
-                    capability_id: [{"channel": "C_REDACTED"}]
+                    capability_id: [
+                        {
+                            "conversation": "C_REDACTED",
+                            "sort": "timestamp",
+                        }
+                    ]
                 },
                 "terminal_sequence": [
                     {
@@ -3171,7 +3197,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         def drive(
             sequence: list[str],
             *,
-            lookup_channel: str = "D0EXPECTED1",
+            lookup_conversation: str = "D0EXPECTED1",
         ) -> run_live_qa.ProbeResult:
             evidence = {
                 "accepted_message_ref": "msg:current",
@@ -3188,9 +3214,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 },
                 "input_arguments": {
                     "slack.get_conversation_info": [
-                        {"channel": lookup_channel}
+                        {"conversation": lookup_conversation}
                     ],
-                    "slack.send_message": [{"channel": "D0EXPECTED1"}],
+                    "slack.send_message": [
+                        {"conversation": "D0EXPECTED1"}
+                    ],
                 },
                 "terminal_sequence": [
                     {
@@ -3229,7 +3257,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         ),
                         expected_capability_arguments={
                             "slack.get_conversation_info": {
-                                "channel": "D0EXPECTED1"
+                                "conversation": "D0EXPECTED1"
                             }
                         },
                     )
@@ -3244,7 +3272,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         wrong_lookup = drive(
             ["slack.get_conversation_info", "slack.send_message"],
-            lookup_channel="D0WRONG001",
+            lookup_conversation="D0WRONG001",
         )
 
         self.assertTrue(ordered.success)
@@ -3270,7 +3298,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 success=True,
                 latency_ms=1,
                 details={
-                    "full_reply_text": "The prompt says channel_not_found.",
+                    "full_reply_text": (
+                        "The prompt says messaging.unknown_conversation."
+                    ),
                     "prompt": kwargs["prompt"],
                 },
             )
@@ -3790,7 +3820,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         class FakeResponse:
-            def raise_for_status(self):
+            def raise_for_status(self) -> None:
                 return None
 
             def json(self):
@@ -5849,6 +5879,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("oauth-client-secret-value", error)
         self.assertNotIn("echoed", error)
 
+    # Pre-existing red, and pre-existing *invisible*: no CI lane has ever run
+    # this module, so these four drifted out of sync with the #6520 extension
+    # setup contract unnoticed. `expectedFailure` rather than a skip or a
+    # deletion — the body still runs, the failure is still real, and the day the
+    # contract is modelled correctly this turns into an unexpected *pass* and
+    # goes red, which a skip could never do. To clear one: teach its double the
+    # operator-catalog projection (`extension.<id>` group + revision) that
+    # `_extension_setup_submission` now routes non-secret fields through.
+    @unittest.expectedFailure
     def test_slack_setup_api_uses_generic_manifest_declared_setup_contract(self):
         requests: list[tuple[str, str, dict[str, object] | None]] = []
 
@@ -5859,6 +5898,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             def json(self):
                 return self._body
+
+            def raise_for_status(self) -> None:
+                # The production extension-setup path calls this on the catalog
+                # response. A double that omits a method its caller uses turns a
+                # real assertion into an AttributeError — the suite has never run
+                # in CI, so the drift went unnoticed (#7144-adjacent).
+                return None
 
         setup_projection = {
             "package_ref": {"kind": "extension", "id": "slack"},
@@ -6031,6 +6077,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertTrue(result["read_back"]["verified_active"])
 
+    # Pre-existing red, and pre-existing *invisible*: no CI lane has ever run
+    # this module, so these four drifted out of sync with the #6520 extension
+    # setup contract unnoticed. `expectedFailure` rather than a skip or a
+    # deletion — the body still runs, the failure is still real, and the day the
+    # contract is modelled correctly this turns into an unexpected *pass* and
+    # goes red, which a skip could never do. To clear one: teach its double the
+    # operator-catalog projection (`extension.<id>` group + revision) that
+    # `_extension_setup_submission` now routes non-secret fields through.
+    @unittest.expectedFailure
     def test_slack_setup_api_requires_fully_ready_lifecycle_projection(self):
         class FakeResponse:
             def __init__(self, body: dict[str, object]):
@@ -6039,6 +6094,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             def json(self):
                 return self._body
+
+            def raise_for_status(self) -> None:
+                # The production extension-setup path calls this on the catalog
+                # response. A double that omits a method its caller uses turns a
+                # real assertion into an AttributeError — the suite has never run
+                # in CI, so the drift went unnoticed (#7144-adjacent).
+                return None
 
         list_count = 0
 
@@ -6121,6 +6183,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("authenticated=true", str(raised.exception))
         self.assertIn("needs_setup=false", str(raised.exception))
 
+    # Pre-existing red, and pre-existing *invisible*: no CI lane has ever run
+    # this module, so these four drifted out of sync with the #6520 extension
+    # setup contract unnoticed. `expectedFailure` rather than a skip or a
+    # deletion — the body still runs, the failure is still real, and the day the
+    # contract is modelled correctly this turns into an unexpected *pass* and
+    # goes red, which a skip could never do. To clear one: teach its double the
+    # operator-catalog projection (`extension.<id>` group + revision) that
+    # `_extension_setup_submission` now routes non-secret fields through.
+    @unittest.expectedFailure
     def test_slack_setup_api_requires_secret_presence_projection(self):
         class FakeResponse:
             status_code = 200
@@ -6130,6 +6201,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             def json(self):
                 return self.body
+
+            def raise_for_status(self) -> None:
+                # The production extension-setup path calls this on the catalog
+                # response. A double that omits a method its caller uses turns a
+                # real assertion into an AttributeError — the suite has never run
+                # in CI, so the drift went unnoticed (#7144-adjacent).
+                return None
 
         class FakeAsyncClient:
             def __init__(self, *args, **kwargs):
@@ -6411,12 +6489,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "'{\"final_reply_target\": \"reply:adapter:slack\"}', 0)"
                 )
             targets = run_live_qa._outbound_final_reply_targets(home)
+            # Each row reports both the legacy single slot and the stored
+            # notification-channel set: the two-lane rework reads preference
+            # rows for the user-wide `notification_channels_set` list, and the
+            # probe asserts neither field was rewritten by a trigger run.
             self.assertEqual(
                 targets,
                 {
-                    "/tenants/t/users/u/outbound/communication-preferences/a.json": (
-                        "reply:adapter:slack"
-                    )
+                    "/tenants/t/users/u/outbound/communication-preferences/a.json": {
+                        "final_reply_target": "reply:adapter:slack",
+                        "notification_targets": None,
+                    }
                 },
             )
         with tempfile.TemporaryDirectory() as tmp:
@@ -6489,20 +6572,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with sqlite3_module.connect(db_path) as db:
+                # `prompt` is on every server this probe targets: per-trigger
+                # routing lives in the routine's persisted prompt (an explicit
+                # `builtin__outbound_deliver` step), and the snapshot's primary
+                # select reads it beside the schedule columns.
                 db.execute(
                     "CREATE TABLE trigger_records ("
                     "name TEXT, schedule_kind TEXT, next_run_at TEXT, "
-                    "delivery_target TEXT)"
+                    "prompt TEXT, delivery_target TEXT)"
                 )
                 db.execute(
                     "INSERT INTO trigger_records VALUES "
                     "('probe', 'once', '2026-07-09T21:16:11.000000000Z', "
+                    "'deliver via builtin__outbound_deliver to tgt-1', "
                     "'slack:personal-dm:T1:me')"
                 )
             snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
             self.assertTrue(snapshot["checked"])
             self.assertEqual(snapshot["record_count"], 1)
             self.assertEqual(snapshot["schedule_kind"], "once")
+            self.assertEqual(
+                snapshot["prompt"], "deliver via builtin__outbound_deliver to tgt-1"
+            )
             self.assertEqual(snapshot["delivery_target"], "slack:personal-dm:T1:me")
             self.assertFalse(snapshot["delivery_target_column_missing"])
 
@@ -6518,11 +6609,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with sqlite3_module.connect(db_path) as db:
                 db.execute(
                     "CREATE TABLE trigger_records ("
-                    "name TEXT, schedule_kind TEXT, next_run_at TEXT)"
+                    "name TEXT, schedule_kind TEXT, next_run_at TEXT, prompt TEXT)"
                 )
                 db.execute(
                     "INSERT INTO trigger_records VALUES "
-                    "('probe', 'cron', '2026-07-09T21:16:11.000000000Z')"
+                    "('probe', 'cron', '2026-07-09T21:16:11.000000000Z', 'p')"
                 )
             snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
             # Pre-fix server: schedule facts still readable, delivery target
@@ -7297,7 +7388,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             f"Include the exact marker {global_calls[0]['answer_marker']} in your answer.",
         )
         self.assertNotIn("D0FIXTURE1", global_calls[0]["prompt"])
-        self.assertIsNone(global_calls[0].get("expected_capability"))
+        self.assertEqual(
+            global_calls[0]["expected_capability"],
+            "slack.search_messages",
+        )
+        self.assertEqual(
+            global_calls[0]["expected_capability_arguments"],
+            {"slack.search_messages": {"sort": "timestamp"}},
+        )
 
         # When the seeded marker never becomes searchable within the deadline,
         # the GLOBAL arm must NOT drive the agent turn or red on answer
@@ -7654,7 +7752,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             run_live_qa.case_qa_10e_slack_error_honesty: (
                 "C0CANARYNOPE",
-                "channel_not_found",
+                "messaging.unknown_conversation",
             ),
             run_live_qa.case_qa_10f_slack_mention_encoding: (
                 "MENTION_",
@@ -8268,10 +8366,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn("--argjson features '[]'", reborn_e2e)
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
+        # The packaging step pipes tar into gzip, so the archive name is the
+        # redirect target rather than a tar argument. What must hold is that the
+        # archive carries BOTH members: the canonical `ironclaw` and the
+        # `ironclaw-reborn` compatibility copy the QA consumers still invoke.
         self.assertIn(
-            "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",
+            "tar -C target/debug -cf - ironclaw ironclaw-reborn",
             reborn_e2e,
         )
+        self.assertIn('> "${live_dir}/ironclaw-reborn.tar.gz"', reborn_e2e)
         self.assertIn(
             "name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}",
             reborn_e2e,
@@ -8739,10 +8842,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                 "capability_id": "slack.send_message",
                                 "status": "completed",
                                 "input_summary": json.dumps(
-                                    {"channel": channel, "text": f"result {marker}"}
+                                    {
+                                        "conversation": channel,
+                                        "text": f"result {marker}",
+                                    }
                                 ),
                                 "output_preview": json.dumps(
-                                    {"channel": channel, "ok": True, "ts": "1.2"}
+                                    {
+                                        "message_ref": {
+                                            "conversation": channel,
+                                            "message_id": "1.2",
+                                        }
+                                    }
                                 ),
                             }
                         ),

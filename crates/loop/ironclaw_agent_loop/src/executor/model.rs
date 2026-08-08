@@ -79,6 +79,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             surface_version: Some(surface_version.clone()),
             model_preference,
             fallback_index,
+            iteration: state.iteration,
             capability_view: Some(capability_view.clone()),
         };
         let visible_capability_count = capability_view.visible_capability_ids.len();

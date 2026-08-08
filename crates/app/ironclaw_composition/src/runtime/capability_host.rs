@@ -11,6 +11,7 @@ use uuid::Uuid;
 use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
     capability::EffectKind,
+    capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
     mount::MountView,
     resolution::Resolution,
@@ -20,8 +21,7 @@ use ironclaw_host_api::{
     scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    HostRuntime, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
@@ -55,6 +55,7 @@ use ironclaw_assistant::projection::{
     CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore,
 };
 
+mod notification_channels_set;
 mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
@@ -62,12 +63,12 @@ mod shell_tests;
 #[cfg(test)]
 mod workspace_scoping_tests;
 
-#[cfg(test)]
-pub(crate) use crate::outbound::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(test)]
+pub(crate) use ironclaw_assistant::{
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+};
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
@@ -133,7 +134,7 @@ pub(super) fn capability_wiring(
             auto_approve_settings,
             services.persistent_approval_policies.clone(),
         ));
-    let outbound_delivery_target_set_requires_approval = effects_require_approval(
+    let outbound_preference_write_requires_approval = effects_require_approval(
         services.runtime_policy.as_ref(),
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
@@ -196,7 +197,7 @@ pub(super) fn capability_wiring(
             thread_service,
             trajectory_observer,
             outbound_preferences_service,
-            outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval,
             approval_settings,
             approval_requests,
             capability_leases,
@@ -232,7 +233,7 @@ struct RefreshingLoopCapabilityPortFactory {
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    outbound_delivery_target_set_requires_approval: bool,
+    outbound_preference_write_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -288,6 +289,18 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        self.create_capability_port_with_surface_policy(
+            run_context,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        )
+        .await
+    }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
         // Database-backed, same tree the reader and Settings use. This port is where an agent's own
         // `skill_install` lands, and it used to write host disk instead (nearai/ironclaw#7168).
@@ -304,6 +317,7 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
+            surface_policy,
             fallback_user_id: self.fallback_user_id.clone(),
             policy: Arc::clone(&self.policy),
             workspace_mounts,
@@ -322,8 +336,8 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
             outbound_preferences_service: self.outbound_preferences_service.clone(),
-            outbound_delivery_target_set_requires_approval: self
-                .outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval: self
+                .outbound_preference_write_requires_approval,
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
@@ -1169,6 +1183,7 @@ struct VisibleCapabilityInputs<'a> {
     memory_mounts: &'a MountView,
     system_extensions_lifecycle_mounts: &'a MountView,
     policy: &'a BuiltinCapabilityPolicy,
+    surface_policy: &'a CapabilitySurfacePolicy,
     extension_surface: &'a ExtensionCapabilitySurface,
 }
 
@@ -1260,7 +1275,7 @@ fn visible_capability_request(
         context,
         SurfaceKind::new("agent_loop").map_err(host_api_agent_loop_error)?,
     )
-    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_policy(inputs.surface_policy.clone())
     .with_provider_trust(provider_trust))
 }
 

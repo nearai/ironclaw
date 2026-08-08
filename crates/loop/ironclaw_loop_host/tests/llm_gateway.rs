@@ -135,6 +135,13 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         response.safe_text_deltas,
         vec!["assistant response".to_string()]
     );
+    assert_eq!(
+        response
+            .diagnostic_effective_model
+            .as_ref()
+            .map(|model| model.as_str()),
+        Some("host-selected-model")
+    );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
@@ -3010,6 +3017,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             surface_version: None,
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3060,6 +3068,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
             model_preference: None,
             fallback_index: 0,
+            iteration: 0,
             capability_view: None,
         })
         .await
@@ -3121,6 +3130,13 @@ async fn gateway_sanitizes_provider_errors() {
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(
+        error
+            .diagnostic_effective_model
+            .as_ref()
+            .map(|model| model.as_str()),
+        Some("host-selected-model")
+    );
     assert!(!error.safe_summary.contains("RAW_PROVIDER_SECRET"));
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
 }
@@ -3352,6 +3368,38 @@ async fn gateway_preserves_exhausted_fallback_as_unavailable_without_provider_ca
         provider.requests.lock().unwrap().len(),
         0,
         "fallback exhaustion must be decided before provider dispatch"
+    );
+}
+
+#[test]
+fn diagnostic_effective_model_uses_selected_fallback_route() {
+    let primary = Arc::new(RecordingLlmProvider::reply_for_model(
+        "primary-model",
+        "primary response",
+    ));
+    let fallback = Arc::new(RecordingLlmProvider::reply_for_model(
+        "fallback-model",
+        "fallback response",
+    ));
+    let failover = Arc::new(
+        FailoverProvider::new(vec![
+            primary as Arc<dyn LlmProvider>,
+            fallback as Arc<dyn LlmProvider>,
+        ])
+        .expect("two-provider failover chain"),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        failover,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let effective_model = gateway.diagnostic_effective_model(&interactive_model(), 1, None);
+
+    assert_eq!(
+        effective_model.as_ref().map(|model| model.as_str()),
+        Some("fallback-model")
     );
 }
 
@@ -4043,6 +4091,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
         surface_version: None,
         model_preference,
         fallback_index: 0,
+        iteration: 0,
         capability_view: None,
     }
 }

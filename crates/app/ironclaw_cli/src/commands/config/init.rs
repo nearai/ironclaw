@@ -303,7 +303,7 @@ mod tests {
     // `reborn_provider_catalog_is_owned_by_its_crate`. It asserted these
     // consts against the catalog by embedding it from five directories up —
     // a repo-root reach-in. The catalog is now `ironclaw_llm`'s own asset
-    // (`crates/ironclaw_llm/assets/providers.json`, CHECKLIST WS6), so the
+    // (`crates/domains/ironclaw_llm/assets/providers.json`, CHECKLIST WS6), so the
     // same `include_str!` would have become a *cross-crate* reach-in — the
     // category §11.2.7's scanner turns into a hard failure. A cross-crate
     // consistency rule belongs in the cross-crate suite, which reads both

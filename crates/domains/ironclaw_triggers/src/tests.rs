@@ -228,6 +228,9 @@ fn fire_identity_length_prefixing_avoids_component_boundary_collisions() {
 #[tokio::test]
 async fn schedule_provider_emits_due_fire_only() {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    // A pre-removal record whose retired delivery route has not been migrated
+    // away yet: it must still fire normally, and the fire must carry nothing
+    // but the task (delivery is a step the prompt performs now).
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
     record.delivery_target = Some(
         TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
@@ -249,13 +252,14 @@ async fn schedule_provider_emits_due_fire_only() {
     assert_eq!(fire.identity.trigger_id, trigger_id);
     assert_eq!(fire.identity.fire_slot, record.next_run_at);
     assert_eq!(fire.prompt, record.prompt);
-    // Per-trigger delivery routing must survive record -> fire so the
-    // delivery layer can honor it without re-reading the record.
-    assert_eq!(fire.delivery_target, record.delivery_target);
 }
 
+/// The retired column is still decoded off pre-removal rows until the boot
+/// migration rewrites them, so its opaque-id contract still has to hold —
+/// including rejecting the shapes that would smuggle control characters or
+/// invisible separators through a legacy value.
 #[test]
-fn trigger_delivery_target_id_is_opaque_and_validated() {
+fn legacy_delivery_target_column_stays_opaque_and_validated() {
     let target = TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a")
         .expect("valid delivery target id");
     assert_eq!(target.as_str(), "slack:personal-dm:T123:user-a");
@@ -269,11 +273,11 @@ fn trigger_delivery_target_id_is_opaque_and_validated() {
     );
     assert!(TriggerDeliveryTargetId::new("x".repeat(512)).is_ok());
 
-    assert!(parse_trigger_delivery_target_id("").is_err());
-    assert!(parse_trigger_delivery_target_id(" target").is_err());
-    assert!(parse_trigger_delivery_target_id("target\nid").is_err());
-    assert!(parse_trigger_delivery_target_id("target:\u{200b}hidden").is_err());
-    assert!(parse_trigger_delivery_target_id("x".repeat(513)).is_err());
+    assert!(decode_legacy_delivery_target("").is_err());
+    assert!(decode_legacy_delivery_target(" target").is_err());
+    assert!(decode_legacy_delivery_target("target\nid").is_err());
+    assert!(decode_legacy_delivery_target("target:\u{200b}hidden").is_err());
+    assert!(decode_legacy_delivery_target("x".repeat(513)).is_err());
     assert!(from_value::<TriggerDeliveryTargetId>(json!("")).is_err());
 }
 

@@ -17,7 +17,7 @@
 //! They never name the underlying `TurnCoordinator`, `SessionThreadService`,
 //! `LoopExitApplier`, `HostManagedModelGateway`, etc. directly. That is the
 //! property that satisfies the "narrow Reborn public surface" requirement
-//! pinned by `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
+//! pinned by `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -49,23 +49,25 @@ use ironclaw_host_api::turn::{
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
+    capability_surface::CapabilitySurfacePolicy,
     http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
+    process::RuntimeProcessError,
     resource::ResourceScope,
     scope::Principal,
 };
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
-    CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
-    HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
+    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_loop_host::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -116,7 +118,7 @@ use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
@@ -133,13 +135,13 @@ use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
-use crate::outbound::{
-    MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-    OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
-    outbound_delivery_synthetic_provider,
-};
+use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
+use ironclaw_assistant::{
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID, RebornOutboundPreferencesService,
+    outbound_delivery_synthetic_provider,
+};
 use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
 pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
@@ -176,9 +178,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            destination: ironclaw_outbound::RunFinalReplyDestination::External {
-                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            },
+            destination: self.reply_target_binding_ref.clone(),
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
@@ -407,12 +407,14 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
-// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
-// below, so the imports carry the same gate. Without it, any build that
-// compiles this crate as a *dependency* without `test-support` — e.g. the
-// PR clippy lane when the changed-package set is `{ironclaw,
-// ironclaw_config}` — sees three unused imports and fails `-D
-// warnings`. See #7119.
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors below,
+// so the imports carry the same gate. Without it, any build that compiles this
+// crate as a *dependency* with `test-support` off — e.g. `cargo clippy -p
+// ironclaw --lib --bins`, where the dev-dependency that would have unified the
+// feature on is not in the selected set — sees three unused imports and fails
+// `-D warnings`. See #7119; the "Check production-target lints (workspace, no
+// dev-dependency features)" step in code_style.yml keeps that shape linted so
+// the class cannot come back invisibly.
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 #[cfg(any(test, feature = "test-support"))]
@@ -514,6 +516,8 @@ pub enum RebornRuntimeError {
     SkillExecutionUnavailable,
     #[error("skill execution failed: {0}")]
     SkillExecution(String),
+    #[error("user sandbox shutdown failed: {0}")]
+    UserSandboxShutdown(#[source] RuntimeProcessError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -543,6 +547,7 @@ pub(crate) struct OutboundTestStores {
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
+    user_sandbox_process_port: Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
@@ -552,6 +557,7 @@ pub struct RebornRuntime {
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
+    pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
@@ -570,8 +576,8 @@ pub struct RebornRuntime {
         dead_code,
         reason = "held for test-support rebinding after runtime construction"
     )]
-    pub(crate) trigger_source_reply_target:
-        Arc<std::sync::RwLock<Arc<dyn crate::factory::TriggerSourceReplyTarget>>>,
+    pub(crate) trigger_source_turn_state:
+        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -1039,12 +1045,14 @@ impl RebornRuntime {
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
         Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+        Arc<dyn OutboundDeliveryTargetProvider>,
     )> {
         Some((
             Arc::clone(&self.outbound_state.state),
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
             Arc::clone(&self.outbound_state.reply_attachment_intents),
+            self.outbound_delivery_target_provider()?,
         ))
     }
 
@@ -1123,8 +1131,11 @@ impl RebornRuntime {
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
+            outbound_delivery_targets: Arc::clone(self.outbound_delivery_target_registry.as_ref()?)
+                as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
             identity_lookup: Arc::clone(&self.channel_identity_store)
                 as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            dm_targets: Arc::clone(&self.channel_dm_target_store),
             deployment_channels: Arc::clone(&self.deployment_channels),
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
@@ -2413,6 +2424,12 @@ impl RebornRuntime {
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
+        if let Some(process_port) = self.user_sandbox_process_port {
+            process_port
+                .shutdown()
+                .await
+                .map_err(RebornRuntimeError::UserSandboxShutdown)?;
+        }
         Ok(())
     }
 
@@ -3351,12 +3368,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            tracing::error!(%error, "capability policy is invalid");
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("capability policy is invalid: {error}"),
-            }
-        })?);
+        let builtin_capability_policy = Arc::clone(&services.capability_policy);
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3627,6 +3639,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
+    let prompt_diagnostic_sink = Arc::new(
+        ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+            diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+            ironclaw_loop_host::DEFAULT_PROMPT_DIAGNOSTIC_QUEUE_CAPACITY,
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+    )
+        as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         process_system: processes.clone(),
         thread_service: Arc::clone(&thread_service),
@@ -3640,6 +3664,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
+        prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone
@@ -3898,6 +3923,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map(|started| Arc::clone(&started.workflow_factory));
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
+    // Forward-migrate pre-removal routines that still carry a stored delivery
+    // target: rewrite the route into the routine's prompt (the only place a
+    // fire can still act on it) and clear the field. Run immediately before an
+    // enabled poller starts. Target metadata enriches the prompt when its
+    // registry is available; the durable target id remains actionable without
+    // it. Idempotent, so every later enabled boot is a no-op.
+    if trigger_poller.enabled {
+        crate::automation::trigger_delivery_migration::migrate_trigger_delivery_targets_at_boot(
+            trigger_repository.as_ref(),
+            outbound_delivery_target_registry.as_deref(),
+            &thread_scope.tenant_id,
+        )
+        .await
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("stored trigger delivery-target migration failed: {error}"),
+        })?;
+    }
+
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
@@ -4035,31 +4078,23 @@ pub(crate) async fn build_runtime_with_resource_governor(
         local_runtime,
     ) {
         let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-        let outbound_preferences = &local_runtime.outbound_preferences;
-        // One driver per codec-bearing channel binding, built by the SAME
-        // product-side workflow factory the channel host graphs are built by
-        // (§12.11 D-A) and from the SAME binding list `register_extras` feeds
-        // the assembly, so the hook's routing set and its driver set cannot
-        // disagree. Construction is product's; routing stays in the hook.
-        let drivers: Vec<(String, Arc<dyn ironclaw_outbound::TriggeredRunDelivery>)> = services
-            .channel_extension_bindings
-            .iter()
-            .filter_map(|binding| {
-                let codec = binding.preference_target_codec.clone()?;
-                workflow_factory
-                    .triggered_run_delivery(binding.extension_id.as_str(), codec)
-                    .map(|driver| (binding.extension_id.as_str().to_owned(), driver))
-            })
-            .collect();
+        // ONE background-run notifier for every channel extension, built by
+        // the SAME product-side workflow factory the channel host graphs are
+        // built by (§12.11 D-A). It decodes each stored notification target
+        // through the assembly's LIVE codec view, so a channel activated
+        // after boot still decodes its own targets.
+        let notifier = workflow_factory.background_run_notifier(Arc::new(
+            ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
+                Arc::clone(assembly),
+            ),
+        ));
+
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
-                Arc::clone(assembly),
+                notifier,
                 Arc::clone(triggered_run_delivery),
-                Arc::clone(outbound_preferences),
-                Arc::clone(&local_runtime.outbound_delivery_targets),
-                drivers,
             ),
         );
         if slot.set(generic_trigger_hook).is_err() {
@@ -4198,6 +4233,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
+        user_sandbox_process_port: services.user_sandbox_process_port.clone(),
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
         skill_management: services.skill_management.clone(),
@@ -4206,11 +4242,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
         scoped_filesystem,
         admin_secret_provisioner,
         project_service,
+        diagnostic_store,
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
         #[cfg(any(test, feature = "test-support"))]
-        trigger_source_reply_target: Arc::clone(&services.trigger_source_reply_target),
+        trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),
@@ -4782,8 +4819,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 

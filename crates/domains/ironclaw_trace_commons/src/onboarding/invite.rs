@@ -155,7 +155,14 @@ pub(crate) fn is_https_or_loopback(scheme: &str, host_only: &str) -> bool {
 /// shape for which a non-HTTPS Trace Commons endpoint can enter the policy
 /// (the loopback-HTTP dev invite form above), so the claim/profile/ingest
 /// validators in `contribution.rs` honor the same exception.
-pub(crate) fn is_loopback_host(host: &str) -> bool {
+///
+/// `pub` because `ironclaw_host_runtime`'s credential-injection chokepoint
+/// (`apply_credential_injection`) carries the same literal-loopback exception
+/// to its HTTPS requirement and must use the *same predicate* — two spellings
+/// of "loopback" would let the validator and the chokepoint drift
+/// (PROPOSAL §12.13 D-R, 2026-08-05). Literal loopback only, never a
+/// hostname class, and never DNS resolution.
+pub fn is_loopback_host(host: &str) -> bool {
     let bare = host_only(host).to_ascii_lowercase();
     bare == "localhost"
         || bare

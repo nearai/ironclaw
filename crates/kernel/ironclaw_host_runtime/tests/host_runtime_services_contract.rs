@@ -57,9 +57,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
-    HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeStatusRequest, RuntimeWorkId,
-    TenantSandboxProcessPort, builtin_first_party_handlers,
+    HostRuntime, HostRuntimeServices, ProductAuthCredentialStageError, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
+    RuntimeStatusRequest, RuntimeWorkId, UserSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_processes::{
@@ -620,7 +620,7 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 // per-backend run-state + approval stores were deleted along with their
 // `with_libsql_run_state_approval_store` /
 // `with_postgres_run_state_approval_store` builder methods (see
-// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
 // Durability across reopen is now a property of the underlying
 // `RootFilesystem` (`LibSqlRootFilesystem`, `PostgresRootFilesystem`, …)
 // composed through `with_filesystem_run_state`; the run-state store layer
@@ -1257,7 +1257,7 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
 }
 
 #[tokio::test]
-async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
+async fn production_wiring_validation_tracks_user_sandbox_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
         Arc::new(DiskFilesystem::new()),
@@ -1273,14 +1273,14 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
-        .expect_err("tenant sandbox process policy must require a sandbox process port");
+        .expect_err("user sandbox process policy must require a sandbox process port");
 
     assert!(
         report.contains(
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::Missing
         ),
-        "tenant sandbox process backend should require the tenant sandbox process port: {report:?}"
+        "user sandbox process backend should require the user sandbox process port: {report:?}"
     );
 
     let services = HostRuntimeServices::new(
@@ -1295,7 +1295,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_policy(hosted_dev_runtime_policy())
-    .with_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(Arc::new(
+    .with_user_sandbox_process_port(Arc::new(UserSandboxProcessPort::new(Arc::new(
         ProductionCandidateSandboxTransport,
     ))));
 
@@ -1313,7 +1313,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "configured tenant sandbox process port should clear missing but remain unverified: {report:?}"
+        "configured user sandbox process port should clear missing but remain unverified: {report:?}"
     );
 
     let services = HostRuntimeServices::new(
@@ -1328,9 +1328,9 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_policy(hosted_dev_runtime_policy())
-    .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
-        Arc::new(ProductionCandidateSandboxTransport),
-    )));
+    .with_production_user_sandbox_process_port(Arc::new(UserSandboxProcessPort::new(Arc::new(
+        ProductionCandidateSandboxTransport,
+    ))));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
@@ -1344,7 +1344,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "verified tenant sandbox process port should satisfy the process-port gate: {report:?}"
+        "verified user sandbox process port should satisfy the process-port gate: {report:?}"
     );
 }
 
@@ -5102,6 +5102,186 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
     assert_eq!(requests[0].method, NetworkMethod::Post);
     assert_eq!(requests[0].url, "https://example.test/api");
     assert_eq!(requests[0].body, b"hello".to_vec());
+}
+
+#[tokio::test]
+async fn host_runtime_services_wasm_secret_exists_reflects_staged_credential() {
+    // Regression (#7307): third-party WASM guests (ironhub tools such as
+    // `attio`) gate on the `secret-exists` host import before issuing any
+    // request. Production hosts left the probe at its deny-all default, so it
+    // returned `false` even when a real credential was staged for the
+    // invocation — every call failed with an opaque `operation_failed`
+    // ("API key not configured") and never surfaced `auth_required`.
+    let parsed_manifest = parse_manifest(WASM_SECRET_EXISTS_MANIFEST);
+    let component = tool_component(SECRET_EXISTS_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/secret-exists.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![]));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_SECRET_EXISTS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+    let capability_id = CapabilityId::new("wasm-secrets.secret_exists").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let handle = SecretHandle::new("attio_api_key").unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("att-123"),
+            None,
+        )
+        .await
+        .expect("test secret should store");
+    services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured")
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await
+        .expect("credential should stage");
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope.clone(),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output, json!(true));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_wasm_secret_exists_false_without_staged_credential() {
+    let parsed_manifest = parse_manifest(WASM_SECRET_EXISTS_MANIFEST);
+    let component = tool_component(SECRET_EXISTS_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/secret-exists.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![]));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_SECRET_EXISTS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+    let capability_id = CapabilityId::new("wasm-secrets.secret_exists").unwrap();
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope.clone(),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output, json!(false));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_credential_staging_rejects_empty_material_as_auth_required() {
+    // A "Configured" account whose resolved material is empty must surface
+    // the typed re-auth signal at staging, not hand the guest an unusable
+    // slot that fails opaquely as `operation_failed` (#7307).
+    let parsed_manifest = parse_manifest(WASM_SECRET_EXISTS_MANIFEST);
+    let component = tool_component(SECRET_EXISTS_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/secret-exists.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![]));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_SECRET_EXISTS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let capability_id = CapabilityId::new("wasm-secrets.secret_exists").unwrap();
+    let handle = SecretHandle::new("attio_api_key").unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from(""),
+            None,
+        )
+        .await
+        .expect("test secret should store");
+
+    let result = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured")
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await;
+
+    assert!(
+        matches!(result, Err(ProductAuthCredentialStageError::AuthRequired)),
+        "empty credential material must stage as auth-required, got {result:?}"
+    );
 }
 
 #[tokio::test]

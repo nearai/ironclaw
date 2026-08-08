@@ -37,7 +37,7 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
 #[path = "support/first_party.rs"]
@@ -107,14 +107,14 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {

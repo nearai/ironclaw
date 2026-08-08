@@ -446,6 +446,9 @@ pub struct UpdateToolResultReferenceRequest {
     pub thread_id: ThreadId,
     pub turn_run_id: String,
     pub result_ref: String,
+    /// Exact provider-call row to update. `None` is reserved for legacy
+    /// callers whose durable edge predates provider-call identity.
+    pub provider_call_id: Option<String>,
     pub safe_summary: ToolResultSafeSummary,
 }
 

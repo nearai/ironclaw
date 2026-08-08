@@ -1,6 +1,6 @@
 # Reborn CLI Docker Deployment
 
-`Dockerfile.reborn` builds the standalone `ironclaw` binary with the
+`Dockerfile` builds the standalone `ironclaw` binary with the
 WebUI v2 and Slack host-beta features enabled. The image defaults to:
 
 ```text
@@ -14,7 +14,7 @@ set `IRONCLAW_REBORN_SERVE_PORT=3000`.
 ## Build
 
 ```bash
-docker build -f Dockerfile.reborn -t ironclaw-reborn:local .
+docker build -f Dockerfile -t ironclaw-reborn:local .
 ```
 
 ## Local Run
@@ -74,7 +74,7 @@ https://<public-host>/auth/callback/google
 
 ## Railway
 
-Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
+Set the service Dockerfile path to `Dockerfile`. Railway sets `PORT`;
 keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
 `/api/health` for Railway's healthcheck.
 
@@ -94,6 +94,28 @@ IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
 NEARAI_API_KEY=<nearai-api-key>
 ```
 
+The volume-backed sandbox profiles have distinct operator intent:
+
+- `hosted-single-tenant-volume-sandboxed` is the local-Docker profile. It is
+  for exercising the Docker worker boundary. The deployment factory enables
+  the worker's default Docker network; `--network none` is only the ad-hoc
+  transport's fail-closed construction default. Build its Python worker once
+  with `docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .`.
+  On Docker Desktop or Colima, keep `IRONCLAW_REBORN_HOME` under a host path
+  shared with the Docker VM (for example `/Users/...` on macOS); otherwise the
+  daemon cannot bind the per-user workspace.
+- `hosted-single-tenant-volume-sandboxed-railway` is the Railway preview
+  profile. Each command runs in a fresh inner Docker worker inside a Railway
+  Sandbox. The deployment factory enables the worker's default Docker network,
+  providing direct egress through the outer sandbox's Railway NAT. The
+  `--network none` setting remains only the ad-hoc transport's fail-closed
+  construction default. Its lifecycle requirements are documented in
+  [the Railway sandbox operator runbook](railway-sandbox-operator.md).
+
+The persisted seed config records the canonical volume-backed application
+settings. The selected profile remains an explicit Rust composition profile,
+so startup also validates that its matching sandbox process provider is wired.
+
 Minimum Railway variables for the hosted single-tenant volume profile:
 
 ```bash
@@ -108,7 +130,8 @@ Attach a Railway volume and mount it at `/data`, or set
 will use `$RAILWAY_VOLUME_MOUNT_PATH/ironclaw-reborn` by default when Railway
 exposes a volume mount. Without a volume, Railway deployments using
 `local-dev`, `local-dev-yolo`, `hosted-single-tenant`, or
-`hosted-single-tenant-volume` fail closed unless
+`hosted-single-tenant-volume`, `hosted-single-tenant-volume-sandboxed`, or
+`hosted-single-tenant-volume-sandboxed-railway` fail closed unless
 `IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true` is explicitly set for a
 disposable test deployment.
 
@@ -134,6 +157,8 @@ listener. That profile grants trusted host access and `serve` refuses to bind it
 to a non-loopback host. Use `hosted-single-tenant-volume` for the mounted-volume
 single-tenant preview path that keeps the local-dev product surface with durable
 libSQL-backed state, or `hosted-single-tenant` for Postgres-backed hosted state.
+Use the sandboxed aliases only with their documented local-Docker or Railway
+preview operator model; neither is a production multi-replica profile.
 
 Set `IRONCLAW_REBORN_HOME` to a mounted volume path if local files should
 survive redeploys. The hosted single-tenant profile stores runtime/control-plane
@@ -203,6 +228,24 @@ Slack extension, and complete its setup. Slack app ids, the bot token, the
 signing secret, and channel mappings are all configured there after the
 container starts.
 
+There is no `IRONCLAW_REBORN_SLACK_ENABLED` toggle — the enablement gate it fed
+was removed in #6116, and nothing has read the variable since. Do not add a
+`[slack]` section either: the retired setup keys (`signing_secret_env`,
+`bot_token_env`, `installation_id`, `team_id`, `api_app_id`, `channel_routes`,
+…) make `ironclaw serve` **refuse to start**.
+
+A volume seeded before #6116 may still carry a `[slack]` section. What happens
+on boot depends on what the section holds. `enabled` on its own is inert and
+keeps booting (with a deprecation notice in the serve log). The one shape the
+entrypoint migrates for you is the old shipped default — an explicit
+`enabled = false` next to `signing_secret_env`/`bot_token_env`: those two
+fields are stripped on start and the container boots. Every other combination
+that includes a retired setup key — `enabled = true` beside them, the legacy
+fields without an explicit `enabled = false` line, or any of the other setup
+keys listed above — is left alone deliberately and fails startup with a
+migration pointer, rather than a live-looking channel config being rewritten
+underneath you.
+
 Set the WebUI identity environment variables as usual.
 
 Do not store OAuth, Slack, or LLM secrets in `config.toml`. Slack bot tokens
@@ -210,9 +253,11 @@ and signing secrets are stored from the WebUI extension setup.
 
 Migrating an existing config file: a mounted or previously seeded
 `config.toml` that still carries a `[slack]` or `[telegram]` section keeps
-parsing. A leftover Slack *setup* field (`installation_id`, `team_id`,
-`api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`,
-`channel_routes`, `signing_secret_env`, `bot_token_env`) fails container
-startup with a migration pointer rather than being silently ignored; a section
-left with only inert keys still starts, and logs a deprecation notice. Delete
-the section from the mounted file — nothing reads it.
+parsing. Outside the one entrypoint-migrated shape above (`enabled = false`
+beside `signing_secret_env`/`bot_token_env`), a leftover Slack *setup* field
+(`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`,
+`shared_subject_user_id`, `channel_routes`, `signing_secret_env`,
+`bot_token_env`) fails container startup with a migration pointer rather than
+being silently ignored; a section left with only inert keys still starts, and
+logs a deprecation notice. Delete the section from the mounted file — nothing
+reads it.

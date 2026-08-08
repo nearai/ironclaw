@@ -23,7 +23,7 @@
 //!    methods are `pub(crate)` and only reachable through
 //!    [`SourceMutators`] inside a `mutate_with` closure.
 //!
-//! See `crates/ironclaw_trust/CONTRACT.md` for the full cross-crate
+//! See `crates/kernel/ironclaw_trust/CONTRACT.md` for the full cross-crate
 //! contract (evaluation matrix, `PackageIdentity` scope, mutation
 //! orchestration, built-in tool migration intent), `CLAUDE.md` for the
 //! per-file guardrails, and `docs/reborn/contracts/host-api.md` (in the

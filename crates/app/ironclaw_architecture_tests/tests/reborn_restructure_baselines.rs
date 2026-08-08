@@ -52,7 +52,7 @@ const WS0_MEASURED_FROM: &str = "origin/main @ ae0989c37 (2026-07-30)";
 /// Composition mass, from `bash scripts/ci/check-composition-budget.sh --print`:
 /// "composition share: 6.58% (658 bp) — 43936 / 667978 LOC".
 ///
-/// The metric is production `.rs` LOC of `crates/ironclaw_composition/src`
+/// The metric is production `.rs` LOC of `crates/app/ironclaw_composition/src`
 /// over the same measure of every `crates/*/src` tree (test-only files excluded
 /// from both sides — see `scripts/ci/composition-budget.toml` for the full
 /// definition). CHECKLIST WS6 re-baselines the gate's ceiling once the eviction
@@ -115,10 +115,17 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// force.
 /// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
 /// repoint added one line in composition; recorded at the measured figure.
-/// ✎ Re-recorded 40_419 → 40_822 on 2026-08-05 by the skills stack's top layer
-/// (#7171), paired with the `[gate].loc_ceiling` raise in the same commit -- this ratchet
-/// fails when the two disagree. The growth is service-graph assembly; see the manifest.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_822;
+/// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
+/// messaging framework, which landed through the queue's tolerance window;
+/// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`.
+/// ✎ Re-recorded 40_423 → 40_692 on 2026-08-07 for #7157: the one-time
+/// stored-trigger delivery migration runs in boot sequencing, while the
+/// notification-channel capability split and delivery wiring preserve their
+/// mediated owners. Measured on the merged tree; the manifest ceiling and
+/// observed value move with this record so the increase is explicit.
+/// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
+/// delivery refactor with #7214's sandbox profile and binding assembly.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_747;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

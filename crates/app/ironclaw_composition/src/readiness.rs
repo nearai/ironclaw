@@ -14,6 +14,7 @@ pub enum RebornReadinessState {
     DevOnly,
     HostedSingleTenantValidated,
     HostedSingleTenantVolumePreviewValidated,
+    HostedSingleTenantVolumeSandboxedValidated,
     ProductionValidated,
     MigrationDryRunValidated,
 }
@@ -79,6 +80,7 @@ pub enum RebornReadinessDiagnosticReason {
     Disabled,
     DevOnlyProfile,
     HostedSingleTenantVolumePreview,
+    HostedSingleTenantVolumeSandboxedPreview,
     Missing,
     LocalOnly,
     Unverified,
@@ -92,6 +94,9 @@ impl RebornReadinessDiagnosticReason {
             Self::Disabled => "disabled",
             Self::DevOnlyProfile => "dev-only-profile",
             Self::HostedSingleTenantVolumePreview => "hosted-single-tenant-volume-preview",
+            Self::HostedSingleTenantVolumeSandboxedPreview => {
+                "hosted-single-tenant-volume-sandboxed-preview"
+            }
             Self::Missing => "missing",
             Self::LocalOnly => "local-only",
             Self::Unverified => "unverified",
@@ -120,6 +125,9 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticReason {
             "disabled" => Self::Disabled,
             "dev-only-profile" => Self::DevOnlyProfile,
             "hosted-single-tenant-volume-preview" => Self::HostedSingleTenantVolumePreview,
+            "hosted-single-tenant-volume-sandboxed-preview" => {
+                Self::HostedSingleTenantVolumeSandboxedPreview
+            }
             "missing" => Self::Missing,
             "local-only" => Self::LocalOnly,
             "unverified" => Self::Unverified,

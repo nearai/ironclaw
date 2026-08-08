@@ -710,19 +710,59 @@ where
         thread_id: &ThreadId,
         turn_run_id: &str,
         result_ref: &str,
+        provider_call_id: Option<&str>,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         self.ensure_transcript_indexes_migrated(scope).await?;
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
-        let indexed_message_id = index_store
-            .read_tool_result(scope, thread_id, turn_run_id, result_ref)
-            .await?;
+        let indexed_message_id = match provider_call_id {
+            Some(provider_call_id) => {
+                index_store
+                    .read_tool_result_provider_call(
+                        scope,
+                        thread_id,
+                        turn_run_id,
+                        result_ref,
+                        provider_call_id,
+                    )
+                    .await?
+            }
+            None => {
+                index_store
+                    .read_tool_result(scope, thread_id, turn_run_id, result_ref)
+                    .await?
+            }
+        };
         if let Some(message_id) = indexed_message_id
             && let Some((message, _)) = self
                 .read_message_versioned(scope, thread_id, message_id)
                 .await?
-            && matches_tool_result_reference(&message, turn_run_id, result_ref)
+            && matches_tool_result_reference_invocation(
+                &message,
+                turn_run_id,
+                result_ref,
+                provider_call_id,
+            )
         {
             return Ok(Some(message));
+        }
+
+        // Compatibility/backfill path for rows whose generic v1 index predates
+        // provider-call-specific result indexes. Before provider calls were
+        // part of this key there could be at most one row per (run, result), so
+        // only a row with no provider metadata is an unambiguous legacy match.
+        if provider_call_id.is_some() {
+            let indexed_message_id = index_store
+                .read_tool_result(scope, thread_id, turn_run_id, result_ref)
+                .await?;
+            if let Some(message_id) = indexed_message_id
+                && let Some((message, _)) = self
+                    .read_message_versioned(scope, thread_id, message_id)
+                    .await?
+                && matches_tool_result_reference(&message, turn_run_id, result_ref)
+                && message.tool_result_provider_call.is_none()
+            {
+                return Ok(Some(message));
+            }
         }
 
         Ok(None)
@@ -1935,6 +1975,11 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let provider_call = request.provider_call;
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
+        }
         let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
@@ -1947,6 +1992,9 @@ where
                 &request.thread_id,
                 &request.turn_run_id,
                 &envelope.result_ref,
+                provider_call
+                    .as_ref()
+                    .map(|provider_call| provider_call.provider_call_id.as_str()),
             )
             .await?
         {
@@ -1954,9 +2002,6 @@ where
             // and attach it (or reject on conflict) — matching the in-memory
             // contract semantics.
             let provider_call_update = if let Some(provider_call) = provider_call.as_ref() {
-                provider_call
-                    .validate()
-                    .map_err(SessionThreadError::Serialization)?;
                 match existing.tool_result_provider_call.as_ref() {
                     Some(existing_call) if existing_call == provider_call => None,
                     Some(_) => {
@@ -2018,11 +2063,6 @@ where
                 return Ok(updated);
             }
             return Ok(existing);
-        }
-        if let Some(provider_call) = &provider_call {
-            provider_call
-                .validate()
-                .map_err(SessionThreadError::Serialization)?;
         }
         let content = serde_json::to_string(&envelope)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
@@ -2155,6 +2195,7 @@ where
                 &request.thread_id,
                 &request.turn_run_id,
                 &request.result_ref,
+                request.provider_call_id.as_deref(),
             )
             .await?
             .ok_or_else(|| {
@@ -2171,6 +2212,7 @@ where
         // the initial lookup path.
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
+        let provider_call_id = request.provider_call_id.clone();
         let thread_id_for_error = request.thread_id.clone();
         let safe_summary = request.safe_summary;
         let now = Utc::now();
@@ -2180,7 +2222,12 @@ where
             &request.thread_id,
             message.message_id,
             |message| {
-                if !matches_tool_result_reference(message, &turn_run_id, &result_ref) {
+                if !matches_tool_result_reference_invocation(
+                    message,
+                    &turn_run_id,
+                    &result_ref,
+                    provider_call_id.as_deref(),
+                ) {
                     return Err(SessionThreadError::Backend(format!(
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
                     )));
@@ -3246,6 +3293,21 @@ fn matches_tool_result_reference(
         && message.tool_result_ref.as_deref() == Some(result_ref)
 }
 
+fn matches_tool_result_reference_invocation(
+    message: &ThreadMessageRecord,
+    turn_run_id: &str,
+    result_ref: &str,
+    provider_call_id: Option<&str>,
+) -> bool {
+    matches_tool_result_reference(message, turn_run_id, result_ref)
+        && provider_call_id.is_none_or(|requested| {
+            message
+                .tool_result_provider_call
+                .as_ref()
+                .is_none_or(|existing| existing.provider_call_id == requested)
+        })
+}
+
 fn assistant_message_matches_run(
     message: &ThreadMessageRecord,
     turn_run_id: &str,
@@ -3449,7 +3511,7 @@ fn summary_covers_redacted_or_deleted_content(
 // single-record RMWs onto `cas_update` (fail-closed on a non-CAS
 // backend) is a tracked, deferred follow-up sibling to the
 // `ironclaw_turns` runner-lease migration (#5274) — see
-// `docs/plans/2026-06-25-cas-migration.md`.
+// `docs/internal/plans/2026-06-25-cas-migration.md`.
 
 /// Local error classification for the CAS-aware put helper.
 enum PutError {

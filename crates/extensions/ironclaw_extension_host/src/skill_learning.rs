@@ -19,7 +19,7 @@
 //!   corrupt the REPL).
 //! - Scope is derived from the EVENT (tenant + owner), never from a runtime
 //!   default — a wrong tenant writes a skill to a directory the WebUI and the
-//!   next run never read (see `docs/plans/2026-06-16-reborn-skill-evolution.md`).
+//!   next run never read (see `docs/internal/plans/2026-06-16-reborn-skill-evolution.md`).
 //! - Distilled content is injection-scanned before it is installed (it becomes
 //!   trusted prompt text loaded into the next run).
 
