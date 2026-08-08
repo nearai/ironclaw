@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Architecture Overview"
+openwiki_generated: true
+---
+
 # Architecture Overview
 
 This page explains IronClaw's system design, the four-layer model, dependency structure, and where to build new features.

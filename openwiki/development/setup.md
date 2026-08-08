@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Development Setup"
+openwiki_generated: true
+---
+
 # Development Setup
 
 This page covers setting up your local development environment for IronClaw.

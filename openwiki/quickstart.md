@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "IronClaw OpenWiki: Quick Start"
+openwiki_generated: true
+---
+
 # IronClaw OpenWiki: Quick Start
 
 Welcome to the IronClaw repository documentation. This is your entry point to understanding the codebase structure, how to build and test, and where to find help.
