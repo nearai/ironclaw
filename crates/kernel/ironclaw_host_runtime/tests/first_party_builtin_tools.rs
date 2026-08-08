@@ -64,8 +64,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
-    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, ToolCallHttpEgress,
+    TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
@@ -442,20 +442,58 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
 #[tokio::test]
 async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     let package =
-        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
     assert!(
         package
             .capabilities
             .iter()
             .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
     );
+    let shell = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("user-sandbox shell descriptor");
+    assert!(shell.description.contains("read-only system filesystem"));
+    assert!(shell.description.contains("/workspace/.venv"));
+    assert!(shell.description.contains("/workspace/.venv/bin/python"));
+    for effect in [
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+    ] {
+        assert!(!shell.effects.contains(&effect));
+    }
+    let manifest_shell = package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("user-sandbox shell manifest");
+    assert_eq!(manifest_shell.description, shell.description);
+    for effect in [
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+    ] {
+        assert!(!manifest_shell.effects.contains(&effect));
+    }
 
     let handlers = builtin_first_party_handlers_for_process_backend(
         Arc::new(InMemoryTriggerRepository::default()),
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
     )
     .unwrap();
     assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+
+    let host_package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::LocalHost).unwrap();
+    let host_shell = host_package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("local-host shell descriptor");
+    assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -3591,14 +3629,14 @@ async fn builtin_shell_path_bearing_failure_reason_rides_the_diagnostic_detail()
 }
 
 #[tokio::test]
-async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
+async fn builtin_shell_uses_configured_user_sandbox_process_port() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
-    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let sandbox_process = Arc::new(UserSandboxProcessPort::new(sandbox_transport.clone()));
     let runtime = runtime_with_local_and_sandbox_process_ports(
         Arc::clone(&local_process),
         Arc::clone(&sandbox_process),
-        tenant_sandbox_process_policy(),
+        user_sandbox_process_policy(),
     );
 
     let output = invoke_with_context(
@@ -3617,14 +3655,14 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
-async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+async fn builtin_shell_user_sandbox_process_uses_callers_scope_for_two_user_isolation() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
-    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let sandbox_process = Arc::new(UserSandboxProcessPort::new(sandbox_transport.clone()));
     let runtime = runtime_with_local_and_sandbox_process_ports(
         Arc::clone(&local_process),
         Arc::clone(&sandbox_process),
-        tenant_sandbox_process_policy(),
+        user_sandbox_process_policy(),
     );
     let user_a = UserId::new("user-a").unwrap();
     let user_b = UserId::new("user-b").unwrap();
@@ -3676,10 +3714,10 @@ async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, FailureKind::FilesystemDenied);
+    assert_eq!(error, FailureKind::UnsupportedRunner);
     assert!(
         process_port.requests.lock().unwrap().is_empty(),
-        "hosted shell must fail at invocation-service resolution before the handler can run"
+        "hosted shell must fail at user-sandbox process resolution before the handler can run"
     );
 }
 
@@ -7171,22 +7209,26 @@ async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_service
 }
 
 #[tokio::test]
-async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
+async fn builtin_read_file_uses_scoped_mounts_for_hosted_tenant_workspace() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    tokio::fs::write(temp.path().join("README.md"), "hosted scoped read\n")
+        .await
+        .unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
         execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, FailureKind::FilesystemDenied);
+    assert_eq!(output["content"], json!("     1│ hosted scoped read"));
+    assert_eq!(output["path"], json!("/workspace/README.md"));
+    assert_eq!(output["total_lines"], json!(1));
 }
 
 #[tokio::test]
@@ -9598,7 +9640,7 @@ where
 
 fn runtime_with_local_and_sandbox_process_ports<L>(
     local_process: Arc<L>,
-    sandbox_process: Arc<TenantSandboxProcessPort>,
+    sandbox_process: Arc<UserSandboxProcessPort>,
     policy: EffectiveRuntimePolicy,
 ) -> impl HostRuntime
 where
@@ -9616,7 +9658,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_process_port(local_process)
-    .with_tenant_sandbox_process_port(sandbox_process)
+    .with_user_sandbox_process_port(sandbox_process)
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
@@ -9654,9 +9696,9 @@ fn local_host_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
+fn user_sandbox_process_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         ..local_host_policy()
     }
 }
@@ -9667,7 +9709,7 @@ fn hosted_dev_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,

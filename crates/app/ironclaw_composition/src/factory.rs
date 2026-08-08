@@ -11,7 +11,6 @@ use crate::backend_store_assembly::{
     filesystem_resource_governor, resolve_explicit_or_keychain_master_key,
     trigger_repository_for_durable_backend,
 };
-#[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, capability_authorizer};
@@ -261,6 +260,8 @@ pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<Compos
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    pub(crate) user_sandbox_process_port:
+        Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
@@ -275,7 +276,6 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) capability_policy: Arc<BuiltinCapabilityPolicy>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) outbound_delivery_targets:

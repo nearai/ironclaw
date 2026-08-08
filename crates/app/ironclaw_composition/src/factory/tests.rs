@@ -40,7 +40,10 @@ use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAc
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
 
-use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
+use crate::builtin_capability_policy::{
+    BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, CapabilityMountProfile,
+    CapabilityNetworkProfile,
+};
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
@@ -54,6 +57,70 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
         Err(RebornBuildError::InvalidConfig { reason })
             if reason.contains("libSQL FilesystemResourceGovernor uses process-local tallies")
     ));
+}
+
+#[tokio::test]
+async fn production_backend_projects_user_sandbox_shell_constraints() {
+    let dir = tempfile::tempdir().expect("sandbox production root");
+    let database_path = dir.path().join("reborn.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(database_path.display().to_string())
+            .build()
+            .await
+            .expect("build sandbox production database"),
+    );
+    let runtime =
+        Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
+    let railway_binding = crate::sandbox::build_railway_user_sandbox_binding(
+        "sandbox-policy-project".to_string(),
+        "sandbox-policy-environment".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect("valid Railway fixture config");
+    let services = build_runtime_substrate(
+        crate::test_support::libsql_host_bindings_from_runtime_for_test(
+            RebornCompositionProfile::Production,
+            "sandbox-policy-owner",
+            runtime,
+            database_path.display().to_string(),
+            test_secret_master_key(),
+        )
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::UserSandbox,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
+        })
+        .with_runtime_process_binding(railway_binding),
+    )
+    .await
+    .expect("production-shaped sandbox services build");
+    let shell = services
+        .capability_policy_for_test()
+        .grants
+        .iter()
+        .find(|grant| grant.capability.as_str() == "builtin.shell")
+        .expect("shell grant");
+
+    for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
+        assert!(!shell.effects.contains(&effect));
+    }
+    assert!(shell.effects.contains(&EffectKind::Network));
+    assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
+    assert_eq!(
+        shell.network,
+        CapabilityNetworkProfile::SandboxDirectPreview
+    );
 }
 
 #[tokio::test]

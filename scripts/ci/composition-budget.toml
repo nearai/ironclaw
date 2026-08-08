@@ -151,7 +151,9 @@ observed_date = "2026-08-07"
 # Phase 0 this file blesses — rather than raising the ceiling to absorb it. Net
 # effect is a smaller composition than before the fixes. Measured on this tree
 # with `bash scripts/ci/check-composition-budget.sh`.
-loc_ceiling = 40432
+# Union re-measured 40432 -> 40747 on 2026-08-07 after merging #7157's delivery
+# refactor with #7214's sandbox profile and binding assembly.
+loc_ceiling = 40747
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -162,7 +164,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40432
+loc_observed = 40747
 loc_observed_date = "2026-08-07"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
