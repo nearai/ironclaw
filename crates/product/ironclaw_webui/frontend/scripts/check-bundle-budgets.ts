@@ -51,7 +51,13 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // initial route, and prevents model-authored `data-workspace-path` metadata
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
 // retains about 1.2 KB of explicit headroom without weakening the feature.
-const CHAT_GZIP_BUDGET = 217_000;
+// The inspector shell then brought current `main` to 216.9 KB gzip. The SSE
+// reconnect coordinator adds ~0.4 KB of deterministic retry/backpressure logic
+// to the eager chat transport path, where it must be available before the first
+// stream opens. A 218.5 KB budget keeps the same ~1.2 KB headroom instead of
+// deleting recovery safeguards to fit inside headroom consumed by concurrent
+// `main` changes.
+const CHAT_GZIP_BUDGET = 218_500;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {
