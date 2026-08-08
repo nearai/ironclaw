@@ -665,7 +665,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
         // non-contract crates.
-        ("ironclaw_product_contracts", 15_758),
+        // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
+        // growth is the three admin scrape request DTOs and the wire
+        // `RebornListThreadsResponse` reuse — declarations only; authorization,
+        // audit, and artifact building stay in ironclaw_assistant.
+        ("ironclaw_product_contracts", 15_800),
         ("ironclaw_prompt_envelope", 832),
     ];
 

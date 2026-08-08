@@ -214,6 +214,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
+| A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user` (step 8 + anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | The model sees channel setup guidance but not UI-only chrome | `channel_connection_projection.rs` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |
@@ -332,7 +333,7 @@ entries.
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
-| Opt into the inspector, preserve its selected tab while closing, resizing, and reloading, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
+| Opt into the inspector, preserve its selected tab while closing, resizing, reloading, and reconnecting after visibility changes, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
 | Inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for a completed run | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
 | Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
@@ -341,6 +342,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Run built-in tools, parallel calls, and multi-step chains and see the result | `test_reborn_webui_v2_legacy_tool_execution.py` (9), `test_v2_engine_tool_lifecycle.py` (6), `test_tool_execution.py` |
+| Inspect safely bounded arguments and a visibly truncated 50 KiB output for a completed tool call | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_tool_turn_records_result_and_final_reply` |
 | Recover when a tool fails, a tool call is truncated, or the model loops | `test_reborn_webui_v2_legacy_tool_execution.py`, `test_agent_loop_recovery.py` (4), `test_v2_engine_error_handling.py` |
 | See the approval card with payload details, approve/deny, and see it disable while resolving | `test_reborn_webui_v2_legacy_approval.py` (8) |
 | Not send messages while a gate is pending — but keep using other threads | `test_reborn_webui_v2_legacy_approval.py::test_reborn_legacy_pending_approval_does_not_block_other_thread` |

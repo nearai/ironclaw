@@ -55,6 +55,16 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     // a deferred/describe-first schema, so keep both always advertised.
     "trigger_list",
     "trigger_create",
+    // outbound delivery lane — core for the same reason the trigger lifecycle
+    // is: a routine's prompt must pin `builtin__outbound_deliver` steps against
+    // ids from `builtin__outbound_delivery_targets_list` at creation time, and
+    // the delivery guidance block renders only while BOTH tools are visible
+    // (`delivery_tools_visible` in the loop driver host). Deferring the pair on
+    // a wide catalog silently un-injects that steering, and creation turns were
+    // observed improvising act-as-user vendor send_message steps to reach the
+    // requester instead.
+    "outbound_deliver",
+    "outbound_delivery_targets_list",
     // skills + time
     "skill_list",
     "time",
@@ -938,6 +948,11 @@ mod tests {
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),
             ("trigger_create", "builtin.trigger_create"),
+            ("outbound_deliver", "builtin.outbound_deliver"),
+            (
+                "outbound_delivery_targets_list",
+                "builtin.outbound_delivery_targets_list",
+            ),
             ("time", ironclaw_host_runtime::TIME_CAPABILITY_ID),
         ];
         let synthetic_or_extension_core_names = [
@@ -1961,13 +1976,19 @@ mod tests {
     /// - 83.7%: after the bridge grew (`tool_search`'s description became the
     ///   always-on catalog index, plus `tool_describe`/`tool_call`) and the
     ///   always-advertised Core tier was introduced.
-    /// - 82.9% (21,130 -> 3,618, 20 advertised): current, with 17 Core-tier
+    /// - 82.9% (21,130 -> 3,618, 20 advertised): with 17 Core-tier
     ///   loop primitives in this fixture always advertised alongside the three
     ///   bridge tools.
     ///
+    /// - 82.0% (21,355 -> 3,843, 22 advertised): current — core-set width
+    ///   plus fixture change: the outbound delivery pair
+    ///   (`outbound_deliver`, `outbound_delivery_targets_list`) became
+    ///   Core-tier so routine-delivery steering stays deterministic, and the
+    ///   fixture now models both (19 Core fixtures).
+    ///
     /// Moving this constant is allowed, but the PR that moves it must say which
     /// of core-set width, bridge-schema growth, or fixture change caused it.
-    const REPRESENTATIVE_REDUCTION_BASELINE_PCT: f64 = 82.9;
+    const REPRESENTATIVE_REDUCTION_BASELINE_PCT: f64 = 82.0;
 
     /// Band around the recorded baseline that counts as noise rather than
     /// material drift.
@@ -2037,7 +2058,7 @@ mod tests {
             "\n| full_count | full_tokens | disclosed_count | disclosed_tokens | reduction_abs | reduction_pct |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| {full_count} | {full_tokens} | {disclosed_count} | {disclosed_tokens} | {reduction_abs} | {reduction_pct:.1}% |\n{breakdown}"
         );
 
-        assert_eq!(full_count, 91);
+        assert_eq!(full_count, 93);
         assert!(disclosed.deferred);
         assert_eq!(
             discoverable.0, 0,
@@ -2095,6 +2116,20 @@ mod tests {
             })
             .collect();
 
+        // The outbound delivery pair rides Core (always advertised) so the
+        // benchmark measures its standing disclosure cost: a bounded deliver
+        // call and a no-argument target lister.
+        definitions.push(fixture_tool(
+            "outbound_deliver",
+            "Deliver content to one connected channel destination from the assistant identity.",
+            medium_schema(17),
+        ));
+        definitions.push(fixture_tool(
+            "outbound_delivery_targets_list",
+            "List the caller's connected outbound delivery destinations.",
+            small_no_arg_schema(),
+        ));
+
         for index in 0..15 {
             definitions.push(fixture_tool(
                 format!("small_status_{index:02}"),
@@ -2123,7 +2158,7 @@ mod tests {
             ));
         }
 
-        assert_eq!(definitions.len(), 91);
+        assert_eq!(definitions.len(), 93);
         definitions
     }
 

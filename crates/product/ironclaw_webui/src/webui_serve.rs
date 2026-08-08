@@ -171,6 +171,17 @@ fn regression_artifact_export_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Read once at composition and default off. Independent of the QA-only
+/// regression-export gate: admin cross-user thread scraping is a different
+/// privilege class and must not ride that caller-owned flag (a deployment
+/// enabling QA self-export would otherwise silently mount tenant-wide admin
+/// transcript access).
+fn admin_thread_scrape_enabled() -> bool {
+    std::env::var("IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 /// Host-installation composition the Reborn HTTP gateway needs in addition to
 /// the product surface it serves over.
 ///
@@ -561,8 +572,10 @@ pub fn webui_v2_app_with_lifecycle(
             .collect(),
     );
     let regression_artifact_export_enabled = regression_artifact_export_enabled();
-    let mut descriptors = crate::webui_v2::webui_v2_routes_with_regression_artifact_export(
+    let admin_thread_scrape_enabled = admin_thread_scrape_enabled();
+    let mut descriptors = crate::webui_v2::webui_v2_routes_with_artifact_flags(
         regression_artifact_export_enabled,
+        admin_thread_scrape_enabled,
     );
     let mut operator_descriptors: Vec<IngressRouteDescriptor> = descriptors
         .iter()
@@ -614,7 +627,8 @@ pub fn webui_v2_app_with_lifecycle(
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
         .with_reborn_projects_enabled(reborn_projects_enabled())
         .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
-        .with_regression_artifact_export_enabled(regression_artifact_export_enabled);
+        .with_regression_artifact_export_enabled(regression_artifact_export_enabled)
+        .with_admin_thread_scrape_enabled(admin_thread_scrape_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

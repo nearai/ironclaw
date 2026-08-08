@@ -3359,6 +3359,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         durable_milestone_sink,
         live_projection_publisher,
     );
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
     let (
         capability_factory,
         capability_input_resolver,
@@ -3369,6 +3373,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
         display_previews,
     ) = if local_runtime.is_some() {
         let builtin_capability_policy = Arc::clone(&services.capability_policy);
+        let tool_diagnostic_sink = Arc::new(
+            ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+                diagnostic_store_impl.clone()
+                    as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+                ironclaw_loop_host::DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY,
+            )
+            .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+        )
+            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3379,6 +3392,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
+            Some(tool_diagnostic_sink),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -3639,10 +3653,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
-    let diagnostic_store_impl =
-        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
-    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
-        diagnostic_store_impl.clone();
     let prompt_diagnostic_sink = Arc::new(
         ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
             diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,

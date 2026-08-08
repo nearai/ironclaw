@@ -110,6 +110,13 @@ const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     // --- frozen inventory (§6.1.3) ----------------------------------------
     ("ADMIN_CONFIGURATION_REPLACE_CAPABILITY", "inventory"),
     ("ADMIN_CONFIGURATION_VIEW", "inventory"),
+    // Admin thread scraping (#7228): the three scrape views are part of the
+    // same frozen view inventory as ADMIN_USERS_VIEW / ADMIN_USER_SECRETS_VIEW;
+    // concrete descriptor constants stay in product per §6.1.3 (contracts
+    // crate holds only the ProductView shape, never concrete inventory).
+    ("ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW", "inventory"),
+    ("ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW", "inventory"),
+    ("ADMIN_THREAD_SCRAPE_THREADS_VIEW", "inventory"),
     ("ADMIN_USERS_VIEW", "inventory"),
     ("ADMIN_USER_CREATE_COMMAND", "inventory"),
     ("ADMIN_USER_DELETE_CAPABILITY", "inventory"),
@@ -216,7 +223,7 @@ const PRODUCT_SYMBOLS_OPENAI_COMPAT_STILL_NAMES: &[(&str, &str)] = &[
 // `product_attachment_capabilities` to `ironclaw_attachments` as
 // `AttachmentCapabilities` / `attachment_capabilities` — the two symbols this
 // list called out by name as that row's to own. Shrink-only.
-const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 100;
+const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 103;
 const OPENAI_COMPAT_PRODUCT_SYMBOL_BASELINE: usize = 3;
 
 /// Boundary vocabulary this row moved: declared in `ironclaw_product_contracts`

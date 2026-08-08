@@ -1599,6 +1599,126 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["tests/snapshots/unowned__case.snap"])
 
+    def plan_prompt_surface_owners(self, paths: list[str]) -> dict:
+        """Plan a pull request in a workspace naming the prompt-surface crates.
+
+        Same shape as `real_owner_metadata`: the planner rejects changed
+        packages outside the canonical set, so the crates the
+        `PROMPT_SURFACE_*` tables route from have to exist with their real
+        manifest paths for the paths under test to classify as production
+        changes rather than falling into the exhaustive-plan arm.
+        """
+
+        def package(name: str, manifest: str) -> dict:
+            return {
+                "id": name,
+                "name": name,
+                "manifest_path": str(ROOT / manifest),
+            }
+
+        packages = [
+            package("ironclaw_integration_tests", "Cargo.toml"),
+            package(
+                "ironclaw_host_runtime",
+                "crates/kernel/ironclaw_host_runtime/Cargo.toml",
+            ),
+            package(
+                "ironclaw_loop_contracts",
+                "crates/contracts/ironclaw_loop_contracts/Cargo.toml",
+            ),
+            package(
+                "ironclaw_host_api",
+                "crates/contracts/ironclaw_host_api/Cargo.toml",
+            ),
+            package("ironclaw_turns", "crates/kernel/ironclaw_turns/Cargo.toml"),
+            package(
+                "ironclaw_agent_loop",
+                "crates/loop/ironclaw_agent_loop/Cargo.toml",
+            ),
+            package(
+                "ironclaw_loop_host",
+                "crates/loop/ironclaw_loop_host/Cargo.toml",
+            ),
+            package("ironclaw_memory", "crates/domains/ironclaw_memory/Cargo.toml"),
+        ]
+        metadata = {
+            "workspace_members": [entry["id"] for entry in packages],
+            "packages": packages,
+            "resolve": {
+                "nodes": [{"id": entry["id"], "deps": []} for entry in packages]
+            },
+        }
+        return planner.build_plan(
+            event="pull_request",
+            changed_paths=paths,
+            metadata=metadata,
+            canonical_packages=[
+                entry["name"]
+                for entry in packages
+                if entry["name"] != "ironclaw_integration_tests"
+            ],
+        )
+
+    def test_prompt_surface_change_schedules_golden_lane_and_crate_bucket(self) -> None:
+        """Every configured entry gets a positive case BY CONSTRUCTION.
+
+        The cases are derived from the `PROMPT_SURFACE_*` tables themselves
+        (each exact path, plus one representative file per prefix), so adding
+        an entry whose crate is missing from the fixture fails here instead of
+        shipping untested — the expected package is resolved from the fixture
+        directories, and an unresolvable entry is an explicit failure, not a
+        skip.
+        """
+        golden_lane = planner._integration_test_lanes()[
+            planner.PROMPT_SURFACE_GOLDEN_OWNER
+        ]
+        fixture_directories = {
+            "crates/kernel/ironclaw_host_runtime": "ironclaw_host_runtime",
+            "crates/contracts/ironclaw_loop_contracts": "ironclaw_loop_contracts",
+            "crates/contracts/ironclaw_host_api": "ironclaw_host_api",
+            "crates/kernel/ironclaw_turns": "ironclaw_turns",
+            "crates/loop/ironclaw_agent_loop": "ironclaw_agent_loop",
+            "crates/loop/ironclaw_loop_host": "ironclaw_loop_host",
+        }
+        cases = list(planner.PROMPT_SURFACE_PATHS) + [
+            f"{prefix}golden_probe.md" for prefix in planner.PROMPT_SURFACE_PREFIXES
+        ]
+        for path in cases:
+            with self.subTest(path=path):
+                package = next(
+                    (
+                        name
+                        for directory, name in fixture_directories.items()
+                        if path.startswith(f"{directory}/")
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(
+                    package,
+                    f"prompt-surface entry {path} names a crate the fixture does "
+                    "not carry; add it to plan_prompt_surface_owners so the "
+                    "entry is actually tested",
+                )
+                plan = self.plan_prompt_surface_owners([path])
+                self.assertIn(
+                    golden_lane,
+                    plan["integration_lanes"],
+                    "a prompt-surface change must run the golden snapshots on the PR",
+                )
+                self.assertIn(package, plan["changed_packages"])
+
+    def test_non_prompt_production_change_does_not_schedule_golden_lane(self) -> None:
+        plan = self.plan_prompt_surface_owners(
+            ["crates/domains/ironclaw_memory/src/lib.rs"]
+        )
+        self.assertEqual(
+            plan["integration_lanes"],
+            [],
+            "ordinary production changes keep the narrow plan; the merge queue "
+            "remains the exhaustive gate",
+        )
+        self.assertIn("ironclaw_memory", plan["changed_packages"])
+
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])
         self.assertEqual(plan["mode"], "none")

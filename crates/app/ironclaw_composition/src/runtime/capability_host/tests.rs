@@ -70,6 +70,19 @@ mod tests {
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
+    #[derive(Default)]
+    struct RecordingToolDiagnosticSink {
+        result: std::sync::Mutex<Option<HostManagedToolResultDiagnosticCapture>>,
+    }
+
+    impl HostManagedPromptDiagnosticSink for RecordingToolDiagnosticSink {
+        fn record_prompt(&self, _capture: ironclaw_loop_host::HostManagedPromptDiagnosticCapture) {}
+
+        fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+            *self.result.lock().expect("diagnostic result lock") = Some(capture);
+        }
+    }
+
     impl StagedCapabilityIo {
         fn latest_result_output(
             &self,
@@ -557,6 +570,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
 
@@ -685,6 +699,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -933,6 +948,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1029,6 +1045,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             unrelated_fallback,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1109,6 +1126,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             runtime_owner_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1169,6 +1187,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1222,6 +1241,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1302,6 +1322,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1404,6 +1425,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1499,6 +1521,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -1699,6 +1722,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1846,6 +1870,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -2086,6 +2111,74 @@ mod tests {
         assert!(store.get("result:first").is_none());
         assert!(store.get("result:second").is_some());
         assert!(store.total_bytes <= CAPABILITY_IO_MAX_STAGED_BYTES);
+    }
+
+    #[tokio::test]
+    async fn capability_io_sends_only_bounded_output_to_the_diagnostic_sink() {
+        let sink = Arc::new(RecordingToolDiagnosticSink::default());
+        let capability_io = StagedCapabilityIo {
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::new(Some(
+                Arc::clone(&sink) as Arc<dyn HostManagedPromptDiagnosticSink>
+            )),
+            ..StagedCapabilityIo::default()
+        };
+        let run_context = run_context("bounded-tool-diagnostic").await;
+        let input_ref = CapabilityInputRef::new(format!(
+            "input:{}:bounded-tool-diagnostic",
+            run_context.run_id
+        ))
+        .expect("input ref");
+        let secret = format!("Bearer {}", "s".repeat(80));
+        let retained_prefix =
+            "x".repeat(ironclaw_product_contracts::inspector::TOOL_RESULT_MAX_BYTES - secret.len());
+        let output = serde_json::Value::String(format!(
+            "{retained_prefix}{secret}{}",
+            "y".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2)
+        ));
+        let serialized_bytes = serialized_result_output(&output)
+            .expect("result serializes")
+            .len();
+        let invocation_id = InvocationId::new();
+        capability_io.record_running_invocation(&run_context, invocation_id, &input_ref);
+
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &CapabilityId::new("builtin.echo").expect("capability id"),
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::InlineOnly,
+            })
+            .await
+            .expect("result writes");
+
+        let capture = sink
+            .result
+            .lock()
+            .expect("diagnostic result lock")
+            .take()
+            .expect("tool diagnostic captured");
+        let retained = capture
+            .result
+            .expect("successful result has diagnostic text");
+        assert_eq!(retained.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert!(retained.contains(&secret));
+        assert!(
+            ironclaw_safety::LeakDetector::new()
+                .redact_all_secrets(&retained)
+                .1,
+            "boundary-crossing secret must remain detectable"
+        );
+        assert_eq!(
+            capture.result_original_bytes,
+            Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))
+        );
+        assert!(
+            capture.duration_ms.is_some(),
+            "the capability writer must forward the measured invocation duration"
+        );
     }
 
     #[test]
@@ -2688,6 +2781,7 @@ mod tests {
             Some(skill_context.activation_source),
             None,
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -3032,6 +3126,7 @@ mod tests {
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -3800,6 +3895,7 @@ mod tests {
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -4203,6 +4299,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             Some(outbound_preferences_service),
+            None,
             None,
         )
         .expect("capability wiring");
@@ -5018,6 +5115,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -5046,6 +5144,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -5176,6 +5275,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -5326,6 +5426,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,

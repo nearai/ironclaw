@@ -14,13 +14,13 @@
 //! correct and none is asserted anywhere, so a future change to any one of them silently enables
 //! script execution for every tenant. This test asserts the property directly.
 //!
-//! **`TenantSandbox` is deliberately treated as execution-capable** and is NOT covered by this
+//! **`UserSandbox` is deliberately treated as execution-capable** and is NOT covered by this
 //! test, because it is @henrypark133's sandbox work: `crates/ironclaw_process_sandbox` is a
 //! complete Docker backend (`--cap-drop ALL`, `no-new-privileges`, `readonly_rootfs`,
 //! `--network none`, non-root uid) that currently has no non-test caller. When that lands,
 //! multi-tenant execution becomes safe *because it is sandboxed*, and the first assertion here
 //! should be revisited rather than deleted. Until then, composition refuses to build a policy
-//! requesting `TenantSandbox` without a port, which the second assertion pins.
+//! requesting `UserSandbox` without a port, which the second assertion pins.
 
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_runtime::builtin_first_party_package_for_process_backend;
@@ -42,7 +42,7 @@ fn capability_ids(backend: ProcessBackendKind) -> Vec<String> {
 fn a_backend_that_cannot_execute_has_no_shell_so_skill_scripts_are_inert() {
     // `None` is what `HostedMultiTenant` resolves to today, via `RuntimeProfile::SecureDefault`.
     // Named as one backend rather than looped over a one-element list: the moment a second
-    // non-executing backend exists (`TenantSandbox` is the expected one), it needs its OWN case
+    // non-executing backend exists (`UserSandbox` is the expected one), it needs its OWN case
     // with its own message, not a silent extra iteration here.
     let backend = ProcessBackendKind::None;
     let ids = capability_ids(backend);
@@ -64,12 +64,12 @@ fn execution_capable_backends_keep_shell_so_this_test_is_not_vacuous() {
     // Without this, the assertion above would pass just as happily if `builtin.shell` had been
     // renamed or removed everywhere -- proving nothing about the multi-tenant case.
     //
-    // `TenantSandbox` appears here on purpose: it is execution-capable BY DESIGN, and safe only
+    // `UserSandbox` appears here on purpose: it is execution-capable BY DESIGN, and safe only
     // once the sandbox process port is wired. That is the boundary this pair of tests draws.
     for backend in [
         ProcessBackendKind::LocalHost,
         ProcessBackendKind::Docker,
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
     ] {
         let ids = capability_ids(backend);
         assert!(

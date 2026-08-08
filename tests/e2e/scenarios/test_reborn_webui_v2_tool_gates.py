@@ -10,11 +10,13 @@ Tracks nearai/ironclaw#4633.
 
 import asyncio
 import json
+import re
 import uuid
 from urllib.parse import quote
 
 import httpx
 import pytest
+from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
@@ -25,6 +27,7 @@ from reborn_webui_harness import (
     create_thread,
     enable_reborn_global_auto_approve,
     fetch_timeline,
+    reborn_v2_browser,
     reborn_bearer_headers,
     send_message,
     start_reborn_webui_v2_server,
@@ -319,15 +322,17 @@ async def reborn_v2_yolo_server(
 
 async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     reborn_v2_yolo_server,
+    reborn_v2_browser,
 ):
     marker = f"tool-turn-{uuid.uuid4().hex[:8]}"
+    oversized_output = f"{marker}-" + ("x" * (50 * 1024 + 512))
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, reborn_v2_yolo_server)
-        await send_message(
+        submitted = await send_message(
             client,
             reborn_v2_yolo_server,
             thread_id,
-            f"reborn builtin echo {marker}",
+            f"reborn builtin echo {oversized_output}",
         )
         assistant = await wait_for_assistant_message(
             client,
@@ -337,6 +342,9 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
         )
         timeline = await fetch_timeline(client, reborn_v2_yolo_server, thread_id)
 
+    run_id = assistant.get("turn_run_id") or submitted.get("run_id")
+    assert run_id, (assistant, submitted)
+
     references = _tool_result_references(timeline)
     assert references, timeline
     assert any(reference.get("tool_result_ref") for reference in references), references
@@ -344,6 +352,38 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     assistant_content = assistant.get("content")
     assert isinstance(assistant_content, str), assistant
     assert assistant_content.strip(), assistant
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_yolo_server}/chat/{thread_id}"
+            f"?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await page.locator("[data-testid='inspector-tab-activity']").click()
+        tool_entry = page.locator("[data-activity-kind='tool_completed']").first
+        await expect(tool_entry).to_be_visible(timeout=30000)
+        await tool_entry.get_by_role("button", name="Show details").click()
+        detail = tool_entry.locator("[data-testid^='inspector-tool-detail-']")
+        await expect(detail).to_be_visible(timeout=15000)
+        await expect(detail).to_contain_text("builtin.echo")
+        await expect(detail).to_contain_text("succeeded")
+        arguments = detail.get_by_text("Arguments", exact=True).locator("..").locator("pre")
+        await expect(arguments).to_contain_text(marker)
+        await expect(detail.get_by_text("Duration:")).to_have_count(1)
+        await expect(detail.get_by_text("Output size:")).to_have_count(1)
+        await expect(
+            detail.get_by_text(
+                re.compile(r"Output · truncated from 5[1-9],[0-9]{3} bytes")
+            )
+        ).to_be_visible()
+        output = detail.locator("pre").nth(1)
+        retained_bytes = await output.evaluate(
+            "element => new TextEncoder().encode(element.textContent || '').length"
+        )
+        assert retained_bytes <= 50 * 1024
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(

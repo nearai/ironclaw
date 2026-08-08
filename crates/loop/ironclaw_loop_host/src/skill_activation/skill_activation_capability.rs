@@ -474,9 +474,13 @@ mod tests {
 /// The payload `skill_activate` actually persists, driven through
 /// [`SkillActivationHandler::invoke`].
 ///
-/// The builder-level cases above prove the shape but not that the handler delivers it. The defect
-/// this contract fixes was exactly that: feedback was built and dropped, so the model saw
-/// `{"activated":[],"count":0}` for a bad name, a trust wall and an unmet requirement alike.
+/// The cases above call `build_activation_output` directly, which proves the shape but not that
+/// the handler hands that shape to `write_capability_result`. Nothing between the two was
+/// covered, and the whole defect this contract exists to fix was a payload that was built
+/// correctly and then not delivered — `plan.selection.feedback` was constructed and dropped, so
+/// the model saw `{"activated":[],"count":0}` for a bad name, a trust wall and an unmet
+/// requirement alike. A test that stops at the builder cannot see that class of bug, so these
+/// assert the captured write.
 #[cfg(test)]
 mod invoke_tests {
     use std::collections::HashMap;
@@ -504,7 +508,8 @@ mod invoke_tests {
     use crate::SkillBundleDescriptor;
     use crate::{SelectableSkillContextSource, SkillActivationSelectorConfig};
 
-    /// Fixed catalog; each entry declares its own trust, so a refusal differs in nothing else.
+    /// A bundle source with a fixed catalog, where each entry declares its own trust so a
+    /// refusal can be provoked without any other difference.
     struct FixedSkillBundleSource {
         descriptors: Vec<SkillBundleDescriptor>,
         files: HashMap<String, Vec<u8>>,

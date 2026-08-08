@@ -165,6 +165,25 @@ LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
 LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
 ```
 
+## Slack Delivery Verification (two-lane model)
+
+Since the explicit channel delivery tool landed (#7157), a triggered fire's
+result is never pushed by the completion driver: the fire itself calls
+`builtin.outbound_deliver`, and the background-run notifier's
+`triggered-run-delivery` record describes notice delivery only — `skipped`
+is the healthy record for a cleanly completed fire. The
+`reborn-webui-v2-live-qa` delivery cases therefore verify:
+
+- the durable `outbound/deliveries/` model-delivery record for the exact
+  fire run (`status == "delivered"`, target = the expected DM), and
+- the delivery marker in an independent Slack `conversations.history`
+  read-back (bot-authored, exactly once for one-shot routines).
+
+Only `failed`/`denied` notifier records fail a delivery case. Case prompts
+bind the marker to the **delivered Slack message** (the fire composes the
+message separately from its final answer, so a final-answer-only phrasing
+produces marker-less deliveries).
+
 ## Artifact Policy
 
 Artifacts are written under `artifacts/live-canary/`.

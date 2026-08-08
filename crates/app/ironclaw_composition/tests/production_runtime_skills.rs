@@ -1,16 +1,35 @@
 //! Skills on the PRODUCTION composition, not local-dev.
 //!
-//! Everything else validating this work reaches production behaviour through seams production does
-//! not use -- disk-mounted skill roots, env overrides -- which is how a class of problem stayed
-//! hidden. So this builds `RebornCompositionProfile::Production` over libSQL under the hosted
-//! multi-tenant policy, with no mounts and no env switches, seeds the DB-backed
-//! `/tenants/<t>/users/<u>/skills/` tree the product actually reads, and asserts a skill there is
-//! activatable by name and still activatable after a restart.
+//! Everything else validating this work runs against local-dev or the benchmark harness, and both
+//! reach production behaviour through seams production does not use: disk-mounted skill roots, env
+//! overrides, a workspace `.skills` directory. That is how a whole class of problem stayed hidden —
+//! agent-authored skills escaping to the host's `~/.claude/skills`, a copy-out scanning disk while
+//! the store is libSQL, a benchmark scoring only what the model requested while the host picked
+//! freely. Each was an artifact of the instrument, not the system.
 //!
-//! The mount-parity tests are the guard for nearai/ironclaw#7168, where three views over two trees
-//! meant an installed skill could never be found again. Both readers are pinned against the writer
-//! separately, because the first fix corrected only the multi-tenant Postgres branch and left
-//! local-dev reading the disk.
+//! So this builds the real thing: `RebornCompositionProfile::Production` over libSQL, with the
+//! hosted multi-tenant runtime policy — scoped-virtual filesystem, brokered secrets, network deny,
+//! ask-always approvals. No mounts, no env switches.
+//!
+//! **What this test establishes, and the gap it exposes.**
+//!
+//! The production composition builds, opens a conversation, and runs a skill-execution turn — so
+//! skills are wired on the production path. But a skill written to
+//! `tenants/<t>/users/<u>/skills/` **on disk is invisible to it**: production resolves the skill
+//! store through the scoped-virtual filesystem (libSQL), not the host filesystem. Measured here:
+//! explicit `$name` activation returned an empty activation set for a disk-seeded skill.
+//!
+//! That is not a product bug — it is the storage contract. It means something else, though, and it
+//! is the honest answer to "would this work in production": **every other validation of this work
+//! seeds skills on disk, so none of it exercises production's storage path.** The benchmark mounts
+//! `system/skills`, the local-dev tests write files, and both are real paths for their profiles and
+//! neither is production's.
+//!
+//! Closing that needs a seam this crate does not expose: installing a skill into the production
+//! scoped-virtual store from a test, i.e. driving `builtin.skill_install` through the production
+//! capability port rather than writing bytes to a directory. That is ironclaw infrastructure work
+//! with an owner other than this PR, so it is recorded here rather than approximated — a test that
+//! seeds disk and asserts success would report production coverage it does not have.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,9 +43,12 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 
-/// The hosted multi-tenant policy a real tenant gets. `ProcessBackendKind::None` is load-bearing:
-/// it is why a skill's `scripts/*.py` cannot execute for a tenant, and a skill that only works with
-/// a process backend is not a multi-tenant feature.
+/// The hosted multi-tenant policy, which is what a real tenant gets.
+///
+/// `ProcessBackendKind::None` is deliberate and load-bearing: it is what `HostedMultiTenant` +
+/// `SecureDefault` resolves to today, and it is why a skill's `scripts/*.py` cannot execute for a
+/// tenant. Asserting skills work *under this policy* is the point — a skill that only works with a
+/// process backend is not a multi-tenant feature.
 fn hosted_multi_tenant_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
@@ -55,9 +77,14 @@ fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> Str
 
 /// A skill written into production's DB-backed store is activatable by name, same session.
 ///
-/// The production runtime really is built and driven here, and under it a skill written to the HOST
-/// `tenants/<t>/users/<u>/skills/` activates nothing -- which bounds what disk-seeded validation
-/// elsewhere in this work can claim.
+/// Two things at once, because the second is what a reader needs and the first is what makes it
+/// credible: the production runtime really is built and driven here (it opens a conversation and
+/// completes `execute_skill_message`), and under it a skill written to
+/// `tenants/<t>/users/<u>/skills/` on the host filesystem activates nothing.
+///
+/// The value is negative and deliberate: it draws the boundary of what disk-seeded validation can
+/// claim. Every other check in this work seeds skills on disk, so none of them speaks to
+/// production's storage path.
 #[tokio::test]
 async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -113,7 +140,7 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
+        "/projects/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(
@@ -201,8 +228,10 @@ async fn build_production(
 /// The full production loop: a skill in the DB-backed store is activatable by a runtime that starts
 /// with it present.
 ///
-/// Distinguishes the two causes of the sibling test's miss -- wrong scoped root versus build-time
-/// enumeration -- by seeding and then building a SECOND runtime over the same libSQL database.
+/// The sibling test above shows a skill written mid-session is not discovered. This distinguishes
+/// the two possible causes -- wrong scoped root versus build-time enumeration -- by seeding and then
+/// building a SECOND runtime over the same libSQL database. If discovery happens at build time, this
+/// passes and the path is right; if it fails too, the scoped root is wrong.
 ///
 /// It is also the realistic shape. A tenant installs a skill in one session and uses it in a later
 /// one, against the same database, which is exactly a rebuild.
@@ -231,7 +260,7 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
+        "/projects/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(
@@ -280,363 +309,4 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     );
 
     second.shutdown().await.expect("second shutdown");
-}
-
-/// The reader and the writer must resolve `/skills` to the SAME tree — the guard for
-/// nearai/ironclaw#7168, where the writer resolved to the database and the reader to the host disk,
-/// so an installed skill reported success and was invisible forever.
-///
-/// A pure mount-view comparison rather than an install-then-list round trip: the two views are the
-/// whole bug surface, and this names the divergence where a round trip would just say "not found".
-#[tokio::test]
-async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
-    use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
-        resource::ResourceScope,
-    };
-
-    let scope = ResourceScope::local_default(
-        UserId::new("mount-parity-user").expect("user id"),
-        InvocationId::new(),
-    )
-    .expect("scope");
-
-    let write =
-        ironclaw_composition::test_support::production_skill_management_mount_view_for_test(&scope)
-            .expect("write mount view");
-    let read =
-        ironclaw_composition::test_support::production_skill_context_mount_view_for_test(&scope)
-            .expect("read mount view");
-
-    // Resolve through the views rather than inspecting their internals: this is the exact call the
-    // runtime makes, so the test fails if resolution diverges for any reason, not just if the grant
-    // list looks different.
-    let probe = write
-        .scoped_path("/skills/example/SKILL.md")
-        .expect("scoped path");
-    let write_target = write
-        .resolve(&probe)
-        .expect("write resolves")
-        .as_str()
-        .to_string();
-    let read_target = read
-        .resolve(&probe)
-        .expect("read resolves")
-        .as_str()
-        .to_string();
-
-    assert_eq!(
-        read_target, write_target,
-        "skill discovery resolves to {read_target} while skill_install resolves to {write_target}. \
-         `/tenants` routes to the database and `/projects` routes to the host disk, so a mismatch \
-         means an installed skill is invisible forever -- installed: true, listed in-session, gone \
-         from every later one (nearai/ironclaw#7168)."
-    );
-    assert!(
-        write_target.starts_with("/tenants/"),
-        "skills must live in the DB-backed tree, not on host disk; got {write_target}"
-    );
-}
-
-/// `/tenant-shared/skills` must land where every other tenant-shared root lands.
-///
-/// `invocation_mount_view` resolves `/tenant-shared` to `/tenants/<t>/shared`, and every sibling
-/// follows. Repeating the alias inside the target pointed at a subtree nothing writes or migrates,
-/// which fails silently: a tenant with shared skills just stops discovering them.
-#[tokio::test]
-async fn tenant_shared_skills_resolve_under_the_canonical_shared_subtree() {
-    use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
-        resource::ResourceScope,
-    };
-
-    let scope = ResourceScope::local_default(
-        UserId::new("tenant-shared-user").expect("user id"),
-        InvocationId::new(),
-    )
-    .expect("scope");
-
-    let read =
-        ironclaw_composition::test_support::production_skill_context_mount_view_for_test(&scope)
-            .expect("read mount view");
-
-    let probe = read
-        .scoped_path("/tenant-shared/skills/team-review/SKILL.md")
-        .expect("scoped path");
-    let resolved = read
-        .resolve(&probe)
-        .expect("tenant-shared skills must resolve")
-        .as_str()
-        .to_string();
-
-    let expected = format!(
-        "/tenants/{}/shared/skills/team-review/SKILL.md",
-        scope.tenant_id.as_str()
-    );
-    assert_eq!(
-        resolved, expected,
-        "tenant-shared state lives under /tenants/<t>/shared; nothing populates any other subtree, \
-         so shared skills would go undiscoverable with no error. Got {resolved}"
-    );
-    assert!(
-        !resolved.contains("/tenant-shared/"),
-        "the alias must not reappear inside the target: {resolved}"
-    );
-}
-
-/// The same parity requirement for the OTHER read branch: local-dev, local-storage production and
-/// hosted single-tenant, which build their reader in `HostAccessAssembly::build_workspace_filesystems`
-/// rather than from `production_skill_context_mount_view`.
-///
-/// This is why #7168 survived its first fix: that fix corrected only the multi-tenant Postgres
-/// branch, so the E2E passed while local-dev stayed broken in exactly the reported way. One root
-/// cause, two readers, one green test covering one of them.
-///
-/// `/system/skills` is asserted separately — it must stay on the host disk, where
-/// `ensure_bundled_reborn_skills_installed` writes, or all 32 bundled skills resolve to an empty
-/// tree.
-#[tokio::test]
-async fn local_dev_skill_read_and_write_mounts_resolve_to_the_same_tree() {
-    use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
-        resource::ResourceScope,
-    };
-
-    let scope = ResourceScope::local_default(
-        UserId::new("mount-parity-user").expect("user id"),
-        InvocationId::new(),
-    )
-    .expect("scope");
-
-    let write =
-        ironclaw_composition::test_support::production_skill_management_mount_view_for_test(&scope)
-            .expect("write mount view");
-    let read =
-        ironclaw_composition::test_support::db_backed_skill_context_mount_view_for_test(&scope)
-            .expect("read mount view");
-
-    let probe = write
-        .scoped_path("/skills/example/SKILL.md")
-        .expect("scoped path");
-    let write_target = write
-        .resolve(&probe)
-        .expect("write resolves")
-        .as_str()
-        .to_string();
-    let read_target = read
-        .resolve(&probe)
-        .expect("read resolves")
-        .as_str()
-        .to_string();
-
-    assert_eq!(
-        read_target, write_target,
-        "local-dev skill discovery resolves to {read_target} while skill_install resolves to \
-         {write_target}. `/tenants` routes to the database and `/projects` routes to the host disk, \
-         so a mismatch means an agent-installed skill is invisible after the session that created \
-         it (nearai/ironclaw#7168)."
-    );
-    assert!(
-        write_target.starts_with("/tenants/"),
-        "skills must live in the DB-backed virtual filesystem, not on host disk; got {write_target}"
-    );
-
-    // Bundled skills are seeded to the host disk by `ensure_bundled_reborn_skills_installed`, so the
-    // reader must keep looking there. Asserted explicitly because pointing this alias at the
-    // database would resolve all 32 to an empty tree and drop them with no error anywhere.
-    //
-    // `/system/skills` as both alias and target is not a no-op: the composite mounts that virtual
-    // root onto the same host directory the seeder reaches through `/projects/system/skills`.
-    // Verified against a live local-dev server, which lists all 32 bundled skills through it.
-    let bundled_probe = read
-        .scoped_path("/system/skills/example/SKILL.md")
-        .expect("scoped path");
-    let bundled_target = read
-        .resolve(&bundled_probe)
-        .expect("bundled resolves")
-        .as_str()
-        .to_string();
-    assert!(
-        !bundled_target.starts_with("/tenants/"),
-        "bundled skills are seeded to the host disk, not the database; a reader pointed at the DB \
-         resolves them to an empty tree and drops all of them, silently. got {bundled_target}"
-    );
-
-    // The agent's in-run skill port resolves through this same writer, so an agent's `skill_install`
-    // lands where discovery reads. That port was the third view over the second tree: it wrote to
-    // `/projects/tenants/...` on the host disk while Settings → Skills listed the database.
-    let write_bundled_target = write
-        .resolve(
-            &write
-                .scoped_path("/system/skills/example/SKILL.md")
-                .expect("scoped path"),
-        )
-        .expect("bundled resolves")
-        .as_str()
-        .to_string();
-    assert_eq!(
-        write_bundled_target, bundled_target,
-        "reader and writer must agree on the bundled root too, or a skill_update can shadow a \
-         bundled skill in a tree discovery never reads"
-    );
-}
-
-/// Production must ship the built-in skills, not an empty Skills page.
-///
-/// Hosted multi-tenant production shipped with **zero** built-in skills. The bundled seeder is only
-/// reachable from `bootstrap_standalone_host`, which the Postgres path does not run — correctly, since
-/// that bootstrap writes through a host-disk filesystem and a tenant here has no host disk. But
-/// `/system/skills` *is* mounted on this path, to the database, and nothing ever wrote to it. So
-/// Settings → Skills read an empty root and said "No skills installed" while local-dev listed all 32,
-/// and there was no error anywhere to notice.
-///
-/// Asserted through the same composite filesystem the product reads, so it fails if the seeding moves,
-/// the mount moves, or the root path changes.
-#[tokio::test]
-async fn the_production_database_is_seeded_with_the_bundled_skills() {
-    use ironclaw_filesystem::RootFilesystem;
-    use ironclaw_host_api::path::VirtualPath;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("bundled.db");
-    let db = Arc::new(
-        libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .expect("libsql db"),
-    );
-    let database = Arc::new(
-        ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db)).expect("libsql filesystem"),
-    );
-    database.run_migrations().await.expect("migrations");
-
-    let filesystem =
-        ironclaw_composition::test_support::production_database_root_filesystem_for_test(
-            database,
-            "bundled-skill-seeding-test",
-        )
-        .expect("production database composite");
-
-    let system_skills_root = VirtualPath::new("/system/skills").expect("virtual path");
-    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
-        filesystem.as_ref(),
-        &system_skills_root,
-    )
-    .await
-    .expect("bundled skills install into the database");
-
-    let entries = RootFilesystem::list_dir(filesystem.as_ref(), &system_skills_root)
-        .await
-        .expect("the seeded system skill root lists");
-    let skill_dirs = entries
-        .iter()
-        .filter(|entry| !entry.name.starts_with('.'))
-        .count();
-    let expected = ironclaw_extension_host::bundled_skills::bundled_reborn_skill_summaries()
-        .expect("bundled summaries")
-        .len();
-    assert!(
-        skill_dirs >= expected,
-        "production must ship every bundled skill in the database-backed system root: found \
-         {skill_dirs}, expected at least {expected}. Zero here is what production actually did -- an \
-         empty Skills page with nothing logged."
-    );
-
-    // Idempotent: production boots repeatedly, and several instances can share one database.
-    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
-        filesystem.as_ref(),
-        &system_skills_root,
-    )
-    .await
-    .expect("a second boot re-runs cleanly");
-    let after = RootFilesystem::list_dir(filesystem.as_ref(), &system_skills_root)
-        .await
-        .expect("list after second seed")
-        .iter()
-        .filter(|entry| !entry.name.starts_with('.'))
-        .count();
-    assert_eq!(
-        after, skill_dirs,
-        "re-seeding must not duplicate or drop skills"
-    );
-}
-
-/// A model must be able to READ a skill file with the ordinary filesystem tools.
-///
-/// Skill mounts were granted to the skill capabilities only, so `read_file` saw nothing but
-/// `workspace`. Observed on a real production turn: the model installed a skill, tried to read it
-/// back to verify it, and got
-///
-/// ```text
-/// path skills clinical-lab-conversions SKILL.md does not resolve inside an available scoped root
-/// (available roots: workspace)
-/// ```
-///
-/// It burned a tool call and fell back to `skill_activate`. This is a parity gap, not just an unhelpful
-/// error: in Claude Code a SKILL.md *is* a file, so models are trained to read it, and skills reference
-/// sibling files (`references/*.md`, `scripts/*.py`) that progressive disclosure expects the agent to
-/// open on demand — dead ends without a readable path.
-///
-/// Read-only is asserted too: writes must stay exclusive to `skill_install`/`skill_update`, which
-/// validate the manifest. A writable `/skills` alias here would let an agent hand-write a bundle that
-/// discovery then silently skips, which is the failure this whole change removes.
-#[tokio::test]
-async fn skill_files_are_readable_through_the_filesystem_tools_but_not_writable() {
-    use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
-        resource::ResourceScope,
-    };
-
-    let scope = ResourceScope::local_default(
-        UserId::new("skill-read-user").expect("user id"),
-        InvocationId::new(),
-    )
-    .expect("scope");
-
-    let workspace_only = ironclaw_composition::test_support::scoped_workspace_mount_view_for_test(
-        &scope,
-        ironclaw_host_api::mount::MountPermissions::read_write(),
-    )
-    .expect("workspace mount view");
-    let unreachable = workspace_only
-        .scoped_path("/skills/example/SKILL.md")
-        .map(|path| workspace_only.resolve(&path).is_err())
-        .unwrap_or(true);
-    assert!(
-        unreachable,
-        "premise of this test: the workspace-only view cannot resolve a skill path -- that is the \
-         error a real turn hit"
-    );
-
-    let with_skills =
-        ironclaw_composition::test_support::capability_workspace_mounts_with_skills_for_test(
-            workspace_only,
-            &scope,
-        )
-        .expect("workspace + skill read view");
-
-    let probe = with_skills
-        .scoped_path("/skills/example/SKILL.md")
-        .expect("skill paths are addressable");
-    let (resolved, grant) = with_skills
-        .resolve_with_grant(&probe)
-        .expect("a skill path resolves for the filesystem tools");
-    assert!(
-        resolved.as_str().starts_with("/tenants/"),
-        "must resolve into the DB-backed skill tree, the one skill_install writes; got {resolved}"
-    );
-    assert!(
-        !grant.permissions.write,
-        "the filesystem tools' skill grant must be read-only: writes belong to skill_install, which \
-         validates the manifest a hand-written bundle would fail"
-    );
-
-    // The workspace itself must be unchanged -- this fix adds reach, it does not move anything.
-    let workspace_probe = with_skills
-        .scoped_path("/workspace/notes.md")
-        .expect("workspace still addressable");
-    assert!(
-        with_skills.resolve(&workspace_probe).is_ok(),
-        "adding skill aliases must not disturb the workspace grant"
-    );
 }

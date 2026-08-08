@@ -19,7 +19,7 @@
 //!   corrupt the REPL).
 //! - Scope is derived from the EVENT (tenant + owner), never from a runtime
 //!   default — a wrong tenant writes a skill to a directory the WebUI and the
-//!   next run never read (see `docs/internal/plans/2026-06-16-reborn-skill-evolution.md`).
+//!   next run never read (see `docs/plans/2026-06-16-reborn-skill-evolution.md`).
 //! - Distilled content is injection-scanned before it is installed (it becomes
 //!   trusted prompt text loaded into the next run).
 
@@ -1416,7 +1416,7 @@ mod learning {
 
         #[test]
         fn rewrite_skill_name_retargets_frontmatter_only() {
-            let content = "---\nname: file-character-count-roundtrip\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [file, count]\n---\n\n# Title\n\nname: not-the-frontmatter\nBody.\n";
+            let content = "---\nname: file-character-count-roundtrip\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [line count, character tally]\n---\n\n# Title\n\nname: not-the-frontmatter\nBody.\n";
             let rewritten = rewrite_skill_name(content, "file-create-read-count-summary");
             let parsed = parse_skill_md(&rewritten).expect("rewritten skill parses");
             assert_eq!(parsed.manifest.name, "file-create-read-count-summary");
@@ -1440,14 +1440,8 @@ mod learning {
             }
         }
 
-        // Keywords must be specific enough to pass the BLOCKING half of the routing-metadata lint,
-        // which `parse_refinement` gates on. `[file, count]` does not: every token of each keyword is
-        // in `NON_SPECIFIC_TERMS`, so both are rejected as "too generic to identify this skill", the
-        // refinement returns `UnusableRoutingMetadata`, and the merge degrades to `KeepExisting` --
-        // which is what these tests were failing on. Multi-word terms are treated as specific, so
-        // these say what the skill is actually for.
-        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [\"character count\", \"count characters in file\"]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
-        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [\"character count\", \"count characters in file\", \"whitespace counting\"]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
+        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [line count, character tally]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
+        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [line count, character tally, whitespace]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
 
         fn refiner(response: &str) -> LlmSkillRefiner {
             LlmSkillRefiner::new(Arc::new(CannedInference {
