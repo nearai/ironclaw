@@ -794,7 +794,17 @@ registerPack("ar", {
   "automations.notificationChannels.explainer":
     "اختر القنوات المتصلة التي تتلقى طلبات الموافقة وطلبات المصادقة وإشعارات فشل التشغيل.",
   "automations.notificationChannels.empty": "لا توجد قنوات متصلة بعد.",
-  "automations.notificationChannels.webOnlyHelper": "تبقى الإشعارات في تطبيق الويب",
+  "automations.notificationChannels.webOnlyHelper": "لم يتم اختيار أي قناة إشعارات — لن يتم تسليم طلبات الموافقة وتنبيهات المصادقة وإشعارات الفشل إلى أي وجهة.",
+  "automations.notificationChannels.webPush.deviceHeading": "هذا المتصفح",
+  "automations.notificationChannels.webPush.checking": "جارٍ التحقق من دعم الإشعارات في هذا المتصفح…",
+  "automations.notificationChannels.webPush.unsupported": "هذا المتصفح لا يدعم الإشعارات الفورية.",
+  "automations.notificationChannels.webPush.permissionDenied": "الإشعارات محظورة لهذا الموقع. اسمح بها في إعدادات الموقع في متصفحك ثم حاول مرة أخرى.",
+  "automations.notificationChannels.webPush.notEnrolled": "هذا المتصفح لا يتلقى الإشعارات بعد.",
+  "automations.notificationChannels.webPush.enrolled": "هذا المتصفح يتلقى الإشعارات.",
+  "automations.notificationChannels.webPush.enroll": "تفعيل الإشعارات في هذا المتصفح",
+  "automations.notificationChannels.webPush.unenroll": "التعطيل في هذا المتصفح",
+  "automations.notificationChannels.webPush.deviceCount": "المتصفحات المسجلة: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "تعذر تحديث تسجيل الإشعارات لهذا المتصفح. يرجى المحاولة مرة أخرى.",
   "automations.notificationChannels.save": "حفظ",
   "automations.notificationChannels.saved": "تم الحفظ",
   "automations.notificationChannels.saveFailed":

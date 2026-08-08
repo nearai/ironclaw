@@ -13,7 +13,24 @@ const COPY = {
     "Choose which connected channels receive approval prompts, auth prompts, and run-failure notices.",
   "automations.notificationChannels.empty": "No connected channels yet.",
   "automations.notificationChannels.webOnlyHelper":
-    "Notifications stay in the web app",
+    "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
+  "automations.notificationChannels.webPush.deviceHeading": "This browser",
+  "automations.notificationChannels.webPush.checking":
+    "Checking this browser's notification support…",
+  "automations.notificationChannels.webPush.unsupported":
+    "This browser doesn't support push notifications.",
+  "automations.notificationChannels.webPush.permissionDenied":
+    "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.",
+  "automations.notificationChannels.webPush.notEnrolled":
+    "This browser isn't receiving notifications yet.",
+  "automations.notificationChannels.webPush.enrolled":
+    "This browser receives notifications.",
+  "automations.notificationChannels.webPush.enroll":
+    "Enable notifications in this browser",
+  "automations.notificationChannels.webPush.unenroll": "Disable in this browser",
+  "automations.notificationChannels.webPush.deviceCount": "Enrolled browsers: {count}",
+  "automations.notificationChannels.webPush.actionFailed":
+    "Couldn't update this browser's notification enrollment. Please try again.",
   "automations.notificationChannels.save": "Save",
   "automations.notificationChannels.saved": "Saved",
   "automations.notificationChannels.saveFailed":
@@ -43,7 +60,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, WebPushDeviceBlock };`;
 }
 
 function html(strings, ...values) {
@@ -106,8 +123,11 @@ function nativeProps(root, tagName) {
   return props;
 }
 
-function t(key) {
-  return COPY[key] || key;
+function t(key, params = {}) {
+  const text = COPY[key] || key;
+  return text.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, name) =>
+    name in params ? String(params[name]) : match,
+  );
 }
 
 function channel(targetId, { displayName, description, status = "available" } = {}) {
@@ -151,7 +171,7 @@ function mergeRows(targets, channels) {
   return { rows, selected };
 }
 
-function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, error = null, saveError = null } = {}) {
+function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, error = null, saveError = null, webPushDevice = null } = {}) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -224,6 +244,18 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
     useT: () => t,
+    useWebPushDevice: () =>
+      webPushDevice || {
+        browser: { state: "not-enrolled" },
+        subscriptionCount: 0,
+        vapidPublicKey: "test-vapid-key",
+        isStatusLoading: false,
+        statusError: null,
+        isBusy: false,
+        actionError: null,
+        enroll: async () => ({ state: "enrolled" }),
+        unenroll: async () => ({ state: "not-enrolled" }),
+      },
   };
 
   vm.runInNewContext(sourceForTest(), context);
@@ -312,7 +344,7 @@ test("NotificationChannelsPanel locks editing after a failed read so Save cannot
     "the user must be told why the panel is disabled, not left with an inert form",
   );
   assert.ok(
-    !scalars.includes("Notifications stay in the web app"),
+    !scalars.includes("No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere."),
     "the empty-selection helper is a claim about the stored set — a failed read must not assert it",
   );
 });
@@ -397,7 +429,7 @@ test("NotificationChannelsPanel shows the web-app-only helper text once every ch
     channels: [channel("slack-alpha")],
   });
   assert.ok(
-    !collectScalars(rendered).includes("Notifications stay in the web app"),
+    !collectScalars(rendered).includes("No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere."),
     "helper text must not show while a channel is still selected",
   );
 
@@ -409,7 +441,7 @@ test("NotificationChannelsPanel shows the web-app-only helper text once every ch
     channels: [channel("slack-alpha")],
   });
   assert.ok(
-    collectScalars(rendered).includes("Notifications stay in the web app"),
+    collectScalars(rendered).includes("No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere."),
     "unchecking every channel must show the empty-selection helper text",
   );
 });
@@ -589,5 +621,184 @@ test("NotificationChannelsPanel does not hardcode a catalog row's badge to Ready
   assert.ok(
     !scalars.includes("Ready"),
     "the Ready badge must not render for a row the response marked unavailable",
+  );
+});
+
+// ── Web-push row: the device block under the "Web app" channel ─────────────
+
+function webPushTarget() {
+  return {
+    target: {
+      target_id: "web-push",
+      display_name: "Web app",
+      description: "Browser push notifications to your enrolled devices",
+      channel: "web-push",
+    },
+    capabilities: { final_replies: true, gate_prompts: true, auth_prompts: true },
+  };
+}
+
+function fakeDevice(overrides = {}) {
+  return {
+    browser: { state: "not-enrolled" },
+    subscriptionCount: 0,
+    vapidPublicKey: "test-vapid-key",
+    isStatusLoading: false,
+    statusError: null,
+    isBusy: false,
+    actionError: null,
+    enroll: async () => ({ state: "enrolled" }),
+    unenroll: async () => ({ state: "not-enrolled" }),
+    ...overrides,
+  };
+}
+
+// The vm harness never invokes child components — they appear in the panel
+// tree as (component, props) nodes. So the panel-level tests assert the
+// block is MOUNTED with the right props (and only under the web-push row),
+// and the block's own rendering is asserted by calling it directly.
+
+test("NotificationChannelsPanel mounts the device block under the web-push row only", () => {
+  const harness = createHarness();
+  const withWebPush = harness.render({
+    targets: [target("slack-alpha"), webPushTarget()],
+    channels: [],
+  });
+  const blocks = componentProps(withWebPush, harness.exports.WebPushDeviceBlock);
+  assert.equal(blocks.length, 1, "exactly one device block for the web-push row");
+  assert.ok(blocks[0].device, "the block receives the device state");
+
+  const withoutWebPush = harness.render({
+    targets: [target("slack-alpha"), target("slack-beta")],
+    channels: [],
+  });
+  assert.equal(
+    componentProps(withoutWebPush, harness.exports.WebPushDeviceBlock).length,
+    0,
+    "no device block without a web-push row",
+  );
+});
+
+test("NotificationChannelsPanel toggles the web-push target into the full-replace save set like any channel", () => {
+  const saved = [];
+  const harness = createHarness({
+    saveNotificationChannels: async (targetIds) => {
+      saved.push(targetIds);
+    },
+  });
+  let rendered = harness.render({
+    targets: [webPushTarget()],
+    channels: [],
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(checkbox.checked, false);
+  checkbox.onChange({ target: { checked: true } });
+
+  rendered = harness.render({ targets: [webPushTarget()], channels: [] });
+  const [saveButton] = componentProps(rendered, harness.Button);
+  assert.equal(saveButton.disabled, false, "a staged web-push toggle enables Save");
+  saveButton.onClick();
+  assert.equal(saved.length, 1);
+  assert.deepEqual(
+    [...saved[0]],
+    ["web-push"],
+    "Save posts the web-push id in target_ids",
+  );
+});
+
+test("WebPushDeviceBlock distinguishes unsupported, denied, not-enrolled, and enrolled browsers", () => {
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+  const cases = [
+    [
+      { state: "unsupported" },
+      "This browser doesn't support push notifications.",
+    ],
+    [
+      { state: "permission-denied" },
+      "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.",
+    ],
+    [
+      { state: "not-enrolled" },
+      "This browser isn't receiving notifications yet.",
+    ],
+    [
+      { state: "enrolled", endpoint: "https://fcm.googleapis.com/send/x" },
+      "This browser receives notifications.",
+    ],
+  ];
+  for (const [browser, expectedCopy] of cases) {
+    const rendered = block({
+      device: fakeDevice({ browser, subscriptionCount: 2 }),
+      t,
+    });
+    const scalars = collectScalars(rendered);
+    assert.ok(scalars.includes("This browser"), "device heading renders");
+    assert.ok(
+      scalars.includes(expectedCopy),
+      `state ${browser.state} must render its copy`,
+    );
+    assert.ok(
+      scalars.includes("Enrolled browsers: 2"),
+      "the enrolled-device count is interpolated",
+    );
+  }
+});
+
+test("WebPushDeviceBlock enroll and unenroll buttons call the device hook", () => {
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+
+  const enrollCalls = [];
+  const notEnrolled = block({
+    device: fakeDevice({
+      enroll: async () => {
+        enrollCalls.push("enroll");
+        return { state: "enrolled" };
+      },
+    }),
+    t,
+  });
+  const [enrollButton] = componentProps(notEnrolled, harness.Button);
+  assert.ok(enrollButton, "the enroll button renders for a not-enrolled browser");
+  assert.equal(enrollButton.disabled, false);
+  enrollButton.onClick();
+  assert.deepEqual(enrollCalls, ["enroll"]);
+
+  const unenrollCalls = [];
+  const enrolled = block({
+    device: fakeDevice({
+      browser: { state: "enrolled", endpoint: "https://fcm.googleapis.com/send/x" },
+      unenroll: async () => {
+        unenrollCalls.push("unenroll");
+        return { state: "not-enrolled" };
+      },
+    }),
+    t,
+  });
+  const [unenrollButton] = componentProps(enrolled, harness.Button);
+  assert.ok(unenrollButton, "the unenroll button renders for an enrolled browser");
+  unenrollButton.onClick();
+  assert.deepEqual(unenrollCalls, ["unenroll"]);
+
+  const busy = block({
+    device: fakeDevice({ isBusy: true }),
+    t,
+  });
+  const [busyButton] = componentProps(busy, harness.Button);
+  assert.equal(busyButton.disabled, true, "actions lock while a request is in flight");
+});
+
+test("WebPushDeviceBlock surfaces an action failure", () => {
+  const harness = createHarness();
+  const block = harness.exports.WebPushDeviceBlock;
+  const rendered = block({
+    device: fakeDevice({ actionError: new Error("nope") }),
+    t,
+  });
+  assert.ok(
+    collectScalars(rendered).includes(
+      "Couldn't update this browser's notification enrollment. Please try again.",
+    ),
   );
 });

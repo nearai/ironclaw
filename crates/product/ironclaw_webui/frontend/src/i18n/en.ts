@@ -843,7 +843,17 @@ registerPack("en", {
   "automations.notificationChannels.explainer":
     "Choose which connected channels receive approval prompts, auth prompts, and run-failure notices.",
   "automations.notificationChannels.empty": "No connected channels yet.",
-  "automations.notificationChannels.webOnlyHelper": "Notifications stay in the web app",
+  "automations.notificationChannels.webOnlyHelper": "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
+  "automations.notificationChannels.webPush.deviceHeading": "This browser",
+  "automations.notificationChannels.webPush.checking": "Checking this browser's notification support…",
+  "automations.notificationChannels.webPush.unsupported": "This browser doesn't support push notifications.",
+  "automations.notificationChannels.webPush.permissionDenied": "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.",
+  "automations.notificationChannels.webPush.notEnrolled": "This browser isn't receiving notifications yet.",
+  "automations.notificationChannels.webPush.enrolled": "This browser receives notifications.",
+  "automations.notificationChannels.webPush.enroll": "Enable notifications in this browser",
+  "automations.notificationChannels.webPush.unenroll": "Disable in this browser",
+  "automations.notificationChannels.webPush.deviceCount": "Enrolled browsers: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "Couldn't update this browser's notification enrollment. Please try again.",
   "automations.notificationChannels.save": "Save",
   "automations.notificationChannels.saved": "Saved",
   "automations.notificationChannels.saveFailed":

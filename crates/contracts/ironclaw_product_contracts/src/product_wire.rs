@@ -955,6 +955,72 @@ pub struct RebornNotificationChannelsResponse {
     pub channels: Vec<RebornNotificationChannel>,
 }
 
+/// Browser push keys from `PushSubscription.getKey()`, base64url. Validated
+/// shapes (65-byte uncompressed P-256 point / 16-byte auth secret) are
+/// enforced by the web-push domain at the service boundary; the wire carries
+/// the raw strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushSubscriptionKeys {
+    pub p256dh: String,
+    pub auth: String,
+}
+
+/// Enroll (or refresh) the calling user's current browser for web push.
+/// The endpoint is the push-service capability URL the browser minted; the
+/// service validates scheme/host against the supported push-service
+/// allowlist before persisting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushSubscribeRequest {
+    pub endpoint: String,
+    pub keys: RebornWebPushSubscriptionKeys,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornWebPushSubscribeOutcome {
+    Enrolled,
+    Refreshed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushSubscribeResponse {
+    pub outcome: RebornWebPushSubscribeOutcome,
+}
+
+/// Remove one browser enrollment by its push endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushUnsubscribeRequest {
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushUnsubscribeResponse {
+    pub removed: bool,
+}
+
+/// One enrolled browser, redacted for the settings surface: the endpoint is
+/// a bearer capability URL, so only its push-service host is projected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushSubscriptionInfo {
+    pub subscription_id: String,
+    pub endpoint_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    pub created_at: String,
+}
+
+/// The caller's web-push enrollment state plus the deployment's public VAPID
+/// key (`applicationServerKey` for `PushManager.subscribe`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornWebPushStatusResponse {
+    pub vapid_public_key: String,
+    pub subscription_count: u32,
+    #[serde(default)]
+    pub subscriptions: Vec<RebornWebPushSubscriptionInfo>,
+}
+
 /// Allowlisted terminal status exposed by automation list projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

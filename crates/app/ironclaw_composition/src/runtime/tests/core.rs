@@ -142,6 +142,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: None,
+        outbound_target_provider: None,
     }]);
     let input =
         RebornRuntimeInput::from_build_input(build_input).with_identity(RebornRuntimeIdentity {

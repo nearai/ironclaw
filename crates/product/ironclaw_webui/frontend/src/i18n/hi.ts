@@ -794,7 +794,17 @@ registerPack("hi", {
   "automations.notificationChannels.explainer":
     "चुनें कि कौन से कनेक्टेड चैनल अनुमोदन अनुरोध, प्रमाणीकरण अनुरोध और रन विफलता की सूचनाएँ प्राप्त करें।",
   "automations.notificationChannels.empty": "अभी कोई कनेक्टेड चैनल नहीं है।",
-  "automations.notificationChannels.webOnlyHelper": "सूचनाएँ वेब ऐप में ही रहती हैं",
+  "automations.notificationChannels.webOnlyHelper": "कोई सूचना चैनल चयनित नहीं है — अनुमोदन अनुरोध, प्रमाणीकरण संकेत और विफलता सूचनाएँ कहीं नहीं पहुँचाई जाएँगी।",
+  "automations.notificationChannels.webPush.deviceHeading": "यह ब्राउज़र",
+  "automations.notificationChannels.webPush.checking": "इस ब्राउज़र में सूचना समर्थन की जाँच हो रही है…",
+  "automations.notificationChannels.webPush.unsupported": "यह ब्राउज़र पुश सूचनाओं का समर्थन नहीं करता।",
+  "automations.notificationChannels.webPush.permissionDenied": "इस साइट के लिए सूचनाएँ अवरुद्ध हैं। अपने ब्राउज़र की साइट सेटिंग में उन्हें अनुमति दें, फिर पुनः प्रयास करें।",
+  "automations.notificationChannels.webPush.notEnrolled": "यह ब्राउज़र अभी सूचनाएँ प्राप्त नहीं कर रहा है।",
+  "automations.notificationChannels.webPush.enrolled": "यह ब्राउज़र सूचनाएँ प्राप्त करता है।",
+  "automations.notificationChannels.webPush.enroll": "इस ब्राउज़र में सूचनाएँ सक्षम करें",
+  "automations.notificationChannels.webPush.unenroll": "इस ब्राउज़र में अक्षम करें",
+  "automations.notificationChannels.webPush.deviceCount": "पंजीकृत ब्राउज़र: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "इस ब्राउज़र का सूचना पंजीकरण अपडेट नहीं हो सका। कृपया पुनः प्रयास करें।",
   "automations.notificationChannels.save": "सहेजें",
   "automations.notificationChannels.saved": "सहेजा गया",
   "automations.notificationChannels.saveFailed":

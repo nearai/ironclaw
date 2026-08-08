@@ -202,6 +202,10 @@ impl ChannelDescriptor {
                         pointer,
                         ..
                     } => pointer.starts_with('/'),
+                    // Field-free: the host derives everything (audience,
+                    // expiry, header value) from the request at the
+                    // injection chokepoint.
+                    ironclaw_host_api::http::RuntimeCredentialTarget::VapidAuthorization => true,
                 };
                 if !well_formed {
                     return Err(ChannelDescriptorError::InvalidEgressInjection {

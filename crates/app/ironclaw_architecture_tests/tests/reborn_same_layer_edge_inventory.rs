@@ -416,6 +416,16 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS6",
     },
     SameLayerEdge {
+        // The web-push subscription store rides the scoped-filesystem plane
+        // (per database.md), the same edge every persisting domain crate
+        // carries; both sit at the substrates layer by family rule.
+        crate_name: "ironclaw_web_push",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "web-push channel (2026-08-08)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_attachments",
         dependency_name: "ironclaw_threads",
         layer: "substrates",
@@ -718,7 +728,7 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.
-const SAME_LAYER_EDGE_BASELINE: usize = 70;
+const SAME_LAYER_EDGE_BASELINE: usize = 71;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
@@ -813,6 +823,8 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_telegram_extension", "products"),
     ("ironclaw_threads", "substrates"),
     ("ironclaw_triggers", "substrates"),
+    ("ironclaw_web_push", "substrates"),
+    ("ironclaw_web_push_extension", "products"),
     ("ironclaw_trust", "kernel"),
     ("ironclaw_turns", "kernel"),
     ("ironclaw_wasm", "runtimes"),

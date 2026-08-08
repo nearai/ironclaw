@@ -794,7 +794,17 @@ registerPack("pt-BR", {
   "automations.notificationChannels.explainer":
     "Escolha quais canais conectados recebem pedidos de aprovação, solicitações de autenticação e avisos de falha de execução.",
   "automations.notificationChannels.empty": "Ainda não há canais conectados.",
-  "automations.notificationChannels.webOnlyHelper": "As notificações ficam no aplicativo web",
+  "automations.notificationChannels.webOnlyHelper": "Nenhum canal de notificação está selecionado — solicitações de aprovação, avisos de autenticação e notificações de falha não serão entregues em lugar algum.",
+  "automations.notificationChannels.webPush.deviceHeading": "Este navegador",
+  "automations.notificationChannels.webPush.checking": "Verificando o suporte a notificações deste navegador…",
+  "automations.notificationChannels.webPush.unsupported": "Este navegador não oferece suporte a notificações push.",
+  "automations.notificationChannels.webPush.permissionDenied": "As notificações estão bloqueadas para este site. Permita-as nas configurações do site do seu navegador e tente novamente.",
+  "automations.notificationChannels.webPush.notEnrolled": "Este navegador ainda não recebe notificações.",
+  "automations.notificationChannels.webPush.enrolled": "Este navegador recebe notificações.",
+  "automations.notificationChannels.webPush.enroll": "Ativar notificações neste navegador",
+  "automations.notificationChannels.webPush.unenroll": "Desativar neste navegador",
+  "automations.notificationChannels.webPush.deviceCount": "Navegadores registrados: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "Não foi possível atualizar o registro de notificações deste navegador. Tente novamente.",
   "automations.notificationChannels.save": "Salvar",
   "automations.notificationChannels.saved": "Salvo",
   "automations.notificationChannels.saveFailed":

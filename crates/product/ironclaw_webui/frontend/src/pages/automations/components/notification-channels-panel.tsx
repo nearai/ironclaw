@@ -4,6 +4,13 @@ import { Badge, Panel } from "../../../design-system/primitives";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
+import { useWebPushDevice } from "../hooks/useWebPushDevice";
+
+// The web-push catalog row's channel label (mirrors
+// `ironclaw_web_push::WEB_PUSH_CHANNEL_NAME`). The row itself toggles like
+// any other channel; matching on the channel only adds the per-browser
+// device block underneath it.
+const WEB_PUSH_CHANNEL = "web-push";
 
 /**
  * Resolve a Badge tone for a notification-channel row.
@@ -16,8 +23,82 @@ function rowTone(status) {
   return "success";
 }
 
+/**
+ * The per-browser device state rendered under the "Web app" channel row.
+ * Account-level routing (the checkbox) and device enrollment (this block)
+ * are deliberately separate dimensions: selecting the channel routes
+ * notifications to the account's enrolled browsers, and this block manages
+ * whether THIS browser is one of them.
+ */
+function WebPushDeviceBlock({ device, t }) {
+  const state = device.browser?.state || "checking";
+  let stateCopy;
+  if (state === "unsupported") {
+    stateCopy = t("automations.notificationChannels.webPush.unsupported");
+  } else if (state === "permission-denied") {
+    stateCopy = t("automations.notificationChannels.webPush.permissionDenied");
+  } else if (state === "enrolled") {
+    stateCopy = t("automations.notificationChannels.webPush.enrolled");
+  } else if (state === "not-enrolled") {
+    stateCopy = t("automations.notificationChannels.webPush.notEnrolled");
+  } else {
+    stateCopy = t("automations.notificationChannels.webPush.checking");
+  }
+  const canEnroll = state === "not-enrolled" && !device.isBusy && device.vapidPublicKey;
+  const canUnenroll = state === "enrolled" && !device.isBusy;
+  return (
+    <div
+      className="ml-7 rounded-[10px] border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-muted)]"
+    >
+      <div className="font-semibold text-[var(--v2-text-strong)]">
+        {t("automations.notificationChannels.webPush.deviceHeading")}
+      </div>
+      <div className="mt-1">{stateCopy}</div>
+      <div className="mt-1 text-[var(--v2-text-faint)]">
+        {t("automations.notificationChannels.webPush.deviceCount", {
+          count: device.subscriptionCount,
+        })}
+      </div>
+      {(state === "not-enrolled" || state === "enrolled") &&
+      (
+        <div className="mt-2 flex items-center gap-3">
+          {state === "not-enrolled" &&
+          (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!canEnroll}
+              onClick={() => device.enroll().catch(() => {})}
+            >
+              {t("automations.notificationChannels.webPush.enroll")}
+            </Button>
+          )}
+          {state === "enrolled" &&
+          (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!canUnenroll}
+              onClick={() => device.unenroll().catch(() => {})}
+            >
+              {t("automations.notificationChannels.webPush.unenroll")}
+            </Button>
+          )}
+        </div>
+      )}
+      {device.actionError &&
+      (
+        <div role="alert" className="mt-2 text-red-300">
+          {t("automations.notificationChannels.webPush.actionFailed")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function NotificationChannelsPanel({ channelsState }) {
   const t = useT();
+  const webPushDevice = useWebPushDevice();
   const rows = channelsState.rows;
   // `selectedIds` is the server truth (the caller's stored notification-
   // channel set, spec §7); `draftIds` is the staged, locally-toggled copy
@@ -156,9 +237,9 @@ export function NotificationChannelsPanel({ channelsState }) {
           {rows.map((row) => {
             const isSelected = draftIds.has(row.target_id);
             const isUnavailable = row.status === "unavailable";
-            return (
+            const isWebPushRow = row.channel === WEB_PUSH_CHANNEL;
+            const rowLabel = (
               <label
-                key={row.target_id}
                 className={cn(
                   "flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer",
                   "transition-colors duration-100",
@@ -194,6 +275,13 @@ export function NotificationChannelsPanel({ channelsState }) {
                   className="self-center shrink-0"
                 />
               </label>
+            );
+            return (
+              <div key={row.target_id} className="flex flex-col gap-2">
+                {rowLabel}
+                {isWebPushRow &&
+                (<WebPushDeviceBlock device={webPushDevice} t={t} />)}
+              </div>
             );
           })}
 

@@ -794,7 +794,17 @@ registerPack("de", {
   "automations.notificationChannels.explainer":
     "Wähle, welche verbundenen Kanäle Freigabe-Anfragen, Anmelde-Aufforderungen und Hinweise zu fehlgeschlagenen Läufen erhalten.",
   "automations.notificationChannels.empty": "Noch keine verbundenen Kanäle.",
-  "automations.notificationChannels.webOnlyHelper": "Benachrichtigungen bleiben in der Web-App",
+  "automations.notificationChannels.webOnlyHelper": "Kein Benachrichtigungskanal ausgewählt — Freigabe-Anfragen, Anmelde-Aufforderungen und Fehlermeldungen werden nirgendwohin zugestellt.",
+  "automations.notificationChannels.webPush.deviceHeading": "Dieser Browser",
+  "automations.notificationChannels.webPush.checking": "Benachrichtigungsunterstützung dieses Browsers wird geprüft…",
+  "automations.notificationChannels.webPush.unsupported": "Dieser Browser unterstützt keine Push-Benachrichtigungen.",
+  "automations.notificationChannels.webPush.permissionDenied": "Benachrichtigungen sind für diese Website blockiert. Erlaube sie in den Website-Einstellungen deines Browsers und versuche es erneut.",
+  "automations.notificationChannels.webPush.notEnrolled": "Dieser Browser empfängt noch keine Benachrichtigungen.",
+  "automations.notificationChannels.webPush.enrolled": "Dieser Browser empfängt Benachrichtigungen.",
+  "automations.notificationChannels.webPush.enroll": "Benachrichtigungen in diesem Browser aktivieren",
+  "automations.notificationChannels.webPush.unenroll": "In diesem Browser deaktivieren",
+  "automations.notificationChannels.webPush.deviceCount": "Registrierte Browser: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "Die Benachrichtigungsregistrierung dieses Browsers konnte nicht geändert werden. Bitte versuche es erneut.",
   "automations.notificationChannels.save": "Speichern",
   "automations.notificationChannels.saved": "Gespeichert",
   "automations.notificationChannels.saveFailed":

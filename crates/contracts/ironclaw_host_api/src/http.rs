@@ -158,6 +158,35 @@ pub enum RuntimeCredentialTarget {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         post_injection_body_limit_bytes: Option<u64>,
     },
+    /// Compute and inject an RFC 8292 `Authorization: vapid t=<jwt>,k=<pub>`
+    /// header for a Web Push request. The resolved secret material must be a
+    /// serialized [`VapidCredentialMaterialV1`]; the host signs an ES256 JWT
+    /// whose `aud` is the origin of the request URL being sent, so the token
+    /// is valid only for the push service this request targets. Carries no
+    /// declaration fields: everything request-dependent is derived host-side
+    /// at the injection chokepoint, and the adapter never sees key bytes.
+    VapidAuthorization,
+}
+
+/// The credential-material schema behind
+/// [`RuntimeCredentialTarget::VapidAuthorization`] (schema `vapid.v1`): a
+/// deployment's Web Push application-server identity per RFC 8292.
+///
+/// Stored as one JSON blob under the channel's VAPID credential handle.
+/// `es256_private_key_pkcs8_b64url` is secret; the public key and subject
+/// are not, but travel inside the same material so the injector needs one
+/// resolution. Generation lives in `ironclaw_web_push`; parsing/signing at
+/// the host egress credential boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VapidCredentialMaterialV1 {
+    /// PKCS#8 P-256 private key, base64url (unpadded).
+    pub es256_private_key_pkcs8_b64url: String,
+    /// Uncompressed P-256 public key (65 bytes), base64url (unpadded) — the
+    /// browser-facing `applicationServerKey` and the `k=` parameter.
+    pub public_key_b64url: String,
+    /// RFC 8292 `sub` claim: a `mailto:` or `https:` operator contact URI.
+    pub subject: String,
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {
@@ -210,6 +239,10 @@ impl RuntimeCredentialTarget {
             Self::BodyJsonPointer { pointer, .. } => {
                 validate_runtime_credential_body_pointer(pointer)?;
             }
+            // Field-free: audience, expiry, and header value are derived
+            // host-side from the request being sent and the resolved
+            // material; there is nothing declared to validate.
+            Self::VapidAuthorization => {}
         }
         Ok(())
     }

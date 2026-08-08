@@ -794,7 +794,17 @@ registerPack("ja", {
   "automations.notificationChannels.explainer":
     "承認リクエスト、認証リクエスト、実行失敗の通知を受け取る接続済みチャネルを選択します。",
   "automations.notificationChannels.empty": "接続済みのチャネルはまだありません。",
-  "automations.notificationChannels.webOnlyHelper": "通知はウェブアプリ内に留まります",
+  "automations.notificationChannels.webOnlyHelper": "通知チャネルが選択されていません — 承認リクエスト、認証プロンプト、失敗通知はどこにも配信されません。",
+  "automations.notificationChannels.webPush.deviceHeading": "このブラウザ",
+  "automations.notificationChannels.webPush.checking": "このブラウザの通知サポートを確認しています…",
+  "automations.notificationChannels.webPush.unsupported": "このブラウザはプッシュ通知に対応していません。",
+  "automations.notificationChannels.webPush.permissionDenied": "このサイトの通知がブロックされています。ブラウザのサイト設定で通知を許可してから、もう一度お試しください。",
+  "automations.notificationChannels.webPush.notEnrolled": "このブラウザはまだ通知を受信していません。",
+  "automations.notificationChannels.webPush.enrolled": "このブラウザは通知を受信します。",
+  "automations.notificationChannels.webPush.enroll": "このブラウザで通知を有効にする",
+  "automations.notificationChannels.webPush.unenroll": "このブラウザで無効にする",
+  "automations.notificationChannels.webPush.deviceCount": "登録済みブラウザ: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "このブラウザの通知登録を更新できませんでした。もう一度お試しください。",
   "automations.notificationChannels.save": "保存",
   "automations.notificationChannels.saved": "保存しました",
   "automations.notificationChannels.saveFailed":

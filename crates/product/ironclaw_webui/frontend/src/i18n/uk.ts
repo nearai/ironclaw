@@ -794,7 +794,17 @@ registerPack("uk", {
   "automations.notificationChannels.explainer":
     "Виберіть, які підключені канали отримуватимуть запити на схвалення, запити автентифікації та сповіщення про невдалі запуски.",
   "automations.notificationChannels.empty": "Підключених каналів поки немає.",
-  "automations.notificationChannels.webOnlyHelper": "Сповіщення залишаються у вебзастосунку",
+  "automations.notificationChannels.webOnlyHelper": "Канал сповіщень не вибрано — запити на схвалення, підказки автентифікації та сповіщення про збої нікуди не доставлятимуться.",
+  "automations.notificationChannels.webPush.deviceHeading": "Цей браузер",
+  "automations.notificationChannels.webPush.checking": "Перевіряємо підтримку сповіщень у цьому браузері…",
+  "automations.notificationChannels.webPush.unsupported": "Цей браузер не підтримує push-сповіщення.",
+  "automations.notificationChannels.webPush.permissionDenied": "Сповіщення для цього сайту заблоковано. Дозвольте їх у налаштуваннях сайту вашого браузера й спробуйте ще раз.",
+  "automations.notificationChannels.webPush.notEnrolled": "Цей браузер ще не отримує сповіщень.",
+  "automations.notificationChannels.webPush.enrolled": "Цей браузер отримує сповіщення.",
+  "automations.notificationChannels.webPush.enroll": "Увімкнути сповіщення в цьому браузері",
+  "automations.notificationChannels.webPush.unenroll": "Вимкнути в цьому браузері",
+  "automations.notificationChannels.webPush.deviceCount": "Зареєстровані браузери: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "Не вдалося оновити реєстрацію сповіщень цього браузера. Спробуйте ще раз.",
   "automations.notificationChannels.save": "Зберегти",
   "automations.notificationChannels.saved": "Збережено",
   "automations.notificationChannels.saveFailed":

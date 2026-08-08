@@ -203,6 +203,16 @@ pub struct RebornHostBindings {
     /// channel host assembly consumes the extras. Composition never names a
     /// concrete extension crate.
     pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
+    /// The web-push channel's late-bound runtime slot (domain crate type, not
+    /// a concrete extension crate): the binary constructs the adapter around
+    /// it before storage exists; composition installs the subscription store
+    /// into it at assembly and seeds the VAPID credential.
+    pub(crate) web_push_runtime_slot: Option<ironclaw_web_push::WebPushRuntimeSlot>,
+    /// RFC 8292 `sub` contact URI used when composition seeds the VAPID
+    /// credential (`mailto:` or `https:`); `None` falls back to a stable
+    /// placeholder. The binary derives it from the deployment's public base
+    /// URL when one is configured.
+    pub(crate) web_push_vapid_subject: Option<String>,
     /// Binary-assembled first-party capability handler registrars (GSuite,
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
@@ -248,6 +258,13 @@ pub struct ChannelExtensionBinding {
     pub preference_target_codec: Option<
         std::sync::Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>,
     >,
+    /// An extension-owned outbound delivery-target catalog provider (e.g.
+    /// web-push's constant per-user "Web app" entry). Registered generically
+    /// into the outbound target registry under the extension id; most channel
+    /// extensions leave this `None` because the generic channel provider
+    /// derives their targets from provisioned records.
+    pub outbound_target_provider:
+        Option<std::sync::Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>>,
 }
 
 #[derive(Clone, Debug)]
@@ -798,6 +815,23 @@ impl RebornHostBindings {
         self
     }
 
+    /// Hand composition the web-push runtime slot the binary's channel
+    /// binding already holds, so assembly can install the subscription store
+    /// and seed the deployment's VAPID credential.
+    pub fn with_web_push_runtime_slot(
+        mut self,
+        slot: ironclaw_web_push::WebPushRuntimeSlot,
+    ) -> Self {
+        self.web_push_runtime_slot = Some(slot);
+        self
+    }
+
+    /// Operator contact URI for the seeded VAPID credential's `sub` claim.
+    pub fn with_web_push_vapid_subject(mut self, subject: String) -> Self {
+        self.web_push_vapid_subject = Some(subject);
+        self
+    }
+
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
@@ -931,6 +965,8 @@ impl RebornHostBindings {
             product_auth_ports: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
+            web_push_runtime_slot: None,
+            web_push_vapid_subject: None,
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
             memory_binding_policy: None,
