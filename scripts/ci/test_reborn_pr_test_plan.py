@@ -621,6 +621,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan("pull_request", [".github/workflows/nightly-deep-ci.yml"])
         self.assertEqual(plan["mode"], "none")
 
+    def test_planner_owns_its_own_files(self) -> None:
+        """The planner's own source and test files must plan, not fail closed.
+
+        Both live under `scripts/ci/`, which `PR_STATIC_CONTROL_PREFIXES`
+        owns wholesale — so a PR editing the planner itself gets a plan for
+        that edit instead of `unmapped test or CI path`.
+        """
+        plan = self.plan(
+            "pull_request",
+            [
+                "scripts/ci/reborn_pr_test_plan.py",
+                "scripts/ci/test_reborn_pr_test_plan.py",
+            ],
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(
+            plan["reasons"],
+            [
+                "static CI or workspace-policy checks own: "
+                "scripts/ci/reborn_pr_test_plan.py",
+                "static CI or workspace-policy checks own: "
+                "scripts/ci/test_reborn_pr_test_plan.py",
+            ],
+        )
+
     def test_coverage_policy_change_is_statically_validated_on_pr(self) -> None:
         plan = self.plan(
             "pull_request", ["tests/integration/coverage-floor.toml"]
@@ -848,6 +873,219 @@ class RebornPrTestPlanTests(unittest.TestCase):
                         for reason in plan["reasons"]
                     )
                 )
+
+    def test_wit_only_change_is_owned_by_platform_and_compat(self) -> None:
+        # Both the historical root location and the current crate-owned one
+        # (CHECKLIST WS4 moved `wit/` inside `ironclaw_wasm`) must delegate,
+        # so a real `crates/ironclaw_wasm/wit/*.wit` change never falls
+        # through to `ironclaw_wasm`'s own production-package lane. The
+        # crate-owned prefix is derived at runtime through the crate
+        # inventory (`_wasm_wit_prefix`), not a hardcoded literal, the same
+        # way `test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay`
+        # derives its input from `_webui_frontend_prefix`.
+        wasm_wit_prefix = planner._wasm_wit_prefix()
+        for path in (
+            "wit/tool.wit",
+            "wit/channel.wit",
+            f"{wasm_wit_prefix}tool.wit",
+            f"{wasm_wit_prefix}channel.wit",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["changed_packages"], [])
+                self.assertEqual(plan["affected_packages"], [])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["coverage_mode"], "none")
+                self.assertEqual(
+                    plan["reasons"],
+                    [f"Platform & Compat owns WIT compatibility: {path}"],
+                )
+
+    def test_wasm_wit_near_miss_resolves_normally(self) -> None:
+        """A path that merely looks like the WIT directory must not match.
+
+        `crates/ironclaw_wasm/witless/notes.txt` shares the
+        `crates/ironclaw_wasm/wit` characters as a prefix but sits outside
+        the resolved WIT directory (`wit` here is a sibling directory name,
+        not `wit/`), so it must fall through to `ironclaw_wasm`'s own
+        production-package lane like any other file in the crate — the same
+        near-miss shape the frontend-prefix tests pin for
+        `_webui_frontend_prefix`. Uses `ironclaw_wasm`'s real manifest path
+        (rather than the `alpha`/`beta`/`gamma` fixture) since
+        `_wasm_wit_prefix` resolves the crate through the live repo tree.
+        """
+        wasm_metadata = metadata()
+        wasm_metadata["workspace_members"].append("wasm")
+        wasm_metadata["packages"].append(
+            {
+                "id": "wasm",
+                "name": "ironclaw_wasm",
+                "manifest_path": str(ROOT / "crates/ironclaw_wasm/Cargo.toml"),
+            }
+        )
+        wasm_metadata["resolve"]["nodes"].append({"id": "wasm", "deps": []})
+
+        plan = planner.build_plan(
+            event="pull_request",
+            changed_paths=["crates/ironclaw_wasm/witless/notes.txt"],
+            metadata=wasm_metadata,
+            canonical_packages=self.canonical + ["ironclaw_wasm"],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_wasm"])
+        self.assertEqual(
+            plan["reasons"],
+            ["production package changed: ironclaw_wasm"],
+        )
+
+    def test_wasm_wit_prefix_resolves_through_crate_inventory_when_nested(
+        self,
+    ) -> None:
+        """A family-moved ironclaw_wasm still routes WIT changes correctly.
+
+        Mocks `crate_directory` (rather than relying on the live repo's
+        current flat layout) to pin that `_wasm_wit_prefix` follows the
+        crate wherever it lives, mirroring
+        `test_frontend_prefix_resolves_through_crate_inventory_when_nested`.
+        Without this, `test_wit_only_change_is_owned_by_platform_and_compat`
+        would still pass even if `_wasm_wit_prefix` regressed to a
+        hardcoded `crates/ironclaw_wasm/wit/` literal, since it only
+        exercises the current flat layout.
+        """
+        planner._wasm_wit_prefix.cache_clear()
+        try:
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    return_value="crates/substrates/ironclaw_wasm",
+                ) as resolver,
+            ):
+                plan = self.plan(
+                    "pull_request",
+                    ["crates/substrates/ironclaw_wasm/wit/tool.wit"],
+                )
+            resolver.assert_called_once_with("ironclaw_wasm", planner.ROOT)
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["changed_packages"], [])
+        finally:
+            planner._wasm_wit_prefix.cache_clear()
+
+    def test_wasm_wit_prefix_resolution_failure_fails_closed(self) -> None:
+        """An unresolvable ironclaw_wasm crate must raise, never fall back
+        to the literal — a silent fallback is exactly the WS10 failure mode
+        (a moved crate makes the prefix match nothing and the planner reports
+        "no Reborn test surface changed" for a real WIT diff), mirroring
+        `test_frontend_prefix_resolution_failure_fails_closed`."""
+        planner._wasm_wit_prefix.cache_clear()
+        try:
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    side_effect=planner.CrateTreeError("boom"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "cannot resolve the ironclaw_wasm crate"
+                ):
+                    self.plan(
+                        "pull_request",
+                        ["crates/ironclaw_wasm/wit/tool.wit"],
+                    )
+        finally:
+            planner._wasm_wit_prefix.cache_clear()
+
+    def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
+        for wit_path in ("wit/tool.wit", f"{planner._wasm_wit_prefix()}tool.wit"):
+            with self.subTest(wit_path=wit_path):
+                plan = self.plan(
+                    "pull_request",
+                    [wit_path, "crates/alpha/src/lib.rs"],
+                )
+                self.assertEqual(plan["mode"], "selected")
+                self.assertEqual(plan["changed_packages"], ["alpha"])
+                self.assertEqual(
+                    plan["affected_packages"], ["alpha", "beta", "gamma"]
+                )
+                self.assertEqual(
+                    plan["crate_buckets"],
+                    [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+                )
+                self.assertTrue(plan["run_qa_replay"])
+
+    def test_wit_and_extension_package_asset_delegate_to_platform_and_compat(
+        self,
+    ) -> None:
+        """A WIT change and a real embedded-asset change compose correctly.
+
+        The WIT carve-out and `EMBEDDED_ASSET_OWNERS` are two independent
+        arms of the same `if package is None:` branch: one PR touching both
+        must not let either clobber the other's reason. Driven through
+        `plan_real_owners` (rather than the toy `alpha`/`beta`/`gamma`
+        workspace `self.plan` uses) because the asset now resolves to
+        `ironclaw_extension_support`, a real crate name the toy canonical set
+        does not contain.
+        """
+        asset = "crates/extensions/packages/github/manifest.toml"
+        wit = f"{planner._wasm_wit_prefix()}tool.wit"
+        plan = self.plan_real_owners([wit, asset])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_support"])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertEqual(
+            plan["reasons"],
+            [
+                "asset compiled into ironclaw_extension_support changed: "
+                f"{asset}",
+                f"Platform & Compat owns WIT compatibility: {wit}",
+            ],
+        )
+
+    # An unmapped extension-package manifest or `wasm-src/**` path used to be
+    # carved out here for silent "Platform & Compat, no lane" delegation.
+    # Upstream's `EMBEDDED_ASSET_OWNERS` table (CHECKLIST WS10) supersedes
+    # that: the whole `crates/extensions/packages/` tree now schedules the
+    # crate that actually compiles it instead of selecting no lane, which is
+    # the safer default the fail-closed doctrine below and
+    # `test_embedded_package_assets_schedule_the_crate_that_compiles_them` /
+    # `test_package_prompt_markdown_routes_to_its_compiler_not_to_prose`
+    # already pin.
+
+    def test_mapped_nested_extension_package_retains_package_coverage(self) -> None:
+        nested = metadata()
+        nested["workspace_members"].append("slack")
+        nested["packages"].append(
+            {
+                "id": "slack",
+                "name": "ironclaw_slack_extension",
+                "manifest_path": str(
+                    ROOT / "crates/extensions/packages/slack/Cargo.toml"
+                ),
+            }
+        )
+        nested["resolve"]["nodes"].append({"id": "slack", "deps": []})
+
+        plan = planner.build_plan(
+            event="pull_request",
+            changed_paths=["crates/extensions/packages/slack/manifest.toml"],
+            metadata=nested,
+            canonical_packages=self.canonical + ["ironclaw_slack_extension"],
+        )
+
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_slack_extension"])
+        self.assertEqual(plan["affected_packages"], ["ironclaw_slack_extension"])
+        self.assertEqual(
+            plan["reasons"],
+            ["production package changed: ironclaw_slack_extension"],
+        )
 
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
