@@ -362,7 +362,7 @@ fn delivery_run_services(
         harness.binding.project_id.clone(),
         ironclaw_host_api::ids::ThreadId::new(format!("{extension_id}-itest-channel-notices"))
             .expect("notice thread id"),
-        harness.binding.subject_user_id.clone(),
+        Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
         binding_service: harness
@@ -446,7 +446,7 @@ async fn preresolve_vendor_turn_scope(
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         ),
         binding.actor_user_id,
     )
@@ -896,11 +896,7 @@ fn start_channel_host_assembly(
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
                 project_id: inbound.binding.project_id.clone(),
-                operator_user_id: inbound
-                    .binding
-                    .subject_user_id
-                    .clone()
-                    .expect("binding subject user id"),
+                operator_user_id: inbound.binding.actor_user_id.clone(),
             },
         })
         .expect("production channel host assembly starts")
@@ -1343,12 +1339,13 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         actor.user_id, vendor_actor_user_id,
         "the admitted Slack run actor must remain the normalized external account"
     );
+    // Pin changed with the run-acts-as-invoker ruling: the shared route's
+    // thread is owned by the PAIRED ACTOR who invoked it, not a configured
+    // subject account.
     assert_eq!(
-        vendor_scope
-            .explicit_owner_user_id()
-            .map(ironclaw_host_api::ids::UserId::as_str),
-        Some("host-user"),
-        "the shared Slack route must retain its configured subject account"
+        vendor_scope.explicit_owner_user_id(),
+        Some(&vendor_actor_user_id),
+        "the shared Slack route's thread must be owned by the invoking actor"
     );
     let durable_reply = inbound
         .thread_service_for_test()
@@ -1461,11 +1458,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
                 project_id: inbound.binding.project_id.clone(),
-                operator_user_id: inbound
-                    .binding
-                    .subject_user_id
-                    .clone()
-                    .expect("binding subject user id"),
+                operator_user_id: inbound.binding.actor_user_id.clone(),
             },
         })
         .expect("the production channel host assembly starts over the composed runtime");
@@ -1494,7 +1487,10 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
             {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
             {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
-            {"handle": "bot_username", "value": "itest_delivery_bot"}
+            {"handle": "bot_username", "value": "itest_delivery_bot"},
+            // Shared-conversation admission: the supergroup this scenario
+            // drives must be connected, or its @-mention fails closed.
+            {"handle": "telegram_allowed_channels", "value": "[\"-1008675309\"]"}
         ]),
     )
     .await;
@@ -1521,11 +1517,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "Telegram activation gate must preserve the manifest-declared pairing setup and provider: {:?}",
         activation_state.credential_requirements
     );
-    let paired_user = inbound
-        .binding
-        .subject_user_id
-        .clone()
-        .expect("binding subject user id");
+    let paired_user = inbound.binding.actor_user_id.clone();
     assert_eq!(
         activation_state.scope.explicit_owner_user_id(),
         Some(&paired_user),
@@ -1728,6 +1720,49 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "a rejected update must not add a turn delivery; earlier pairing feedback is preserved"
     );
 
+    // Fail-closed group admission at the caller path: a correctly-signed
+    // update from a supergroup NOT listed in `telegram_allowed_channels` is
+    // acknowledged on the wire (no vendor retry storm) but produces no turn
+    // and no reply — the conversation is simply not connected.
+    let unlisted_body = json!({
+        "update_id": 502,
+        "message": {
+            "message_id": 12,
+            "message_thread_id": 5,
+            "date": 1710000001,
+            "text": "@itest_delivery_bot are you there?",
+            "entities": [{"type": "mention", "offset": 0, "length": 19}],
+            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+            "chat": {"id": -1009999999_i64, "type": "supergroup"}
+        }
+    })
+    .to_string();
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &unlisted_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unlisted group's update is acknowledged, not retried"
+    );
+    ingress.drain().await;
+    assert_eq!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .filter(|request| request.url.ends_with("/sendMessage"))
+            .count(),
+        send_message_count_before_rejected_update,
+        "an unlisted supergroup must produce no turn delivery and no reply"
+    );
+
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
@@ -1795,7 +1830,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     assert_eq!(
         vendor_scope.explicit_owner_user_id(),
         Some(&paired_user),
-        "the Telegram topic's shared route must retain its configured subject account"
+        "the Telegram topic's thread must be owned by the invoking paired actor"
     );
     let durable_reply = inbound
         .thread_service_for_test()
@@ -2255,11 +2290,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
                 project_id: inbound.binding.project_id.clone(),
-                operator_user_id: inbound
-                    .binding
-                    .subject_user_id
-                    .clone()
-                    .expect("binding subject user id"),
+                operator_user_id: inbound.binding.actor_user_id.clone(),
             },
         })
         .expect("the production channel host assembly starts over the composed runtime");
@@ -2298,11 +2329,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     // Bootstrap one caller-scoped account connection through the same generic
     // pairing service. Pairing resumes the exact install to active; this
     // journey keeps its focus on a second, unbound external actor afterward.
-    let paired_user = inbound
-        .binding
-        .subject_user_id
-        .clone()
-        .expect("binding subject user id");
+    let paired_user = inbound.binding.actor_user_id.clone();
     let bootstrap_code = services
         .pairing_mint_for_test("telegram", &paired_user)
         .await

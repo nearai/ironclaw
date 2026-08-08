@@ -314,6 +314,12 @@ mod tests {
                     secret: false,
                     provided: false,
                 },
+                ChannelConfigField {
+                    name: "telegram_allowed_channels".to_string(),
+                    label: "Allowed group chats (JSON array of Telegram chat IDs)".to_string(),
+                    secret: false,
+                    provided: false,
+                },
             ],
             "the handle becomes `name`, and label/secret/provided cross unchanged"
         );

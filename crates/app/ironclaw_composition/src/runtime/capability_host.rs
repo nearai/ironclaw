@@ -1138,18 +1138,18 @@ fn durable_result_scope_error() -> AgentLoopHostError {
     )
 }
 
+/// The scope a run's workspace grants and skill mounts key off. Delegates to
+/// the one contract ladder ([`LoopRunContext::acting_resource_scope`]): a run
+/// acts as the user who invoked it, so its mounts resolve to the same identity
+/// as its gates, settings, and deliveries. This was owner-first until the
+/// run-acts-as-invoker unification (#7377) — owner and actor coincide on every
+/// run constructible since, and a legacy owner≠actor run parked across that
+/// deploy now mounts as its ACTOR, matching the rest of its gate dance.
 pub(super) fn resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
 ) -> ResourceScope {
-    let mut scope = run_context.scope.to_resource_scope();
-    scope.user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
-    scope
+    run_context.acting_resource_scope(fallback_user_id)
 }
 
 /// Build the per-run [`ThreadScope`] for durable display-preview appends.
@@ -1196,12 +1196,9 @@ fn visible_capability_request(
     let extension_id = loop_driver_execution_extension_id(run_context)?;
     // Resolved BEFORE grant minting: extension grants are filtered per caller
     // (#5459 P1 — user-private installs mint grants only for their owner).
-    let user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
+    // The caller is the acting user — one contract ladder for grants, mounts,
+    // and the gate dance alike (run-acts-as-invoker, #7377).
+    let user_id = run_context.acting_user_id(fallback_user_id);
     let mut grants = inputs.policy.builtin_grants(
         &extension_id,
         inputs.workspace_mounts,

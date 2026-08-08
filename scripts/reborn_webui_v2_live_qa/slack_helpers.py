@@ -269,32 +269,6 @@ def _slack_dm_route_user_id() -> str | None:
     return None
 
 
-def _slack_channel_routes(config_text: str) -> list[dict[str, str]]:
-    in_route = False
-    route: dict[str, str] = {}
-    routes: list[dict[str, str]] = []
-    for raw_line in config_text.splitlines():
-        line = raw_line.strip()
-        if line == "[[slack.channel_routes]]":
-            if route:
-                routes.append(route)
-            route = {}
-            in_route = True
-            continue
-        if line.startswith("[") and line.endswith("]") and line != "[[slack.channel_routes]]":
-            if route:
-                routes.append(route)
-            route = {}
-            in_route = False
-            continue
-        if in_route and "=" in line:
-            key, _, value = line.partition("=")
-            route[key.strip()] = value.strip().strip('"')
-    if route:
-        routes.append(route)
-    return routes
-
-
 def _remove_dm_slack_channel_routes(config_path: Path) -> dict[str, object]:
     """Remove stale DM routes from legacy shared-channel route config."""
     if not config_path.exists():
@@ -385,28 +359,6 @@ def _slack_channel_route_block_has_dm_channel(block: list[str]) -> bool:
         if match and match.group(1).strip().startswith("D"):
             return True
     return False
-
-
-def _config_has_slack_channel_route(
-    config_text: str,
-    *,
-    subject_user_id: str,
-    channel_id: str,
-) -> bool:
-    return any(
-        route.get("subject_user_id") == subject_user_id
-        and route.get("channel_id") == channel_id
-        for route in _slack_channel_routes(config_text)
-    )
-
-
-def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> bool:
-    return any(
-        route.get("subject_user_id") == user_id
-        and bool(route.get("channel_id"))
-        and not str(route.get("channel_id") or "").startswith("D")
-        for route in _slack_channel_routes(config_text)
-    )
 
 
 def _has_persisted_slack_personal_dm_target(reborn_home: Path, user_id: str) -> bool:
@@ -561,7 +513,6 @@ def _slack_setup_payload(
     extra_env: dict[str, str],
     *,
     bot_user_id: str | None = None,
-    shared_subject_user_id: str | None = None,
 ) -> tuple[dict[str, object] | None, dict[str, object]]:
     preflight = _slack_setup_preflight(reborn_home, config_text, extra_env)
     setup = _slack_setup_from_reborn_home(reborn_home) or {}
@@ -575,14 +526,16 @@ def _slack_setup_payload(
         "bot_user_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_USER_ID",
     )
-    resolved_shared_subject_user_id = (
-        str(shared_subject_user_id or "").strip()
-        or _slack_setup_field(
-            setup,
-            config_text,
-            "shared_subject_user_id",
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_SHARED_SUBJECT_USER_ID",
-        )
+    # Shared-channel admission (run-acts-as-invoker): there is no subject user
+    # or subject route any more. `slack_allowed_channels` is the sole shared
+    # admission surface — a JSON array of channel ids — and the bot answers
+    # each participant in an allowed channel as themselves.
+    resolved_allowed_channels = _slack_setup_field(
+        setup,
+        config_text,
+        "allowed_channels",
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ALLOWED_CHANNELS",
+        default="[]",
     )
     required = {
         "installation_id": preflight.get("installation_id"),
@@ -591,7 +544,6 @@ def _slack_setup_payload(
         "bot_token": bot_token,
         "signing_secret": signing_secret,
         "bot_user_id": resolved_bot_user_id,
-        "shared_subject_user_id": resolved_shared_subject_user_id,
         "oauth_client_id": oauth_client_id,
         "oauth_client_secret": oauth_client_secret,
     }
@@ -605,9 +557,7 @@ def _slack_setup_payload(
         "bot_token": bot_token,
         "signing_secret": signing_secret,
         "bot_user_id": str(required["bot_user_id"]),
-        "shared_subject_user_id": str(required["shared_subject_user_id"]),
-        "allowed_channels": "[]",
-        "subject_routes": "{}",
+        "allowed_channels": str(resolved_allowed_channels or "[]"),
         "oauth_client_id": str(required["oauth_client_id"]),
         "oauth_client_secret": required["oauth_client_secret"],
     }

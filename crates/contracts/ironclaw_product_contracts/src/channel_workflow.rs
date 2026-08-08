@@ -32,7 +32,7 @@ use crate::actor_identity::ProductActorUserResolver;
 use crate::binding::ProductBindingResolver;
 use crate::command::CommandActorRoleResolver;
 use crate::inbound::{ProductInboundAck, ProductInboundEnvelope};
-use crate::subject_route::ProductConversationSubjectRouteResolver;
+use crate::shared_admission::SharedConversationAdmission;
 use crate::surface::{ChannelInboundProductSurface, ProductSurface};
 
 /// Extension-keyed durable roots for the per-extension workflow state (the
@@ -64,9 +64,10 @@ pub struct ChannelWorkflowRequest {
     /// derives the per-extension identity policy (vendor OAuth, pairing, or
     /// the operator-actor default) and implements the port.
     pub actor_user_resolver: Arc<dyn ProductActorUserResolver>,
-    /// Shared-channel subject routing. `Some` makes unrouted shared
-    /// conversations fail closed.
-    pub subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    /// Shared-conversation admission. Fail-closed either way: `None` rejects
+    /// every shared conversation; `Some` admits exactly the conversations the
+    /// resolver says are connected.
+    pub shared_admission: Option<Arc<dyn SharedConversationAdmission>>,
     /// The manifest-declared channel commands, in declaration order. An
     /// undeclarable name fails the build, and the route stays unregistered.
     pub commands: Vec<String>,

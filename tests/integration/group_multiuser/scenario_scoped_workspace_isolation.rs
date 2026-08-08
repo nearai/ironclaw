@@ -45,11 +45,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     let tenant = h.binding.tenant_id.as_str().to_string();
-    let owner = h
-        .binding
-        .subject_user_id
-        .clone()
-        .ok_or("binding missing subject user id")?;
+    let owner = h.binding.actor_user_id.clone();
     let scoped = |name: &str| format!("tenants/{tenant}/users/{}/{name}", owner.as_str());
 
     // ── Fresh caller: a never-written subtree reads as EMPTY, not an error ──

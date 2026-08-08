@@ -234,15 +234,22 @@ mod tests {
         assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
     }
 
+    /// Pin changed with the run-acts-as-invoker unification (#7377): the
+    /// runtime scope previously derived owner-first (this test pinned the
+    /// explicit owner beating the actor). Grants, mounts, and the gate dance
+    /// now all key off `LoopRunContext::acting_user_id`, so on the only run
+    /// shape where the two differ — a legacy owner≠actor run parked across
+    /// the deploy — the ACTOR is authoritative, matching its gates and
+    /// settings instead of splitting one run across two identities.
     #[tokio::test]
-    async fn visible_capability_request_uses_explicit_subject_for_runtime_scope() {
-        let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
+    async fn visible_capability_request_uses_acting_user_for_runtime_scope() {
+        let legacy_owner_user_id = UserId::new("team-agent-user").expect("owner user id");
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
-            TenantId::new("tenant-subject").expect("tenant id"),
-            Some(AgentId::new("agent-subject").expect("agent id")),
-            Some(ProjectId::new("project-subject").expect("project id")),
-            ThreadId::new("thread-subject").expect("thread id"),
-            Some(subject_user_id),
+            TenantId::new("tenant-owner").expect("tenant id"),
+            Some(AgentId::new("agent-owner").expect("agent id")),
+            Some(ProjectId::new("project-owner").expect("project id")),
+            ThreadId::new("thread-owner").expect("thread id"),
+            Some(legacy_owner_user_id),
         ))
         .await
         .with_actor(TurnActor::new(
@@ -251,10 +258,10 @@ mod tests {
         let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
         let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
 
-        assert_eq!(request.context.user_id.as_str(), "team-agent-user");
+        assert_eq!(request.context.user_id.as_str(), "slack-sender");
         assert_eq!(
             request.context.resource_scope.user_id.as_str(),
-            "team-agent-user"
+            "slack-sender"
         );
     }
 
@@ -4404,6 +4411,336 @@ mod tests {
                 .await
                 .expect("owner preference read after direct set")
                 .is_none()
+        );
+    }
+
+    /// The full `builtin.notification_channels_set` approval-gate dance —
+    /// raise → replay payload → user approve (store + lease mint) → approved
+    /// resume → lease claim → dispatch → lease consume — on a run whose thread
+    /// OWNER differs from its ACTING user. That is the shape a shared-route
+    /// conversation produced before scope followed the invoker, and the shape
+    /// any run parked across that deploy boundary still has.
+    ///
+    /// Two properties are pinned:
+    ///
+    /// 1. **Raise and resume derive the same scope.** Every store the dance
+    ///    touches (approval request, replay payload, gate record, lease) is
+    ///    scope-keyed; if the raise persists under one identity and the resume
+    ///    recomputes another, the resume finds nothing and the approved
+    ///    capability never runs. This test drives both halves through the real
+    ///    port, so any half-unified derivation change fails it.
+    /// 2. **Whose identity that scope carries.** Deliberately asserted so a
+    ///    derivation change is a recorded decision, not drift.
+    ///
+    /// Tier note: this lives at the capability-host tier rather than
+    /// `tests/integration/` because the product rule "a run acts as its
+    /// invoker" makes owner ≠ actor unconstructible through every product
+    /// front door — bindings now always scope to the actor. The run-context
+    /// shape itself remains legal kernel state (in-flight parked runs across
+    /// the deploy carry it), which is exactly what this fixture builds. The
+    /// owner == actor dance stays covered end-to-end at the integration tier
+    /// (`outbound_target.rs::notification_channels_set_approval_gate_approve_applies_channels`).
+    #[tokio::test]
+    async fn notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor()
+     {
+        use ironclaw_approvals::ApprovalRequestStorePort as _;
+        use ironclaw_authorization::CapabilityLeaseStorePort as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Default standalone policy — NOT the yolo/minimal override the
+        // sibling test uses — so the ExternalWrite effect requires approval
+        // and the first invoke raises a real gate.
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input(
+                "local-outbound-gate-scope",
+                dir.path().join("standalone"),
+            ),
+        )
+        .await
+        .expect("standalone services build");
+        let runtime_surfaces = services
+            .local_runtime_for_test()
+            .expect("local runtime substrate");
+        let slack_target_id =
+            RebornOutboundDeliveryTargetId::new("slack:gate-scope-dm").expect("target id");
+        let slack_target_summary = OutboundDeliveryTargetSummary::new(
+            OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
+            "slack",
+            "Slack DM",
+            Some("Personal Slack direct message".to_string()),
+        )
+        .expect("target summary");
+        let slack_reply_target =
+            ReplyTargetBindingRef::new("reply:test:gate-scope-dm").expect("reply target");
+        let slack_provider = Arc::new(StaticOutboundDeliveryTargetProvider::new(
+            OutboundDeliveryTargetEntry {
+                summary: slack_target_summary,
+                capabilities: DeliveryTargetCapabilities {
+                    final_replies: true,
+                    progress: false,
+                    gate_prompts: false,
+                    auth_prompts: false,
+                    modalities: Vec::new(),
+                },
+                destination: slack_reply_target,
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-gate-scope").expect("tenant id"),
+                    UserId::new("gate-scope-placeholder").expect("user id"),
+                ),
+            },
+        ));
+        let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
+            slack_provider.clone();
+        let target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+            Arc::new(OutboundDeliveryTargetRegistry::new(vec![
+                slack_provider_delegate,
+            ]));
+        let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+            Arc::new(RebornOutboundPreferencesService::new(
+                Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
+                target_provider,
+            ));
+        let owner_user_id = UserId::new("gate-scope-owner").expect("user id");
+        let actor_user_id = UserId::new("gate-scope-actor").expect("user id");
+        let fallback_user_id = UserId::new("gate-scope-fallback").expect("user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            TenantId::new("tenant-gate-scope").expect("tenant id"),
+            Some(AgentId::new("agent-gate-scope").expect("agent id")),
+            Some(ProjectId::new("project-gate-scope").expect("project id")),
+            ThreadId::new("thread-gate-scope").expect("thread id"),
+            Some(owner_user_id.clone()),
+        ))
+        .await
+        .with_actor(TurnActor::new(actor_user_id.clone()));
+        // The authorization identity is the ACTING user (#7157): the target
+        // provider must be queried as the actor on both the raise-side
+        // validation and the post-approval dispatch.
+        let expected_provider_caller =
+            expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
+        slack_provider.expect_caller(expected_provider_caller.clone());
+        // Local-dev defaults global auto-approve ON, which would bypass the
+        // gate. Disable it for BOTH candidate identities so the gate raises
+        // regardless of which one the settings-scope derivation follows — the
+        // derivation itself is what this test pins, not the settings default.
+        for settings_user in [&owner_user_id, &actor_user_id] {
+            let mut settings_scope = run_context.scope.to_resource_scope();
+            settings_scope.user_id = (*settings_user).clone();
+            ironclaw_approvals::AutoApproveSettingStorePort::set(
+                runtime_surfaces.auto_approve_settings_for_test().as_ref(),
+                ironclaw_approvals::AutoApproveSettingInput {
+                    updated_by: ironclaw_host_api::scope::Principal::User((*settings_user).clone()),
+                    scope: settings_scope,
+                    enabled: false,
+                },
+            )
+            .await
+            .expect("disabling global auto-approve should succeed");
+        }
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        ensure_thread_for_run(thread_service.as_ref(), &run_context, &fallback_user_id).await;
+        let wiring = capability_wiring(
+            &services,
+            thread_service,
+            fallback_user_id.clone(),
+            Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            Some(outbound_preferences_service),
+            None,
+            None,
+        )
+        .expect("capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+
+        let set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__notification_channels_set",
+                    serde_json::json!({ "target_ids": [slack_target_id.as_str()] }),
+                ),
+            ))
+            .await
+            .expect("set call stages");
+        let raise_outcome = port
+            .invoke_capability(invocation_for_candidate(&set_candidate))
+            .await
+            .expect("gated set call returns a capability outcome");
+        let waypoint = match raise_outcome {
+            Resolution::Blocked(ironclaw_host_api::resolution::Blocked::Approval(waypoint)) => {
+                waypoint
+            }
+            other => panic!("default policy must raise an approval gate, got {other:?}"),
+        };
+        let origin_gate_ref = waypoint
+            .origin
+            .as_ref()
+            .expect("approval waypoint preserves the loop gate ref")
+            .as_str()
+            .to_string();
+        let approval_request_id = origin_gate_ref
+            .strip_prefix("gate:approval-")
+            .expect("loop gate ref has the approval prefix")
+            .parse::<uuid::Uuid>()
+            .map(ironclaw_host_api::ids::ApprovalRequestId::from_uuid)
+            .expect("approval request id parses");
+        let resume_token = ironclaw_loop_contracts::CapabilityResumeToken::new(
+            waypoint
+                .resume
+                .as_ref()
+                .expect("approval waypoint carries the resume token")
+                .as_str(),
+        )
+        .expect("resume token converts");
+        let raise_invocation_id =
+            super::super::outbound_delivery::invocation_id_from_resume_token(&resume_token)
+                .expect("resume token encodes the raise invocation id");
+        // Recompute the raise scope EXACTLY as the production raise did.
+        let raise_scope = super::super::outbound_delivery::resource_scope_for_run(
+            &run_context,
+            &fallback_user_id,
+            raise_invocation_id,
+        );
+        // PINNED IDENTITY: a run acts as the user who invoked it, so the
+        // approval-gate raise (and therefore the lease) is scoped to the
+        // ACTING user — the invoker sees and approves the gate. This flipped
+        // from the thread owner when the interim #7157 split was unified onto
+        // the actor; this test passed under both derivations, which is the
+        // point: raise and resume moved together.
+        assert_eq!(
+            raise_scope.user_id, actor_user_id,
+            "the approval-gate scope follows the acting user"
+        );
+        let approval_requests = runtime_surfaces.approval_requests_for_test();
+        let raise_record = approval_requests
+            .get(&raise_scope, approval_request_id)
+            .await
+            .expect("approval store read succeeds")
+            .expect("the raise persisted the approval request under the raise scope");
+        assert_eq!(
+            raise_record.status,
+            ironclaw_approvals::ApprovalStatus::Pending
+        );
+        let fingerprint = raise_record
+            .request
+            .invocation_fingerprint
+            .clone()
+            .expect("the raise fingerprints the invocation");
+        // Scope isolation: the OTHER candidate identity (the thread owner)
+        // must not see the gate.
+        let mut other_scope = raise_scope.clone();
+        other_scope.user_id = owner_user_id.clone();
+        assert!(
+            approval_requests
+                .get(&other_scope, approval_request_id)
+                .await
+                .expect("approval store read succeeds")
+                .is_none(),
+            "the gate must be visible only under the identity it was raised for"
+        );
+
+        // The user approves: mark the stored request approved and mint the
+        // single-use lease FROM THE STORED ROW (its scope, its grantee, its
+        // fingerprint) — the same material the production click-approval
+        // resolution uses, never a re-derivation.
+        approval_requests
+            .approve(&raise_scope, approval_request_id)
+            .await
+            .expect("approval request approves");
+        let capability_leases = runtime_surfaces.capability_leases_for_test();
+        let lease = ironclaw_authorization::CapabilityLease {
+            scope: raise_scope.clone(),
+            grant: ironclaw_host_api::capability::CapabilityGrant {
+                id: ironclaw_host_api::ids::CapabilityGrantId::new(),
+                capability: CapabilityId::new(OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID)
+                    .expect("capability id"),
+                grantee: raise_record.request.requested_by.clone(),
+                issued_by: ironclaw_host_api::scope::Principal::HostRuntime,
+                constraints: ironclaw_host_api::capability::GrantConstraints {
+                    allowed_effects: vec![EffectKind::ExternalWrite],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+            invocation_fingerprint: Some(fingerprint),
+            status: ironclaw_authorization::CapabilityLeaseStatus::Active,
+        };
+        let lease_id = lease.grant.id;
+        capability_leases
+            .issue(lease)
+            .await
+            .expect("approval lease issues");
+
+        // Resume exactly as the executor reconstructs it from the waypoint.
+        let resume_request = LoopRequest {
+            activity_id: set_candidate.activity_id,
+            surface_version: set_candidate.surface_version.clone(),
+            capability_id: set_candidate.capability_id.clone(),
+            input_ref: set_candidate.input_ref.clone(),
+            approval_resume: Some(ironclaw_loop_contracts::CapabilityApprovalResume {
+                approval_request_id,
+                resume_token,
+                correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
+                input_ref: set_candidate.input_ref.clone(),
+            }),
+            auth_resume: None,
+        };
+        let resume_outcome = port
+            .invoke_capability(resume_request)
+            .await
+            .expect("approved resume returns a capability outcome");
+        assert!(
+            matches!(resume_outcome, Resolution::Done(_)),
+            "an approved resume must complete the set, got {resume_outcome:?}"
+        );
+
+        // The applied set persisted under the ACTING user's preference key.
+        let actor_preference = runtime_surfaces
+            .outbound_preferences_for_test()
+            .load_communication_preference(CommunicationPreferenceKey::personal(
+                run_context.scope.tenant_id.clone(),
+                actor_user_id.clone(),
+            ))
+            .await
+            .expect("acting-user preference read")
+            .expect("acting-user preference persisted after the approved resume");
+        assert_eq!(
+            actor_preference
+                .record
+                .notification_targets
+                .iter()
+                .map(|target| target.as_str())
+                .collect::<Vec<_>>(),
+            vec![slack_target_id.as_str()]
+        );
+        // The provider was queried as the actor on every leg.
+        let observed_provider_callers = slack_provider.observed_callers();
+        assert!(
+            !observed_provider_callers.is_empty()
+                && observed_provider_callers
+                    .iter()
+                    .all(|caller| caller == &expected_provider_caller),
+            "the outbound target provider must be queried as the acting user: {observed_provider_callers:?}"
+        );
+        // The lease was claimed and consumed under the raise scope: the dance
+        // closed on the same identity it opened on.
+        let consumed_lease = capability_leases
+            .get(&raise_scope, lease_id)
+            .await
+            .expect("the consumed lease remains readable under the raise scope");
+        assert_eq!(
+            consumed_lease.status,
+            ironclaw_authorization::CapabilityLeaseStatus::Consumed,
+            "the single-use approval lease must be consumed by the resumed dispatch"
         );
     }
 

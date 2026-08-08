@@ -2508,7 +2508,8 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        // A run acts as the user who invoked it: the actor owns the scope.
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })
 }

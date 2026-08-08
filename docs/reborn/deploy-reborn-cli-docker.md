@@ -225,8 +225,12 @@ secret is registered.
 
 Once the container is running, open the WebUI at `/extensions`, install the
 Slack extension, and complete its setup. Slack app ids, the bot token, the
-signing secret, and channel mappings are all configured there after the
-container starts.
+signing secret, and the shared-channel allowlist are all configured there
+after the container starts. Shared channels are admitted by listing their
+channel ids in the `slack_allowed_channels` field (a JSON array); the bot
+answers each participant in an allowed channel as themselves, and every user
+pairs by completing the Slack OAuth connect from Extensions — there is no
+shared subject user or per-channel subject route to configure.
 
 There is no `IRONCLAW_REBORN_SLACK_ENABLED` toggle — the enablement gate it fed
 was removed in #6116, and nothing has read the variable since. Do not add a
