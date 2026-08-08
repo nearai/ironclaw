@@ -245,6 +245,46 @@ test("tool activity loads bounded verbose details from the dedicated endpoint", 
   assert.match(detail.textContent || "", /bounded output/);
 });
 
+test("tool activity rejects detail missing a capability name without disabling inspector", async () => {
+  inspectorState.snapshot = {
+    stream_id: "stream-tool",
+    activity: [{
+      sequence: 1,
+      event: {
+        occurred_at: "2026-08-06T10:00:00Z",
+        kind: "tool_completed",
+        iteration: null,
+        activity_id: "01890a5d-ac96-774b-bcce-b302099a8057",
+        model_call_id: null,
+        summary: { content: "Tool invocation completed", original_bytes: 25, truncated: false },
+      },
+    }],
+  };
+  fetchInspectorTool.mockResolvedValue({
+    tool: {
+      arguments: null,
+      result: null,
+      status: "succeeded",
+      duration_ms: null,
+      output_bytes: null,
+      failure_category: null,
+      failure_summary: null,
+    },
+  });
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-tool" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+  await act(async () => {
+    document.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click();
+    await Promise.resolve();
+  });
+
+  assert.ok(document.querySelector("[data-testid='inspector-panel']"));
+  assert.match(document.body.textContent || "", /Tool details are unavailable/);
+});
+
 test("tool detail request is cancelled when navigating to another run", async () => {
   inspectorState.snapshot = {
     stream_id: "stream-tool",
@@ -300,6 +340,7 @@ test("tool details can retry after a transient request failure", async () => {
         arguments: null,
         result: { content: "retried output", original_bytes: 14, truncated: false },
         status: "succeeded",
+        duration_ms: null,
         output_bytes: 14,
         failure_category: null,
         failure_summary: null,

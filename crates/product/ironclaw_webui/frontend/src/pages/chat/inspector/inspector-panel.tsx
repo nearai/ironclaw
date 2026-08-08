@@ -347,11 +347,63 @@ interface ToolDetail {
   capability_name: BoundedDiagnosticText;
   arguments: BoundedDiagnosticText | null;
   result: BoundedDiagnosticText | null;
-  status: string;
+  status: "started" | "succeeded" | "failed";
   duration_ms: number | null;
   output_bytes: number | null;
   failure_category: BoundedDiagnosticText | null;
   failure_summary: BoundedDiagnosticText | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isBoundedDiagnosticText(value: unknown): value is BoundedDiagnosticText {
+  return isRecord(value)
+    && typeof value.content === "string"
+    && isNonNegativeSafeInteger(value.original_bytes)
+    && typeof value.truncated === "boolean";
+}
+
+function isNullableBoundedDiagnosticText(
+  value: unknown,
+): value is BoundedDiagnosticText | null {
+  return value === null || isBoundedDiagnosticText(value);
+}
+
+function isNullableNonNegativeSafeInteger(value: unknown): value is number | null {
+  return value === null || isNonNegativeSafeInteger(value);
+}
+
+function decodeToolDetailResponse(response: unknown): ToolDetail | null {
+  if (!isRecord(response) || !isRecord(response.tool)) return null;
+  const tool = response.tool;
+  if (
+    !isBoundedDiagnosticText(tool.capability_name)
+    || !isNullableBoundedDiagnosticText(tool.arguments)
+    || !isNullableBoundedDiagnosticText(tool.result)
+    || (tool.status !== "started" && tool.status !== "succeeded" && tool.status !== "failed")
+    || !isNullableNonNegativeSafeInteger(tool.duration_ms)
+    || !isNullableNonNegativeSafeInteger(tool.output_bytes)
+    || !isNullableBoundedDiagnosticText(tool.failure_category)
+    || !isNullableBoundedDiagnosticText(tool.failure_summary)
+  ) {
+    return null;
+  }
+  return {
+    capability_name: tool.capability_name,
+    arguments: tool.arguments,
+    result: tool.result,
+    status: tool.status,
+    duration_ms: tool.duration_ms,
+    output_bytes: tool.output_bytes,
+    failure_category: tool.failure_category,
+    failure_summary: tool.failure_summary,
+  };
 }
 
 function ToolDetailDisclosure({
@@ -389,7 +441,7 @@ function ToolDetailDisclosure({
     fetchInspectorTool({ threadId, runId, activityId, signal: controller.signal })
       .then((response) => {
         if (controller.signal.aborted || requestRef.current !== controller) return;
-        const detail = (response as { tool?: ToolDetail | null })?.tool || null;
+        const detail = decodeToolDetailResponse(response);
         setTool(detail);
         setUnavailable(!detail);
       })
