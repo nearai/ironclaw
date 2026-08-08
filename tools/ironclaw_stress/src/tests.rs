@@ -273,6 +273,13 @@ fn scripted_cli_flag_combination_parses_and_gates_execution() {
     missing_sidecar.mock_llm_bind = None;
     let error = validate_args(&missing_sidecar).expect_err("sidecar is required");
     assert!(error.contains("--api-scripted-tool requires --mock-llm-bind"));
+
+    // Scripted verdicts are read from the timeline, so assistant polling is
+    // required for the flow to complete.
+    let mut no_polling = scripted_api_args();
+    no_polling.api_wait_for_assistant = false;
+    let error = validate_args(&no_polling).expect_err("assistant polling is required");
+    assert!(error.contains("--api-scripted-tool requires --api-wait-for-assistant"));
 }
 
 #[test]
