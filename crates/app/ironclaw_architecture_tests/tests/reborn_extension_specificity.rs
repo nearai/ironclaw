@@ -685,10 +685,13 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 /// structural reason, mirroring `reborn_retired_taxonomy.rs`: the one-time
 /// forward data migrations name what they fold forward.
 const SANCTIONED_PATHS: &[&str] = &[
-    "extension_host/extension_installation_store.rs",
     // One-release legacy webhook-path aliases (MIG-5): the compatibility
     // table names the concrete legacy paths it forwards; each entry carries
     // its own removal note.
+    // (A second fragment, `extension_host/extension_installation_store.rs`,
+    // sat here after #6430 deleted that file — matching nothing. Unlike the
+    // taxonomy twin, this list has no staleness check, so keep it pruned by
+    // hand when the named files go away.)
     "product_auth/durable/",
 ];
 

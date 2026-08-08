@@ -594,29 +594,61 @@ fn reborn_crate_dependency_boundaries_hold() {
 /// with slack is an unclaimed budget for the specific debt it names (#7147); a
 /// line ceiling with slack just means the crate got smaller, which is the
 /// direction wanted, and equality here would red the build on every routine
-/// deletion. What must not happen silently is *growth*, so each ceiling sits a
-/// bounded `TOLERANCE` above the measured count and a crate that eats through it
-/// forces a reviewer to say so in writing.
+/// deletion.
 ///
-/// The ceiling is also bounded from *below*: a crate more than one tolerance
-/// window under its ceiling has banked slack, which is how a ratchet goes inert
-/// (the exact way `composition-budget.toml`'s share ceiling did — 17.4pp of
-/// slack, constraining nothing, #7151). Re-capture at every wave close.
+/// Each ceiling is **pinned at the measured count** ("set to current, not
+/// padded") and the pass window extends [`GROWTH_TOLERANCE`] above it and
+/// [`TOLERANCE`] below it. The upward slack exists because a hard cap at the
+/// observed count reds **every open branch** the moment anyone lands a line
+/// in a contracts crate on main — measured, not hypothetical: PR #7157
+/// re-captured `ironclaw_loop_contracts` four times, roughly once per fold
+/// onto main, every delta ≤105 lines (gate audit 2026-08,
+/// `docs/internal/gate-audit-2026-08.md` §3.2). The tolerance is sized to
+/// absorb that routine drift while staying far under the growth this gate
+/// exists to force into review (the reviewed raises it has caught were
+/// +1,069 and +1,214 lines; `composition-budget.toml` uses the same 150).
+/// Growth past the window is the reviewed decision; re-pin to the new
+/// measured count in the same PR, with the reason, and keep the dated
+/// re-capture notes below **append-only** — an overwritten rationale is a
+/// lost audit trail.
+///
+/// The ceiling is also bounded from *below*: a crate more than one
+/// [`TOLERANCE`] window under its ceiling has banked slack, which is how a
+/// ratchet goes inert (the exact way `composition-budget.toml`'s share
+/// ceiling did — 17.4pp of slack, constraining nothing, #7151). Re-capture at
+/// every wave close.
 ///
 /// Measured through [`production_rust_files`], the suite's single definition of
 /// a production source file, so the numbers agree with every sibling gate
 /// rather than with a private walk.
 #[test]
 fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
-    /// How far above the measured count each ceiling sits, and the width of
-    /// the banked-slack window below it.
+    /// The banked-slack window below each ceiling: a crate sitting more than
+    /// this far under its ceiling forces a re-capture (anti-inertness).
     const TOLERANCE: usize = 400;
+
+    /// Working slack ABOVE each pinned count, so routine drift — a fold from
+    /// main, a few lines of wiring — passes while real growth still forces a
+    /// reviewed re-pin. Before 2026-08-07 this direction had NO tolerance
+    /// (the check was a bare `lines > ceiling`), which combined with
+    /// "set to current" pins to red every open branch on any main-side
+    /// contracts-crate growth (see the module doc and the gate audit).
+    const GROWTH_TOLERANCE: usize = 150;
 
     /// `(crate, production line ceiling)` — captured 2026-08-05 by running this
     /// test with every ceiling at `0` and reading the counts out of its own
     /// failure message. Never counted by eye.
+    /// Re-pinned 2026-08-07 (gate audit): all six set to the counts this
+    /// test reported with every ceiling at 0 on this tree. Three had been
+    /// seeded at measured+400 (common, loop_contracts, prompt_envelope) —
+    /// the maximum non-tripping pad, contradicting the capture rule above —
+    /// and three at measured+0. With `GROWTH_TOLERANCE` carrying the working
+    /// slack, every pin now follows the one rule: set to current.
+    /// ✎ Union re-captured on the #7373 merge (2026-08-08): every value below
+    /// is the merged tree's own report (ceilings-at-0 procedure); #7157's and
+    /// this audit's chains fold together, and product_contracts ratchets down.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
-        ("ironclaw_common", 3_793),
+        ("ironclaw_common", 3_393),
         // 7_727 -> 7_748 (2026-08-05, #7157): +21 lines for the
         // `ActivePreferenceTargetCodecs` port beside its sibling
         // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
@@ -665,12 +697,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
         // non-contract crates.
+        // 15_758 -> 15_715 (2026-08-08, #7373 merge re-capture): the crate came
+        // back 43 lines lighter from main-side work, so the pin ratchets DOWN
+        // with it. Count read from this test's own failure message.
         // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
         // growth is the three admin scrape request DTOs and the wire
         // `RebornListThreadsResponse` reuse — declarations only; authorization,
-        // audit, and artifact building stay in ironclaw_assistant.
-        ("ironclaw_product_contracts", 15_800),
-        ("ironclaw_prompt_envelope", 832),
+        // audit, and artifact building stay in ironclaw_assistant. Folded with
+        // the ratchet-down above on the second #7373 merge (2026-08-08); the
+        // value below is the merged tree's own report.
+        ("ironclaw_product_contracts", 15_740),
+        ("ironclaw_prompt_envelope", 432),
     ];
 
     let root = workspace_root();
@@ -695,9 +732,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
             })
             .sum();
 
-        if lines > *ceiling {
+        if lines > *ceiling + GROWTH_TOLERANCE {
             over.push(format!(
-                "{crate_name}: {lines} production lines over a ceiling of {ceiling}"
+                "{crate_name}: {lines} production lines over a ceiling of {ceiling} \
+                 (+{GROWTH_TOLERANCE} working slack -> effective {})",
+                ceiling + GROWTH_TOLERANCE
             ));
         } else if ceiling.saturating_sub(lines) > TOLERANCE {
             banked.push(format!(
