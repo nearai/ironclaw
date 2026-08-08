@@ -28,7 +28,7 @@
 // arch-exempt: large_file, one contract surface — splitting by feature area at move time would give the same names two import paths, plan #7008
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::ids::{ThreadId, UserId};
 use ironclaw_host_api::turn::{AcceptedMessageRef, EventCursor, TurnRunId, TurnStatus};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -1818,6 +1818,31 @@ pub struct RebornRunArtifactRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornThreadArtifactRequest {
     pub thread_id: String,
+}
+
+/// Admin-authorized, read-only thread collection request for one tenant user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeListRequest {
+    pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Admin-authorized request for an existing full-thread artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeArtifactRequest {
+    pub user_id: UserId,
+    pub thread_id: String,
+}
+
+/// Admin-authorized request for an existing single-run artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeRunArtifactRequest {
+    pub user_id: UserId,
+    pub thread_id: String,
+    pub run_id: String,
 }
 
 // --- Operator settings vocabulary --------------------------------------------

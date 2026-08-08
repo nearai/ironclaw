@@ -2781,6 +2781,99 @@ def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, obj
     return {"path": row[0], "raw_contents": payload}
 
 
+def _classify_triggered_notice_outcome(outcome: dict[str, object] | None) -> str:
+    """Classify the background-run notifier's outcome record for one fire.
+
+    Since the two-lane delivery model (#7157), the ``triggered-run-delivery``
+    record describes NOTICE delivery only (gate/auth/failure prompts): a
+    cleanly completed fire records ``skipped`` (or ``no_default_configured``
+    when the creator has no notification channels), and ``delivered`` means a
+    notice went out (for example the fire parked on an approval gate) — never
+    the fire's result. Result-delivery evidence lives in the run's own
+    ``builtin.outbound_deliver`` call and its durable ``outbound/deliveries/``
+    record instead, so only ``failed``/``denied`` are canary-failing states
+    here. Unknown future vocabulary reads as ``pending`` and surfaces through
+    the timeout diagnostics rather than hard-failing the lane.
+    """
+    if not isinstance(outcome, dict):
+        return "pending"
+    kind = str(outcome.get("outcome") or "")
+    if kind in ("failed", "denied"):
+        return "notifier_failure"
+    if kind in ("delivered", "skipped", "no_default_configured"):
+        return "healthy_terminal"
+    return "pending"
+
+
+def _model_delivery_summary(
+    reborn_home: Path, run_id: str, expected_channel_id: str | None
+) -> dict[str, object]:
+    """Aggregate one fire run's durable ``outbound/deliveries/`` records.
+
+    Only aggregate counts leave this helper: the raw records carry the sealed
+    reply-target ref (workspace and conversation ids), which must never be
+    copied into canary results.
+    """
+    summary: dict[str, object] = {
+        "record_count": 0,
+        "delivered_count": 0,
+        "expected_channel_delivered_count": 0,
+        "other_status_count": 0,
+    }
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        summary["read_error"] = "reborn-local-dev.db missing"
+        return summary
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+            rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE '%/outbound/deliveries/%'
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        summary["read_error"] = _exc_text(exc)
+        return summary
+    expected_target_piece = (
+        f"conversation:{len(expected_channel_id)}:{expected_channel_id};"
+        if expected_channel_id
+        else None
+    )
+    for (raw_contents,) in rows:
+        if isinstance(raw_contents, bytes):
+            raw_contents = raw_contents.decode("utf-8", errors="replace")
+        try:
+            record = json.loads(raw_contents)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        candidate = record.get("candidate")
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            str(candidate.get("turn_run_id") or "") != run_id
+            or str(candidate.get("kind") or "") != "model_delivery"
+        ):
+            continue
+        summary["record_count"] = int(summary["record_count"]) + 1
+        if str(record.get("status") or "") == "delivered":
+            summary["delivered_count"] = int(summary["delivered_count"]) + 1
+            target = str(candidate.get("target") or "")
+            if expected_target_piece and expected_target_piece in target:
+                summary["expected_channel_delivered_count"] = (
+                    int(summary["expected_channel_delivered_count"]) + 1
+                )
+        else:
+            summary["other_status_count"] = int(summary["other_status_count"]) + 1
+    return summary
+
+
 def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[str, object]]:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists() or not run_id:
@@ -3512,12 +3605,20 @@ async def _slack_history_contains_marker(
 
 
 def _slack_delivery_observed(
-    outcome: dict[str, object] | None,
+    model_delivery: dict[str, object] | None,
     history: dict[str, object] | None,
 ) -> bool:
+    """Two-sided delivery evidence for the two-lane model.
+
+    The durable ``outbound/deliveries/`` model-delivery record proves the
+    fire's own ``builtin.outbound_deliver`` call reached the expected DM, and
+    the independent Slack history read-back proves the marker actually
+    arrived. The retired completion-driver ``outcome == "delivered"`` push
+    record no longer exists for results and must not be required.
+    """
     return (
-        isinstance(outcome, dict)
-        and outcome.get("outcome") == "delivered"
+        isinstance(model_delivery, dict)
+        and int(model_delivery.get("expected_channel_delivered_count") or 0) >= 1
         and isinstance(history, dict)
         and bool(history.get("found"))
     )
@@ -3637,27 +3738,137 @@ def _trigger_run_slack_send_evidence(
     return evidence
 
 
+def _trigger_run_outbound_deliver_evidence(
+    reborn_home: Path,
+    *,
+    run_id: str,
+    thread_id: str,
+    marker: str,
+) -> dict[str, object]:
+    """Read sanitized ``builtin.outbound_deliver`` evidence for one trigger run.
+
+    The deliver-lane sibling of ``_trigger_run_slack_send_evidence``: it
+    counts the fire's completed ``builtin.outbound_deliver`` calls and how
+    many composed a content payload carrying the delivery marker. Only
+    aggregate counts leave this helper — target ids and message content stay
+    in the local runtime database.
+    """
+    evidence: dict[str, object] = {
+        "completed_deliver_count": 0,
+        "marker_deliver_count": 0,
+        "parse_error_count": 0,
+    }
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        evidence["read_error"] = "reborn-local-dev.db missing"
+        return evidence
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+            rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE ?
+                """,
+                (f"%/threads/{thread_id}/messages/%",),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["read_error"] = _exc_text(exc)
+        return evidence
+
+    def json_object(value: object) -> dict[str, object] | None:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    for (raw_contents,) in rows:
+        message = json_object(raw_contents)
+        if (
+            message is None
+            or message.get("turn_run_id") != run_id
+            or message.get("kind") != "capability_display_preview"
+        ):
+            continue
+        preview = json_object(message.get("content"))
+        if preview is None:
+            evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
+            continue
+        if preview.get("capability_id") != "builtin.outbound_deliver":
+            continue
+        input_summary = json_object(preview.get("input_summary"))
+        if input_summary is None:
+            evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
+            continue
+        # Only completed calls are evidence: a failed or in-flight deliver
+        # whose content happens to carry the marker never reached Slack, so
+        # counting it would fake the exactly-one-verified-send inconclusive
+        # classification and suppress the deterministic markerless red.
+        if str(preview.get("status") or "") != "completed":
+            continue
+        evidence["completed_deliver_count"] = (
+            int(evidence["completed_deliver_count"]) + 1
+        )
+        if marker in str(input_summary.get("content") or ""):
+            evidence["marker_deliver_count"] = (
+                int(evidence["marker_deliver_count"]) + 1
+            )
+    return evidence
+
+
 def _slack_delivery_readback_is_inconclusive(
-    outcome: dict[str, object] | None,
+    model_delivery: dict[str, object] | None,
     history: dict[str, object] | None,
-    evidence: dict[str, object],
+    vendor_evidence: dict[str, object],
+    deliver_evidence: dict[str, object],
 ) -> bool:
-    """Distinguish a Slack history miss from wrong or duplicate model sends."""
-    return (
-        isinstance(outcome, dict)
-        and outcome.get("outcome") == "delivered"
-        and isinstance(history, dict)
+    """Distinguish a Slack history read-back miss from a real delivery failure.
+
+    Inconclusive means: the fire verifiably sent exactly one marker-carrying
+    message to the expected DM — through either lane — but the independent
+    ``conversations.history`` read-back never exposed it before timeout.
+    A send whose content lacks the marker is NOT inconclusive: that is the
+    deterministic stale-prompt failure mode and must stay red.
+    """
+    history_clean_miss = (
+        isinstance(history, dict)
         and history.get("checked") is True
         and not history.get("found")
         and not history.get("error")
-        and not evidence.get("read_error")
-        and evidence.get("completed_send_count") == 1
-        and evidence.get("marker_send_count") == 1
-        and evidence.get("expected_channel_marker_send_count") == 1
-        and evidence.get("expected_channel_marker_ok_count") == 1
-        and evidence.get("wrong_channel_marker_send_count") == 0
-        and evidence.get("parse_error_count") == 0
     )
+    if not history_clean_miss:
+        return False
+    if vendor_evidence.get("read_error") or deliver_evidence.get("read_error"):
+        return False
+    if (
+        vendor_evidence.get("wrong_channel_marker_send_count") != 0
+        or vendor_evidence.get("parse_error_count") != 0
+    ):
+        return False
+    vendor_exact_send = (
+        vendor_evidence.get("completed_send_count") == 1
+        and vendor_evidence.get("marker_send_count") == 1
+        and vendor_evidence.get("expected_channel_marker_send_count") == 1
+        and vendor_evidence.get("expected_channel_marker_ok_count") == 1
+    )
+    deliver_exact_send = (
+        isinstance(model_delivery, dict)
+        and model_delivery.get("expected_channel_delivered_count") == 1
+        and deliver_evidence.get("completed_deliver_count") == 1
+        and deliver_evidence.get("marker_deliver_count") == 1
+        and deliver_evidence.get("parse_error_count") == 0
+    )
+    return vendor_exact_send or deliver_exact_send
 
 
 async def _wait_for_slack_delivery_marker(
@@ -3676,8 +3887,8 @@ async def _wait_for_slack_delivery_marker(
     last_rows: list[dict[str, object]] = []
     last_outcome: dict[str, object] | None = None
     last_history: dict[str, object] | None = None
-    last_delivered_row: dict[str, object] | None = None
-    last_delivered_outcome: dict[str, object] | None = None
+    last_model_delivery: dict[str, object] | None = None
+    last_run_row: dict[str, object] | None = None
     approved_gate_refs: set[str] = set()
     approval_attempts: list[dict[str, object]] = []
     while time.monotonic() < deadline:
@@ -3689,12 +3900,15 @@ async def _wait_for_slack_delivery_marker(
                 run_id = str(row.get("run_id") or "")
                 if not run_id:
                     continue
+                last_run_row = row
                 outcome = _triggered_delivery_outcome(ctx.reborn_home, run_id)
                 if outcome:
                     last_outcome = outcome
-                    if outcome.get("outcome") == "delivered":
-                        last_delivered_row = row
-                        last_delivered_outcome = outcome
+                model_delivery = _model_delivery_summary(
+                    ctx.reborn_home, run_id, channel_id
+                )
+                if int(model_delivery.get("record_count") or 0) > 0:
+                    last_model_delivery = model_delivery
                 for route in _delivered_gate_routes_for_run(ctx.reborn_home, run_id):
                     gate_ref = str(route.get("gate_ref") or "")
                     if gate_ref in approved_gate_refs:
@@ -3739,45 +3953,106 @@ async def _wait_for_slack_delivery_marker(
                             "error": _exc_text(history_exc),
                         }
                     last_history = history
-                if _slack_delivery_observed(outcome, history):
+                if _slack_delivery_observed(model_delivery, history):
                     return {
                         "trigger_run": row,
                         "delivery_outcome": outcome,
+                        "model_delivery": model_delivery,
                         "slack_history": history,
                         "approval_attempts": approval_attempts[-5:],
                     }
-                if isinstance(outcome, dict) and outcome.get("outcome") not in (None, "delivered"):
+                notice_state = _classify_triggered_notice_outcome(outcome)
+                if notice_state == "notifier_failure":
                     raise AssertionError(
-                        "triggered Slack delivery completed without delivered outcome: "
+                        "background-run notifier recorded a terminal failure "
+                        "for the fire (notices could not be delivered): "
                         f"run={row!r} outcome={outcome!r} history={history!r}"
                     )
+                if isinstance(outcome, dict) and outcome.get("outcome") in (
+                    "skipped",
+                    "no_default_configured",
+                ):
+                    # The fire is settled (the notifier saw it complete), so
+                    # the delivered content is final. A completed
+                    # outbound_deliver whose composed content lacks the
+                    # marker can never satisfy the history read-back — fail
+                    # deterministically instead of timing out.
+                    #
+                    # Deliberately NOT the whole healthy_terminal class:
+                    # `delivered` means a NOTICE went out, which includes a
+                    # fire parked on an approval gate whose run is not
+                    # settled — it resumes after the approve and may only
+                    # then make its marker-carrying deliver call. Running
+                    # this check there would hard-fail a fire that is still
+                    # going to deliver; a genuinely marker-less gated fire
+                    # still fails via the timeout path.
+                    thread_id = str(row.get("thread_id") or "")
+                    deliver_evidence = _trigger_run_outbound_deliver_evidence(
+                        ctx.reborn_home,
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        marker=marker,
+                    )
+                    if (
+                        not deliver_evidence.get("read_error")
+                        and int(deliver_evidence.get("parse_error_count") or 0) == 0
+                        and int(deliver_evidence.get("completed_deliver_count") or 0)
+                        >= 1
+                        and int(deliver_evidence.get("marker_deliver_count") or 0)
+                        == 0
+                    ):
+                        raise AssertionError(
+                            "the fire delivered a Slack message whose content "
+                            "lacks the required marker — the delivered message "
+                            "itself, not only the routine's final answer, must "
+                            f"carry the marker: run={row!r} "
+                            f"deliver_evidence={deliver_evidence!r} "
+                            f"model_delivery={model_delivery!r} "
+                            f"history={history!r}"
+                        )
         await asyncio.sleep(2.0)
-    if last_delivered_row is not None:
-        run_id = str(last_delivered_row.get("run_id") or "")
-        thread_id = str(last_delivered_row.get("thread_id") or "")
+    if last_run_row is not None:
+        run_id = str(last_run_row.get("run_id") or "")
+        thread_id = str(last_run_row.get("thread_id") or "")
         if run_id and thread_id:
-            send_evidence = _trigger_run_slack_send_evidence(
+            vendor_evidence = _trigger_run_slack_send_evidence(
                 ctx.reborn_home,
                 run_id=run_id,
                 thread_id=thread_id,
                 expected_channel_id=channel_id,
                 marker=marker,
             )
+            deliver_evidence = _trigger_run_outbound_deliver_evidence(
+                ctx.reborn_home,
+                run_id=run_id,
+                thread_id=thread_id,
+                marker=marker,
+            )
             if _slack_delivery_readback_is_inconclusive(
-                last_delivered_outcome,
+                last_model_delivery,
                 last_history,
-                send_evidence,
+                vendor_evidence,
+                deliver_evidence,
             ):
                 raise SlackDeliveryReadbackInconclusive(
                     "the exact trigger run completed one verified Slack send to the "
                     "expected DM, but the independent Slack history readback did not "
                     "expose the marker before timeout",
-                    send_evidence,
+                    # Namespaced per lane: both evidence dicts carry a
+                    # parse_error_count, and a flat merge would let one lane
+                    # silently overwrite the other's in the persisted
+                    # delivery_readback_evidence.
+                    {
+                        "vendor_evidence": vendor_evidence,
+                        "deliver_evidence": deliver_evidence,
+                        "model_delivery": last_model_delivery,
+                    },
                 )
     raise AssertionError(
         "Slack delivery marker was not observed before timeout. "
         f"routine_name={routine_name!r} marker={marker!r} "
         f"last_rows={last_rows[:3]!r} last_outcome={last_outcome!r} "
+        f"last_model_delivery={last_model_delivery!r} "
         f"last_history={last_history!r} approvals={approval_attempts[-3:]!r}"
     )
 
@@ -5284,6 +5559,21 @@ async def case_qa_3c_endpoint_status_slack_routine(ctx: LiveQaContext) -> ProbeR
     )
 
 
+def _delivery_marker_prompt_requirement(delivery_marker: str) -> str:
+    """The delivery-marker sentence for routine-creation prompts.
+
+    Under the two-lane delivery model the fire composes the Slack message
+    separately from its final answer, so the marker requirement must bind to
+    the DELIVERED message — a final-answer-only phrasing produced live fires
+    whose Slack message carried no marker while the thread answer did.
+    """
+    return (
+        "The delivered Slack message itself must include the exact marker "
+        f"{delivery_marker}, and the routine's final answer must also "
+        "include that exact marker."
+    )
+
+
 async def _slack_delivery_routine_case(
     ctx: LiveQaContext,
     *,
@@ -5318,8 +5608,9 @@ async def _slack_delivery_routine_case(
         required_text=["routine"],
         prompt=(
             f"QA case {case_name}: create a routine named {routine_name}. {schedule_instruction} "
-            f"{routine_instruction} The routine's final answer must include the exact "
-            f"marker {delivery_marker}. Create the routine now; do not "
+            f"{routine_instruction} "
+            f"{_delivery_marker_prompt_requirement(delivery_marker)} "
+            "Create the routine now; do not "
             "run it immediately. During routine creation, do not perform the routine's "
             "live check, web/search/HTTP lookup, or Slack send. "
             f"In your final answer include the exact marker {creation_marker} and include "
@@ -5546,6 +5837,7 @@ async def _slack_delivery_routine_case(
                 "required_delivery_text": text_checks,
                 "trigger_run": delivery.get("trigger_run"),
                 "delivery_outcome": delivery.get("delivery_outcome"),
+                "model_delivery": delivery.get("model_delivery"),
                 "slack_history": history,
                 "exactly_once": exactly_once,
             },

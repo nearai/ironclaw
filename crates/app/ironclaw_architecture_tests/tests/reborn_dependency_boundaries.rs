@@ -700,7 +700,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 15_758 -> 15_715 (2026-08-08, #7373 merge re-capture): the crate came
         // back 43 lines lighter from main-side work, so the pin ratchets DOWN
         // with it. Count read from this test's own failure message.
-        ("ironclaw_product_contracts", 15_715),
+        // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
+        // growth is the three admin scrape request DTOs and the wire
+        // `RebornListThreadsResponse` reuse — declarations only; authorization,
+        // audit, and artifact building stay in ironclaw_assistant. Folded with
+        // the ratchet-down above on the second #7373 merge (2026-08-08); the
+        // value below is the merged tree's own report.
+        ("ironclaw_product_contracts", 15_740),
         ("ironclaw_prompt_envelope", 432),
     ];
 

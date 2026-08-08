@@ -72,6 +72,14 @@ Run and full-thread regression artifact exports are QA-only. Host composition
 mounts their routes and exposes their browser affordances only when
 `IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT=true`; the default is disabled.
 
+Admin cross-user thread scraping is a separate surface with its own
+kill switch: `IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE=true` mounts the three
+`/admin/users/{user_id}/thread-scrape/*` routes and reveals the admin panel.
+It is deliberately NOT implied by the QA-only regression-export flag — a
+caller-owned QA export toggle must never silently mount tenant-wide admin
+transcript access. Both gates are off by default and feed the session
+`features.*` fields so the browser never advertises an unmounted route.
+
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
 **ws-origin → per-route body limit → bearer auth → rate limit → handler** —
 turning the `webui_v2_routes()` descriptors into tower layers.
@@ -139,7 +147,7 @@ candidate module.
 | `dispatch` | The shared `ProductSurface` call shapes every other owner goes through: invoke/query/page helpers, the generic activity-id derivation, and idempotency/client-action-id validation | A route-specific decision — those belong to the owner that made them | `CLIENT_ACTION_ID_MAX_BYTES`, `product_surface_input`, `invoke_product_capability`, `invoke_product_capability_with_activity_id`, `invoke_product_command`, `product_capability_activity_id`, `product_surface_activity_id`, `query_product_view`, `query_product_page`, `decode_product_outbound_events`, `validate_idempotency_key`, `parse_client_action_id` |
 | `operator` | The operator console: first-run setup, tool settings, operator config keys, diagnostics, status, logs, and service lifecycle | LLM provider administration — that is `llm-admin` | `SETTINGS_TOOLS_AUTO_APPROVE_KEY`, `SETTINGS_TOOL_CONFIG_PREFIX`, `SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES`, `get_operator_setup`, `query_operator_setup_response`, `run_operator_setup`, `list_settings_tools`, `SettingsToolsAutoApproveRequest`, `set_settings_tools_auto_approve`, `SettingsToolPermissionPath`, `SettingsToolPermissionRequest`, `set_settings_tool_permission`, `validate_settings_tool_capability_id`, `validate_settings_tool_config_response`, `list_operator_config`, `OperatorConfigKeyPath`, `OPERATOR_CONFIG_KEY_MAX_BYTES`, `OPERATOR_CONFIG_RESERVED_VALIDATE_KEY`, `validate_operator_config_key`, `operator_config_key_error`, `query_operator_config_key_response`, `get_operator_config_key`, `set_operator_config_key`, `reject_reserved_operator_config_key`, `validate_operator_config`, `get_operator_diagnostics`, `get_operator_status`, `query_operator_logs`, `query_logs`, `run_operator_service_lifecycle` |
 | `llm-admin` | LLM provider administration and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
-| `run-artifact` | Run and thread artifact reads — already its own file, the one seam plan #5985 has taken so far | Anything not artifact-shaped | `handlers/run_artifact.rs::RunArtifactPath`, `handlers/run_artifact.rs::ThreadArtifactPath`, `handlers/run_artifact.rs::query_single`, `handlers/run_artifact.rs::get_run_artifact`, `handlers/run_artifact.rs::get_thread_artifact` |
+| `run-artifact` | Run and thread artifact reads — already its own file, the one seam plan #5985 has taken so far | Anything not artifact-shaped | `handlers/run_artifact.rs::RunArtifactPath`, `handlers/run_artifact.rs::ThreadArtifactPath`, `handlers/run_artifact.rs::AdminThreadScrapeListQuery`, `handlers/run_artifact.rs::AdminThreadScrapeThreadPath`, `handlers/run_artifact.rs::AdminThreadScrapeRunPath`, `handlers/run_artifact.rs::query_single`, `handlers/run_artifact.rs::get_run_artifact`, `handlers/run_artifact.rs::get_thread_artifact`, `handlers/run_artifact.rs::admin_list_thread_scrape_threads`, `handlers/run_artifact.rs::admin_get_thread_scrape_artifact`, `handlers/run_artifact.rs::admin_get_thread_scrape_run_artifact` |
 
 Three placement calls worth stating, because each is an item whose *name*
 suggests one owner and whose *use* is another:

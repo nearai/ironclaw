@@ -699,7 +699,10 @@ fn assert_telegram_topic_delivery_evidence(messages: &[serde_json::Value]) {
     );
 }
 
-fn assert_telegram_chat_delivery_evidence(messages: &[serde_json::Value]) {
+fn assert_telegram_chat_delivery_evidence(
+    messages: &[serde_json::Value],
+    expected_reply_to_message_id: i64,
+) {
     let expected_conversation_id = "515151";
     let expected_thread_anchor: Option<&serde_json::Value> = None;
     let expected_count = 1;
@@ -709,11 +712,16 @@ fn assert_telegram_chat_delivery_evidence(messages: &[serde_json::Value]) {
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(TELEGRAM_REPLY))
+            // The reply must quote the prompting inbound message: without the
+            // anchor, a reply landing after a newer user message reads as an
+            // answer to the wrong prompt (#6644).
+            && message["reply_to_message_id"] == expected_reply_to_message_id
     });
     assert_eq!(
         matching.count(),
         expected_count,
-        "the coordinated Telegram reply must reach the exact unthreaded chat once: {messages:?}"
+        "the coordinated Telegram reply must reach the exact unthreaded chat once, \
+         anchored to the prompting message: {messages:?}"
     );
 }
 
@@ -2351,8 +2359,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         })
         .to_string()
     };
-    let targeted_start_body = |update_id: u64, chat_id: u64, code: &str| {
-        let command = "/start@itest_pairing_bot";
+    let targeted_command_body = |update_id: u64, chat_id: u64, command: &str, code: &str| {
         json!({
             "update_id": update_id,
             "message": {
@@ -2449,7 +2456,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &targeted_start_body(604, 515151, &code),
+            &targeted_command_body(604, 515151, "/start@itest_pairing_bot", &code),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -2557,7 +2564,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             serde_json::from_slice(&request.body).expect("Telegram sendMessage body is JSON")
         })
         .collect::<Vec<_>>();
-    assert_telegram_chat_delivery_evidence(&delivered_messages);
+    assert_telegram_chat_delivery_evidence(&delivered_messages, 615);
     assert_delivered_attempt(services, &vendor_scope).await;
 
     // 5. Exercise the real protected HTTP unpair handler. It must revoke both
@@ -2675,6 +2682,45 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         "verified webhook re-pair must restore the durable connection"
     );
 
+    // 6b. The bot-targeted alias shape: an already-bound sender re-sending a
+    // fresh code as `/pair@bot CODE` is serviced as the idempotent repair
+    // path — the targeted-command normalization (`@bot` strip) composes with
+    // the alias prefix, and the sender gets the already-paired notice.
+    let repair_code = services
+        .pairing_mint_for_test("telegram", &paired_user)
+        .await
+        .expect("a connected caller can still mint a repair code");
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &targeted_command_body(610, 515151, "/pair@itest_pairing_bot", &repair_code),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ingress.drain().await;
+    assert!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body)
+                        .contains(telegram_notices.already_paired_same_user.as_str())
+            }),
+        "a targeted /pair repair re-send must post the already-paired notice"
+    );
+    assert_eq!(
+        services
+            .pairing_connected_for_test("telegram", &paired_user)
+            .await,
+        Some(true),
+        "the idempotent repair re-send must leave the pairing connected"
+    );
+
     // 7. Resolving the same external actor/conversation now must allocate a
     // fresh thread. This assertion crosses the production conversation
     // binding seam and catches unpair implementations that delete only the
@@ -2715,4 +2761,128 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     assert_eq!(status, StatusCode::OK);
     ingress.drain().await;
     assert_delivered_attempt(services, &repaired_scope).await;
+
+    // 8. Overlapping-message feedback and reply anchoring (#6643/#6644): a
+    // second DM arriving while a turn is still running gets an IMMEDIATE
+    // busy notice quoting that second message, the working indicator and the
+    // final reply quote the first message, and nothing is silently dropped
+    // or left positionally ambiguous.
+    const RACE_REPLY: &str = "anchored answer for the deferred-race leg";
+    let race_first_body = dm_body(608, 717171, "what's the weather right now?");
+    let (race_scope, _) = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_pairing_bot".to_string(),
+        )],
+        &evidence,
+        &race_first_body,
+    )
+    .await;
+    let paused = Arc::new(PausedReplyGateway::new(RACE_REPLY));
+    inbound.register_scope_gateway_for_test(
+        race_scope.clone(),
+        Arc::clone(&paused) as Arc<dyn HostManagedModelGateway>,
+    );
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &race_first_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let first_run = paused.wait_for_run_id().await;
+    // The second message arrives while the first run is parked on its model
+    // call — the genuine mid-run overlap from the issue report.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &dm_body(609, 717171, "and what about tomorrow?"),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let race_bodies = || -> Vec<serde_json::Value> {
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .filter(|request| request.url.ends_with("/sendMessage"))
+            .filter_map(|request| serde_json::from_slice(&request.body).ok())
+            .filter(|body: &serde_json::Value| body["chat_id"] == "717171")
+            .collect()
+    };
+    let anchored_count = |bodies: &[serde_json::Value], needle: &str, anchor: i64| -> usize {
+        bodies
+            .iter()
+            .filter(|body| {
+                body["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(needle))
+                    && body["reply_to_message_id"] == anchor
+            })
+            .count()
+    };
+    // The busy notice must land while the first run is STILL parked on its
+    // model call — immediacy is the #6643 contract (feedback arrives during
+    // the run, not after it finishes). The paused gateway holds the first
+    // run open, so this poll can only pass on admission-time feedback.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if anchored_count(&race_bodies(), "still working on a previous message", 619) == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the overlapping DM must get its anchored busy notice while the \
+             first run is still executing; saw: {:?}",
+            race_bodies()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    paused.release();
+    let coordinator = inbound.turn_coordinator_for_test();
+    wait_for_run_status_in_scope(&coordinator, &race_scope, first_run, TurnStatus::Completed).await;
+    ingress.drain().await;
+    // Every race-chat sendMessage quotes the message it belongs to: exactly
+    // one working indicator and one final reply anchored to the FIRST
+    // message (dm_body assigns update_id + 10 → 618), the one busy notice
+    // anchored to the SECOND (619), and no other anchors. Bounded poll —
+    // the final reply lands observer-driven after drain returns.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let bodies = race_bodies();
+        if anchored_count(&bodies, RACE_REPLY, 618) == 1
+            && anchored_count(&bodies, "is thinking", 618) == 1
+        {
+            assert_eq!(
+                anchored_count(&bodies, "still working on a previous message", 619),
+                1,
+                "the busy notice stays a single anchored message: {bodies:?}"
+            );
+            assert!(
+                bodies
+                    .iter()
+                    .all(|body| matches!(body["reply_to_message_id"].as_i64(), Some(618 | 619))),
+                "every race-chat message must anchor to one of the two prompting \
+                 messages: {bodies:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the working indicator and final reply must each anchor to their \
+             own prompt exactly once; saw: {bodies:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
