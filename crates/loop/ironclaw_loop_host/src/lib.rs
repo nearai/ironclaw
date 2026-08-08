@@ -2298,6 +2298,7 @@ pub struct HostManagedToolResultDiagnosticCapture {
     pub context: LoopRunContext,
     pub activity_id: Uuid,
     pub capability_name: String,
+    pub duration_ms: Option<u64>,
     pub result: Option<String>,
     pub result_original_bytes: Option<u64>,
     pub status: HostManagedToolResultDiagnosticStatus,
@@ -2312,6 +2313,7 @@ impl fmt::Debug for HostManagedToolResultDiagnosticCapture {
             .field("run_id", &self.context.run_id)
             .field("activity_id", &self.activity_id)
             .field("capability_name", &self.capability_name)
+            .field("duration_ms", &self.duration_ms)
             .field("result", &self.result.as_ref().map(|value| value.len()))
             .field("result_original_bytes", &self.result_original_bytes)
             .field("status", &self.status)
@@ -3367,6 +3369,7 @@ mod tests {
             context,
             activity_id,
             capability_name: "builtin.echo".to_string(),
+            duration_ms: Some(2),
             result: Some("ok".to_string()),
             result_original_bytes: Some(2),
             status: HostManagedToolResultDiagnosticStatus::Succeeded,
@@ -3408,6 +3411,7 @@ mod tests {
             context,
             activity_id: Uuid::new_v4(),
             capability_name: "builtin.echo".to_string(),
+            duration_ms: Some(3),
             result: Some(secret.to_string()),
             result_original_bytes: Some(secret.len() as u64),
             status: HostManagedToolResultDiagnosticStatus::Failed,

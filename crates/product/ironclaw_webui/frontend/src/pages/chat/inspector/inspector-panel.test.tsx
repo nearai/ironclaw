@@ -218,6 +218,7 @@ test("tool activity loads bounded verbose details from the dedicated endpoint", 
       arguments: { content: '{"path":"safe.txt"}', original_bytes: 19, truncated: false },
       result: { content: "bounded output", original_bytes: 75_000, truncated: true },
       status: "succeeded",
+      duration_ms: 42,
       output_bytes: 75_000,
       failure_category: null,
       failure_summary: null,
@@ -238,6 +239,8 @@ test("tool activity loads bounded verbose details from the dedicated endpoint", 
   const detail = document.querySelector("[data-testid^='inspector-tool-detail-']");
   assert.ok(detail);
   assert.match(detail.textContent || "", /filesystem\.read/);
+  assert.match(detail.textContent || "", /safe\.txt/);
+  assert.match(detail.textContent || "", /Duration: 42 ms/);
   assert.match(detail.textContent || "", /truncated from 75,000 bytes/);
   assert.match(detail.textContent || "", /bounded output/);
 });

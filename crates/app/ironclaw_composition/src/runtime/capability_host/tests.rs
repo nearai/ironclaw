@@ -2138,12 +2138,14 @@ mod tests {
         let serialized_bytes = serialized_result_output(&output)
             .expect("result serializes")
             .len();
+        let invocation_id = InvocationId::new();
+        capability_io.record_running_invocation(&run_context, invocation_id, &input_ref);
 
         capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,
-                invocation_id: InvocationId::new(),
+                invocation_id,
                 capability_id: &CapabilityId::new("builtin.echo").expect("capability id"),
                 output,
                 display_preview: None,
@@ -2172,6 +2174,10 @@ mod tests {
         assert_eq!(
             capture.result_original_bytes,
             Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))
+        );
+        assert!(
+            capture.duration_ms.is_some(),
+            "the capability writer must forward the measured invocation duration"
         );
     }
 

@@ -343,20 +343,15 @@ function shortId(value: string | null): string | null {
   return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
 }
 
-interface ToolDetailText {
-  content: string;
-  original_bytes: number;
-  truncated: boolean;
-}
-
 interface ToolDetail {
-  capability_name: ToolDetailText;
-  arguments: ToolDetailText | null;
-  result: ToolDetailText | null;
+  capability_name: BoundedDiagnosticText;
+  arguments: BoundedDiagnosticText | null;
+  result: BoundedDiagnosticText | null;
   status: string;
+  duration_ms: number | null;
   output_bytes: number | null;
-  failure_category: ToolDetailText | null;
-  failure_summary: ToolDetailText | null;
+  failure_category: BoundedDiagnosticText | null;
+  failure_summary: BoundedDiagnosticText | null;
 }
 
 function ToolDetailDisclosure({
@@ -428,6 +423,7 @@ function ToolDetailDisclosure({
             <>
               <p><span className="font-medium">Capability:</span> {tool.capability_name.content}</p>
               <p><span className="font-medium">Status:</span> {tool.status}</p>
+              {tool.duration_ms != null && <p>Duration: {tool.duration_ms.toLocaleString()} ms</p>}
               <ToolDetailBlock label="Arguments" value={tool.arguments} />
               <ToolDetailBlock label="Output" value={tool.result} />
               {tool.output_bytes != null && <p>Output size: {tool.output_bytes.toLocaleString()} bytes</p>}
@@ -441,7 +437,7 @@ function ToolDetailDisclosure({
   );
 }
 
-function ToolDetailBlock({ label, value }: { label: string; value: ToolDetailText | null }) {
+function ToolDetailBlock({ label, value }: { label: string; value: BoundedDiagnosticText | null }) {
   if (!value) return null;
   return (
     <div>
