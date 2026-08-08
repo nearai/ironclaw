@@ -555,7 +555,7 @@ impl RebornRuntimeStores {
 
     /// Test-support access to the standalone per-tool permission override store
     /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_override`,
-    /// which the synthetic `outbound_delivery_target_set` capability consults for
+    /// which the synthetic `notification_channels_set` capability consults for
     /// its settings decision — a `Disabled` override drives the `policy_denied`
     /// route. Mirrors `standalone_auto_approve_settings_for_test`; `None` for
     /// production-profile compositions without a standalone runtime.

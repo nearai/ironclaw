@@ -8,9 +8,9 @@ export interface DiagnosticMetricTotal {
 
 export interface SessionDiagnosticStats {
   total_model_calls: number;
-  total_tool_calls?: number | null;
-  successful_tool_calls?: number | null;
-  failed_tool_calls?: number | null;
+  total_tool_calls?: number;
+  successful_tool_calls?: number;
+  failed_tool_calls?: number;
   calls_per_model: Array<{ model: BoundedDiagnosticText; calls: number }>;
   calls_per_model_truncated: boolean;
   input_tokens: DiagnosticMetricTotal;
@@ -42,6 +42,9 @@ function emptyMetric(): DiagnosticMetricTotal {
 function emptyStats(): SessionDiagnosticStats {
   return {
     total_model_calls: 0,
+    total_tool_calls: 0,
+    successful_tool_calls: 0,
+    failed_tool_calls: 0,
     calls_per_model: [],
     calls_per_model_truncated: false,
     input_tokens: emptyMetric(),
@@ -50,21 +53,6 @@ function emptyStats(): SessionDiagnosticStats {
     cache_creation_input_tokens: emptyMetric(),
     total_latency_ms: emptyMetric(),
   };
-}
-
-function mergeOptionalCount(
-  target: number | null | undefined,
-  source: unknown,
-): number | null {
-  if (target === null) return null;
-  if (
-    typeof source !== "number"
-    || !Number.isSafeInteger(source)
-    || source < 0
-  ) {
-    return null;
-  }
-  return add(target ?? 0, source);
 }
 
 function mergeMetric(
@@ -84,17 +72,14 @@ function mergeStats(
 ): void {
   if (!source) return;
   target.total_model_calls = add(target.total_model_calls, source.total_model_calls);
-  target.total_tool_calls = mergeOptionalCount(
-    target.total_tool_calls,
-    source.total_tool_calls,
+  target.total_tool_calls = add(target.total_tool_calls ?? 0, source.total_tool_calls);
+  target.successful_tool_calls = add(
+    target.successful_tool_calls ?? 0,
+    source.successful_tool_calls ?? 0,
   );
-  target.successful_tool_calls = mergeOptionalCount(
-    target.successful_tool_calls,
-    source.successful_tool_calls,
-  );
-  target.failed_tool_calls = mergeOptionalCount(
-    target.failed_tool_calls,
-    source.failed_tool_calls,
+  target.failed_tool_calls = add(
+    target.failed_tool_calls ?? 0,
+    source.failed_tool_calls ?? 0,
   );
   mergeMetric(target.input_tokens, source.input_tokens);
   mergeMetric(target.output_tokens, source.output_tokens);
@@ -129,7 +114,6 @@ function mergeStats(
 
 interface AuthSessionStats {
   hasData: boolean;
-  carriedHasData: boolean;
   carried: SessionDiagnosticStats;
   runs: Map<string, SessionDiagnosticStats>;
   retiredRunIds: Set<string>;
@@ -147,7 +131,6 @@ export class InspectorSessionStatsAccumulator {
   private emptyState(): AuthSessionStats {
     return {
       hasData: false,
-      carriedHasData: false,
       carried: emptyStats(),
       runs: new Map(),
       retiredRunIds: new Set(),
@@ -180,7 +163,6 @@ export class InspectorSessionStatsAccumulator {
       if (!oldest) break;
       this.state.runs.delete(oldest[0]);
       mergeStats(this.state.carried, oldest[1]);
-      this.state.carriedHasData = true;
       this.state.retiredRunIds.add(oldest[0]);
       while (this.state.retiredRunIds.size > MAX_RETIRED_RUN_IDS) {
         const oldestRetired = this.state.retiredRunIds.values().next().value as
@@ -197,7 +179,7 @@ export class InspectorSessionStatsAccumulator {
     this.selectScope(callerScope);
     if (!this.state.hasData) return null;
     const result = emptyStats();
-    if (this.state.carriedHasData) mergeStats(result, this.state.carried);
+    mergeStats(result, this.state.carried);
     for (const stats of this.state.runs.values()) mergeStats(result, stats);
     return result;
   }

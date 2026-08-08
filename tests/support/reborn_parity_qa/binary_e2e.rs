@@ -44,7 +44,7 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
-    JsonSpawnSubagentInputCodec, RejectingInputEnqueue,
+    JsonSpawnSubagentInputCodec, RejectingInputEnqueue, ToolDisclosureMode,
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
@@ -845,6 +845,9 @@ impl RebornBinaryE2EHarness {
             // minutes of backoff. Mirrors the integration group harness's
             // IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS=1 pin.
             planned_model_availability_retry_attempts: std::num::NonZeroU32::new(1),
+            // Scripted replay steps assert exact flat tool surfaces. Keep that
+            // test contract explicit instead of inheriting production's mode.
+            tool_disclosure: ToolDisclosureMode::Off,
             ..DefaultPlannedRuntimeConfig::default()
         };
         if exposes_spawn_subagent {

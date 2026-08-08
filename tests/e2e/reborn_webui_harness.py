@@ -504,6 +504,10 @@ async def start_reborn_webui_v2_server(
             "IRONCLAW_REBORN_PROFILE": profile,
             "IRONCLAW_REBORN_WEBUI_TOKEN": REBORN_V2_AUTH_TOKEN,
             "IRONCLAW_REBORN_WEBUI_USER_ID": USER_ID,
+            # Recorded provider fixtures assert the pre-disclosure request
+            # shape. Keep this shared deterministic harness explicit rather
+            # than inheriting the production default.
+            "REBORN_TOOL_DISCLOSURE": "off",
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",

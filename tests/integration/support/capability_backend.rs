@@ -74,6 +74,8 @@ pub(super) enum RebornCapabilityBackend {
     /// without a confirmed host-home mount) is observable at the
     /// integration tier.
     BuiltinHttpToolsConfirmedHostMount,
+    /// `builtin.shell` through the production Docker sandbox composition.
+    SandboxShellTools,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -239,6 +241,18 @@ impl RebornCapabilityBackend {
                 let host_runtime =
                     core_builtin::core_builtin_tools_with_confirmed_host_mount().await?;
                 host_runtime.install_http_responses(keyed_http_responses)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::SandboxShellTools => {
+                if !matches!(shell_mode, ShellMode::Inert) {
+                    return Err(
+                        "sandbox shell harness executes real containers and does not support \
+                         shell mode overrides"
+                            .into(),
+                    );
+                }
+                let host_runtime =
+                    super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

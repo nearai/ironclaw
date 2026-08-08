@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { setAuthScope } from "../../../lib/auth-scope";
 import { ActivityKind } from "./activity-kind";
 import {
   INSPECTOR_RUN_HISTORY_KEY,
@@ -356,28 +355,4 @@ test("stream metrics persist in the browser session without duplicate update cou
   assert.equal(bounded.scopeOrder.length, 32);
   assert.equal(Object.keys(bounded.cursors).length, 32);
   assert.equal(bounded.scopeOrder[0], "thread-8/run-8");
-});
-
-test("stream metrics and cursors reset when the authenticated caller changes", () => {
-  const memory = storage();
-  try {
-    setAuthScope({ tenant_id: "tenant-a", user_id: "user-a" });
-    recordInspectorReconnect(memory);
-    recordInspectorDiagnosticUpdate(
-      "thread-a/run-a",
-      "stream-a:1",
-      "2026-08-06T10:00:00.000Z",
-      memory,
-    );
-
-    setAuthScope({ tenant_id: "tenant-a", user_id: "user-b" });
-    assert.deepEqual(readInspectorStreamMetrics(memory), {
-      reconnectCount: 0,
-      receivedUpdateCount: 0,
-      lastUpdateAt: null,
-    });
-    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), null);
-  } finally {
-    setAuthScope(null);
-  }
 });

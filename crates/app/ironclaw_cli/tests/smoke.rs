@@ -1335,6 +1335,14 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         stdout.contains("hosted-single-tenant-volume"),
         "stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed-railway"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -1361,7 +1369,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 6);
+    assert_eq!(profiles.len(), 8);
     assert!(
         profiles
             .iter()
@@ -1384,6 +1392,12 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
             .any(|profile| profile["name"] == "hosted-single-tenant-volume"
                 && profile["default"] == false)
     );
+    assert!(profiles.iter().any(|profile| profile["name"]
+        == "hosted-single-tenant-volume-sandboxed"
+        && profile["default"] == false));
+    assert!(profiles.iter().any(|profile| profile["name"]
+        == "hosted-single-tenant-volume-sandboxed-railway"
+        && profile["default"] == false));
     assert!(
         profiles
             .iter()
@@ -1576,6 +1590,29 @@ fn skills_list_rejects_unsupported_profiles() {
         assert!(
             stderr.contains(&format!("profile={profile}")),
             "stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn skills_list_accepts_sandbox_profiles() {
+    for profile in [
+        "hosted-single-tenant-volume-sandboxed",
+        "hosted-single-tenant-volume-sandboxed-railway",
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = reborn_command()
+            .arg("skills")
+            .arg("list")
+            .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+            .env("IRONCLAW_REBORN_PROFILE", profile)
+            .output()
+            .expect("ironclaw-reborn skills list should run");
+
+        assert!(
+            output.status.success(),
+            "skills list should accept profile={profile}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

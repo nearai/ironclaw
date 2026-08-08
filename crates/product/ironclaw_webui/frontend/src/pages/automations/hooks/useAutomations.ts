@@ -140,6 +140,16 @@ export function useAutomations(includeCompleted = false) {
   const latestActionSequence = React.useRef(0);
   const actionErrorToastId = React.useRef<string | null>(null);
   const query = useQuery(createAutomationsQueryOptions(includeCompleted));
+  // Completed one-shots stay out of the default list, but failed completed
+  // runs must still contribute to the summary and remain one click away. Load
+  // the full projection in parallel without making it the page's initial
+  // loading gate. When a historical filter is selected, the primary observer
+  // adopts this same cached/in-flight query and keepPreviousData retains the
+  // current rows until it settles.
+  const completedSummaryQuery = useQuery({
+    ...createAutomationsQueryOptions(true),
+    enabled: !includeCompleted,
+  });
 
   // Schedule labels are localized in the presenter (`scheduleLabel`), so the
   // memo must re-run when the active language changes, not just the data.
@@ -147,9 +157,20 @@ export function useAutomations(includeCompleted = false) {
     () => normalizeAutomations(query.data, t, lang),
     [query.data, t, lang]
   );
+  const summaryAutomations = React.useMemo(
+    () =>
+      normalizeAutomations(
+        includeCompleted
+          ? query.data
+          : completedSummaryQuery.data ?? query.data,
+        t,
+        lang
+      ),
+    [completedSummaryQuery.data, includeCompleted, lang, query.data, t]
+  );
   const summary = React.useMemo(
-    () => automationSummary(automations),
-    [automations]
+    () => automationSummary(summaryAutomations),
+    [summaryAutomations]
   );
   const nextRefreshDelay = React.useMemo(
     () => nextAutomationsRefetchDelay(automations),
@@ -173,6 +194,13 @@ export function useAutomations(includeCompleted = false) {
   const invalidateAutomations = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["automations"] });
   }, [queryClient]);
+  const refetchAutomations = React.useCallback(() => {
+    const refetches = [query.refetch()];
+    if (!includeCompleted) {
+      refetches.push(completedSummaryQuery.refetch());
+    }
+    return Promise.all(refetches);
+  }, [completedSummaryQuery.refetch, includeCompleted, query.refetch]);
   const showActionErrorToast = React.useCallback(
     () =>
       toast(t("automations.error.actionFailed"), {
@@ -222,18 +250,26 @@ export function useAutomations(includeCompleted = false) {
     summary,
     schedulerEnabled,
     isLoading: query.isLoading,
-    isRefreshing: query.isFetching,
+    // A manual refresh updates both the visible list and the background
+    // completed-inclusive summary. Keep the UI in its refreshing state until
+    // neither request can still change what the page presents.
+    isRefreshing: query.isFetching || completedSummaryQuery.isFetching,
     isFilterTransition: query.isPlaceholderData,
     isMutating:
       pauseMutation.isPending ||
       resumeMutation.isPending ||
       renameMutation.isPending ||
       deleteMutation.isPending,
+    // The completed-inclusive request is deliberately non-blocking. Its
+    // failure may leave summary counts stale, but must not turn a successful
+    // primary list load into a page-level failure.
     error: query.error || null,
+    summaryError:
+      includeCompleted ? null : completedSummaryQuery.error || null,
     pauseAutomation: pauseMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
     renameAutomation: renameMutation.mutate,
     deleteAutomation: deleteMutation.mutate,
-    refetch: query.refetch,
+    refetch: refetchAutomations,
   };
 }

@@ -393,7 +393,7 @@ impl GroupCapability {
             Self::HostRuntime(harness) => harness
                 .reborn_services_for_test()
                 .and_then(|runtime| runtime.outbound_delivery_stores_for_test())
-                .map(|(_, _, _, reply_attachment_intents)| reply_attachment_intents)
+                .map(|(_, _, _, reply_attachment_intents, _)| reply_attachment_intents)
                 .unwrap_or_else(fresh_store),
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 fresh_store()
@@ -602,8 +602,17 @@ impl RebornIntegrationGroup {
             .ok_or("source delivery target requires composed Reborn runtime")?;
         let target_id = ironclaw_assistant::RebornOutboundDeliveryTargetId::new(target_id)?;
         let display_name = target_id.as_str().to_string();
+        // Registry-key the registration by the TARGET id (always unique per
+        // call), never by `provider_key`/channel: the registry's
+        // `providers.insert` silently REPLACES whatever already sits at a
+        // given key (`OutboundDeliveryTargetRegistrationOutcome::Replaced`),
+        // so two targets on the SAME channel (e.g. two Slack DMs) registered
+        // under the shared channel-named key would leave only the
+        // last-registered one resolvable — the first would look
+        // unregistered to the model that named it.
+        let registry_key = target_id.as_str().to_string();
         runtime.register_static_outbound_delivery_target_for_test(
-            provider_key,
+            registry_key,
             target_id,
             provider_key,
             display_name.as_str(),

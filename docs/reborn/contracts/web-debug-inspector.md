@@ -83,10 +83,6 @@ accepted diagnostic-update count, and the last accepted update time. These
 values are tab-session diagnostics, not server accounting. They are bounded in
 `sessionStorage`, retain cursors for at most 32 observed runs, and reject
 duplicate or backwards cursors when a run is revisited or the page reloads.
-Changing the authenticated tenant/user resets this browser-observed state, so
-one operator cannot inherit another operator's counters or resume cursor in a
-shared tab.
-
 Closing the panel or entering the mobile layout hides only its presentation;
 while debug mode remains enabled, the browser continues observing the selected
 run so those UI choices do not create gaps in page-session statistics.

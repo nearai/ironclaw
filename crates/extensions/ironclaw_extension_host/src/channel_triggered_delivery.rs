@@ -1,190 +1,79 @@
-//! Generic triggered-run delivery over the channel host assembly
+//! Generic background-run notification over the channel host assembly
 //! (extension-runtime §5.4, P6 c-rest).
 //!
 //! One composition-owned [`PostSubmitDeliveryHook`] serves every channel
-//! extension: on a settled trigger fire it resolves the fire's optional
-//! creator-owned target id, otherwise reads the creator's personal
-//! communication preference, routes that reply-target binding ref to the
-//! extension whose registered [`PreferenceTargetCodec`] decodes it, and drives
-//! that extension's generic [`TriggeredRunDelivery`] driver. The single poller
-//! hook slot stays — multiplexing happens inside this hook, by extension id.
+//! extension. On a settled trigger fire it hands either the accepted run or a
+//! permanent pre-submit failure to the single background-run notifier, which
+//! resolves the creator's stored
+//! **notification channels** at fire time and fans gate/auth/failure notices
+//! out over every one of them.
 //!
-//! The drivers themselves are built by the product-side channel workflow
-//! factory and supplied by composition (§12.11 D-A): this module owns the
-//! *routing* policy — which extension a fire belongs to, and the fail-closed
-//! rules below — and names no product type to do it.
-//!
-//! Fail-closed routing: with no stored preference the fire routes to the
-//! only active codec-bearing channel extension when exactly one exists (its
-//! driver then records the no-default outcome through the normal path);
-//! with zero or several candidates the outcome is recorded as `Failed`.
+//! The hook does no routing. There is no per-fire destination to pick any
+//! more: a fire's result is never pushed (spec §8), and a notification goes to
+//! every configured channel rather than to one chosen extension. The notifier
+//! itself is built by the product-side channel workflow factory and supplied
+//! by composition (§12.11 D-A): this module names no product type — it owns
+//! only the hand-off and the fail-closed recording below, plus the live
+//! codec view every notification target decodes through.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
+use ironclaw_extension_contracts::preference_target::{
+    ActivePreferenceTargetCodecs, PreferenceTargetCodec,
+};
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_outbound::{
-    CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveryDefaultScope,
-    OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDelivery,
+    ProjectionUpdateRef, TriggeredFireFailureDeliveryRequest, TriggeredRunDelivery,
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest,
     TriggeredRunDeliveryStore,
 };
-use ironclaw_triggers::TriggerFire;
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
+use ironclaw_triggers::{TriggerFailedFireSettlement, TriggerFire};
+use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::channel_host::GenericChannelHostAssembly;
-use ironclaw_outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 
-/// Hook invoked by the trigger poller after a successful fire submission has
-/// been durably settled in trigger storage.
+/// Attribution bucket for the notifier's own run-delivery services. The
+/// notifier is NOT bound to one extension — it chooses the delivering
+/// extension per notification target from that target's catalog entry — so
+/// this id never selects a channel; it only names the notifier's notice
+/// ledger scope. Composition uses it to build the notifier's services.
+pub const BACKGROUND_RUN_NOTIFIER_ID: &str = "background-run-notifier";
+
+/// Hook invoked by the trigger poller after a successful submission or a
+/// permanent pre-submit failure has been durably settled in trigger storage.
 #[async_trait::async_trait]
 pub trait PostSubmitDeliveryHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
     /// turn scope the run was submitted under.
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
+
+    /// Called after a trigger fire permanently fails before a run exists and
+    /// the failure has been durably settled in trigger storage.
+    async fn on_trigger_failed_before_submit(&self, _event: TriggerFailedFireSettlement) {}
 }
 
-/// The generic post-submit delivery hook: routes each settled trigger fire
-/// to the owning extension's triggered-delivery driver.
+/// The generic post-submit delivery hook: hands each settled trigger fire to
+/// the background-run notifier.
 pub struct GenericTriggeredRunDeliveryHook {
-    assembly: Arc<GenericChannelHostAssembly>,
+    /// The single background-run notifier, built by the product-side workflow
+    /// factory and supplied by composition (§12.11 D-A). `None` when the
+    /// composed runtime has no delivery coordinator — accepted runs record a
+    /// `Failed` outcome and no-run failures remain visible in trigger history
+    /// while notification fails closed.
+    notifier: Option<Arc<dyn TriggeredRunDelivery>>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-    preferences: Arc<dyn CommunicationPreferenceRepository>,
-    delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
-    /// One driver per channel extension, keyed by extension id, built by the
-    /// product-side workflow factory (§12.11 D-A) and supplied by composition
-    /// from the same channel-extension bindings that register the codecs this
-    /// hook routes across. Routing stays here; construction does not.
-    drivers: HashMap<String, Arc<dyn TriggeredRunDelivery>>,
 }
 
 impl GenericTriggeredRunDeliveryHook {
     pub fn new(
-        assembly: Arc<GenericChannelHostAssembly>,
+        notifier: Option<Arc<dyn TriggeredRunDelivery>>,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-        preferences: Arc<dyn CommunicationPreferenceRepository>,
-        delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
-        drivers: impl IntoIterator<Item = (String, Arc<dyn TriggeredRunDelivery>)>,
     ) -> Self {
         Self {
-            assembly,
+            notifier,
             delivery_store,
-            preferences,
-            delivery_targets,
-            drivers: drivers.into_iter().collect(),
         }
-    }
-
-    /// Pick the extension that owns this fire's delivery: the one whose
-    /// codec decodes the creator's stored preference target; falling back
-    /// to the only codec-bearing active channel extension when no target is
-    /// stored (single-channel deployments keep the retired lane's behavior
-    /// of recording the no-default outcome through the driver).
-    async fn route_extension(
-        &self,
-        scope: &TurnScope,
-        creator: &ironclaw_host_api::ids::UserId,
-        per_trigger_target: Option<&ReplyTargetBindingRef>,
-    ) -> Result<(String, Arc<dyn PreferenceTargetCodec>), String> {
-        let codecs = self.assembly.active_preference_codecs();
-        if codecs.is_empty() {
-            return Err("no active channel extension registered a preference codec".to_string());
-        }
-        let target = match per_trigger_target {
-            Some(target) => Some(target.clone()),
-            None => self.stored_preference_target(scope, creator).await?,
-        };
-        if let Some(target) = target {
-            for (extension_id, codec) in &codecs {
-                if codec.conversation_for_target(&target).is_some() {
-                    return Ok((extension_id.clone(), Arc::clone(codec)));
-                }
-            }
-            return Err(format!(
-                "no registered channel codec decodes the stored preference target `{}`",
-                target.as_str()
-            ));
-        }
-        let mut codecs = codecs.into_iter();
-        if let (Some((extension_id, codec)), None) = (codecs.next(), codecs.next()) {
-            return Ok((extension_id, codec));
-        }
-        Err(
-            "no stored preference target and several channel extensions are active; \
-             delivery routing is ambiguous"
-                .to_string(),
-        )
-    }
-
-    /// Resolve the fire's durable opaque target id at fire time through the
-    /// same creator-scoped registry used at trigger creation. This both turns
-    /// the public id into a transport binding and revalidates ownership and
-    /// current availability after any intervening channel disconnect/remove.
-    async fn resolve_per_trigger_target(
-        &self,
-        fire: &TriggerFire,
-        scope: &TurnScope,
-    ) -> Result<Option<ReplyTargetBindingRef>, String> {
-        let Some(target) = fire.delivery_target.as_ref() else {
-            return Ok(None);
-        };
-        let target_id = OutboundDeliveryTargetId::new(target.as_str())
-            .map_err(|error| format!("invalid per-trigger delivery target id: {error}"))?;
-        let caller =
-            OutboundDeliveryTargetScope::new(scope.tenant_id.clone(), fire.creator_user_id.clone());
-        let entry = self
-            .delivery_targets
-            .resolve_outbound_delivery_target(&caller, &target_id)
-            .await
-            .map_err(|error| format!("per-trigger delivery target lookup failed: {error}"))?
-            .ok_or_else(|| {
-                "per-trigger delivery target is no longer available to its creator".to_string()
-            })?;
-        match entry.destination {
-            ironclaw_outbound::RunFinalReplyDestination::External {
-                reply_target_binding_ref,
-            } => Ok(Some(reply_target_binding_ref)),
-            ironclaw_outbound::RunFinalReplyDestination::WebApp => Ok(None),
-        }
-    }
-
-    /// The creator's first configured personal preference target, in
-    /// delivery-role order.
-    async fn stored_preference_target(
-        &self,
-        scope: &TurnScope,
-        creator: &ironclaw_host_api::ids::UserId,
-    ) -> Result<Option<ReplyTargetBindingRef>, String> {
-        let key = CommunicationPreferenceKey {
-            scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), creator.clone()),
-        };
-        let record = self
-            .preferences
-            .load_communication_preference(key)
-            .await
-            .map_err(|error| format!("communication preference read failed: {error}"))?;
-        Ok(record.and_then(|versioned| {
-            let record = versioned.record;
-            record
-                .final_reply_target
-                .or(record.approval_prompt_target)
-                .or(record.auth_prompt_target)
-                .or(record.progress_target)
-        }))
-    }
-
-    fn driver_for_extension(
-        &self,
-        extension_id: &str,
-    ) -> Result<Arc<dyn TriggeredRunDelivery>, String> {
-        self.drivers
-            .get(extension_id)
-            .map(Arc::clone)
-            .ok_or_else(|| {
-                "composed runtime has no delivery coordinator; triggered delivery unavailable"
-                    .to_string()
-            })
     }
 
     async fn record_failed(&self, run_id: TurnRunId) {
@@ -202,7 +91,7 @@ impl GenericTriggeredRunDeliveryHook {
                 target: "ironclaw::reborn::channel_triggered_delivery",
                 %run_id,
                 %error,
-                "failed to record triggered run delivery outcome (best-effort)"
+                "failed to record background run notification outcome (best-effort)"
             );
         }
     }
@@ -211,90 +100,108 @@ impl GenericTriggeredRunDeliveryHook {
 #[async_trait]
 impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
-        let trigger_context = match triggered_communication_context(&fire) {
-            Ok(context) => context,
-            Err(reason) => {
-                tracing::warn!(
-                    target: "ironclaw::reborn::channel_triggered_delivery",
-                    %run_id,
-                    %reason,
-                    "triggered run delivery skipped: cannot build trigger context"
-                );
-                self.record_failed(run_id).await;
-                return;
-            }
+        let Some(notifier) = self.notifier.as_ref() else {
+            tracing::warn!(
+                target: "ironclaw::reborn::channel_triggered_delivery",
+                %run_id,
+                "background run notification skipped: composed runtime has no delivery \
+                 coordinator"
+            );
+            self.record_failed(run_id).await;
+            return;
         };
-        let delivery_target = match self.resolve_per_trigger_target(&fire, &scope).await {
-            Ok(target) => target,
-            Err(reason) => {
-                tracing::warn!(
-                    target: "ironclaw::reborn::channel_triggered_delivery",
-                    %run_id,
-                    %reason,
-                    "triggered run delivery skipped: per-trigger target could not be resolved"
-                );
-                self.record_failed(run_id).await;
-                return;
-            }
-        };
-        let (extension_id, _codec) = match self
-            .route_extension(&scope, &fire.creator_user_id, delivery_target.as_ref())
-            .await
-        {
-            Ok(routed) => routed,
-            Err(reason) => {
-                tracing::warn!(
-                    target: "ironclaw::reborn::channel_triggered_delivery",
-                    %run_id,
-                    %reason,
-                    "triggered run delivery skipped: no channel extension owns the delivery"
-                );
-                self.record_failed(run_id).await;
-                return;
-            }
-        };
-        let driver = match self.driver_for_extension(&extension_id) {
-            Ok(driver) => driver,
-            Err(reason) => {
-                tracing::warn!(
-                    target: "ironclaw::reborn::channel_triggered_delivery",
-                    %run_id,
-                    extension_id,
-                    %reason,
-                    "triggered run delivery skipped: delivery driver unavailable"
-                );
-                self.record_failed(run_id).await;
-                return;
-            }
-        };
-        driver
+        // A fire carries no destination at all any more (spec §8): the stored
+        // per-trigger route is gone from `TriggerFire`, and composition's boot
+        // migration rewrites any surviving column value into the routine's own
+        // prompt. Delivery happens only if the fire calls
+        // `builtin.outbound_deliver` itself.
+        notifier
             .on_trigger_submitted(TriggeredRunDeliveryRequest {
                 run_id,
                 scope,
                 creator_user_id: fire.creator_user_id.clone(),
                 project_scoped: fire.project_id.is_some(),
                 prompt: fire.prompt.clone(),
-                delivery_target,
-                trigger_context,
+            })
+            .await;
+    }
+
+    async fn on_trigger_failed_before_submit(&self, event: TriggerFailedFireSettlement) {
+        let Some(notifier) = self.notifier.as_ref() else {
+            tracing::warn!(
+                target: "ironclaw::reborn::channel_triggered_delivery",
+                trigger_id = %event.fire.identity.trigger_id,
+                "background fire failure notification skipped: composed runtime has no delivery coordinator"
+            );
+            return;
+        };
+        let thread_id = match ThreadId::new(event.fire.identity.route_thread_id().as_str()) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_triggered_delivery",
+                    trigger_id = %event.fire.identity.trigger_id,
+                    %error,
+                    "background fire failure notification has invalid stable route identity"
+                );
+                return;
+            }
+        };
+        let failure_ref = match ProjectionUpdateRef::new(format!(
+            "trigger-failure:{}",
+            event.fire.identity.external_event_id()
+        )) {
+            Ok(failure_ref) => failure_ref,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_triggered_delivery",
+                    trigger_id = %event.fire.identity.trigger_id,
+                    %error,
+                    "background fire failure notification has invalid stable event identity"
+                );
+                return;
+            }
+        };
+        let scope = TurnScope::new_with_owner(
+            event.fire.identity.tenant_id().clone(),
+            event.fire.agent_id.clone(),
+            event.fire.project_id.clone(),
+            thread_id,
+            Some(event.fire.creator_user_id.clone()),
+        );
+        notifier
+            .on_trigger_failed_before_submit(TriggeredFireFailureDeliveryRequest {
+                scope,
+                creator_user_id: event.fire.creator_user_id.clone(),
+                project_scoped: event.fire.project_id.is_some(),
+                prompt: event.fire.prompt,
+                failure_ref,
             })
             .await;
     }
 }
 
-/// Build a [`ironclaw_outbound::TriggerCommunicationContext`] from the
-/// fire's identity — the generic translation the retired per-vendor hooks
-/// each carried.
-pub fn triggered_communication_context(
-    fire: &TriggerFire,
-) -> Result<ironclaw_outbound::TriggerCommunicationContext, String> {
-    let trigger_origin_ref =
-        ironclaw_outbound::TriggerOriginRef::new(fire.identity.trigger_id().to_string())
-            .map_err(|error| format!("invalid trigger origin ref: {error}"))?;
-    let fire_slot = ironclaw_outbound::TriggerFireSlot::new(fire.identity.fire_slot().to_rfc3339())
-        .map_err(|error| format!("invalid fire slot: {error}"))?;
-    Ok(ironclaw_outbound::TriggerCommunicationContext {
-        trigger_origin_ref,
-        trigger_source_kind: ironclaw_outbound::TriggerSourceKind::Schedule,
-        fire_slot,
-    })
+/// Live codec view over the channel host assembly's ACTIVE snapshot. Each
+/// call re-reads the snapshot, so activations and deactivations are visible to
+/// the long-lived notifier without rebuilding it. Capturing a snapshot
+/// instead would freeze the channel set at first use and leave every
+/// later-activated channel's gate prompts undeliverable until restart.
+pub struct AssemblyPreferenceTargetCodecs {
+    assembly: Arc<GenericChannelHostAssembly>,
+}
+
+impl AssemblyPreferenceTargetCodecs {
+    pub fn new(assembly: Arc<GenericChannelHostAssembly>) -> Self {
+        Self { assembly }
+    }
+}
+
+impl ActivePreferenceTargetCodecs for AssemblyPreferenceTargetCodecs {
+    fn active_preference_target_codecs(&self) -> Vec<Arc<dyn PreferenceTargetCodec>> {
+        self.assembly
+            .active_preference_codecs()
+            .into_iter()
+            .map(|(_, codec)| codec)
+            .collect()
+    }
 }

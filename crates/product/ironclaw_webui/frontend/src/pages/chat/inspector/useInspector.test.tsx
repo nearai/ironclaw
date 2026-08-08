@@ -259,6 +259,7 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
       Authorization: "Bearer operator-token",
       "Last-Event-ID": `${streamId}:6`,
     });
+
     for (let sequence = 7; sequence <= 12; sequence += 1) {
       await act(async () => {
         stream.message("diagnostic_update", `${streamId}:${sequence}`, {
@@ -288,6 +289,7 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
       .filter((update) => update.local_id)
       .map((update) => update.local_id);
     assert.deepEqual(retainedLocalIds, ["transport-1", "transport-2"]);
+    const receivedBeforeRebase = latestState?.receivedUpdateCount;
 
     await act(async () => {
       stream.message("diagnostic_rebase", `${streamId}:14`, {
@@ -298,6 +300,7 @@ test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidd
       latestState?.updates.map((update) => update.local_id),
       retainedLocalIds,
     );
+    assert.equal(latestState?.receivedUpdateCount, receivedBeforeRebase);
     assert.equal(vi.mocked(fetch).mock.calls.length, 3);
     await act(async () => vi.advanceTimersByTimeAsync(50));
     assert.equal(vi.mocked(fetch).mock.calls.length, 4);

@@ -79,6 +79,7 @@ registerPack("en", {
   "inspector.tool.unavailableDetails": "Tool details are unavailable or no longer retained.",
   "inspector.tool.capability": "Capability",
   "inspector.tool.status": "Status",
+  "inspector.tool.duration": "Duration: {count} ms",
   "inspector.tool.arguments": "Arguments",
   "inspector.tool.output": "Output",
   "inspector.tool.outputSize": "Output size: {count} bytes",

@@ -985,25 +985,13 @@ fn prompt_component_label(kind: PromptComponentKind, index: usize) -> String {
 
 impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
     fn record_prompt(&self, capture: HostManagedPromptDiagnosticCapture) {
-        let user_id = capture
-            .context
-            .actor
-            .as_ref()
-            .map(|actor| actor.user_id.clone())
-            .or_else(|| capture.context.scope.explicit_owner_user_id().cloned());
-        let Some(user_id) = user_id else {
+        let Some(scope) = diagnostic_scope_for_context(&capture.context) else {
             tracing::debug!(
                 run_id = %capture.context.run_id,
                 "prompt diagnostics skipped because the run has no user scope"
             );
             return;
         };
-        let scope = DiagnosticScope::new(
-            capture.context.scope.tenant_id.clone(),
-            user_id,
-            capture.context.thread_id.clone(),
-            capture.context.run_id,
-        );
         let detector = prompt_leak_detector();
         let reconstruction_capacity = capture
             .messages
@@ -1155,25 +1143,13 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
                 ),
             },
         };
-        let user_id = diagnostic
-            .context
-            .actor
-            .as_ref()
-            .map(|actor| actor.user_id.clone())
-            .or_else(|| diagnostic.context.scope.explicit_owner_user_id().cloned());
-        let Some(user_id) = user_id else {
+        let Some(scope) = diagnostic_scope_for_context(&diagnostic.context) else {
             tracing::debug!(
                 run_id = %diagnostic.context.run_id,
                 "model-call diagnostics skipped because the run has no user scope"
             );
             return;
         };
-        let scope = DiagnosticScope::new(
-            diagnostic.context.scope.tenant_id.clone(),
-            user_id,
-            diagnostic.context.thread_id.clone(),
-            diagnostic.context.run_id,
-        );
         let usage = usage.map(|usage| ModelTokenUsage {
             input_tokens: Some(u64::from(usage.input_tokens)),
             output_tokens: Some(u64::from(usage.output_tokens)),
@@ -1361,7 +1337,7 @@ impl HostManagedPromptDiagnosticSink for InMemoryDiagnosticStore {
             output_bytes: result.as_ref().map(BoundedDiagnosticText::original_bytes),
             result,
             status,
-            duration_ms: None,
+            duration_ms: capture.duration_ms,
             failure_category,
             failure_summary: failure_summary.clone(),
         };
@@ -2414,6 +2390,7 @@ mod tests {
                 context: context.clone(),
                 activity_id: first_tool_id,
                 capability_name: "filesystem.read".to_string(),
+                duration_ms: Some(42),
                 result: Some(format!(
                     "{secret} {}",
                     "x".repeat(TOOL_RESULT_MAX_BYTES + 32)
@@ -2430,6 +2407,7 @@ mod tests {
                 context: context.clone(),
                 activity_id: second_tool_id,
                 capability_name: "filesystem.read".to_string(),
+                duration_ms: Some(7),
                 result: None,
                 result_original_bytes: None,
                 status: HostManagedToolResultDiagnosticStatus::Failed,
@@ -2443,6 +2421,7 @@ mod tests {
                 context,
                 activity_id: uuid::Uuid::new_v4(),
                 capability_name: "filesystem.read".to_string(),
+                duration_ms: Some(1),
                 result: Some("untrusted size".to_string()),
                 result_original_bytes: None,
                 status: HostManagedToolResultDiagnosticStatus::Succeeded,
@@ -2518,6 +2497,8 @@ mod tests {
             snapshot.tool_executions[1].status,
             ToolExecutionStatus::Failed
         );
+        assert_eq!(snapshot.tool_executions[0].duration_ms, Some(42));
+        assert_eq!(snapshot.tool_executions[1].duration_ms, Some(7));
         let first_arguments = snapshot.tool_executions[0]
             .arguments
             .as_ref()

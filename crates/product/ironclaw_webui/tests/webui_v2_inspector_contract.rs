@@ -373,6 +373,38 @@ async fn updates_rejects_bad_cursor_and_bounds_concurrent_streams() {
         "invalid cursor must be rejected before ProductSurface dispatch"
     );
 
+    for (invalid_query, expected_field, expected_validation_code) in [
+        ("connection_id=invalid%20id", "connection_id", "invalid_id"),
+        (
+            "connection_generation=1",
+            "connection_generation",
+            "invalid_value",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/webchat/v2/operator/inspector/threads/thread-a/runs/run-a/events?{invalid_query}",
+                ))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 4 * 1024)
+            .await
+            .expect("error body");
+        let error = serde_json::from_slice::<serde_json::Value>(&body).expect("error json");
+        assert_eq!(error["field"], expected_field);
+        assert_eq!(error["validation_code"], expected_validation_code);
+    }
+    assert!(
+        surface.calls().is_empty(),
+        "invalid connection metadata must be rejected before ProductSurface dispatch"
+    );
+
     let first = app
         .clone()
         .oneshot(
