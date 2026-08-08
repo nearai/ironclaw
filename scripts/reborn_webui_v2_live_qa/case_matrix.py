@@ -295,8 +295,8 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_9d_routine_per_trigger_delivery_target": {
         "rows": ["9D"],
         "feature": (
-            "Routine routed through its own delivery_target_id end to end "
-            "(per-trigger routing probe)"
+            "Routine routed through its own prompt-pinned builtin__outbound_deliver "
+            "destination end to end (per-trigger routing probe)"
         ),
         "gate": "requires live Slack message delivery verification",
     },

@@ -100,6 +100,11 @@ derive hashes for opaque state/code/verifier values, then call
 claims the flow through `AuthFlowManager`, performs provider exchange through
 `AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
+Once callback completion begins, the host route must keep that work alive if
+the provider-facing HTTP request disconnects: canceling after the durable
+one-time claim can otherwise strand the flow at `callback_received`. Same-host
+retries for one flow are single-flight and observe the first durable outcome;
+they must never exchange the same authorization code concurrently.
 If continuation dispatch fails, the handler returns a sanitized retryable
 error instead of reporting callback success. Lifecycle continuations are
 at-least-once and idempotent on flow id: a process-local single-flight guard

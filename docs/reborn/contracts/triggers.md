@@ -118,6 +118,10 @@ It is the source of truth for fire eligibility.
 Pre-submit permanent failures are handled separately by the worker: `Once`
 triggers complete on failure so the one-shot slot is retired, while exhausted
 Cron triggers stay `Scheduled`/retryable for manual investigation or removal.
+After that state transition is durably visible, the settlement observer emits
+a typed failed-fire event. Composition may hand that event to the ordinary
+outbound notification policy, but the poller never sends a message itself and
+no synthetic run or thread-history row is created.
 
 Run threads for completed triggers remain accessible by design; their history is
 retained user data and must not become unreachable when the trigger transitions
@@ -414,7 +418,9 @@ trigger turn is waiting for human interaction, the trigger remains active throug
 `active_run_ref` back-pressure. Later lifecycle/notification work must define
 durable gate expiry, stale gate rejection, reminder throttling, and user/admin
 notification paths without making the trigger poller deliver outbound messages
-directly.
+directly. A permanently failed pre-submit fire uses the same rule: notification
+starts only after durable failure settlement, carries a stable fire identity
+for idempotency, and records no `TurnRunId` because no run exists.
 
 ---
 
@@ -446,6 +452,10 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
+  Resuming a recurring trigger atomically rebases `next_run_at` to the first
+  future schedule slot, so slots elapsed during the pause are not replayed as
+  catch-up deliveries. A paused fire-once trigger retains its original slot
+  and remains eligible to fire exactly once when resumed.
 - Local-dev builds store trigger records in the local-dev libSQL database
   (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
   by production libSQL.

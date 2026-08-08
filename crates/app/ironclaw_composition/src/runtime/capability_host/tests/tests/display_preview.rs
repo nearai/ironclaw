@@ -43,6 +43,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service.clone(),
         fallback_user_id.clone(),
+        None,
     );
     let input_ref = capability_io
         .register_provider_tool_call_input(
@@ -130,6 +131,7 @@ async fn capability_io_writes_failure_display_preview_to_durable_history() {
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service.clone(),
         fallback_user_id.clone(),
+        None,
     );
     let input_ref = capability_io
         .register_provider_tool_call_input(

@@ -69,12 +69,14 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    // #6520 registers the product-owned run-scoped delivery router as a real
-    // built-in; its e2e coverage lives in
-    // `reborn_integration_delivery_user_journeys` (ROUTE_CURRENT journeys:
-    // exact-listed-target routing, web_app-only routing, stale-target
-    // model-correctable failure).
-    ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+    // The explicit model-initiated delivery tool. Its e2e coverage is the
+    // delivery user journeys in `reborn_integration_delivery_user_journeys`
+    // (`webui_send_me_on_slack_delivers_via_bot_with_evidence` and siblings),
+    // which drive it through the real composition-wired
+    // `ExtensionHostModelChannelDelivery` → `DeliveryCoordinator` → channel
+    // adapter → vendor wire, asserting at the wire recorder and the outbound
+    // attempt ledger.
+    ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID,
     // This capability's production runtime proof writes a CSV through
     // `builtin.write_file`, invokes the attachment tool through the real
     // host/runtime/loop chain, and verifies the finalized assistant message:

@@ -2662,11 +2662,15 @@ def _parse_epoch_seconds(value: object) -> float | None:
 
 
 def _outbound_final_reply_targets(reborn_home: Path) -> dict[str, object]:
-    """Every persisted user-default final-reply target, keyed by row path.
+    """Every persisted user-default notification-channel target, keyed by row path.
 
     qa_9d compares this before creation and after delivery: per-trigger
-    routing must NOT be implemented by silently rewriting the user-wide
-    default delivery target."""
+    routing (an explicit `builtin__outbound_deliver` step pinned in the
+    routine's own persisted prompt) must NOT be implemented by silently
+    rewriting the user-wide `notification_channels_set` target list.
+    `final_reply_target` is read too for parity with pre-migration rows (the
+    retired single-slot wire name that the notification-channel read path
+    folds forward); nothing writes it anymore."""
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     targets: dict[str, object] = {}
     if not db_path.exists():
@@ -2688,18 +2692,27 @@ def _outbound_final_reply_targets(reborn_home: Path) -> dict[str, object]:
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(record, dict):
-            targets[str(path)] = record.get("final_reply_target")
+            targets[str(path)] = {
+                "notification_targets": record.get("notification_targets"),
+                "final_reply_target": record.get("final_reply_target"),
+            }
     return targets
 
 
 def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, object]:
-    """Read count/schedule/delivery-target facts for one routine from the
+    """Read count/schedule/delivery-destination facts for one routine from the
     server DB.
 
-    `delivery_target_column_missing` is reported separately (the column only
-    exists on servers with per-trigger delivery routing) while the schedule
-    columns exist on every server version this probe targets, so pre-fix
-    servers still get schedule preconditions checked.
+    Per-trigger delivery routing lives in the routine's own persisted PROMPT
+    now (an explicit `builtin__outbound_deliver` step naming the resolved
+    target id, written while the user is present at creation time) rather
+    than a stored `delivery_target_id` column on the trigger record -- that
+    write path was retired. `delivery_target`/`delivery_target_column_missing`
+    are still read and reported for diagnostic visibility on legacy rows, but
+    callers must not require them: a freshly created routine legitimately
+    leaves the column unset. The schedule/prompt columns exist on every
+    server version this probe targets, so pre-fix servers still get schedule
+    preconditions checked.
     """
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     snapshot: dict[str, object] = {
@@ -2707,6 +2720,7 @@ def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, 
         "record_count": 0,
         "schedule_kind": None,
         "next_run_at": None,
+        "prompt": None,
         "delivery_target": None,
         "delivery_target_column_missing": False,
     }
@@ -2716,13 +2730,14 @@ def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, 
     try:
         with closing(sqlite3.connect(db_path)) as db:
             rows = db.execute(
-                "SELECT schedule_kind, next_run_at FROM trigger_records WHERE name = ?",
+                "SELECT schedule_kind, next_run_at, prompt FROM trigger_records WHERE name = ?",
                 (routine_name,),
             ).fetchall()
             snapshot["record_count"] = len(rows)
             if rows:
                 snapshot["schedule_kind"] = rows[0][0]
                 snapshot["next_run_at"] = rows[0][1]
+                snapshot["prompt"] = rows[0][2]
             try:
                 target_rows = db.execute(
                     "SELECT delivery_target FROM trigger_records WHERE name = ?",
@@ -5334,20 +5349,18 @@ async def _slack_delivery_routine_case(
             record_snapshot = _trigger_record_snapshot(ctx.reborn_home, routine_name)
             base_details["trigger_record_snapshot"] = record_snapshot
         if require_persisted_delivery_target and record_snapshot is not None:
-            if record_snapshot.get("delivery_target_column_missing"):
-                raise AssertionError(
-                    "server does not support per-trigger delivery targets "
-                    "(trigger_records.delivery_target column missing)"
-                )
             if not record_snapshot.get("checked"):
                 raise AssertionError(
                     "probe could not read trigger_records for the persisted "
-                    f"delivery target: {record_snapshot.get('error')!r}"
+                    f"routine prompt: {record_snapshot.get('error')!r}"
                 )
-            if not record_snapshot.get("delivery_target"):
+            persisted_prompt = str(record_snapshot.get("prompt") or "")
+            if "builtin__outbound_deliver" not in persisted_prompt:
                 raise AssertionError(
-                    "routine was created without a per-trigger delivery_target_id "
-                    "on the trigger record"
+                    "routine was created without its own explicit "
+                    "builtin__outbound_deliver delivery step in the persisted "
+                    "prompt -- per-trigger routing lives in the routine's own "
+                    "prompt now, not a stored delivery_target_id column"
                 )
         if expect_one_shot_schedule and record_snapshot is not None:
             # Exactly-once counting is only well-defined for once-schedules:
@@ -5510,16 +5523,18 @@ async def _slack_delivery_routine_case(
                 )
         if require_persisted_delivery_target and default_targets_before is not None:
             # Per-trigger routing must not be green because the server (or
-            # the model) rewrote the user-wide default target instead of
-            # honoring the trigger's own delivery_target_id.
+            # the model) rewrote the user's notification-channel targets
+            # instead of honoring the explicit builtin__outbound_deliver step
+            # pinned in the trigger's own persisted prompt.
             default_targets_after = _outbound_final_reply_targets(ctx.reborn_home)
             base_details["default_delivery_targets_before"] = default_targets_before
             base_details["default_delivery_targets_after"] = default_targets_after
             if default_targets_after != default_targets_before:
                 raise AssertionError(
-                    "user-default outbound delivery target changed during the "
+                    "user notification-channel targets changed during the "
                     "per-trigger routing case — routing must come from the "
-                    "trigger's own delivery_target_id, not a rewritten default"
+                    "trigger's own prompt-pinned builtin__outbound_deliver step, "
+                    "not a rewritten notification-channel default"
                 )
         # The exact Slack body is not persisted in results to avoid leaking workspace data.
         return _result(
@@ -6467,8 +6482,9 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
 
 async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> ProbeResult:
     """Per-trigger routing probe: the routine must be created with its OWN
-    delivery_target_id (persisted on the trigger record) and deliver through
-    it — not by mutating the user-wide default delivery target."""
+    destination pinned as an explicit builtin__outbound_deliver step in its
+    own persisted prompt, and deliver through it — not by mutating the
+    user's notification-channel targets."""
     return await _slack_delivery_routine_case(
         ctx,
         case_name="qa_9d_routine_per_trigger_delivery_target",
@@ -6488,9 +6504,10 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
             "is active (the Slack account is already connected); install it "
             "and complete any returned setup if it is not. "
             "Route THIS routine's results to my Slack DM by listing my outbound "
-            "delivery targets and passing the Slack DM target id as "
-            "delivery_target_id when creating the trigger. Do not change my "
-            "default outbound delivery target."
+            "delivery targets, then writing an explicit step in the routine's "
+            "own prompt that calls builtin__outbound_deliver with that Slack DM "
+            "target id to deliver the result. Do not change my notification "
+            "channels."
         ),
         exactly_once_grace_seconds=60.0,
         require_persisted_delivery_target=True,

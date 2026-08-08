@@ -6,15 +6,15 @@ use super::super::super::outbound_preferences::FakeOutboundPreferencesService;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness};
 
-/// C-SYNTH outbound: harness surfacing the two local-dev synthetic
-/// `outbound_delivery_*` capabilities over an injected
-/// [`FakeOutboundPreferencesService`] double.
+/// C-SYNTH outbound: harness surfacing the local-dev synthetic
+/// `outbound_delivery_targets_list` and `notification_channels_set`
+/// capabilities over an injected [`FakeOutboundPreferencesService`] double.
 /// `create_capability_port` injects them via
 /// `apply_synthetic_capability_wrappers` because
-/// `outbound_target_tools` is `Some`. `target_set` runs with
+/// `outbound_target_tools` is `Some`. `notification_channels_set` runs with
 /// `requires_approval = true`, so its settings decision is exercised for
 /// real: global auto-approve (default ON) → `Allow`; a `Disabled` tool
-/// override (`disable_outbound_target_set_tool`) → `Deny`; auto-approve
+/// override (`disable_notification_channels_set_tool`) → `Deny`; auto-approve
 /// disabled → `Ask` (approval gate). The RETURNED harness leaves global
 /// auto-approve at its default-ON state so the happy/`NotFound` arms
 /// dispatch through `Allow`; the gate arm disables it per-test.
@@ -26,11 +26,9 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
                 ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
             )?,
             CapabilityId::new(
-                ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+                ironclaw_composition::test_support::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
             )?,
-            CapabilityId::new(
-                ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-            )?,
+            CapabilityId::new(ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![
             EffectKind::DispatchCapability,

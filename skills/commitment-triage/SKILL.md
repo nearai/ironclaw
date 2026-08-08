@@ -1,6 +1,6 @@
 ---
 name: commitment-triage
-version: 0.2.0
+version: 0.2.1
 description: Recognize obligations in conversation, extract signals with immediacy and expiration, create and manage commitments in the workspace.
 activation:
   # Limits enforced by `ironclaw_skills::types::ActivationCriteria::enforce_limits`:
@@ -18,7 +18,6 @@ activation:
     - by tomorrow
     - follow up
     - get back to
-    - remind me
     - track this
     - mark done
     - commitment
@@ -30,7 +29,7 @@ activation:
     - this week
   patterns:
     - "(?i)I (need|have|should|must|ought) to"
-    - "(?i)(remind me|don't let me forget|make sure I)"
+    - "(?i)(don't let me forget|make sure I)"
     - "(?i)(by|before|until) (monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|end of)"
     - "(?i)(promised|committed|agreed) (to|that)"
     - "(?i)(slack|email|dm|text) message from .+: .+"
