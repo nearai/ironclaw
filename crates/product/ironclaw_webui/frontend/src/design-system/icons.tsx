@@ -129,6 +129,10 @@ const paths = {
   arrowDown: (<><path d="M12 5v14" /><path d="m6 13 6 6 6-6" /></>),
 
   retry: (<><path d="M3.5 12a8.5 8.5 0 1 1 2.6 6.1" /><path d="M3.2 18.5v-5h5" /></>),
+
+  alert: (<><path d="M12 5 3.5 19.5h17L12 5Z" /><path d="M12 10.5v3.6" /><path
+      d="M12 16.9h.01"
+    /></>),
 };
 
 export function Icon({ name, className = "", strokeWidth = 1.7 }) {
