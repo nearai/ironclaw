@@ -29,7 +29,7 @@
 //!
 //! Scope note: the model gateway override IS honored on production under
 //! `test-support`, but the fired trusted-ingress run terminates before the
-//! first model call in this minimal secure-default / tenant-sandbox production
+//! first model call in this minimal secure-default / user-sandbox production
 //! harness (no real conversational agent-loop environment), so this tier
 //! cannot assert "the trigger prompt reached the model" the way the local
 //! `trigger_poller_e2e` suite does. That is a turn-execution-environment limit,
@@ -61,7 +61,7 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -133,7 +133,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
 
 /// Builds a production-shaped runtime with the trigger poller enabled.
 /// Mirrors `production_runtime_automations.rs`'s recipe (Production profile,
-/// first-party trust policy, secure-default runtime policy, tenant-sandbox
+/// first-party trust policy, secure-default runtime policy, user-sandbox
 /// process binding) and additionally opts the poller in via the existing
 /// `trigger_poller.enabled` input flag, using the tenant-scoped placeholder
 /// authorizer so no fire-time access checker is required for the test.
@@ -164,14 +164,14 @@ async fn build_production_runtime_with_poller(
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {

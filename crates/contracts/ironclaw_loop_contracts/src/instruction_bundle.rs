@@ -27,6 +27,14 @@ use super::{
 
 const CAPABILITY_SURFACE_USAGE_POLICY: &str =
     include_str!("../prompts/capability_surface_usage_policy.md");
+/// Single delivery-guidance block: how to route content off the current
+/// conversation (`builtin__outbound_deliver`/`builtin__outbound_delivery_targets_list`)
+/// versus act-as-user integration messaging tools. Rendered by
+/// `runtime_context::LoopRuntimeContext::render_model_content` only when the
+/// communication slice's `delivery_tools_visible` flag is true — visible here
+/// (`pub(super)`) so that sibling module can reach it without re-deriving
+/// visibility itself.
+pub(super) const DELIVERY_GUIDANCE: &str = include_str!("../prompts/delivery.md");
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);
@@ -1021,6 +1029,72 @@ mod tests {
         assert_eq!(bundle.materialized_messages.len(), 1);
         assert_eq!(bundle.materialized_messages[0].role, "user");
         assert_eq!(bundle.materialized_messages[0].model_content, inline_body);
+    }
+
+    fn auth_vocabulary_surface(trust: CapabilityDescriptionTrust) -> VisibleCapabilitySurface {
+        VisibleCapabilitySurface {
+            version: crate::CapabilitySurfaceVersion::new("surface:auth-vocab").unwrap(),
+            descriptors: vec![CapabilityDescriptorView {
+                capability_id: ironclaw_host_api::ids::CapabilityId::new(
+                    "builtin.extension_register_hosted_mcp",
+                )
+                .unwrap(),
+                provider: None,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
+                safe_name: "extension_register_hosted_mcp".to_string(),
+                safe_description: "Choose oauth for a browser authorization-code flow.".to_string(),
+                description_trust: trust,
+                concurrency_hint: crate::ConcurrencyHint::Exclusive,
+                parameters_schema: serde_json::json!({"type": "object"}),
+            }],
+            callable_capability_ids: None,
+        }
+    }
+
+    fn surface_summary_for(trust: CapabilityDescriptionTrust) -> String {
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle::default(),
+                visible_surface: Some(auth_vocabulary_surface(trust)),
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: Vec::new(),
+            })
+            .expect("instruction bundle builds");
+        bundle
+            .materialized_messages
+            .iter()
+            .find(|message| message.model_content.starts_with("surface "))
+            .expect("surface summary message")
+            .model_content
+            .clone()
+    }
+
+    /// Host-verified descriptions legitimately mention auth flows
+    /// ("browser authorization-code flow"); the credential denylist must not
+    /// silently drop them from the prompt's capability surface.
+    #[test]
+    fn verified_catalog_descriptions_with_auth_vocabulary_stay_on_the_surface() {
+        let summary = surface_summary_for(CapabilityDescriptionTrust::VerifiedCatalog);
+        assert!(
+            summary.contains("builtin.extension_register_hosted_mcp"),
+            "verified-catalog description must stay on the prompt surface: {summary}"
+        );
+    }
+
+    /// The strict scan still governs untrusted provenance: the same
+    /// description from an unverified source stays off the surface.
+    #[test]
+    fn untrusted_descriptions_with_auth_vocabulary_are_omitted_from_the_surface() {
+        let summary = surface_summary_for(CapabilityDescriptionTrust::Untrusted);
+        assert!(
+            !summary.contains("builtin.extension_register_hosted_mcp"),
+            "untrusted description must be omitted from the prompt surface: {summary}"
+        );
+        assert!(
+            summary.contains("(none)"),
+            "an all-omitted surface must render the empty marker: {summary}"
+        );
     }
 
     fn test_context() -> LoopRunContext {

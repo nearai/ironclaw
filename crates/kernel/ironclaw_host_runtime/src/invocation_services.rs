@@ -66,7 +66,7 @@ pub struct InvocationServices {
     /// process port that runs it. Resolved once per invocation; `None` keeps
     /// the feature off for this invocation. The edit plans declare no process
     /// effect, so the resolver — the only layer that inspects process backends
-    /// — selects the port matching the plan's process backend (tenant sandbox
+    /// — selects the port matching the plan's process backend (user sandbox
     /// under `HostedMultiTenant`, local host under `LocalSingleUser`) so the
     /// check runs in the same isolation boundary a declared process effect
     /// would, rather than escaping onto the shared provider host. `None`
@@ -188,7 +188,7 @@ pub struct ConfiguredInvocationServicesResolver {
     tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     process: Arc<dyn RuntimeProcessPort>,
-    tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
+    user_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStorePort>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     post_edit_check: Option<PostEditCheckConfig>,
@@ -207,7 +207,7 @@ impl ConfiguredInvocationServicesResolver {
             tool_call_http_egress: None,
             runtime_secret_material_stager: None,
             process,
-            tenant_sandbox_process: None,
+            user_sandbox_process: None,
             secret_store,
             audit_sink: None,
             post_edit_check: None,
@@ -235,11 +235,8 @@ impl ConfiguredInvocationServicesResolver {
         self
     }
 
-    pub fn with_tenant_sandbox_process_port(
-        mut self,
-        process: Arc<dyn RuntimeProcessPort>,
-    ) -> Self {
-        self.tenant_sandbox_process = Some(process);
+    pub fn with_user_sandbox_process_port(mut self, process: Arc<dyn RuntimeProcessPort>) -> Self {
+        self.user_sandbox_process = Some(process);
         self
     }
 
@@ -266,7 +263,7 @@ impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
                 ProcessBackendKind::LocalHost if local_host_process_execution_permitted(plan) => {
                     Arc::clone(&self.process)
                 }
-                ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone().ok_or(
+                ProcessBackendKind::UserSandbox => self.user_sandbox_process.clone().ok_or(
                     InvocationServicesError::UnsupportedProcessBackend {
                         backend: plan.process_backend,
                     },
@@ -319,7 +316,7 @@ impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
             // plans it rides declare no process effect, so `process` above is
             // the deployment-blind local port. Bundle the check with the port
             // that matches the plan's process backend instead, so it runs in
-            // the tenant sandbox under hosted multi-tenant rather than escaping
+            // the user sandbox under hosted multi-tenant rather than escaping
             // onto the shared provider host; disabled when no backend can run
             // it in isolation.
             post_edit_check: self.post_edit_check.clone().and_then(|config| {
@@ -342,7 +339,7 @@ impl ConfiguredInvocationServicesResolver {
     /// Select the process port the post-edit check must run through, matching
     /// the plan's process-isolation boundary: the local host port only when
     /// local host execution is permitted (`LocalSingleUser` + `LocalHost`), the
-    /// tenant sandbox port under a `TenantSandbox` backend. Returns `None`
+    /// user sandbox port under a `UserSandbox` backend. Returns `None`
     /// (check disabled for this invocation) when no backend can run it in
     /// isolation — this mirrors how `resolve` binds `process` for a declared
     /// process effect, but fails soft because the check is advisory rather than
@@ -352,7 +349,7 @@ impl ConfiguredInvocationServicesResolver {
             ProcessBackendKind::LocalHost if local_host_process_execution_permitted(plan) => {
                 Some(Arc::clone(&self.process))
             }
-            ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone(),
+            ProcessBackendKind::UserSandbox => self.user_sandbox_process.clone(),
             _ => None,
         }
     }
@@ -375,6 +372,18 @@ impl ConfiguredInvocationServicesResolver {
                 Ok(Arc::clone(&self.filesystem))
             }
             FilesystemBackendKind::ScopedVirtual => {
+                let mounts =
+                    mounts.ok_or(InvocationServicesError::UnsupportedFilesystemBackend {
+                        backend: plan.filesystem_backend,
+                    })?;
+                Ok(Arc::new(MountScopedRootFilesystem::new(
+                    Arc::clone(&self.filesystem),
+                    mounts.clone(),
+                )))
+            }
+            FilesystemBackendKind::TenantWorkspace
+                if matches!(plan.deployment, DeploymentMode::HostedMultiTenant) =>
+            {
                 let mounts =
                     mounts.ok_or(InvocationServicesError::UnsupportedFilesystemBackend {
                         backend: plan.filesystem_backend,

@@ -808,7 +808,7 @@ impl RunDeliveryObserver {
             &target_authority,
         );
         let projection_id =
-            prompts::run_notification_projection_id(run_id, notification.event_kind);
+            prompts::run_notification_projection_id(run_id, notification.event_kind, None);
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {
@@ -834,7 +834,6 @@ impl RunDeliveryObserver {
             .coordinator
             .deliver(
                 &outbound_policy,
-                self.services.communication_preferences.as_ref(),
                 &target_authority,
                 self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {

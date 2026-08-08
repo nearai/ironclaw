@@ -1,5 +1,13 @@
+// @vitest-environment happy-dom
+
 import assert from "node:assert/strict";
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import React, { act } from "react";
+import {
+  QueryClient,
+  QueryClientProvider,
+  QueryObserver,
+} from "@tanstack/react-query";
+import { createRoot } from "react-dom/client";
 import { beforeEach, test, vi } from "vitest";
 
 const automationApi = vi.hoisted(() => ({
@@ -11,15 +19,132 @@ const automationApi = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../lib/api", () => automationApi);
+vi.mock("../../../lib/i18n", () => ({
+  useI18n: () => ({
+    lang: "en",
+    t: (key: string) => key,
+  }),
+}));
 
 import {
   createAutomationMutationConfig,
   createAutomationMutationLifecycle,
   createAutomationsQueryOptions,
+  useAutomations,
 } from "./useAutomations";
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+async function renderAutomationsHook(queryClient: QueryClient) {
+  let hookResult: ReturnType<typeof useAutomations> | undefined;
+  function Harness() {
+    hookResult = useAutomations(false);
+    return null;
+  }
+
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      React.createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        React.createElement(Harness)
+      )
+    );
+  });
+  return {
+    cleanup: () => {
+      act(() => root.unmount());
+      queryClient.clear();
+    },
+    current: () => {
+      assert.ok(hookResult, "useAutomations should render");
+      return hookResult;
+    },
+  };
+}
+
+test("refresh remains active until the list and summary refetches both settle", async () => {
+  const payload = { automations: [], scheduler_enabled: true };
+  automationApi.listAutomations.mockResolvedValue(payload);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const rendered = await renderAutomationsHook(queryClient);
+
+  try {
+    await vi.waitFor(() => assert.equal(rendered.current().isRefreshing, false));
+    const listRefetch = deferred<typeof payload>();
+    const summaryRefetch = deferred<typeof payload>();
+    automationApi.listAutomations.mockImplementation(({ includeCompleted }) =>
+      includeCompleted ? summaryRefetch.promise : listRefetch.promise
+    );
+
+    let refetchPromise!: ReturnType<ReturnType<typeof useAutomations>["refetch"]>;
+    act(() => {
+      refetchPromise = rendered.current().refetch();
+    });
+    await vi.waitFor(() => assert.equal(rendered.current().isRefreshing, true));
+
+    await act(async () => {
+      listRefetch.resolve(payload);
+      await listRefetch.promise;
+    });
+    assert.equal(
+      rendered.current().isRefreshing,
+      true,
+      "the still-pending summary request must keep refresh active"
+    );
+
+    await act(async () => {
+      summaryRefetch.resolve(payload);
+      await refetchPromise;
+    });
+    await vi.waitFor(() => assert.equal(rendered.current().isRefreshing, false));
+  } finally {
+    rendered.cleanup();
+  }
+});
+
+test("a background summary failure does not become the primary page error", async () => {
+  const payload = { automations: [], scheduler_enabled: true };
+  automationApi.listAutomations.mockImplementation(({ includeCompleted }) =>
+    includeCompleted
+      ? Promise.reject(new Error("summary unavailable"))
+      : Promise.resolve(payload)
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const rendered = await renderAutomationsHook(queryClient);
+
+  try {
+    await vi.waitFor(() => {
+      assert.equal(rendered.current().isLoading, false);
+      assert.equal(rendered.current().isRefreshing, false);
+      assert.equal(rendered.current().error, null);
+      assert.match(
+        String(rendered.current().summaryError),
+        /summary unavailable/
+      );
+    });
+    assert.deepEqual(rendered.current().automations, []);
+  } finally {
+    rendered.cleanup();
+  }
 });
 
 test("automation filter changes retain the visible list while fetching", async () => {

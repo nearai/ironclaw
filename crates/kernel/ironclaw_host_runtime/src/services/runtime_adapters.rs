@@ -33,12 +33,14 @@ use super::{
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
     WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
+use crate::obligations::RuntimeSecretInjectionStore;
 use crate::{
     FirstPartyCapabilityError,
     latency::{
         RuntimeLatencyFields, RuntimeLatencyMetrics, started_at as latency_started_at,
         trace_runtime_error, trace_runtime_ok,
     },
+    services::wasm_secrets::StagedWasmHostSecrets,
 };
 
 /// Per-invocation execution request handed to a runtime lane.
@@ -902,6 +904,7 @@ pub(super) struct WasmRuntimeAdapter {
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+    secret_injections: Arc<RuntimeSecretInjectionStore>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -912,6 +915,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+        secret_injections: Arc<RuntimeSecretInjectionStore>,
     ) -> Self {
         Self {
             runtime,
@@ -919,6 +923,7 @@ impl WasmRuntimeAdapter {
             network_policy_store,
             runtime_http_egress,
             credential_provider,
+            secret_injections,
             prepared: Mutex::new(HashMap::new()),
         }
     }
@@ -929,6 +934,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+        secret_injections: Arc<RuntimeSecretInjectionStore>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
@@ -936,6 +942,7 @@ impl WasmRuntimeAdapter {
             network_policy_store,
             runtime_http_egress,
             credential_provider,
+            secret_injections,
         ))
     }
 
@@ -949,16 +956,32 @@ impl WasmRuntimeAdapter {
     }
 
     fn host_for_scope(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> WitToolHost {
+        // Per-invocation `secret-exists` backing: every host variant below
+        // (denied HTTP or policy-routed) must answer the credential probe from
+        // the staged injection store, or third-party guests that gate on it
+        // abort with an opaque failure before issuing any request.
+        let secrets = StagedWasmHostSecrets::new(
+            Arc::clone(&self.secret_injections),
+            scope.clone(),
+            capability_id.clone(),
+        );
         let egress = runtime_http_egress(&self.runtime_http_egress);
         let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
             return if egress.is_some() {
-                self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
+                self.host
+                    .clone()
+                    .with_http(Arc::new(DenyWasmHostHttp))
+                    .with_secrets(Arc::new(secrets))
             } else {
-                self.host.clone()
+                self.host.clone().with_secrets(Arc::new(secrets))
             };
         };
         let Some(egress) = egress else {
-            return self.host.clone().with_http(Arc::new(DenyWasmHostHttp));
+            return self
+                .host
+                .clone()
+                .with_http(Arc::new(DenyWasmHostHttp))
+                .with_secrets(Arc::new(secrets));
         };
         let mut adapter =
             WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy)
@@ -968,7 +991,10 @@ impl WasmRuntimeAdapter {
         if let Some(provider) = &self.credential_provider {
             adapter = adapter.with_credential_provider(Arc::clone(provider));
         }
-        self.host.clone().with_http(Arc::new(adapter))
+        self.host
+            .clone()
+            .with_http(Arc::new(adapter))
+            .with_secrets(Arc::new(secrets))
     }
 }
 

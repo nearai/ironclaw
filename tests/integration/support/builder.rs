@@ -461,6 +461,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Exercise the production enum default without making the general
+    /// integration harness depend on ambient process configuration.
+    pub fn with_tool_disclosure_production_default(mut self) -> Self {
+        self.tool_disclosure = ToolDisclosureMode::default();
+        self
+    }
+
     /// Force `ToolDisclosureMode::Off` for this harness's underlying group,
     /// bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
     /// negative-control test's mode explicitly rather than relying on the
@@ -652,6 +659,13 @@ impl RebornIntegrationHarnessBuilder {
     ) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
         self.real_egress_response_bodies = bodies.into_iter().collect();
+        self
+    }
+
+    /// Route scripted `builtin.shell` calls through the real Docker-backed
+    /// sandbox profile. The calling test owns the Docker availability gate.
+    pub fn with_sandbox_shell_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::SandboxShellTools;
         self
     }
 
@@ -2524,6 +2538,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_shell_rejects_scripted_process_overrides_during_build() {
+        let result = RebornIntegrationHarness::test_default()
+            .with_shell_timeout()
+            .with_sandbox_shell_tools()
+            .build()
+            .await;
+
+        let error = match result {
+            Ok(_) => panic!("sandbox shell accepted an unsupported process override"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("sandbox shell harness executes real containers")
+        );
     }
 }
 

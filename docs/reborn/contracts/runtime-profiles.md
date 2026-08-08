@@ -201,7 +201,7 @@ EnterpriseDedicated + EnterpriseDev
 | `Sandboxed` | scoped or read-only mount plus scratch | SRT/Docker/SmolVM | brokered/allowlisted | brokered handles only | policy-driven approvals | safer execution of helper processes |
 | `Experiment` | copy-in or read-only repo plus sandbox overlay | SmolVM or Docker | allowlisted/brokered | brokered handles only | ask before host patch apply | package installs, tests, benchmarks, generated code |
 
-`LocalYolo` must be explicit and local-only. `HostedYoloTenantScoped` means fewer approvals inside a tenant sandbox, not direct provider-host authority.
+`LocalYolo` must be explicit and local-only. `HostedYoloTenantScoped` means fewer approvals inside a user sandbox, not direct provider-host authority.
 
 ---
 
@@ -212,7 +212,7 @@ Deployment mode is the outer authority envelope. Profiles are resolved inside it
 | Deployment mode | Direct host filesystem? | Direct host shell? | Default process backend | Network | Secrets | Yolo meaning |
 |---|---:|---:|---|---|---|---|
 | `LocalSingleUser` | yes, selected workspace | yes, selected cwd | `LocalHost` or SRT | direct-logged or brokered | local/brokered by profile | direct local machine authority after explicit selection |
-| `HostedMultiTenant` | no provider-host access | no provider-host shell | per-tenant SRT/container/microVM | brokered/allowlisted only | tenant-scoped broker only | fewer approvals inside tenant sandbox only |
+| `HostedMultiTenant` | no provider-host access | no provider-host shell | per-tenant SRT/container/microVM | brokered/allowlisted only | tenant-scoped broker only | fewer approvals inside user sandbox only |
 | `EnterpriseDedicated` | org-dedicated workspace only if admin-enabled | org-dedicated runner only if admin-enabled | org-dedicated runner/container/VM | org policy / brokered | org KMS/broker | org-admin-defined within dedicated infrastructure |
 
 Hosted multi-tenant invariants:
