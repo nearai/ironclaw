@@ -78,6 +78,18 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/ironclaw-release.yml": (
         "Smoke exact binaries before packaging upload",
         "scripts/ci/smoke-release-binary.py",
+        # The docs-live repoint: cargo-dist regeneration would silently drop
+        # this hand-added job, unhooking docs publication from releases. The
+        # prerelease guard is pinned literally so an edit that starts moving
+        # docs-live on rc tags fails here first.
+        "publish-docs-live:",
+        "refs/heads/docs-live",
+        "!fromJson(needs.host.outputs.val).announcement_is_prerelease",
+        # The newest-stable-tag guard: without it, re-running an older
+        # release's workflow force-moves docs-live backwards and silently
+        # reverts the live docs site.
+        "git/matching-refs/tags/ironclaw-v",
+        "skipping docs-live repoint:",
     ),
 }
 

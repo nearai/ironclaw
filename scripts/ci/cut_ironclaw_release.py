@@ -155,6 +155,43 @@ class GitHubTags:
             raise ReleaseTagError(f"failed to create {tag}: {result.stderr.strip()}")
 
 
+def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
+    """A stable cut requires the candidate's `docs/changelog.mdx` to carry
+    the release's entry.
+
+    The public docs site deploys from the `docs-live` branch, which the
+    release workflow repoints at each stable tag — so the changelog page that
+    ships is whatever the candidate commit carries, and it must already
+    contain this release. The probe is the exact `description="vX.Y.Z"`
+    attribute, not a bare-substring `vX.Y.Z`: a prose mention or an
+    rc-labeled entry (`description="vX.Y.Z-rc.1"`) must not satisfy the
+    stable gate. Prerelease (`-rc.N`, hotfix-rc) cuts are exempt so the
+    freeze/blocker flow stays unimpeded; the entry lands on `main` before
+    the Monday cut so the candidate inherits it and later candidates keep it
+    (docs/internal/weekly-release-strategy.md). A malformed version is left
+    for `ensure_release_tag` to reject with the canonical message.
+    """
+    if VERSION_PATTERN.fullmatch(version) is None or "-" in version:
+        return
+    changelog = candidate_root / "docs" / "changelog.mdx"
+    try:
+        text = changelog.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReleaseTagError(
+            f"stable release {version} requires docs/changelog.mdx in the "
+            f"candidate checkout, which cannot be read: {error}"
+        ) from error
+    if f'description="v{version}"' not in text:
+        raise ReleaseTagError(
+            f"docs/changelog.mdx has no entry for v{version}. Land an "
+            f'<Update description="v{version}"> entry on main before the '
+            "Monday cut so the candidate inherits it; if the branch is "
+            "already cut, add the entry there and cherry-pick it to main so "
+            "the next candidate keeps it "
+            "(docs/internal/weekly-release-strategy.md, Monday checklist)."
+        )
+
+
 def _checked_out_sha(candidate_root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD^{commit}"],
@@ -192,6 +229,7 @@ def main() -> int:
     parser.add_argument("--repository", required=True)
     args = parser.parse_args()
 
+    ensure_stable_changelog_entry(args.candidate_root, args.version)
     tags = GitHubTags(args.repository)
     message = ensure_release_tag(
         requested_version=args.version,
