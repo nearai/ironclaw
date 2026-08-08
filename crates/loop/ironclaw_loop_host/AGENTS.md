@@ -35,7 +35,8 @@ Working rules for the host-port adapter crate. Orientation lives in
   `ironclaw_turn_runner`, PROPOSAL §6.7.2).
 - `driver_host_port_adapters.rs` — checkpoint/progress/no-extra-input port
   adapters for a claimed run.
-- `tool_disclosure.rs` / `tool_disclosure_port.rs` / `tool_disclosure_mode.rs`
+- `tool_disclosure.rs` / `tool_disclosure_port.rs` / `tool_disclosure_port/tests.rs` /
+  `tool_disclosure_mode.rs`
   — progressive tool disclosure: catalog, `LoopCapabilityPort` decorator, and
   the `REBORN_TOOL_DISCLOSURE` switch.
 - `skill_bundle_source.rs` / `filesystem_skill_bundle_source.rs` skill-bundle

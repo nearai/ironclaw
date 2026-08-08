@@ -75,6 +75,16 @@ pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 
+/// Maximum number of tool names one `tool_describe` call may resolve.
+///
+/// Production traces show the model spending a full model round-trip per
+/// schema (seven sequential single-name describes in one run, for schemas of
+/// 372–2851 bytes each). A bounded `names` array collapses a whole
+/// `tool_search` candidate list into one round-trip; the bound keeps the saved
+/// round-trips from turning into an unbounded schema dump. Mirrors the
+/// `skill_activate` `names`/`maxItems` precedent.
+pub(crate) const MAX_DESCRIBE_BATCH_SIZE: usize = 8;
+
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
         ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
@@ -444,16 +454,22 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
             ),
             bridge_tool_definition(
                 TOOL_DESCRIBE_NAME,
-                "Return the full schema for one named deferred tool.",
+                "Return the full schema for one or more named deferred tools. Pass every candidate from a tool_search in a single `names` array instead of one call per tool. At most 8 names per call — to describe more, emit several of these calls in parallel in the same response. Two spellings of the same tool collapse to one entry.",
                 json!({
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Provider-facing tool name to describe."
+                            "description": "Provider-facing tool name to describe. Prefer `names` when describing more than one tool."
+                        },
+                        "names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1,
+                            "maxItems": MAX_DESCRIBE_BATCH_SIZE,
+                            "description": "Provider-facing tool names to describe in one call, at most 8 names. Use this to load every candidate schema in a single round-trip; two spellings of the same tool collapse to one entry. For more than 8 candidates, split them across parallel tool_describe calls in the same response."
                         }
                     },
-                    "required": ["name"],
                     "additionalProperties": false
                 }),
             ),
@@ -1330,6 +1346,64 @@ mod tests {
             bridges[0].parameters["required"],
             json!(["query"]),
             "tool_search requires query"
+        );
+        // `tool_describe` accepts either the original single `name` or the
+        // bounded bulk `names` array, so neither may be globally `required`.
+        // The bound is what keeps a one-round-trip bulk describe from becoming
+        // an unbounded schema dump.
+        assert_eq!(
+            bridges[1].parameters["properties"]["name"]["type"],
+            json!("string"),
+            "tool_describe keeps the back-compatible single-name argument"
+        );
+        let names_schema = &bridges[1].parameters["properties"]["names"];
+        assert_eq!(names_schema["type"], json!("array"));
+        assert_eq!(names_schema["items"], json!({"type": "string"}));
+        assert_eq!(names_schema["minItems"], json!(1));
+        assert_eq!(
+            names_schema["maxItems"],
+            json!(MAX_DESCRIBE_BATCH_SIZE),
+            "tool_describe advertises a bounded names array"
+        );
+        // The model only learns the bound from prose, so every advertised text
+        // that states it must be pinned with the exact bound phrase: a
+        // substring pin on the digit alone would let a stale "at most 8" pass
+        // if the bound ever grew to a value containing the digit 8 (18, 80). A
+        // `MAX_DESCRIBE_BATCH_SIZE` change must fail loudly here instead of leaving
+        // the model reading a stale bound.
+        let bound_phrase = format!("at most {MAX_DESCRIBE_BATCH_SIZE} names");
+        let names_description = names_schema["description"]
+            .as_str()
+            .expect("names carries a description");
+        assert!(
+            names_description.contains(&bound_phrase),
+            "names description must state the bound: {names_description}"
+        );
+        let bridge_description = bridges[1].description.as_str();
+        assert!(
+            bridge_description
+                .contains(&format!("At most {MAX_DESCRIBE_BATCH_SIZE} names per call"))
+                && bridge_description.contains("parallel")
+                && bridge_description.contains("collapse to one entry"),
+            "bridge description must state the bound, the split-into-parallel remedy, and the alias collapse: {bridge_description}"
+        );
+        let protocol = include_str!("../prompts/tool_disclosure_protocol.md");
+        assert!(
+            protocol.contains(&bound_phrase),
+            "the disclosure protocol prompt must state the bound it instructs the model to respect"
+        );
+        // The round-trip collapse is a model-behavior nudge, so the protocol's
+        // step-2 instruction to batch all schema loads into one response must
+        // be pinned too: a drift that reverts step 2 to one describe per tool
+        // would silently re-introduce the per-schema round-trips this feature
+        // exists to remove.
+        assert!(
+            protocol.contains("single response") && protocol.contains("parallel"),
+            "the protocol must instruct batching describes into one response"
+        );
+        assert!(
+            bridges[1].parameters.get("required").is_none(),
+            "tool_describe accepts either argument shape, so neither is required"
         );
         assert_eq!(
             bridges[2].parameters["required"],

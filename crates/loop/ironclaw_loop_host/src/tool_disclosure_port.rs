@@ -1,3 +1,7 @@
+// arch-exempt: large_file, tool disclosure migration remains centralized, plan #6175;
+// bulk tool_describe (PR #7374) added the describe path and its test block;
+// the test block lives in sibling tests.rs; decomposition tracked in plan #7383.
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, MutexGuard},
@@ -22,9 +26,10 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::tool_disclosure::{
-    ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, definition_matches_provider_name,
-    is_bridge_capability_id, is_bridge_name, select_active_set,
+    ActiveSet, CapabilityCatalog, DisclosureCaps, MAX_DESCRIBE_BATCH_SIZE, PromotedSet,
+    TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions,
+    canonicalize_json, definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
+    select_active_set,
 };
 use crate::tool_search::{
     AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
@@ -48,6 +53,183 @@ const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 /// disclosed + promoted so it becomes directly callable — the `tool_search` →
 /// `capability_info` → direct-call discovery path.
 const CAPABILITY_INFO_NAME: &str = "capability_info";
+
+const TOOL_DESCRIBE_REQUIRES_NAME_MESSAGE: &str = "tool_describe requires name";
+const TOOL_DESCRIBE_NAMES_MUST_BE_STRINGS_MESSAGE: &str = "tool_describe names must be strings";
+const TOOL_DESCRIBE_NAMES_MUST_BE_ARRAY_MESSAGE: &str = "tool_describe names must be an array";
+const TOOL_DESCRIBE_NAMES_MUST_BE_NON_EMPTY_MESSAGE: &str = "tool_describe names must not be empty";
+const TOOL_DESCRIBE_EITHER_NAME_OR_NAMES_MESSAGE: &str =
+    "tool_describe accepts either name or names, not both";
+const TOOL_DESCRIBE_BRIDGE_TARGET_MESSAGE: &str = "tool_describe target must not be a bridge";
+const TOOL_DESCRIBE_UNKNOWN_TARGET_MESSAGE: &str = "tool_describe target is unknown";
+const TOOL_DESCRIBE_NAME_TOO_LONG_MESSAGE: &str = "tool_describe name is too long";
+const TOOL_DESCRIBE_RETURNED_NO_SCHEMAS_MESSAGE: &str = "tool_describe returned no schemas";
+
+/// Longest *requested* bulk `tool_describe` name, in bytes.
+///
+/// A per-entry failure entry echoes the *requested* spelling so the model can
+/// tell which name failed. Without a length bound, `MAX_DESCRIBE_BATCH_SIZE`
+/// caps the entry count but not the result bytes — eight junk names of
+/// arbitrary length would be reflected verbatim. Over-long bulk names fail
+/// their own entry (like any other unresolvable name) with the echo truncated
+/// to [`MAX_DESCRIBE_NAME_ECHO`] bytes, so the bound survives the
+/// per-entry failure path. The single-name shape never echoes the requested
+/// spelling (its failures carry no echo and its success echoes the resolved
+/// catalog name), so it is not capped and stays byte-exact. Real provider
+/// tool names are validated identifiers far shorter than this, so the cap
+/// only ever rejects input that could not have resolved anyway.
+const MAX_DESCRIBE_NAME_BYTES: usize = 128;
+
+/// Echo bound for an over-long bulk entry, in bytes: long enough for the
+/// model to identify which requested name failed, short enough that the echo
+/// cannot itself bloat the result. Applied via `floor_char_boundary` so a
+/// multibyte name is never cut mid-character.
+const MAX_DESCRIBE_NAME_ECHO: usize = 64;
+
+/// What a `tool_describe` call resolved to.
+///
+/// The two shapes are kept apart deliberately: `name` keeps the original flat
+/// result object (back-compat for every model and transcript that learned it),
+/// while `names` returns a `results` array whose entries can fail individually.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DescribeRequest {
+    Single(String),
+    Bulk(Vec<DescribeName>),
+}
+
+/// One requested bulk spelling, pre-classified at parse time.
+///
+/// The byte cap is enforced while parsing — a spelling over
+/// [`MAX_DESCRIBE_NAME_BYTES`] is stored as its truncated echo only, so the
+/// transient allocation can never exceed the bound — and the two variants
+/// keep the over-long entry's distinct diagnostic while a within-bound name
+/// resolves against the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DescribeName {
+    /// A spelling within the byte bound, resolved against the catalog.
+    Name(String),
+    /// A spelling over [`MAX_DESCRIBE_NAME_BYTES`]: fails its own entry with
+    /// a truncated echo, never resolved.
+    TooLong(String),
+}
+
+/// What one `tool_describe` target resolved to.
+///
+/// `Resolved` carries the catalog entry whose schema is disclosed; `Unknown`
+/// is the single per-name failure. Bridge names never reach this point: the
+/// single-name path rejects them before the turn-state guard, the bulk loop
+/// rejects them inline, and both keep the #5712 opacity boundary — a
+/// policy-excluded tool and a nonexistent name collapse to the same `Unknown`
+/// outcome.
+enum DescribeResolution {
+    Unknown,
+    Resolved { name: String, entry: Value },
+}
+
+/// Parse `tool_describe` arguments into the names to resolve.
+///
+/// Accepts the original `name` string or the bulk `names` array — either
+/// shape alone; both together is a recoverable caller error, because no
+/// advertised schema can express a bound across two independent properties.
+/// Bounded by [`MAX_DESCRIBE_BATCH_SIZE`] at invoke time as well as in the
+/// advertised schema, because a provider that ignores `maxItems` must still
+/// get a recoverable failure rather than an unbounded result. Duplicates
+/// collapse so a repeated name cannot multiply the result size.
+fn parse_tool_describe_names(arguments: &Value) -> Result<DescribeRequest, String> {
+    // Null is treated as absent — some callers serialize missing optionals as
+    // null, so a null `names` alongside a valid `name` keeps the single-name
+    // shape and vice versa. Filter nulls to absence once here; every later
+    // check reads the filtered values.
+    let name_value = arguments.get("name").filter(|value| !value.is_null());
+    let names_value = arguments.get("names").filter(|value| !value.is_null());
+    // A `names` key that is present but not an array is a caller error: fail
+    // recoverably with a diagnostic that names the actual problem instead of
+    // silently coercing to the single-name shape or misreporting
+    // "requires name".
+    if let Some(names_value) = names_value
+        && !names_value.is_array()
+    {
+        return Err(TOOL_DESCRIBE_NAMES_MUST_BE_ARRAY_MESSAGE.into());
+    }
+    // `name` and `names` are alternatives, exactly as the advertised schema
+    // presents them (both optional, `additionalProperties: false`): sending
+    // both is a caller error under either shape, not a third union shape.
+    if name_value.is_some() && names_value.is_some() {
+        return Err(TOOL_DESCRIBE_EITHER_NAME_OR_NAMES_MESSAGE.into());
+    }
+    let single_name = name_value.and_then(Value::as_str);
+    let Some(values) = names_value.and_then(Value::as_array) else {
+        // The pre-bulk single-name shape: the raw requested spelling is passed
+        // through untrimmed and uncapped so `name` keeps its exact historical
+        // behavior ("target is unknown" for any spelling that does not
+        // resolve). Trim, dedup, and the byte bound apply to bulk entries,
+        // whose per-entry failures echo the requested spelling.
+        let Some(name) = single_name else {
+            return Err(TOOL_DESCRIBE_REQUIRES_NAME_MESSAGE.into());
+        };
+        return Ok(DescribeRequest::Single(name.to_string()));
+    };
+    // Bulk: the array alone drives the shape. The length bound is applied
+    // during the trim+dedup pass, so the model-facing collapse promise holds
+    // (nine spellings deduping to eight names are accepted, while a ninth
+    // *distinct* name fails recoverably). Dedup borrows from the parsed
+    // request and keeps at most one owned string per unique name, so the
+    // allocation and result stay bounded regardless of raw array length
+    // (iteration is linear in the array, which the ingress payload limit
+    // already bounds). The model-visible bound message is derived from
+    // [`MAX_DESCRIBE_BATCH_SIZE`] here — no hand-copied constant to drift.
+    // Empty-after-trim and null entries are schema-valid or soft-absence
+    // but unresolvable, so they fail their own entry like any other unknown
+    // name; only non-string items are malformed enough to fail the whole
+    // call.
+    let mut names: Vec<DescribeName> =
+        Vec::with_capacity(MAX_DESCRIBE_BATCH_SIZE.min(values.len()));
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for value in values {
+        // Null is soft-absence inside the array too: it becomes the same
+        // unresolvable empty entry as an empty string, not a whole-call
+        // type error.
+        let name = if value.is_null() {
+            ""
+        } else {
+            match value.as_str().map(str::trim) {
+                Some(name) => name,
+                None => return Err(TOOL_DESCRIBE_NAMES_MUST_BE_STRINGS_MESSAGE.into()),
+            }
+        };
+        if !seen.insert(name) {
+            continue; // duplicate spelling; does not count toward the bound
+        }
+        if names.len() == MAX_DESCRIBE_BATCH_SIZE {
+            return Err(format!(
+                "tool_describe accepts at most {MAX_DESCRIBE_BATCH_SIZE} names per call"
+            ));
+        }
+        if name.len() > MAX_DESCRIBE_NAME_BYTES {
+            // Keep only the bounded echo; the full spelling never needs to
+            // outlive the parse pass.
+            let echo_bound = name.floor_char_boundary(MAX_DESCRIBE_NAME_ECHO);
+            names.push(DescribeName::TooLong(name[..echo_bound].to_string()));
+        } else {
+            names.push(DescribeName::Name(name.to_string()));
+        }
+    }
+    if names.is_empty() {
+        return Err(TOOL_DESCRIBE_NAMES_MUST_BE_NON_EMPTY_MESSAGE.into());
+    }
+    Ok(DescribeRequest::Bulk(names))
+}
+
+fn log_describe_selection(state: &ToolDisclosureTurnState, resolved_name: &str) {
+    if let Some(selected_rank) = state.search_ranks.get(resolved_name).copied() {
+        debug!(
+            target: "ironclaw::reborn::tool_search",
+            selected_rank,
+            selection_action = "describe",
+            "observed deferred-tool selection without logging tool or query metadata"
+        );
+    }
+}
 
 pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -1051,46 +1233,176 @@ impl ToolDisclosureCapabilityPort {
         request: &LoopRequest,
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
-            return Ok(failed_invalid_input("tool_describe requires name"));
+        let names = match parse_tool_describe_names(&bridge.arguments) {
+            Ok(names) => names,
+            Err(message) => return Ok(failed_invalid_input(message)),
         };
-        if is_bridge_name(name) {
-            return Ok(failed_invalid_input(
-                "tool_describe target must not be a bridge",
-            ));
+        // Bridge-name rejection stays ahead of the turn-state guard, exactly as
+        // it was before the bulk shape existed: a bridge target must not be
+        // misreported as "tool catalog is unavailable".
+        if let DescribeRequest::Single(name) = &names
+            && is_bridge_name(name)
+        {
+            return Ok(failed_invalid_input(TOOL_DESCRIBE_BRIDGE_TARGET_MESSAGE));
         }
-        let output = {
+        let (output, summary) = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let Some(result) = state.catalog.search_result(name) else {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
-            };
-            // #5712: same message as a truly unknown name — a narrowed profile
-            // must not learn that a non-allowlisted tool exists.
-            if !self.policy.permits_capability_id(&result.capability_id) {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
+            match self.describe_output(state, &names) {
+                Ok(completed) => completed,
+                Err(message) => return Ok(failed_invalid_input(message)),
             }
-            if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
-                debug!(
-                    target: "ironclaw::reborn::tool_search",
-                    selected_rank,
-                    selection_action = "describe",
-                    "observed deferred-tool selection without logging tool or query metadata"
-                );
+        };
+        self.completed_bridge_result(request, output, summary).await
+    }
+
+    /// Build the `tool_describe` result for one request shape.
+    ///
+    /// The single-name shape maps every unresolvable target to a whole-call
+    /// recoverable failure (its `Err`); the bulk shape succeeds with per-entry
+    /// failures inside the result, except that a batch where every entry
+    /// failed is exactly the single-name failure case and keeps its verdict
+    /// class (`Err`), so failure-kind tracking and recovery routing see it.
+    fn describe_output(
+        &self,
+        state: &mut ToolDisclosureTurnState,
+        names: &DescribeRequest,
+    ) -> Result<(Value, &'static str), &'static str> {
+        match names {
+            DescribeRequest::Single(name) => match self.describe_one(state, name) {
+                None => Err(TOOL_DESCRIBE_UNKNOWN_TARGET_MESSAGE),
+                Some((_resolved_name, entry)) => Ok((entry, "tool_describe returned schema")),
+            },
+            DescribeRequest::Bulk(names) => {
+                let mut entries = Vec::with_capacity(names.len());
+                // Dedup on the *resolved* catalog name, not the requested
+                // spelling: two spellings of the same tool (bare encoded
+                // name vs dotted capability id) resolve to one entry, so
+                // aliases cannot multiply the result size either. Per-entry
+                // failures carry no schema and are kept per spelling.
+                let mut resolved_seen = BTreeSet::new();
+                for name in names {
+                    if let Some(entry) = self.describe_bulk_entry(state, name, &mut resolved_seen) {
+                        entries.push(entry);
+                    }
+                }
+                // A batch with at least one schema succeeds, with the
+                // per-entry failures inside the result. The verdict is
+                // derived from the resolved-name set that gates schema entry
+                // pushes, not by re-scanning the emitted JSON for a wire key.
+                if resolved_seen.is_empty() {
+                    return Err(TOOL_DESCRIBE_RETURNED_NO_SCHEMAS_MESSAGE);
+                }
+                Ok((
+                    json!({ "results": entries }),
+                    "tool_describe returned schemas",
+                ))
             }
-            state.disclosed_names.insert(name.to_string());
-            json!({
+        }
+    }
+
+    /// Resolve one `tool_describe` target and record it as disclosed.
+    ///
+    /// Shared by the single-name and bulk paths, so the disclosure
+    /// bookkeeping (selection log + resolved catalog name) cannot diverge
+    /// between shapes: both record the *resolved* name, so a forgiving
+    /// dotted spelling discloses the canonical wire name the model can
+    /// actually call. Returns `None` for the opaque unknown outcome.
+    fn describe_one(
+        &self,
+        state: &mut ToolDisclosureTurnState,
+        name: &str,
+    ) -> Option<(String, Value)> {
+        match self.describe_resolution(state, name) {
+            DescribeResolution::Unknown => None,
+            DescribeResolution::Resolved {
+                name: resolved_name,
+                entry,
+            } => {
+                log_describe_selection(state, &resolved_name);
+                state.disclosed_names.insert(resolved_name.clone());
+                Some((resolved_name, entry))
+            }
+        }
+    }
+
+    /// One entry of a bulk `tool_describe` result.
+    ///
+    /// Returns `None` when the name resolved to a catalog tool whose schema
+    /// was already emitted in this batch (alias dedup). Every per-entry
+    /// failure — bridge, over-long, unknown — renders through the same
+    /// [`Self::error_entry`] shape, so the opacity-relevant failure surface
+    /// is single-sourced.
+    fn describe_bulk_entry(
+        &self,
+        state: &mut ToolDisclosureTurnState,
+        name: &DescribeName,
+        resolved_seen: &mut BTreeSet<String>,
+    ) -> Option<Value> {
+        let name = match name {
+            // The byte cap was enforced at parse time; only the bounded echo
+            // survives, and the distinct too-long diagnostic stays attached.
+            DescribeName::TooLong(echo) => {
+                return Some(Self::error_entry(echo, TOOL_DESCRIBE_NAME_TOO_LONG_MESSAGE));
+            }
+            DescribeName::Name(name) => name,
+        };
+        if is_bridge_name(name) {
+            return Some(Self::error_entry(name, TOOL_DESCRIBE_BRIDGE_TARGET_MESSAGE));
+        }
+        match self.describe_one(state, name) {
+            None => Some(Self::error_entry(
+                name,
+                TOOL_DESCRIBE_UNKNOWN_TARGET_MESSAGE,
+            )),
+            Some((resolved_name, entry)) => {
+                if resolved_seen.insert(resolved_name) {
+                    Some(entry)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The per-entry failure shape: the requested spelling (truncated for
+    /// over-long names) plus the recoverable message. The echo is the
+    /// caller's own spelling, never a catalog fact, so the #5712 opacity
+    /// boundary is untouched.
+    fn error_entry(name: &str, message: &'static str) -> Value {
+        json!({ "name": name, "error": message })
+    }
+
+    /// Resolve one `tool_describe` target to its schema entry, or classify the
+    /// per-name failure.
+    ///
+    /// Shared by the single-name and bulk paths: they differ only in failure
+    /// shape (whole-call vs per-entry) and in which spelling they record as
+    /// disclosed. The permit check lives here so a policy-excluded tool and a
+    /// nonexistent name stay byte-indistinguishable (#5712, #7166 §1).
+    fn describe_resolution(
+        &self,
+        state: &ToolDisclosureTurnState,
+        name: &str,
+    ) -> DescribeResolution {
+        let Some(result) = state.catalog.search_result(name) else {
+            return DescribeResolution::Unknown;
+        };
+        if !self.policy.permits_capability_id(&result.capability_id) {
+            return DescribeResolution::Unknown;
+        }
+        DescribeResolution::Resolved {
+            name: result.name.clone(),
+            entry: json!({
                 "name": result.name,
                 "capability_id": result.capability_id.as_str(),
                 "description": result.description,
                 "required": result.required_params,
                 "parameters": result.parameters,
-            })
-        };
-        self.completed_bridge_result(request, output, "tool_describe returned schema")
-            .await
+            }),
+        }
     }
 
     /// Invoke an auto-schema (describe-first) bridge: return the target tool's
@@ -1409,13 +1721,12 @@ fn decode_tool_call_arguments(bridge_arguments: &Value) -> Option<Value> {
     }
 }
 
-fn failed_invalid_input(summary: &'static str) -> Resolution {
+fn failed_invalid_input(summary: impl Into<String>) -> Resolution {
+    let summary = summary.into();
     resolution::failed(
         ironclaw_host_api::result_meta::FailureKind::InputEncode,
-        summary.to_string(),
-        CapabilityFailureDetail::Diagnostic {
-            text: summary.to_string(),
-        },
+        summary.clone(),
+        CapabilityFailureDetail::Diagnostic { text: summary },
     )
 }
 
@@ -1424,2221 +1735,4 @@ fn invalid_invocation(summary: impl Into<String>) -> AgentLoopHostError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn arguments_satisfy_schema_gates_describe_first_on_nested_shape() {
-        // trigger_create's `schedule` must be an object (oneOf cron/once); a weak
-        // model that calls it deferred often sends a bare cron string. That must
-        // read as "does not satisfy" so describe-first hands over the schema.
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "schedule": {
-                    "oneOf": [
-                        {"type": "object", "properties": {"kind": {"const": "cron"}}, "required": ["kind", "expression"]},
-                        {"type": "object", "properties": {"kind": {"const": "once"}}, "required": ["kind", "at"]}
-                    ]
-                }
-            },
-            "required": ["name", "schedule"]
-        });
-        assert!(
-            !arguments_satisfy_schema(&json!({"name": "r", "schedule": "*/30 * * * *"}), &schema),
-            "a bare-string schedule must fail the object oneOf → describe-first"
-        );
-        assert!(
-            arguments_satisfy_schema(
-                &json!({"name": "r", "schedule": {"kind": "cron", "expression": "*/30 * * * *"}}),
-                &schema
-            ),
-            "the correct object shape must satisfy the schema → dispatch directly"
-        );
-        // Unresolved $ref / uncompilable schema is treated as satisfied (assist,
-        // never a gate): the real capability validator stays authoritative.
-        assert!(arguments_satisfy_schema(
-            &json!({"anything": true}),
-            &json!({"$ref": "https://example.com/not-resolvable.json"})
-        ));
-    }
-
-    use crate::CapabilityWriteResult;
-    use ironclaw_host_api::{
-        ids::{AgentId, ProjectId, TenantId, ThreadId},
-        resolution::ToolVerdict,
-        result_meta::FailureKind,
-    };
-    use ironclaw_loop_contracts::{
-        CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
-        RunProfileResolutionRequest, RunProfileResolver,
-    };
-    use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
-
-    struct SpyPort {
-        definitions: Vec<ProviderToolDefinition>,
-        surface_version: CapabilitySurfaceVersion,
-        registered_calls: Mutex<Vec<ProviderToolCall>>,
-        invocations: Mutex<Vec<LoopRequest>>,
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    struct MutableDefinitionsPort {
-        definitions: Mutex<Vec<ProviderToolDefinition>>,
-        surface_version: Mutex<CapabilitySurfaceVersion>,
-        visible_capability_ids: Option<BTreeSet<CapabilityId>>,
-        tool_definition_reads: std::sync::atomic::AtomicUsize,
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[async_trait]
-    impl LoopCapabilityPort for MutableDefinitionsPort {
-        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-            self.tool_definition_reads
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(self
-                .definitions
-                .lock()
-                .expect("mutable definitions lock")
-                .clone())
-        }
-
-        async fn visible_capabilities(
-            &self,
-            _request: VisibleCapabilityRequest,
-        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-            let definitions = self
-                .definitions
-                .lock()
-                .expect("mutable definitions lock")
-                .clone();
-            Ok(VisibleCapabilitySurface {
-                version: self
-                    .surface_version
-                    .lock()
-                    .expect("mutable surface-version lock")
-                    .clone(),
-                descriptors: definitions
-                    .into_iter()
-                    .filter(|definition| {
-                        self.visible_capability_ids
-                            .as_ref()
-                            .is_none_or(|visible| visible.contains(&definition.capability_id))
-                    })
-                    .map(|definition| CapabilityDescriptorView {
-                        capability_id: definition.capability_id,
-                        provider: None,
-                        runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
-                        safe_name: definition.name.to_string(),
-                        safe_description: definition.description,
-                        description_trust: definition.description_trust,
-                        concurrency_hint: ConcurrencyHint::SafeForParallel,
-                        parameters_schema: definition.parameters,
-                    })
-                    .collect(),
-                callable_capability_ids: None,
-            })
-        }
-
-        async fn invoke_capability(
-            &self,
-            _request: LoopRequest,
-        ) -> Result<Resolution, AgentLoopHostError> {
-            unreachable!("turn-state rebuild test does not dispatch")
-        }
-
-        async fn invoke_capability_batch(
-            &self,
-            _request: LoopRequestBatch,
-        ) -> Result<ResolutionBatch, AgentLoopHostError> {
-            unreachable!("turn-state rebuild test does not dispatch")
-        }
-    }
-
-    #[async_trait]
-    impl LoopCapabilityPort for SpyPort {
-        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-            Ok(self.definitions.clone())
-        }
-
-        fn provider_tool_call_capability_ids(
-            &self,
-            tool_call: &ProviderToolCall,
-        ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-            let definition = self
-                .definitions
-                .iter()
-                .find(|definition| definition.name == tool_call.name)
-                .ok_or_else(|| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::InvalidInvocation,
-                        "provider tool call is outside the visible capability surface",
-                    )
-                })?;
-            Ok(ProviderToolCallCapabilityIds::single(
-                definition.capability_id.clone(),
-            ))
-        }
-
-        fn validate_provider_tool_call(
-            &self,
-            tool_call: &ProviderToolCall,
-        ) -> Result<(), AgentLoopHostError> {
-            // Sentinel: lets a test drive the describe-first path by failing
-            // pre-dispatch validation for a resolved target (mirrors the
-            // `register_explodes` register-failure sentinel above).
-            if tool_call
-                .arguments
-                .get("__force_invalid")
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
-                return Err(invalid_invocation(
-                    "spy validation rejects forced-invalid input",
-                ));
-            }
-            self.provider_tool_call_capability_ids(tool_call)
-                .map(|_| ())
-        }
-
-        async fn register_provider_tool_call(
-            &self,
-            request: RegisterProviderToolCallRequest,
-        ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-            let RegisterProviderToolCallRequest {
-                tool_call,
-                activity_id,
-            } = request;
-            // Sentinel: lets tests drive the gateway's "register failed" arm.
-            if tool_call.name.as_str() == "register_explodes" {
-                return Err(invalid_invocation("spy register explodes"));
-            }
-            self.validate_provider_tool_call(&tool_call)?;
-            self.registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .push(tool_call.clone());
-            let definition = self
-                .definitions
-                .iter()
-                .find(|definition| definition.name == tool_call.name)
-                .expect("test target definition")
-                .clone();
-            Ok(CapabilityCallCandidate {
-                activity_id: activity_id.unwrap_or_else(CapabilityActivityId::new),
-                surface_version: self.surface_version.clone(),
-                capability_id: definition.capability_id,
-                input_ref: input_ref(format!("input:{}", tool_call.name)),
-                effective_capability_ids: Vec::new(),
-                provider_replay: Some(provider_replay_for(&tool_call, tool_call.name.clone())),
-            })
-        }
-
-        async fn visible_capabilities(
-            &self,
-            _request: VisibleCapabilityRequest,
-        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-            Ok(VisibleCapabilitySurface {
-                callable_capability_ids: None,
-                version: self.surface_version.clone(),
-                descriptors: self
-                    .definitions
-                    .iter()
-                    .map(|definition| CapabilityDescriptorView {
-                        capability_id: definition.capability_id.clone(),
-                        provider: None,
-                        runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
-                        safe_name: definition.name.to_string(),
-                        safe_description: definition.description.clone(),
-                        description_trust: definition.description_trust,
-                        concurrency_hint: ConcurrencyHint::SafeForParallel,
-                        parameters_schema: definition.parameters.clone(),
-                    })
-                    .collect(),
-            })
-        }
-
-        async fn invoke_capability(
-            &self,
-            request: LoopRequest,
-        ) -> Result<Resolution, AgentLoopHostError> {
-            // Sentinel: lets a test drive a gate (approval) suspension outcome.
-            let suspends = request.capability_id.as_str() == "fixture.suspends";
-            self.invocations
-                .lock()
-                .expect("invocations lock")
-                .push(request);
-            if suspends {
-                Ok(resolution::approval_required(
-                    ironclaw_turns::LoopGateRef::new("gate:test").expect("valid gate ref"),
-                    "approval needed".to_string(),
-                    None,
-                )
-                .resolution)
-            } else {
-                Ok(resolution::completed(
-                    LoopResultRef::new("result:target").expect("valid result ref"),
-                    "target completed".to_string(),
-                    CapabilityProgress::MadeProgress,
-                    false,
-                    2,
-                    None,
-                    None,
-                ))
-            }
-        }
-
-        async fn invoke_capability_batch(
-            &self,
-            request: LoopRequestBatch,
-        ) -> Result<ResolutionBatch, AgentLoopHostError> {
-            let mut resolutions = Vec::new();
-            for invocation in request.invocations {
-                resolutions.push(self.invoke_capability(invocation).await?);
-            }
-            Ok(ResolutionBatch {
-                resolutions,
-                stopped_on_suspension: false,
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn same_turn_schema_refresh_rebuilds_index_and_preserves_progress() {
-        let inner = Arc::new(MutableDefinitionsPort {
-            definitions: Mutex::new(vec![provider_definition(
-                "fixture.lookup",
-                "fixture__lookup",
-                "Lookup records",
-            )]),
-            surface_version: Mutex::new(
-                CapabilitySurfaceVersion::new("surface:initial")
-                    .expect("valid initial surface version"),
-            ),
-            visible_capability_ids: None,
-            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("initial surface refresh");
-        let original_fingerprint = {
-            let mut guard = port.lock_turn_state().expect("initial turn state");
-            let state = guard.as_mut().expect("initial state exists");
-            state.disclosed_names.insert("fixture__lookup".to_string());
-            state.search_ranks.insert("fixture__lookup".to_string(), 2);
-            state.definitions_fingerprint
-        };
-        let reads_after_initial_refresh = inner
-            .tool_definition_reads
-            .load(std::sync::atomic::Ordering::Relaxed);
-        drop(port.turn_state().expect("cached turn state"));
-        drop(port.turn_state().expect("cached turn state again"));
-        assert_eq!(
-            inner
-                .tool_definition_reads
-                .load(std::sync::atomic::Ordering::Relaxed),
-            reads_after_initial_refresh,
-            "unchanged same-turn bridge calls must not refetch or rehash definitions"
-        );
-        inner.definitions.lock().expect("mutable definitions lock")[0].parameters = json!({
-            "type": "object",
-            "properties": {"timezone": {"type": "string"}},
-            "required": ["timezone"],
-            "additionalProperties": false
-        });
-        *inner
-            .surface_version
-            .lock()
-            .expect("mutable surface-version lock") =
-            CapabilitySurfaceVersion::new("surface:refreshed")
-                .expect("valid refreshed surface version");
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("same-turn surface refresh");
-        let guard = port.lock_turn_state().expect("refreshed turn state");
-        let state = guard.as_ref().expect("refreshed state exists");
-        assert_ne!(state.definitions_fingerprint, original_fingerprint);
-        assert_eq!(
-            state.search_index.search("timezone", 1).names,
-            vec!["fixture__lookup"]
-        );
-        assert!(state.disclosed_names.contains("fixture__lookup"));
-        assert_eq!(state.search_ranks["fixture__lookup"], 2);
-    }
-
-    #[tokio::test]
-    async fn complete_policy_qualified_surface_limits_disclosure_catalog_and_search_index() {
-        let visible_ids: BTreeSet<_> = (0..6)
-            .map(|index| {
-                CapabilityId::new(format!("fixture.visible_{index}"))
-                    .expect("valid visible capability id")
-            })
-            .collect();
-        let mut definitions: Vec<_> = visible_ids
-            .iter()
-            .enumerate()
-            .map(|(index, capability_id)| {
-                provider_definition(
-                    capability_id.as_str(),
-                    &format!("visible_tool_{index}"),
-                    "Visible operation",
-                )
-            })
-            .collect();
-        definitions.push(provider_definition(
-            "fixture.policy_excluded",
-            "policy_excluded_tool",
-            "Forbidden runtime effect approval vocabulary",
-        ));
-        let inner = Arc::new(MutableDefinitionsPort {
-            definitions: Mutex::new(definitions),
-            surface_version: Mutex::new(
-                CapabilitySurfaceVersion::new("surface:complete-policy")
-                    .expect("valid surface version"),
-            ),
-            visible_capability_ids: Some(visible_ids),
-            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
-        });
-        let port = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("complete policy-qualified surface builds turn state");
-
-        let guard = port.lock_turn_state().expect("turn state lock");
-        let state = guard.as_ref().expect("turn state exists");
-        assert!(
-            state
-                .catalog
-                .definition_by_capability_id(
-                    &CapabilityId::new("fixture.policy_excluded")
-                        .expect("valid excluded capability id")
-                )
-                .is_none(),
-            "a capability excluded by non-ID policy dimensions must not enter the disclosure catalog"
-        );
-        assert!(
-            state
-                .search_index
-                .search("forbidden runtime effect approval vocabulary", 5)
-                .names
-                .is_empty(),
-            "excluded capability metadata must not affect or appear in deferred-tool search"
-        );
-    }
-
-    struct TestWriter;
-
-    #[async_trait]
-    impl LoopCapabilityResultWriter for TestWriter {
-        async fn write_capability_result(
-            &self,
-            write: CapabilityResultWrite<'_>,
-        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
-            let result_digest = ironclaw_host_api::approval::sha256_digest_token(
-                write.input_ref.as_str().as_bytes(),
-            )
-            .replace(':', ".");
-            Ok(CapabilityWriteResult::without_output_digest(
-                LoopResultRef::new(format!("result:{result_digest}")).expect("valid result ref"),
-                write.output.to_string().len() as u64,
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn visible_surface_preserves_verified_catalog_description_provenance() {
-        let mut definition = provider_definition(
-            "fixture.read_file",
-            "read_file",
-            "Verified catalog description",
-        );
-        definition.description_trust =
-            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog;
-        let inner = Arc::new(SpyPort {
-            definitions: vec![definition],
-            surface_version: CapabilitySurfaceVersion::new("surface:verified-catalog")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        let surface = port
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        let descriptor = surface
-            .descriptors
-            .iter()
-            .find(|descriptor| descriptor.safe_name == "read_file")
-            .expect("core capability remains visible");
-
-        assert_eq!(
-            descriptor.description_trust,
-            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog
-        );
-    }
-
-    #[tokio::test]
-    async fn search_discloses_tool_call_dispatches_target_and_promotes_next_turn() {
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition(
-                "fixture.hidden",
-                "hidden_tool",
-                "Hidden workspace operation",
-            ),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let first_run_context = run_context(TurnId::new()).await;
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            first_run_context,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        let surface = port
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        assert!(
-            !surface
-                .descriptors
-                .iter()
-                .any(|descriptor| descriptor.safe_name == "hidden_tool"),
-            "deferred tool should not be model-visible before discovery"
-        );
-        assert_eq!(
-            surface
-                .descriptors
-                .iter()
-                .find(|descriptor| descriptor.safe_name == "read_file")
-                .expect("read_file descriptor")
-                .concurrency_hint,
-            ConcurrencyHint::SafeForParallel,
-            "visible surface must preserve inner descriptor metadata"
-        );
-        let advertised = port.tool_definitions().expect("tool definitions");
-        for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
-            assert!(
-                advertised
-                    .iter()
-                    .any(|definition| definition.name.as_str() == bridge),
-                "deferred surfaces advertise the complete discovery protocol: missing {bridge}"
-            );
-        }
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool")
-        );
-
-        // Forgiving `tool_call` resolution of an undisclosed catalog tool is
-        // covered by `tool_call_resolves_undisclosed_catalog_target_forgivingly`.
-        // This test focuses on the search -> disclose -> dispatch -> promote flow.
-
-        let search = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_SEARCH_NAME,
-                json!({"query": "hidden", "limit": 5}),
-            )))
-            .await
-            .expect("search registers");
-        let search_outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: search.activity_id,
-                surface_version: search.surface_version,
-                capability_id: search.capability_id,
-                input_ref: search.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("search invokes");
-        assert!(matches!(search_outcome, Resolution::Done(ref o) if o.verdict.is_success()));
-
-        let disclosed_surface = port
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface after search");
-        assert!(
-            disclosed_surface
-                .descriptors
-                .iter()
-                .any(|descriptor| descriptor.safe_name == "hidden_tool"),
-            "same-turn search should disclose target to the executor surface"
-        );
-
-        let target = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": r#"{"path":"demo"}"#}),
-            )))
-            .await
-            .expect("disclosed tool_call registers as target");
-        assert_eq!(target.capability_id.as_str(), "fixture.hidden");
-        assert_eq!(
-            target
-                .provider_replay
-                .as_ref()
-                .expect("provider replay")
-                .provider_tool_name
-                .as_str(),
-            TOOL_CALL_NAME
-        );
-        let batch = port
-            .invoke_capability_batch(LoopRequestBatch {
-                invocations: vec![LoopRequest {
-                    activity_id: target.activity_id,
-                    surface_version: target.surface_version,
-                    capability_id: target.capability_id,
-                    input_ref: target.input_ref,
-                    approval_resume: None,
-                    auth_resume: None,
-                }],
-                stop_on_first_suspension: true,
-            })
-            .await
-            .expect("target batch invokes");
-        assert!(matches!(
-            batch.resolutions.as_slice(),
-            [Resolution::Done(o)] if o.verdict.is_success()
-        ));
-        assert_eq!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .last()
-                .map(|call| (call.name.as_str(), &call.arguments)),
-            Some(("hidden_tool", &json!({"path": "demo"}))),
-            "the provider-safe string must decode before inner registration"
-        );
-        assert_eq!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .last()
-                .expect("target invocation")
-                .capability_id
-                .as_str(),
-            "fixture.hidden"
-        );
-
-        let next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            promoted_by_scope,
-        );
-        next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("next visible surface");
-        let next_advertised = next_turn.tool_definitions().expect("next tool definitions");
-        assert!(
-            next_advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "successful deferred tool_call should promote the target on the next turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_deferred_catalog_tool_dispatches_target_and_promotes_next_turn() {
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition(
-                "fixture.hidden",
-                "hidden_tool",
-                "Hidden workspace operation",
-            ),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let first_run_context = run_context(TurnId::new()).await;
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            first_run_context,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "hidden_tool starts deferred"
-        );
-
-        let direct_call = provider_call("hidden_tool", json!({"path": "demo"}));
-        let capability_ids = port
-            .provider_tool_call_capability_ids(&direct_call)
-            .expect("direct deferred call resolves through inner");
-        assert_eq!(
-            capability_ids.provider_capability_id.as_str(),
-            "fixture.hidden"
-        );
-        port.validate_provider_tool_call(&direct_call)
-            .expect("direct deferred call validates through inner");
-        let target = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(direct_call))
-            .await
-            .expect("direct deferred call registers as target");
-        assert_eq!(target.capability_id.as_str(), "fixture.hidden");
-        assert_eq!(
-            target
-                .provider_replay
-                .as_ref()
-                .expect("provider replay")
-                .provider_tool_name
-                .as_str(),
-            "hidden_tool"
-        );
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: target.activity_id,
-                surface_version: target.surface_version,
-                capability_id: target.capability_id,
-                input_ref: target.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("target invokes");
-        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
-        assert_eq!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .last()
-                .expect("target call")
-                .name
-                .as_str(),
-            "hidden_tool"
-        );
-        assert_eq!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .last()
-                .expect("target invocation")
-                .capability_id
-                .as_str(),
-            "fixture.hidden"
-        );
-
-        let next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            promoted_by_scope,
-        );
-        next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("next visible surface");
-        let next_advertised = next_turn.tool_definitions().expect("next tool definitions");
-        assert!(
-            next_advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "successful direct deferred call should promote the target on the next turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn capability_info_on_deferred_tool_promotes_it_for_direct_use_next_turn() {
-        // Firat's discovery flow: tool_search (names) -> capability_info (loads +
-        // promotes) -> direct call. Inspecting a deferred tool via capability_info
-        // must disclose it this turn and promote it for the next, so it becomes
-        // directly callable — without this the model inspects a tool it can never
-        // reach and loops.
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        assert!(
-            !port
-                .tool_definitions()
-                .expect("tool definitions")
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "hidden_tool starts deferred"
-        );
-
-        // The model inspects the deferred tool by its canonical capability id.
-        let inspect = provider_call("capability_info", json!({"name": "fixture.hidden"}));
-        port.note_capability_info_target(&inspect)
-            .expect("capability_info promotes the inspected target");
-
-        // This turn the inspected tool is disclosed onto the callable surface
-        // (visible_capabilities descriptors), so a call to it is authorized.
-        let surface = port
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface after inspect");
-        assert!(
-            surface
-                .descriptors
-                .iter()
-                .any(|descriptor| descriptor.capability_id.as_str() == "fixture.hidden"),
-            "capability_info discloses the inspected tool onto the surface this turn"
-        );
-
-        let next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            promoted_by_scope,
-        );
-        next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("next visible surface");
-        assert!(
-            next_turn
-                .tool_definitions()
-                .expect("next tool definitions")
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "capability_info promotes the inspected tool for the next turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn undisclosed_invalid_deferred_call_returns_schema_instead_of_dispatching() {
-        // The failure tool disclosure introduced: the model calls a deferred tool
-        // whose schema it has not loaded, with arguments that fail validation (a
-        // required field — e.g. an id — it does not have). Pre-disclosure the
-        // schema was always in context; now it is deferred, so the model calls
-        // blind and loops on the opaque schema error. Describe-first returns the
-        // schema as a recoverable completion WITHOUT dispatching the target blind,
-        // so the model's retry can be well-formed.
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
-            )))
-            .await
-            .expect("describe-first registers");
-        assert!(
-            is_bridge_capability_id(&candidate.capability_id),
-            "an undisclosed invalid call must route to a schema (bridge) response, not the target"
-        );
-        assert!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .is_empty(),
-            "describe-first must NOT register/dispatch the target on the inner port"
-        );
-
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: candidate.activity_id,
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("describe-first invokes");
-        assert!(
-            matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
-            "describe-first returns the schema as a recoverable completion"
-        );
-        assert!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .is_empty(),
-            "describe-first must NOT invoke the target on the inner port"
-        );
-    }
-
-    #[tokio::test]
-    async fn well_formed_blind_deferred_call_dispatches_without_describe_first() {
-        // Describe-first must not tax correct calls: a blind call whose arguments
-        // pass validation dispatches straight to the target (no wasted round-trip),
-        // matching the zero-round-trip pre-disclosure behavior.
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            )))
-            .await
-            .expect("valid blind call registers");
-        assert_eq!(
-            candidate.capability_id.as_str(),
-            "fixture.hidden",
-            "a well-formed blind call dispatches the target directly, not describe-first"
-        );
-        assert_eq!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .last()
-                .expect("target registered")
-                .name
-                .as_str(),
-            "hidden_tool"
-        );
-    }
-
-    #[tokio::test]
-    async fn describe_first_is_one_shot_so_repeated_failures_still_reach_dispatch() {
-        // Backstop-safety: describe-first fires at most once per undisclosed tool.
-        // After the schema is disclosed, a still-invalid call must dispatch (and
-        // fail) through the normal path rather than returning a schema again —
-        // otherwise a wedged model would receive an endless stream of
-        // "made progress" schema responses and the no-progress detector would
-        // never observe the repeated failure.
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-
-        // First invalid blind call -> describe-first (schema bridge), discloses.
-        let first = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
-            )))
-            .await
-            .expect("first registers");
-        assert!(
-            is_bridge_capability_id(&first.capability_id),
-            "first undisclosed invalid call is describe-first"
-        );
-        port.invoke_capability(LoopRequest {
-            activity_id: first.activity_id,
-            surface_version: first.surface_version,
-            capability_id: first.capability_id,
-            input_ref: first.input_ref,
-            approval_resume: None,
-            auth_resume: None,
-        })
-        .await
-        .expect("first invokes (discloses schema)");
-
-        // Second still-invalid call -> now disclosed, so it no longer intercepts:
-        // it dispatches, the inner port rejects it, and a recoverable Failed
-        // outcome (countable by the no-progress detector) surfaces — NOT a schema.
-        let second = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
-            )))
-            .await
-            .expect("second registers via recoverable fallback");
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: second.activity_id,
-                surface_version: second.surface_version,
-                capability_id: second.capability_id,
-                input_ref: second.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("second invokes");
-        assert!(
-            matches!(outcome, Resolution::Done(ref o) if matches!(o.verdict, ToolVerdict::RecoverableFailure { .. })),
-            "after disclosure a still-invalid call surfaces a Failed outcome the no-progress detector can count, not another schema"
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_deferred_encoded_wire_name_records_canonical_wire_name_in_replay() {
-        // Regression: a weak model calls a deferred provider tool by its canonical
-        // `__`-encoded wire name (e.g. `google-calendar__list_events`, which
-        // `tool_search`/`tool_describe` surface) before it is advertised. The
-        // forgiving direct-deferred path resolves that, and the recorded provider
-        // replay (consumed by the assistant transcript and any provider-error
-        // result ref) MUST carry the canonical wire name so it serializes without
-        // tripping `validate_provider_tool_name`. (The dotted capability_id form a
-        // model might otherwise copy can no longer reach this port: `ProviderToolName`
-        // excludes dots, so the gateway rejects such a call before it lands here.)
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition(
-                "google-calendar.list_events",
-                "google-calendar__list_events",
-                "List Google Calendar events",
-            ),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "google-calendar__list_events"),
-            "deferred Google Calendar tool starts hidden"
-        );
-
-        // The model calls the deferred tool by its `__`-encoded wire name before
-        // it is advertised.
-        let deferred_call = provider_call("google-calendar__list_events", json!({"path": "demo"}));
-        port.provider_tool_call_capability_ids(&deferred_call)
-            .expect("deferred wire name resolves through forgiving path");
-        port.validate_provider_tool_call(&deferred_call)
-            .expect("deferred wire name validates through forgiving path");
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(deferred_call))
-            .await
-            .expect("deferred wire name registers as target");
-
-        let replay = candidate.provider_replay.as_ref().expect("provider replay");
-        assert_eq!(
-            replay.provider_tool_name.as_str(),
-            "google-calendar__list_events",
-            "replay records the canonical wire name"
-        );
-        // The recorded name must serialize into the transcript without error.
-        ironclaw_safety::validate_provider_tool_name(replay.provider_tool_name.as_str())
-            .expect("recorded provider tool name is wire-safe");
-    }
-
-    #[tokio::test]
-    async fn gate_suspended_target_is_promoted_so_it_survives_the_resume() {
-        // Regression: a tool the model dispatched that paused on an approval/auth
-        // gate must stay model-visible across the resume, exactly like a completed
-        // dispatch. Otherwise the per-turn disclosed set resets on resume, the tool
-        // drops off the surface, and the model's retry is hard-rejected by the
-        // visible-surface filter ("outside the model-visible capability view") —
-        // discarding the response and borking the run. Only *invoked* tools promote
-        // (completed or gate-suspended), so a mere search/describe still does not,
-        // and the advertised surface does not balloon toward "all tools".
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.suspends", "suspends_tool", "Needs approval"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        assert!(
-            !port
-                .tool_definitions()
-                .expect("tool definitions")
-                .iter()
-                .any(|definition| definition.name.as_str() == "suspends_tool"),
-            "suspends_tool starts deferred"
-        );
-
-        // Direct-deferred call -> resolves -> dispatch -> APPROVAL suspension.
-        let target = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                "suspends_tool",
-                json!({"path": "demo"}),
-            )))
-            .await
-            .expect("direct deferred call registers as target");
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: target.activity_id,
-                surface_version: target.surface_version,
-                capability_id: target.capability_id,
-                input_ref: target.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("target invokes");
-        assert!(
-            outcome.parks(),
-            "the gate must park the call (a re-entrant Blocked gate), not complete it"
-        );
-
-        // The resume is a fresh decorator instance (new turn state) sharing the
-        // promoted store, exactly like the live BlockedApproval resume. The
-        // gate-blocked tool must still be advertised.
-        let next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            promoted_by_scope,
-        );
-        next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("next visible surface");
-        assert!(
-            next_turn
-                .tool_definitions()
-                .expect("next tool definitions")
-                .iter()
-                .any(|definition| definition.name.as_str() == "suspends_tool"),
-            "a gate-suspended tool must be promoted so it survives the resume"
-        );
-    }
-
-    #[tokio::test]
-    async fn callable_set_includes_advertised_bridges_so_the_visible_filter_keeps_them() {
-        // Regression: callable_capability_ids was derived only from the inner
-        // catalog, which excludes the synthesized bridges. The outer model-visible
-        // filter is seeded from callable and strips any advertised tool not in it —
-        // so the bridges (tool_search / tool_describe / tool_call) vanished from the
-        // model's tool list and it could no longer discover anything ("tool_search
-        // is not available"). Callable must be a superset of everything advertised
-        // this turn AND still include the deferred long tail.
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        let surface = port
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-
-        let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            advertised
-                .iter()
-                .any(|d| d.name.as_str() == TOOL_SEARCH_NAME),
-            "fixture must be in deferred mode so the bridges are advertised"
-        );
-        let callable: std::collections::HashSet<_> = surface
-            .callable_capability_ids
-            .as_ref()
-            .expect("disclosure narrows the surface, so callable set is populated")
-            .iter()
-            .cloned()
-            .collect();
-        // Every advertised tool — bridges included — must be authorizable, or the
-        // visible-surface filter strips it from the model's tool list.
-        for descriptor in &surface.descriptors {
-            assert!(
-                callable.contains(&descriptor.capability_id),
-                "advertised tool {} missing from callable; the visible filter would strip it",
-                descriptor.capability_id.as_str()
-            );
-        }
-        // The deferred long tail stays callable (the original purpose of callable).
-        assert!(
-            callable.iter().any(|id| id.as_str() == "fixture.hidden"),
-            "deferred catalog tool must remain callable"
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_provider_encoded_builtin_dispatches_and_promotes() {
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("builtin.echo", "echo", "Echo the input"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let first_run_context = run_context(TurnId::new()).await;
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            first_run_context,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "echo"),
-            "echo starts deferred"
-        );
-
-        let direct_call = provider_call("builtin__echo", json!({"path": "demo"}));
-        let capability_ids = port
-            .provider_tool_call_capability_ids(&direct_call)
-            .expect("provider-encoded direct deferred call resolves");
-        assert_eq!(
-            capability_ids.provider_capability_id.as_str(),
-            "builtin.echo"
-        );
-        assert_eq!(
-            capability_ids
-                .effective_capability_ids
-                .iter()
-                .map(CapabilityId::as_str)
-                .collect::<Vec<_>>(),
-            vec!["builtin.echo"]
-        );
-        port.validate_provider_tool_call(&direct_call)
-            .expect("provider-encoded direct deferred call validates against resolved target");
-        let target = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(direct_call))
-            .await
-            .expect("provider-encoded direct deferred call registers as target");
-        assert_eq!(target.capability_id.as_str(), "builtin.echo");
-        assert_eq!(
-            target
-                .provider_replay
-                .as_ref()
-                .expect("provider replay")
-                .provider_tool_name
-                .as_str(),
-            "builtin__echo"
-        );
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: target.activity_id,
-                surface_version: target.surface_version,
-                capability_id: target.capability_id,
-                input_ref: target.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("target invokes");
-        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
-        assert_eq!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .last()
-                .expect("target call")
-                .name
-                .as_str(),
-            "echo",
-            "inner registration must receive the catalog target name"
-        );
-        assert_eq!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .last()
-                .expect("target invocation")
-                .capability_id
-                .as_str(),
-            "builtin.echo"
-        );
-
-        let next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            promoted_by_scope,
-        );
-        next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("next visible surface");
-        let next_advertised = next_turn.tool_definitions().expect("next tool definitions");
-        assert!(
-            next_advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "echo"),
-            "successful provider-encoded direct deferred call should promote the target next turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_provider_encoded_non_builtin_extension_tool_dispatches_and_promotes() {
-        // Generality guard: the forgiving direct-deferred path must resolve ANY
-        // deferred tool by its provider-encoded wire name, not just `builtin__*`.
-        // Production sets `ProviderToolDefinition.name` to the encoded wire name
-        // (`capability.provider_tool_name`, see capability_port surface_snapshot)
-        // for every provider, and the catalog matches it by exact name. This
-        // fixture mirrors that for a NON-builtin extension tool
-        // (`gmail.send_message` -> wire `gmail__send_message`), so the resolution
-        // cannot lean on the builtin-specific `strip_prefix("builtin__")` leniency
-        // — if it did, this tool would fail "unresolved unadvertised" exactly like
-        // the long tail of extension/MCP tools would in production.
-        let definitions = vec![
-            provider_definition("builtin.read_file", "builtin__read_file", "Read a file"),
-            provider_definition(
-                "gmail.send_message",
-                "gmail__send_message",
-                "Send an email via Gmail",
-            ),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let first_run_context = run_context(TurnId::new()).await;
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            first_run_context,
-            Arc::clone(&promoted_by_scope),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "gmail__send_message"),
-            "gmail__send_message starts deferred"
-        );
-
-        let direct_call = provider_call("gmail__send_message", json!({"path": "demo"}));
-        let capability_ids = port
-            .provider_tool_call_capability_ids(&direct_call)
-            .expect("provider-encoded non-builtin direct deferred call resolves");
-        assert_eq!(
-            capability_ids.provider_capability_id.as_str(),
-            "gmail.send_message"
-        );
-        assert_eq!(
-            capability_ids
-                .effective_capability_ids
-                .iter()
-                .map(CapabilityId::as_str)
-                .collect::<Vec<_>>(),
-            vec!["gmail.send_message"]
-        );
-        port.validate_provider_tool_call(&direct_call)
-            .expect("provider-encoded non-builtin direct deferred call validates against target");
-        let target = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(direct_call))
-            .await
-            .expect("provider-encoded non-builtin direct deferred call registers as target");
-        assert_eq!(target.capability_id.as_str(), "gmail.send_message");
-        assert_eq!(
-            target
-                .provider_replay
-                .as_ref()
-                .expect("provider replay")
-                .provider_tool_name
-                .as_str(),
-            "gmail__send_message"
-        );
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: target.activity_id,
-                surface_version: target.surface_version,
-                capability_id: target.capability_id,
-                input_ref: target.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("target invokes");
-        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
-        assert_eq!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .last()
-                .expect("target call")
-                .name
-                .as_str(),
-            "gmail__send_message",
-            "inner registration must receive the catalog target name"
-        );
-        assert_eq!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .last()
-                .expect("target invocation")
-                .capability_id
-                .as_str(),
-            "gmail.send_message"
-        );
-
-        let next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            promoted_by_scope,
-        );
-        next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("next visible surface");
-        let next_advertised = next_turn.tool_definitions().expect("next tool definitions");
-        assert!(
-            next_advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "gmail__send_message"),
-            "successful non-builtin direct deferred call should promote the target next turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_resolves_undisclosed_catalog_target_forgivingly() {
-        // Regression: a model (often a strong one) may invoke a catalog tool via
-        // the `tool_call` bridge WITHOUT first discovering it through
-        // tool_search/tool_describe. The bridge used to reject that with a generic
-        // `invalid_input` ("unknown or not disclosed") carrying no recovery hint,
-        // so the model looped on the same dead-end call until the run died. The
-        // bridge must be no stricter than a direct call: an undisclosed catalog
-        // tool resolves and dispatches to the target.
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition(
-                "fixture.hidden",
-                "hidden_tool",
-                "Hidden workspace operation",
-            ),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-        let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "hidden_tool starts deferred (never discovered this turn)"
-        );
-
-        // tool_call the deferred tool WITHOUT any prior tool_search/tool_describe.
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            )))
-            .await
-            .expect("undisclosed tool_call resolves forgivingly");
-        assert_eq!(
-            candidate.capability_id.as_str(),
-            "fixture.hidden",
-            "undisclosed tool_call must resolve to the catalog target, not the bridge"
-        );
-
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: candidate.activity_id,
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("target dispatches");
-        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
-        assert_eq!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .last()
-                .expect("target call")
-                .name
-                .as_str(),
-            "hidden_tool",
-            "the inner port must receive the unwrapped target call"
-        );
-        assert_eq!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .last()
-                .expect("target invocation")
-                .capability_id
-                .as_str(),
-            "fixture.hidden"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_target_registration_failure_falls_back_to_recoverable_bridge_failure() {
-        // Regression: the forgiving tool_call path resolves a deferred target, but
-        // if the inner port then rejects it (e.g. malformed arguments), that must
-        // surface as a RECOVERABLE invalid_input the model can retry — NOT a hard
-        // error, which the gateway turns into a run-borking discard of the whole
-        // provider response. (Observed live with gpt-5.5: repeated tool_call
-        // validation rejections, run ending Failed / driver_protocol_violation.)
-        let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition("fixture.explodes", "register_explodes", "Register fails"),
-            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-        ];
-        let inner = Arc::new(SpyPort {
-            definitions,
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("visible surface");
-
-        let bridge_call = provider_call(
-            TOOL_CALL_NAME,
-            json!({"name": "register_explodes", "arguments": {"path": "demo"}}),
-        );
-        // Validation must NOT hard-fail — that would abort the whole response.
-        port.validate_provider_tool_call(&bridge_call)
-            .expect("bridge validate downgrades a target failure to recoverable");
-
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(bridge_call))
-            .await
-            .expect("bridge register falls back instead of erroring");
-        assert!(
-            is_bridge_capability_id(&candidate.capability_id),
-            "a target that cannot register must fall back to the bridge path"
-        );
-
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: candidate.activity_id,
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("bridge handles the fallback");
-        assert!(
-            matches!(
-                outcome,
-                Resolution::Done(ref o)
-                    if matches!(
-                        o.verdict,
-                        ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
-                            ..
-                        }
-                    )
-            ),
-            "fallback must be a recoverable InvalidInput failure, not run death"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_targeting_a_bridge_is_rejected_without_dispatch() {
-        // Recursion guard: tool_call(name = a bridge) must NOT re-enter the
-        // bridge or dispatch anything — it is a model-recoverable failure.
-        let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        // Build the surface first, as the real loop always does before a call.
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("surface builds turn state");
-
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": TOOL_SEARCH_NAME, "arguments": {}}),
-            )))
-            .await
-            .expect("recursive tool_call registers on the bridge path");
-        assert!(
-            is_bridge_capability_id(&candidate.capability_id),
-            "recursive tool_call must stay on the bridge path, never resolve to a target"
-        );
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: candidate.activity_id,
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("bridge handles recursion");
-        assert!(
-            matches!(
-                outcome,
-                Resolution::Done(ref o)
-                    if matches!(
-                        o.verdict,
-                        ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
-                            ..
-                        }
-                    )
-            ),
-            "recursive tool_call must be a recoverable InvalidInput failure, not run death"
-        );
-        assert!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .is_empty(),
-            "recursion must not register any target call on the inner port"
-        );
-        assert!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .is_empty(),
-            "recursion must not dispatch to the inner port"
-        );
-    }
-
-    #[tokio::test]
-    async fn advertised_tool_describe_errors_are_recoverable_without_dispatch() {
-        let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("surface builds turn state");
-
-        for (arguments, expected) in [
-            (json!({}), "tool_describe requires name"),
-            (json!({"name": 42}), "tool_describe requires name"),
-            (
-                json!({"name": TOOL_SEARCH_NAME}),
-                "tool_describe target must not be a bridge",
-            ),
-            (
-                json!({"name": "does_not_exist"}),
-                "tool_describe target is unknown",
-            ),
-        ] {
-            let candidate =
-                port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                    provider_call(TOOL_DESCRIBE_NAME, arguments),
-                ))
-                .await
-                .expect("tool_describe registers on the bridge path");
-            let outcome = port
-                .invoke_capability(LoopRequest {
-                    activity_id: candidate.activity_id,
-                    surface_version: candidate.surface_version,
-                    capability_id: candidate.capability_id,
-                    input_ref: candidate.input_ref,
-                    approval_resume: None,
-                    auth_resume: None,
-                })
-                .await
-                .expect("tool_describe returns a recoverable result");
-            assert!(
-                matches!(
-                    outcome,
-                    Resolution::Done(ref output)
-                        if matches!(
-                            &output.verdict,
-                            ToolVerdict::RecoverableFailure { diagnostic, .. }
-                                if diagnostic.model_visible_text() == Some(expected)
-                        )
-                ),
-                "unexpected tool_describe outcome for {expected}: {outcome:?}"
-            );
-        }
-
-        assert!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .is_empty(),
-            "invalid tool_describe calls must not register an inner capability"
-        );
-        assert!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .is_empty(),
-            "invalid tool_describe calls must not dispatch an inner capability"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_targeting_unknown_tool_is_rejected_without_dispatch() {
-        // Unknown-target guard: tool_call(name = not in catalog) must be a
-        // model-recoverable failure and must not dispatch to the inner port.
-        let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-
-        // Build the surface first, as the real loop always does before a call.
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("surface builds turn state");
-
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "does_not_exist", "arguments": {}}),
-            )))
-            .await
-            .expect("unknown-target tool_call registers on the bridge path");
-        assert!(
-            is_bridge_capability_id(&candidate.capability_id),
-            "unknown-target tool_call must stay on the bridge path"
-        );
-        let outcome = port
-            .invoke_capability(LoopRequest {
-                activity_id: candidate.activity_id,
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("bridge handles unknown target");
-        assert!(
-            matches!(
-                outcome,
-                Resolution::Done(ref o)
-                    if matches!(
-                        o.verdict,
-                        ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
-                            ..
-                        }
-                    )
-            ),
-            "unknown-target tool_call must be a recoverable InvalidInput failure"
-        );
-        assert!(
-            inner
-                .registered_calls
-                .lock()
-                .expect("registered calls lock")
-                .is_empty(),
-            "unknown target must not register any call on the inner port"
-        );
-        assert!(
-            inner
-                .invocations
-                .lock()
-                .expect("invocations lock")
-                .is_empty(),
-            "unknown target must not dispatch to the inner port"
-        );
-    }
-
-    #[tokio::test]
-    async fn promotions_are_scoped_by_full_turn_scope_not_thread_only() {
-        let inner = Arc::new(SpyPort {
-            definitions: vec![
-                provider_definition("fixture.read_file", "read_file", "Read a file"),
-                provider_definition(
-                    "fixture.hidden",
-                    "hidden_tool",
-                    "Hidden workspace operation",
-                ),
-                provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
-                provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
-                provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
-                provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
-            ],
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
-        let tenant_a_first_turn = disclosure_port(
-            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
-            run_context_for(
-                "tenant-a",
-                "agent-tool-disclosure",
-                "project-tool-disclosure",
-                "shared-thread",
-                TurnId::new(),
-            )
-            .await,
-            Arc::clone(&promoted_by_scope),
-        );
-        tenant_a_first_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("surface builds turn state");
-        let search = tenant_a_first_turn
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_SEARCH_NAME,
-                json!({"query": "hidden", "limit": 5}),
-            )))
-            .await
-            .expect("search registers");
-        assert!(matches!(
-            tenant_a_first_turn
-                .invoke_capability(LoopRequest {
-                    activity_id: search.activity_id,
-                    surface_version: search.surface_version,
-                    capability_id: search.capability_id,
-                    input_ref: search.input_ref,
-                    approval_resume: None,
-                    auth_resume: None,
-                })
-                .await
-                .expect("search invokes"),
-            Resolution::Done(o) if o.verdict.is_success()
-        ));
-        let target = tenant_a_first_turn
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            )))
-            .await
-            .expect("target registers");
-        assert!(matches!(
-            tenant_a_first_turn
-                .invoke_capability(LoopRequest {
-                    activity_id: target.activity_id,
-                    surface_version: target.surface_version,
-                    capability_id: target.capability_id,
-                    input_ref: target.input_ref,
-                    approval_resume: None,
-                    auth_resume: None,
-                })
-                .await
-                .expect("target invokes"),
-            Resolution::Done(o) if o.verdict.is_success()
-        ));
-
-        let tenant_b_next_turn = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context_for(
-                "tenant-b",
-                "agent-tool-disclosure",
-                "project-tool-disclosure",
-                "shared-thread",
-                TurnId::new(),
-            )
-            .await,
-            promoted_by_scope,
-        );
-        tenant_b_next_turn
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("tenant B surface builds");
-        let tenant_b_advertised = tenant_b_next_turn
-            .tool_definitions()
-            .expect("tenant B tool definitions");
-        assert!(
-            !tenant_b_advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == "hidden_tool"),
-            "promotion from tenant A must not leak to tenant B with the same thread id"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_search_rejects_missing_non_string_or_blank_query() {
-        let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
-            surface_version: CapabilitySurfaceVersion::new("surface:test")
-                .expect("valid surface version"),
-            registered_calls: Mutex::new(Vec::new()),
-            invocations: Mutex::new(Vec::new()),
-        });
-        let port = disclosure_port(
-            inner as Arc<dyn LoopCapabilityPort>,
-            run_context(TurnId::new()).await,
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        port.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect("surface builds turn state");
-
-        for arguments in [
-            json!({}),
-            json!({"query": 42}),
-            json!({"query": ""}),
-            json!({"query": "   "}),
-            json!({"query": "x".repeat(MAX_SEARCH_QUERY_BYTES.saturating_add(1))}),
-        ] {
-            let candidate =
-                port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                    provider_call(TOOL_SEARCH_NAME, arguments),
-                ))
-                .await
-                .expect("tool_search registers");
-            let outcome = port
-                .invoke_capability(LoopRequest {
-                    activity_id: candidate.activity_id,
-                    surface_version: candidate.surface_version,
-                    capability_id: candidate.capability_id,
-                    input_ref: candidate.input_ref,
-                    approval_resume: None,
-                    auth_resume: None,
-                })
-                .await
-                .expect("tool_search invokes");
-            assert!(matches!(
-                outcome,
-                Resolution::Done(ref o)
-                    if matches!(
-                        o.verdict,
-                        ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
-                            ..
-                        }
-                    )
-            ));
-        }
-    }
-
-    fn disclosure_port(
-        inner: Arc<dyn LoopCapabilityPort>,
-        run_context: LoopRunContext,
-        promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
-    ) -> ToolDisclosureCapabilityPort {
-        ToolDisclosureCapabilityPort {
-            inner,
-            run_context,
-            result_writer: Arc::new(TestWriter),
-            promoted_by_scope,
-            caps: DisclosureCaps {
-                max_tokens: u32::MAX,
-                max_tools: 5,
-                ctx_limit: None,
-            },
-            // Unnarrowed — unit tests here exercise disclosure mechanics, not
-            // profile narrowing (that's the integration tier).
-            policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
-            turn_state: Mutex::new(None),
-            bridge_inputs: Mutex::new(BTreeMap::new()),
-            tool_call_target_inputs: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    async fn run_context(turn_id: TurnId) -> LoopRunContext {
-        run_context_for(
-            "tenant-tool-disclosure",
-            "agent-tool-disclosure",
-            "project-tool-disclosure",
-            "thread-tool-disclosure",
-            turn_id,
-        )
-        .await
-    }
-
-    async fn run_context_for(
-        tenant: &str,
-        agent: &str,
-        project: &str,
-        thread: &str,
-        turn_id: TurnId,
-    ) -> LoopRunContext {
-        let tenant_id = TenantId::new(tenant).expect("valid tenant");
-        let agent_id = AgentId::new(agent).expect("valid agent");
-        let project_id = ProjectId::new(project).expect("valid project");
-        let thread_id = ThreadId::new(thread).expect("valid thread");
-        let turn_scope = TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id);
-        let resolved: ResolvedRunProfile = InMemoryRunProfileResolver::default()
-            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-            .await
-            .expect("run profile resolves");
-        LoopRunContext::new(turn_scope, turn_id, TurnRunId::new(), resolved)
-    }
-
-    fn provider_definition(
-        capability_id: &str,
-        name: &str,
-        description: &str,
-    ) -> ProviderToolDefinition {
-        ProviderToolDefinition {
-            capability_id: CapabilityId::new(capability_id).expect("valid capability id"),
-            name: ProviderToolName::new(name).expect("valid provider tool name"),
-            description: description.to_string(),
-            description_trust: Default::default(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"}
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn provider_call(name: &str, arguments: Value) -> ProviderToolCall {
-        ProviderToolCall {
-            provider_id: "provider".to_string(),
-            provider_model_id: "model".to_string(),
-            turn_id: Some("provider-turn".to_string()),
-            id: format!("call-{name}"),
-            name: ProviderToolName::new(name).expect("valid provider tool name"),
-            arguments,
-            response_reasoning: None,
-            reasoning: None,
-            signature: None,
-        }
-    }
-
-    fn input_ref(value: impl Into<String>) -> CapabilityInputRef {
-        CapabilityInputRef::new(value.into()).expect("valid input ref")
-    }
-}
-// arch-exempt: large_file, tool disclosure migration remains centralized, plan #6175
+mod tests;

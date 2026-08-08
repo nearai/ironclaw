@@ -59,6 +59,10 @@ const TOOL_CALL_NAME: &str = "tool_call";
 /// see `tests/snapshots/golden_payload__tool_call.snap`'s `tool_surface`).
 const FLAT_GITHUB_TOOL_NAME: &str = "github__get_repo";
 
+/// Second deferred github tool, used to prove one bulk `tool_describe` returns
+/// several schemas in a single model round-trip.
+const SECOND_FLAT_GITHUB_TOOL_NAME: &str = "github__list_issues";
+
 /// Flat first-party tool (wire form) for the below-caps threshold control.
 const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
 
@@ -385,6 +389,147 @@ async fn deferred_search_describe_call_flow_uses_production_capability_chain() {
         .await
         .expect("search, describe, and call complete");
     assert_deferred_bridge_flow(&harness).await;
+}
+
+/// Bulk `tool_describe` through the production capability chain (#7166 §1).
+///
+/// One bounded `names` array must load every candidate schema in one
+/// round-trip (see `MAX_DESCRIBE_BATCH_SIZE` in `tool_disclosure.rs` for the
+/// production-trace motivation) and still dispatch the follow-up `tool_call`,
+/// and a bad name in the batch must cost only its own entry.
+#[tokio::test]
+async fn deferred_bulk_describe_loads_every_schema_in_one_round_trip() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "repository issues", "limit": 5}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_DESCRIBE_NAME,
+                serde_json::json!({
+                    "names": [
+                        FLAT_GITHUB_TOOL_NAME,
+                        SECOND_FLAT_GITHUB_TOOL_NAME,
+                        "github__no_such_tool",
+                    ]
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({
+                    "name": FLAT_GITHUB_TOOL_NAME,
+                    "arguments": r#"{"owner":"nearai","repo":"ironclaw"}"#
+                }),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("inspect the ironclaw repository and its issues")
+        .await
+        .expect("bulk describe and the follow-up call complete");
+
+    harness
+        .assert_model_message_content_contains("tool_describe returned schemas")
+        .await
+        .expect("the bulk describe completion reaches the next production model request");
+
+    // One round-trip, one result: search + describe + call is three scripted
+    // tool calls and therefore exactly three persisted results — the three
+    // schemas did NOT cost three describe round-trips. The describe result is a
+    // *success* despite carrying a bogus name, which is the per-entry
+    // recoverability property: one wrong name must not fail the whole call and
+    // cost the model the schemas it got right.
+    let envelopes = harness
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("each scripted bridge call persists a ToolResultReference");
+    assert_eq!(
+        envelopes.len(),
+        3,
+        "expected one persisted result per scripted call (search, one bulk describe, call), got {envelopes:?}"
+    );
+    assert_eq!(
+        envelopes[1].safe_summary.as_str(),
+        "tool_describe returned schemas",
+        "the bulk describe must complete successfully with an unknown name in the batch"
+    );
+
+    // Per-entry failures mean the call succeeds even if a schema were
+    // silently dropped, so the envelope-count and summary assertions above
+    // alone cannot pin that every requested schema materialized. The
+    // model-visible rendering strips describe payload keys (empirically:
+    // neither "capability_id" nor the "results" envelope nor the bogus
+    // name's error entry appear in the captured model messages, and
+    // tool-result content lives in the result store behind opaque refs),
+    // so content-level delivery cannot be asserted through this harness
+    // message seam — it is pinned at unit tier instead by
+    // `tool_describe_bulk_returns_every_requested_schema_in_one_result`
+    // and the per-entry failure tests.
+
+    harness
+        .assert_tool_invoked("github.get_repo")
+        .await
+        .expect("a bulk-described tool stays callable through the tool_call bridge");
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn completes after the bulk-describe flow");
+}
+
+/// A bulk describe whose entries all fail keeps the single-name verdict
+/// class end-to-end: a recoverable failure with the "returned no schemas"
+/// summary, so failure-kind tracking and recovery routing see it through
+/// the production chain — not a success verdict claiming progress.
+#[tokio::test]
+async fn deferred_bulk_describe_all_entries_failing_is_recoverable() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_DESCRIBE_NAME,
+                serde_json::json!({"names": ["github__no_such_a", "github__no_such_b"]}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("inspect the ironclaw repository")
+        .await
+        .expect("an all-failed bulk describe stays recoverable");
+
+    // The all-failed batch must surface as a recoverable tool error with the
+    // honest summary, and must not persist a result envelope as if schemas
+    // were returned.
+    harness
+        .assert_tool_error_summary_contains("tool_describe returned no schemas")
+        .await
+        .expect("an all-error bulk describe reports the no-schemas failure summary");
+    let envelopes = harness
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("persisted results are readable");
+    assert!(
+        envelopes
+            .iter()
+            .all(|envelope| envelope.safe_summary.as_str() != "tool_describe returned schemas"),
+        "an all-error batch must not persist a success-shaped describe envelope: {envelopes:?}"
+    );
+
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn completes after the recoverable describe failure");
 }
 
 /// Selector-budget regression: a physically wide catalog with only one
