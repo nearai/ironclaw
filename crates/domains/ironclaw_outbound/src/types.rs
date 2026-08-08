@@ -459,10 +459,23 @@ mod tests {
 
     #[test]
     fn all_lists_every_variant_exactly_once() {
-        // Catches both a duplicated entry and an omitted one. The witness
-        // list below is exhaustive by construction: a new variant forces a
-        // new binding here (the match below is non-exhaustive otherwise),
-        // which then forces the `ALL` membership check for it.
+        // Checks `ALL` for internal consistency against the `witnesses`
+        // array below: a duplicate entry in `ALL` (same discriminant twice)
+        // fails the `seen.insert` assert, and any witness missing from `ALL`
+        // fails the `seen.contains` assert. Discriminant comparison also
+        // means this is immune to the old failure mode of a Debug-string
+        // key silently merging two variants with identical output, and
+        // there's no hardcoded expected count to fall out of sync.
+        //
+        // What this does NOT guarantee: `witnesses` is a plain array
+        // literal, not a match, so it isn't compiler-checked against the
+        // enum. A variant added to `DeliveryFailureKind` but omitted from
+        // *both* `ALL` and `witnesses` passes silently — nothing here
+        // forces a new binding to exist. Closing that gap for real needs
+        // either a derive like `strum::EnumIter` (not a workspace
+        // dependency today) or restructuring this test around an actual
+        // exhaustive match, as `permits_reopen_is_exhaustively_classified`
+        // above does.
         let witnesses = [
             DeliveryFailureKind::AuthorizationRevoked,
             DeliveryFailureKind::TransientValidatorError,
