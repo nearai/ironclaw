@@ -19,7 +19,15 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      `AGENTS.md`/`CLAUDE.md`, every `AGENTS.md`/`CLAUDE.md`/`CONTRACT.md`/
      `README.md` under `crates/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
-     directory.
+     directory. Every `.md`/`.mdx` under `docs/` — the public Mintlify tree,
+     the `zh/` locale mirror, and the living contract corpus
+     `docs/reborn/contracts/` — is scanned the same way, but for **backticked
+     inline paths only**: markdown link targets there are Mintlify site paths
+     (extensionless page routes, site-absolute `/using/cli` forms), a
+     different namespace than the tracked tree, so the link extractor is off
+     for `docs/**` by design rather than suppressed case-by-case. The dated
+     archives (`docs/internal/`, the non-contract parts of `docs/reborn/`)
+     are excluded as classes — see `DOCS_EXCLUDED_PREFIXES` below.
   2. **Rule triggers are live.** Every `paths:` glob in a rule's (or skill's)
      frontmatter must match at least one tracked file. A rule whose glob
      matches nothing is a rule that never loads — the exact
@@ -73,9 +81,12 @@ gate gets disabled, which is worse than no gate):
   * the one reference immediately preceding a `check-guidance: path-ok`
     marker — put the marker in an HTML comment right after the deliberate
     example: `` `crates/…/myprovider.rs` <!-- check-guidance: path-ok -->``.
-    Unlike the glyph, the marker is per-reference, not per-line: other
-    references on the same line are still checked, so a fresh dangling path
-    cannot ride into the tree beside a vouched-for one.
+    In `.mdx` files (where raw HTML comments are not MDX syntax) use the MDX
+    comment form: `` {/* check-guidance: path-ok */}`` — both comment
+    syntaxes are recognized everywhere. Unlike the glyph, the marker is
+    per-reference, not per-line: other references on the same line are still
+    checked, so a fresh dangling path cannot ride into the tree beside a
+    vouched-for one.
 
 **How a reference resolves** — the ways this repository's guidance actually
 cites paths, each verified against the live tree before being modeled:
@@ -135,6 +146,19 @@ ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
+# The docs tree — published Mintlify pages and the zh/ locale mirror — plus
+# the living contract corpus under docs/reborn/contracts/. The scan is
+# against the git tree, not the publication set, so `.mintignore` plays no
+# part here. The fenced historical archives are excluded as *classes*, not
+# per-file: dated plans, ADRs, research notes, superpowers specs, and
+# design-era checklists describe the tree as it stood when they were written
+# (measured 2026-08-07: 705 of 709 dangling docs references sat in
+# docs/internal/ and the non-contract parts of docs/reborn/) — forcing them
+# to track today's tree would either rewrite history or drown KNOWN_MISSING,
+# and both destroy the signal this gate exists for.
+DOCS_PREFIX = "docs/"
+DOCS_EXCLUDED_PREFIXES = ("docs/internal/", "docs/reborn/")
+DOCS_REINCLUDED_PREFIXES = ("docs/reborn/contracts/",)
 
 CORRECTION_GLYPH = "✎"
 SUPPRESS_MARKER = "check-guidance: path-ok"
@@ -184,17 +208,23 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # extraction pass that finds almost no path references, means the discovery
 # globs or the extractor broke — not that the repository stopped documenting
 # itself. Refuse rather than report an empty scan as clean. (Measured
-# 2026-08-06 on the shipped tree: 237 guidance files, ~2070 path references,
-# 38 rule globs, 65 AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json`
-# and re-date this comment when the numbers move materially.) Each floor sits
-# roughly half of its measured value: low enough that legitimate
-# consolidation never trips it, high enough that a parser or discovery pass
-# silently degrading to a handful of hits refuses instead of passing — a
-# floor of 1 catches only total loss, not the degraded-but-nonzero shape.
-MIN_GUIDANCE_FILES = 40
-MIN_PATH_REFERENCES = 80
+# 2026-08-07 on the shipped tree, after the docs/ surface joined the scan:
+# 364 guidance files, ~2276 path references, 38 rule globs, 65
+# AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json` and re-date this
+# comment when the numbers move materially.) Each floor sits roughly half of
+# its measured value: low enough that legitimate consolidation never trips
+# it, high enough that a parser or discovery pass silently degrading to a
+# handful of hits refuses instead of passing — a floor of 1 catches only
+# total loss, not the degraded-but-nonzero shape. The docs/ surface gets its
+# own floor (measured 2026-08-07: ~127 docs files in scope) because the
+# aggregate floors sit below the guidance-only remainder — without it, the
+# docs branch of discovery silently breaking would pass on guidance alone,
+# which is exactly the silent-degradation shape floors exist to refuse.
+MIN_GUIDANCE_FILES = 180
+MIN_PATH_REFERENCES = 1100
 MIN_RULE_GLOBS = 20
 MIN_ALIAS_PAIRS = 40
+MIN_DOCS_FILES = 60
 
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -407,6 +437,15 @@ def discover_guidance(tree: Tree) -> list[str]:
             docs.append(path)
         elif path.startswith(SKILLS_PREFIX) and path.endswith("/SKILL.md"):
             docs.append(path)
+        elif (
+            path.startswith(DOCS_PREFIX)
+            and path.endswith((".md", ".mdx"))
+            and (
+                not path.startswith(DOCS_EXCLUDED_PREFIXES)
+                or path.startswith(DOCS_REINCLUDED_PREFIXES)
+            )
+        ):
+            docs.append(path)
     return docs
 
 
@@ -415,6 +454,14 @@ def _read_guidance(path: pathlib.Path) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise GuidanceError(f"cannot read guidance file {path}: {error}") from error
+
+
+# Comment syntaxes stripped from prose before extraction. HTML comments are
+# markdown's native form; MDX (the `.mdx` pages under `docs/`) rejects raw
+# HTML comments and uses JSX comment braces instead. Both are recognized in
+# every file — a marker's meaning must not change when a page is renamed
+# between `.md` and `.mdx`.
+_COMMENT_SYNTAXES: tuple[tuple[str, str], ...] = (("<!--", "-->"), ("{/*", "*/}"))
 
 
 def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...]]]:
@@ -428,10 +475,12 @@ def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...
     """
     lines: list[tuple[int, str, tuple[int, ...]]] = []
     in_fence = False
-    in_comment = False
+    # The closing delimiter of a comment that opened on an earlier line, or
+    # None outside comments. Which syntax opened decides which closer ends it.
+    pending_close: str | None = None
     for number, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
-        if not in_comment and stripped.startswith("```"):
+        if pending_close is None and stripped.startswith("```"):
             in_fence = not in_fence
             continue
         if in_fence:
@@ -440,32 +489,37 @@ def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...
             continue
         line = raw
         markers: list[int] = []
-        if in_comment:
-            end = line.find("-->")
+        if pending_close is not None:
+            end = line.find(pending_close)
             if end == -1:
                 continue
             # A marker inside a comment that opened on an earlier line has no
             # same-line reference before it; position 0 suppresses nothing.
-            if SUPPRESS_MARKER in line[: end + 3]:
+            if SUPPRESS_MARKER in line[: end + len(pending_close)]:
                 markers.append(0)
-            line = line[end + 3 :]
-            in_comment = False
+            line = line[end + len(pending_close) :]
+            pending_close = None
         # Comments are collapsed left to right, so a recorded position stays
         # valid in the final string: everything before it is comment-free.
         while True:
-            start = line.find("<!--")
-            if start == -1:
+            openings = [
+                (position, opener, closer)
+                for opener, closer in _COMMENT_SYNTAXES
+                if (position := line.find(opener)) != -1
+            ]
+            if not openings:
                 break
-            end = line.find("-->", start)
+            start, opener, closer = min(openings)
+            end = line.find(closer, start + len(opener))
             if end == -1:
                 if SUPPRESS_MARKER in line[start:]:
                     markers.append(start)
                 line = line[:start]
-                in_comment = True
+                pending_close = closer
                 break
-            if SUPPRESS_MARKER in line[start : end + 3]:
+            if SUPPRESS_MARKER in line[start : end + len(closer)]:
                 markers.append(start)
-            line = line[:start] + line[end + 3 :]
+            line = line[:start] + line[end + len(closer) :]
         if line.strip():
             lines.append((number, line, tuple(markers)))
     if in_fence:
@@ -536,6 +590,11 @@ def extract_references(
 ) -> list[Reference]:
     references: list[Reference] = []
     base = str(pathlib.PurePosixPath(doc).parent)
+    # Under docs/, markdown link targets are Mintlify site routes
+    # (extensionless page paths, `/using/cli` site-absolute forms) — a
+    # different namespace than the tracked tree, so the link extractor is off
+    # there by design. Backticked repo paths remain checked.
+    include_links = not doc.startswith(DOCS_PREFIX)
     previous_spans: list[str] = []
     for number, line, markers in _reference_lines(text, doc):
         inline_matches = list(_INLINE_CODE.finditer(line))
@@ -557,11 +616,14 @@ def extract_references(
                 candidates.append(
                     (match.end(), Reference(doc, number, token, context))
                 )
-        for match in _MARKDOWN_LINK.finditer(line):
-            token = _resolve_link(doc, match.group(1))
-            if token is None or _NOT_A_PATH.search(token):
-                continue
-            candidates.append((match.end(), Reference(doc, number, token, context)))
+        if include_links:
+            for match in _MARKDOWN_LINK.finditer(line):
+                token = _resolve_link(doc, match.group(1))
+                if token is None or _NOT_A_PATH.search(token):
+                    continue
+                candidates.append(
+                    (match.end(), Reference(doc, number, token, context))
+                )
         candidates.sort(key=lambda item: item[0])
         # A `path-ok` marker vouches for the one reference immediately before
         # it — never the whole line, so a fresh dangling path beside a
@@ -1025,6 +1087,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
+        docs_files = sum(1 for doc in docs if doc.startswith(DOCS_PREFIX))
+        if docs_files < MIN_DOCS_FILES:
+            raise GuidanceError(
+                f"discovered only {docs_files} docs/ files in scope (floor is "
+                f"{MIN_DOCS_FILES}). The docs branch of discovery broke; "
+                "refusing rather than passing on the guidance-only remainder."
+            )
         crates = load_crates(repo_root)
         reference_problems, warnings, references = check_references(
             repo_root, docs, tree, crates
@@ -1039,6 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
     problems = reference_problems + glob_problems + table_problems + alias_problems
     report = {
         "guidance_files": len(docs),
+        "docs_files": docs_files,
         "path_references": references,
         "rule_globs": globs_checked,
         "crates_tabled": crates_tabled,
