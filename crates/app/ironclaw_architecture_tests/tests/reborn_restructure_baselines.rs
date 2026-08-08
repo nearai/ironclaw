@@ -118,7 +118,12 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
 /// messaging framework, which landed through the queue's tolerance window;
 /// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_423;
+/// ✎ Re-recorded 40_423 → 40_692 on 2026-08-07 for #7157: the one-time
+/// stored-trigger delivery migration runs in boot sequencing, while the
+/// notification-channel capability split and delivery wiring preserve their
+/// mediated owners. Measured on the merged tree; the manifest ceiling and
+/// observed value move with this record so the increase is explicit.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_432;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

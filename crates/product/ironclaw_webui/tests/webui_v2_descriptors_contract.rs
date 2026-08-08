@@ -30,7 +30,7 @@ use ironclaw_webui::webui_v2::{
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_PROJECT,
     WEBUI_V2_ROUTE_DELETE_THREAD, WEBUI_V2_ROUTE_EXECUTE_COMMAND, WEBUI_V2_ROUTE_GET_ATTACHMENT,
     WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG,
-    WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_GET_PROJECT,
+    WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS, WEBUI_V2_ROUTE_GET_PROJECT,
     WEBUI_V2_ROUTE_GET_RUN_ARTIFACT, WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL,
     WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT, WEBUI_V2_ROUTE_GET_TIMELINE,
     WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSPECTOR_PROMPT,
@@ -56,7 +56,7 @@ use ironclaw_webui::webui_v2::{
     WEBUI_V2_ROUTE_RENAME_AUTOMATION, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_SEARCH_SKILLS,
     WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
-    WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
+    WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS,
     WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION, WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE,
     WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE, WEBUI_V2_ROUTE_SETUP_EXTENSION,
     WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
@@ -540,40 +540,6 @@ fn expected_table() -> Vec<Expected> {
             effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
-            route_id: WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES,
-            method: NetworkMethod::Get,
-            pattern: "/api/webchat/v2/outbound/preferences",
-            listener_class: ListenerClass::LocalGateway,
-            auth_schemes: &[IngressAuthScheme::BearerToken],
-            scope_source: IngressScopeSource::AuthenticatedCaller,
-            body_limit: BodyLimitPolicy::NoBody,
-            rate_limit_max: 120,
-            rate_limit_window_seconds: 60,
-            rate_limit_scope: RateLimitScope::PerCaller,
-            cors: CorsPolicy::SameOriginOnly,
-            websocket_origin: WebSocketOriginPolicy::NotApplicable,
-            streaming: StreamingMode::None,
-            audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductSurface,
-        },
-        Expected {
-            route_id: WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
-            method: NetworkMethod::Post,
-            pattern: "/api/webchat/v2/outbound/preferences",
-            listener_class: ListenerClass::LocalGateway,
-            auth_schemes: &[IngressAuthScheme::BearerToken],
-            scope_source: IngressScopeSource::AuthenticatedCaller,
-            body_limit: body_limit_kib(4),
-            rate_limit_max: 60,
-            rate_limit_window_seconds: 60,
-            rate_limit_scope: RateLimitScope::PerCaller,
-            cors: CorsPolicy::SameOriginOnly,
-            websocket_origin: WebSocketOriginPolicy::NotApplicable,
-            streaming: StreamingMode::None,
-            audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductSurface,
-        },
-        Expected {
             route_id: WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS,
             method: NetworkMethod::Get,
             pattern: "/api/webchat/v2/outbound/targets",
@@ -582,6 +548,40 @@ fn expected_table() -> Vec<Expected> {
             scope_source: IngressScopeSource::AuthenticatedCaller,
             body_limit: BodyLimitPolicy::NoBody,
             rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductSurface,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/outbound/notification-channels",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductSurface,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS,
+            method: NetworkMethod::Post,
+            pattern: "/api/webchat/v2/outbound/notification-channels",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: body_limit_kib(8),
+            rate_limit_max: 60,
             rate_limit_window_seconds: 60,
             rate_limit_scope: RateLimitScope::PerCaller,
             cors: CorsPolicy::SameOriginOnly,
@@ -2027,4 +2027,28 @@ fn every_descriptor_matches_the_locked_policy_surface() {
             row.route_id
         );
     }
+}
+
+#[test]
+fn notification_channel_body_limit_accepts_the_largest_valid_target_set() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        // The product contract permits eight ids of up to 512 ASCII bytes.
+        "target_ids": (0..8)
+            .map(|index| format!("{index}:{}", "x".repeat(510)))
+            .collect::<Vec<_>>()
+    }))
+    .expect("serialize maximum notification-channel request");
+    let mut routes = route_lookup();
+    let route = routes
+        .remove(WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS)
+        .expect("notification-channel route");
+    let BodyLimitPolicy::Limited { max_bytes } = route.policy().body_limit() else {
+        panic!("notification-channel mutation must have a bounded body");
+    };
+    assert!(
+        body.len() <= max_bytes.get() as usize,
+        "maximum valid request is {} bytes but route accepts only {}",
+        body.len(),
+        max_bytes
+    );
 }

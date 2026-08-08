@@ -548,13 +548,6 @@ mod tests {
             "the API-only operator tool-permission save must not open a second approval gate"
         );
         assert!(
-            policy
-                .approval_gate_exempt_capabilities()
-                .iter()
-                .any(|capability| capability.as_str() == "builtin.outbound_preferences_set"),
-            "the API-only outbound preferences save gesture must not open a second approval gate"
-        );
-        assert!(
             !policy
                 .approval_gate_exempt_capabilities()
                 .iter()
@@ -567,15 +560,6 @@ mod tests {
                 .any(|capability| capability.as_str() == "ironclaw.memory.profile_set"),
             "ironclaw.memory.profile_set must be in the exempt list (private local write, no \
              network/external_write — analogous to memory_write on a fixed path)"
-        );
-        assert!(
-            !policy
-                .approval_gate_exempt_capabilities()
-                .iter()
-                .any(|capability| {
-                    capability.as_str() == "builtin.outbound_delivery_target_route_current"
-                }),
-            "natural-language destination intent is model interpretation, not host-verifiable consent; current-run external routing must stay approval-gated"
         );
         assert!(
             policy
@@ -644,11 +628,6 @@ mod tests {
         assert_trigger_grant(
             &policy,
             "builtin.trigger_remove",
-            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-        );
-        assert_trigger_grant(
-            &policy,
-            "builtin.outbound_delivery_target_route_current",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
 

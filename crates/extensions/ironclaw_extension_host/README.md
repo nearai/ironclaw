@@ -81,6 +81,13 @@ core behind the WebUI's pairing routes), and the root integration-test package
 - **No `/api/webchat/` route in production files** — what remains of the Axum
   surface is exactly the vendor-blind ingress router:
   `reborn_transport_product_boundary.rs`.
+- **A durable direct-message admission proves a personal reply route.** After
+  identity resolution and durable user-message admission, the generic
+  post-admission observer upserts that actor/conversation into the owner-scoped
+  DM-target catalog. `Rejected(_)`, command, no-op, and shared-conversation
+  ingress never mutate the catalog; `RejectedBusy` still backfills the proven
+  route so a retry does not lose discoverability. Provider-specific code is
+  not involved.
 
 ## Tests
 

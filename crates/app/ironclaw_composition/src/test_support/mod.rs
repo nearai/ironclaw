@@ -139,7 +139,7 @@ pub use oauth_product_auth::{
 };
 #[cfg(feature = "test-support")]
 pub use outbound_delivery::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
 };
 #[cfg(feature = "test-support")]
 pub use project_create::PROJECT_CREATE_CAPABILITY_ID;

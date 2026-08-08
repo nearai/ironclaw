@@ -50,15 +50,15 @@ impl ironclaw_network::NetworkHttpEgress for SlackDmOpenNetworkEgress {
 }
 
 #[test]
-fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
+fn persistent_grantee_resolver_maps_notification_channels_set_to_synthetic_provider() {
     let registry = Arc::new(ironclaw_extension_registry::ExtensionRegistry::new());
     let resolver =
         super::RegistryPersistentApprovalGranteeResolver::new(registry).expect("resolver builds");
     let capability_id =
-        CapabilityId::new(crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID)
+        CapabilityId::new(ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID)
             .expect("capability id");
     let expected_provider =
-        crate::outbound::outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        ironclaw_assistant::outbound_delivery_synthetic_provider().expect("synthetic provider id");
 
     assert_eq!(
         ironclaw_assistant::PersistentApprovalGranteeResolver::persistent_approval_grantee(
@@ -691,9 +691,9 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
 use ironclaw_assistant::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
     LifecycleReadinessBlocker, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
-    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
-    RebornSetupExtensionResponse, RebornSkillListResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND, approval_gate_ref,
+    RebornExtensionCredentialSetup, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
@@ -724,7 +724,7 @@ use ironclaw_loop_host::{
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedToolResultContent, HostSkillContextBuildError,
     HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
-    SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
+    SubagentKindId, SubagentThreadKind, SubagentThreadMetadata, ToolDisclosureMode,
 };
 use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
@@ -3005,6 +3005,7 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             )),
         ))),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-observer-reject-tenant".to_string(),
         agent_id: "runtime-observer-reject-agent".to_string(),
@@ -3761,6 +3762,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
         )
         .with_local_runtime_confirmed_host_home_root(host_home),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-auth-gate-tenant".to_string(),
         agent_id: "runtime-auth-gate-agent".to_string(),
@@ -4039,6 +4041,7 @@ async fn standalone_runtime_exposes_host_runtime_capabilities_to_model_calls() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-tools-tenant".to_string(),
         agent_id: "runtime-tools-agent".to_string(),
@@ -4183,6 +4186,7 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-trajectory-tenant".to_string(),
         agent_id: "runtime-trajectory-agent".to_string(),
@@ -4259,6 +4263,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-preview-tenant".to_string(),
         agent_id: "runtime-preview-agent".to_string(),
@@ -5117,6 +5122,7 @@ async fn standalone_runtime_maps_workspace_to_configured_root() {
         .with_local_runtime_workspace_root(workspace_root.path().to_path_buf())
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-workspace-tenant".to_string(),
         agent_id: "runtime-workspace-agent".to_string(),
@@ -5749,7 +5755,7 @@ async fn standalone_webui_bundle_uses_lifecycle_product_service_for_setup_extens
 }
 
 #[tokio::test]
-async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
+async fn standalone_webui_bundle_exposes_outbound_delivery_targets_view() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui outbound ok".to_string(),
@@ -5783,30 +5789,6 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
         None,
     );
 
-    let cleared = invoke_product_capability(
-        bundle.as_ref(),
-        caller.clone(),
-        ironclaw_assistant::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-        serde_json::json!({}),
-    )
-    .await
-    .expect("outbound preference clear uses composed service");
-    assert!(matches!(cleared, Resolution::Done(_)));
-    let cleared_page = query_product_surface_page(
-        bundle.as_ref(),
-        caller.clone(),
-        ironclaw_product_contracts::views::RebornViewQuery {
-            view_id: ironclaw_assistant::OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-            params: serde_json::json!({}),
-            cursor: None,
-        },
-    )
-    .await
-    .expect("outbound preference read-back uses composed view");
-    let cleared_preferences: RebornOutboundPreferencesResponse =
-        serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
-    assert!(cleared_preferences.final_reply_target.is_none());
-
     let targets_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
@@ -5822,9 +5804,19 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     .expect("outbound target listing uses composed service");
     let targets: ironclaw_assistant::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
+    // Behavior change (route_current stack deletion): the host no longer seeds a
+    // `builtin:web_app` pseudo-target, so a runtime with no channel extension
+    // active composes an EMPTY catalog. "Keep it in the app" is now the absence
+    // of a delivery call, not a destination the model can address. The view must
+    // still resolve and project a well-formed (empty) catalog rather than error.
     assert!(
-        !targets.targets.is_empty(),
-        "standalone runtime identity should expose at least one composed outbound target"
+        targets.targets.is_empty(),
+        "with no channel extension active the composed catalog must be empty; saw {:?}",
+        targets
+            .targets
+            .iter()
+            .map(|option| option.target.target_id.as_str())
+            .collect::<Vec<_>>()
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -6641,6 +6633,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-multi-tool-surface-tenant".to_string(),
         agent_id: "runtime-multi-tool-surface-agent".to_string(),

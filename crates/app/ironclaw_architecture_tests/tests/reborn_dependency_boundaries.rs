@@ -617,7 +617,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     /// failure message. Never counted by eye.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
-        ("ironclaw_extension_contracts", 7_727),
+        // 7_727 -> 7_748 (2026-08-05, #7157): +21 lines for the
+        // `ActivePreferenceTargetCodecs` port beside its sibling
+        // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
+        // no logic. Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 7_748),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -628,7 +632,30 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
         ("ironclaw_host_api", 18_784),
-        ("ironclaw_loop_contracts", 14_479),
+        // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
+        // delivery-heuristic vocabulary (stored trigger delivery targets and
+        // their run-profile plumbing) left this crate with the two-lane
+        // delivery model. The final count includes 96 prompt-inspection lines
+        // and 3 model-accounting lines subsequently merged from main; #7157
+        // remains a net 229-line reduction against that main baseline.
+        // 13_949 -> 13_115 (2026-08-07, #7157 review round): the
+        // connected-channels line gained a byte budget so the runtime-context
+        // slice cannot exceed the 4 KiB prompt surface it is validated on (a
+        // worst case measured 4,391 bytes, which would end every run for that
+        // user), and `runtime_context.rs`'s 919-line inline `#[cfg(test)]`
+        // module was split verbatim into a `runtime_context/tests.rs` sibling
+        // — which `production_rust_files` excludes, unlike an inline module in
+        // a production file. Net effect is a smaller crate than before the
+        // fixes, so the ceiling ratchets DOWN rather than being raised. Count
+        // read from this test's own failure message.
+        // 13_115 -> 13_181 (2026-08-07): +66 lines landed in
+        // `instruction_bundle.rs` from main (#7361/#7363) when this branch
+        // folded onto it. Not growth from this PR — the upward check is a hard
+        // `lines > ceiling` with ZERO headroom (TOLERANCE is the downward
+        // ratchet-nudge window only), so any commit that adds a line to a
+        // contracts crate reddens every branch until the ceiling is
+        // re-captured. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_181),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

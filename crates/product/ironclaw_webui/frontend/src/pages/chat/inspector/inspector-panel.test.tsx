@@ -5,6 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, test, vi } from "vitest";
 
+import { INSPECTOR_RUN_HISTORY_KEY } from "./inspector-activity";
 import { INSPECTOR_HEALTH } from "./inspector-state";
 import { InspectorPanel } from "./inspector-panel";
 
@@ -154,6 +155,75 @@ test("stats tab formats aggregates and unavailable samples without zero fabricat
   assert.match(stats.textContent || "", /provider-model3/);
   assert.doesNotMatch(stats.textContent || "", /Tool calls|Tool outcomes/);
   assert.match(stats.textContent || "", /7 metric samples were unavailable/);
+});
+
+test("activity tab renders ordered correlations and navigates retained turns", async () => {
+  inspectorState.snapshot = {
+    stream_id: "stream-a",
+    activity: [
+      {
+        sequence: 1,
+        event: {
+          occurred_at: "2026-08-06T10:00:00Z",
+          kind: "model_call_started",
+          iteration: 2,
+          activity_id: null,
+          model_call_id: "call-1234567890",
+          summary: { content: "Model call started", original_bytes: 18, truncated: false },
+        },
+      },
+    ],
+  };
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />));
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-b" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+
+  const activity = document.querySelector("[data-testid='inspector-activity-content']");
+  assert.ok(activity);
+  assert.match(activity.textContent || "", /Model call started/);
+  assert.match(activity.textContent || "", /Pending/);
+  assert.match(activity.textContent || "", /Turn 2 of 2/);
+
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.click(),
+  );
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-a");
+});
+
+test("activity navigation advances when a pinned run leaves the history window", async () => {
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-0" />));
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-1" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.click(),
+  );
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-0");
+
+  sessionStorage.setItem(
+    INSPECTOR_RUN_HISTORY_KEY,
+    JSON.stringify({
+      "thread-a": Array.from({ length: 32 }, (_, index) => `run-${index + 1}`),
+    }),
+  );
+  await act(async () =>
+    root?.render(<InspectorPanel threadId="thread-a" runId="run-32" />),
+  );
+
+  assert.equal(inspectorCalls.at(-1)?.runId, "run-1");
+  assert.match(document.body.textContent || "", /Turn 1 of 32/);
+  assert.equal(
+    document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.disabled,
+    true,
+  );
+  assert.equal(
+    document.querySelector<HTMLButtonElement>("[aria-label='Next turn']")?.disabled,
+    false,
+  );
 });
 
 afterEach(async () => {

@@ -18,8 +18,8 @@ pytest_plugins = ["reborn_webui_harness"]
 READ_PATHS = [
     "/api/webchat/v2/automations",
     "/api/webchat/v2/traces/credit",
-    "/api/webchat/v2/outbound/preferences",
     "/api/webchat/v2/outbound/targets",
+    "/api/webchat/v2/outbound/notification-channels",
 ]
 
 
@@ -46,11 +46,11 @@ async def test_reborn_v2_automation_trace_outbound_routes_require_auth_served(
                 "/api/webchat/v2/traces/holds/"
                 f"{uuid.uuid4()}/authorize",
             ),
-            ("post", "/api/webchat/v2/outbound/preferences"),
+            ("post", "/api/webchat/v2/outbound/notification-channels"),
         ]:
             kwargs = {"timeout": 15}
-            if method == "post" and path.endswith("preferences"):
-                kwargs["json"] = {}
+            if method == "post" and path.endswith("notification-channels"):
+                kwargs["json"] = {"target_ids": []}
             response = await getattr(anonymous, method)(f"{reborn_v2_server}{path}", **kwargs)
             assert response.status_code == 401, (method, path, response.text)
 
@@ -135,37 +135,12 @@ async def test_reborn_v2_trace_credits_and_hold_authorize_served(reborn_v2_serve
         assert malformed_submission.status_code == 400
 
 
-async def test_reborn_v2_outbound_preferences_targets_and_channels_served(
+async def test_reborn_v2_outbound_targets_and_channels_served(
     reborn_v2_server,
 ):
     headers = reborn_bearer_headers()
 
     async with httpx.AsyncClient(headers=headers) as client:
-        preferences = await client.get(
-            f"{reborn_v2_server}/api/webchat/v2/outbound/preferences",
-            timeout=15,
-        )
-        preferences.raise_for_status()
-        preferences_body = preferences.json()
-        assert preferences_body.get("final_reply_target") is None
-        assert preferences_body["final_reply_target_status"] == "none_configured"
-        assert preferences_body["default_modality"] == "text"
-
-        clear = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/outbound/preferences",
-            json={"final_reply_target_id": None},
-            timeout=15,
-        )
-        clear.raise_for_status()
-        assert clear.json()["final_reply_target_status"] == "none_configured"
-
-        unknown_target = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/outbound/preferences",
-            json={"final_reply_target_id": "missing-target"},
-            timeout=15,
-        )
-        assert unknown_target.status_code in {400, 404}, unknown_target.text
-
         targets = await client.get(
             f"{reborn_v2_server}/api/webchat/v2/outbound/targets",
             timeout=15,
@@ -174,3 +149,50 @@ async def test_reborn_v2_outbound_preferences_targets_and_channels_served(
         targets_body = targets.json()
         assert isinstance(targets_body["targets"], list)
         assert targets_body.get("next_cursor") in {None, ""}
+
+        channels = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/outbound/notification-channels",
+            timeout=15,
+        )
+        channels.raise_for_status()
+        channels_body = channels.json()
+        assert channels_body == {"channels": []}
+
+        cleared_channels = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/outbound/notification-channels",
+            json={"target_ids": []},
+            timeout=15,
+        )
+        cleared_channels.raise_for_status()
+        assert cleared_channels.json() == {"channels": []}
+
+        unknown_channel = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/outbound/notification-channels",
+            json={"target_ids": ["missing-target"]},
+            timeout=15,
+        )
+        # 400 deliberately, not the single-target sibling's 404: the plural
+        # route frames unknown ids as validation (`notification_channel_not_found`).
+        assert unknown_channel.status_code == 400, unknown_channel.text
+
+        # `target_ids` defaults to empty when omitted entirely (a bare `{}`
+        # is a valid "clear the set" request); a wrong-typed value is what
+        # must be rejected at deserialization.
+        omitted_field = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/outbound/notification-channels",
+            json={},
+            timeout=15,
+        )
+        omitted_field.raise_for_status()
+        assert omitted_field.json() == {"channels": []}
+
+        malformed_channels_body = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/outbound/notification-channels",
+            json={"target_ids": "not-an-array"},
+            timeout=15,
+        )
+        # A wrong-typed field fails at the `Json<T>` extractor before the
+        # handler runs, which axum reports as 422, not 400 (see the pause/
+        # resume/delete automation id validation above for the handler-level
+        # 400 shape instead).
+        assert malformed_channels_body.status_code == 422, malformed_channels_body.text

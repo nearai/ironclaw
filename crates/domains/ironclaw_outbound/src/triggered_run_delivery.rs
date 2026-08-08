@@ -1,14 +1,17 @@
 //! Delivery outcome records for trigger-fired runs.
 //!
-//! When a trigger fires and submits a run, the delivery driver attempts to
-//! resolve the creator's personal communication preference and send the run
-//! result to their configured personal delivery target. This module holds the
-//! outcome record and its in-memory store.
+//! When a trigger fires and submits a run, the notifier watches it and fans
+//! out the notices it produces — an approval gate, an expired credential, a
+//! failure — to the creator's configured **notification channels**. It does
+//! NOT push the run's result: a fire's answer lives in its own run thread,
+//! and putting it on a channel is the model's explicit
+//! `builtin.outbound_deliver` call. This module holds the outcome record for
+//! that watch-and-notify pass, and its in-memory store.
 //!
 //! Design constraints:
-//! - Resolution-stage failures (e.g. no default configured) must NOT produce
-//!   delivery-attempt rows — those rows are for attempts that reach the
-//!   transport layer. Instead we write a lightweight outcome record here.
+//! - Resolution-stage failures (e.g. no notification channels configured) must
+//!   NOT produce delivery-attempt rows — those rows are for attempts that reach
+//!   the transport layer. Instead we write a lightweight outcome record here.
 //! - Authoritative terminal state: owners propagate record failures into their
 //!   managed task lifecycle instead of reporting an unpersisted completion.
 //! - Personal scope only: non-personal triggers fail closed with `Denied`.
@@ -17,10 +20,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::UserId;
-use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
-use crate::delivery_resolution::TriggerCommunicationContext;
+use crate::ProjectionUpdateRef;
 
 /// Terminal outcome of a triggered-run delivery attempt.
 ///
@@ -76,19 +79,25 @@ pub trait TriggeredRunDeliveryStore: Send + Sync {
 pub struct TriggeredRunDeliveryRequest {
     pub run_id: TurnRunId,
     pub scope: TurnScope,
-    /// The trigger creator; delivery goes to their personal preference
-    /// target.
+    /// The trigger creator; notifications go to THEIR notification channels.
     pub creator_user_id: UserId,
-    /// Fail closed for non-personal triggers: a project-scoped trigger is
-    /// never delivered to a personal channel.
+    /// Fail closed for non-personal triggers: a project-scoped trigger never
+    /// notifies a personal channel.
     pub project_scoped: bool,
     /// The trigger prompt; its first line becomes the short footer label.
     pub prompt: String,
-    /// Optional per-trigger target resolved from the creator-scoped outbound
-    /// target registry. When present, ordinary results route here instead of
-    /// consulting the user's mutable global default.
-    pub delivery_target: Option<ReplyTargetBindingRef>,
-    pub trigger_context: TriggerCommunicationContext,
+}
+
+/// One permanently failed trigger fire that never produced a run.
+/// `failure_ref` is stable across retries so the delivery coordinator's
+/// durable claim prevents duplicate provider sends.
+#[derive(Debug, Clone)]
+pub struct TriggeredFireFailureDeliveryRequest {
+    pub scope: TurnScope,
+    pub creator_user_id: UserId,
+    pub project_scoped: bool,
+    pub prompt: String,
+    pub failure_ref: ProjectionUpdateRef,
 }
 
 /// The proactive delivery driver for one channel extension, as its caller
@@ -100,13 +109,20 @@ pub struct TriggeredRunDeliveryRequest {
 /// `ironclaw_host_api` turn vocabulary, and the caller — the generic
 /// post-submit hook in `ironclaw_extension_host` — sits below the crate that
 /// implements it. Declaring it in the vocabulary's own home costs zero type
-/// weakening; narrowing it into a contracts crate would have cost
-/// [`TriggerCommunicationContext`] its typed refs.
+/// weakening; narrowing it into a contracts crate would have cost the request
+/// its typed turn vocabulary.
 #[async_trait::async_trait]
 pub trait TriggeredRunDelivery: Send + Sync {
-    /// Watch the submitted run and deliver its outputs to the creator's
-    /// resolved target, recording the terminal outcome in the store.
+    /// Watch the submitted run and fan its notices — approval gates, expired
+    /// credentials, failures — out to the creator's notification channels,
+    /// recording the terminal outcome in the store. The run's own result is
+    /// never pushed here.
     async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest);
+
+    /// Notify configured channels that a fire permanently failed before run
+    /// submission. There is deliberately no synthetic run id.
+    async fn on_trigger_failed_before_submit(&self, _request: TriggeredFireFailureDeliveryRequest) {
+    }
 }
 
 #[async_trait::async_trait]
@@ -116,6 +132,10 @@ where
 {
     async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest) {
         self.as_ref().on_trigger_submitted(request).await;
+    }
+
+    async fn on_trigger_failed_before_submit(&self, request: TriggeredFireFailureDeliveryRequest) {
+        self.as_ref().on_trigger_failed_before_submit(request).await;
     }
 }
 
