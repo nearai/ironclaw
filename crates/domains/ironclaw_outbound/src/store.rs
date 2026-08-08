@@ -5,11 +5,12 @@ use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
-    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
-    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    ClaimDeliveryAttemptForSendRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundDeliveryId, OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
+    OutboundPushTargetRequest, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -70,18 +71,37 @@ pub trait OutboundStateStorePort: Send + Sync {
         request: AdvanceSubscriptionCursorRequest,
     ) -> Result<(), OutboundError>;
 
+    /// Persist `attempt` under its deterministic delivery id.
+    ///
+    /// Idempotent for a replay whose id already resolved: an existing row
+    /// that is not a reopen candidate is left untouched and this returns
+    /// `Ok(())` without writing. The one exception is a reopen: when the
+    /// existing row is `Failed` with a kind where
+    /// [`crate::DeliveryFailureKind::permits_reopen`] is `true` and the
+    /// incoming `attempt` is a fresh `Prepared` reservation for the same id,
+    /// the store CAS-writes the incoming attempt over the stale `Failed` row
+    /// instead of no-opping — that failure kind is only ever settled for
+    /// this id when nothing reached the vendor, so reopening it cannot
+    /// duplicate an accepted send. Any other existing status, including a
+    /// `Failed` row whose kind does not permit reopen, keeps the no-op
+    /// behavior.
     async fn record_delivery_attempt(
         &self,
         attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError>;
 
     /// Atomically reserve the one allowed vendor-egress drive for a prepared
-    /// attempt. Returns `true` only to the caller that persisted the
-    /// `Prepared -> Sending` transition.
+    /// attempt. Returns [`ClaimDeliveryAttemptForSendOutcome::Claimed`] only
+    /// to the caller that persisted the `Prepared -> Sending` transition;
+    /// every other caller receives
+    /// [`ClaimDeliveryAttemptForSendOutcome::Existing`] carrying the exact
+    /// authoritative row that blocked the claim, read atomically as part of
+    /// the same CAS attempt — never from a separate subsequent read, which
+    /// would reopen a TOCTOU window a concurrent reopen could race.
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError>;
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError>;
 
     /// Crash recovery for an interrupted send. Re-reads the attempt inside the
     /// store's CAS and transitions `Sending -> Unknown` only when it is still

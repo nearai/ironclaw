@@ -224,7 +224,61 @@ pub enum DeliveryFailureKind {
     TransportUnavailable,
     RateLimited,
     Rejected,
+    /// Unclassified failure — this codebase never wrote a more specific
+    /// [`DeliveryFailureKind`] for this row. Contrast with
+    /// [`Self::VendorContactAmbiguous`], which is a specific, deliberately
+    /// classified kind: it does not mean "we don't know what happened", it
+    /// means "we know retries were exhausted after the vendor-egress claim,
+    /// and that state provides no proof the vendor was never contacted."
     Unknown,
+    /// Retry exhaustion after the vendor-egress claim, settled without proof
+    /// that no part of this delivery reached the vendor: either the adapter's
+    /// `deliver` call returned a bare `Err` (no typed report at all), or it
+    /// returned a typed report whose parts were all `Retryable` but retries
+    /// were still exhausted. Both in-tree channel adapters (Slack, Telegram)
+    /// use `Retryable` for post-send ambiguity (e.g. a timeout after the
+    /// request was already sent), not just pre-send failure, so neither path
+    /// proves the vendor was never contacted the way a preflight
+    /// `TransportUnavailable`/`RateLimited`/`TransientValidatorError` does.
+    ///
+    /// This is distinct from [`Self::Unknown`]: `Unknown` means this codebase
+    /// never assigned a specific kind to the row (an unclassified gap).
+    /// `VendorContactAmbiguous` means the row *was* classified, precisely as
+    /// "reached the point of no return and cannot prove the vendor wasn't
+    /// contacted." A reopen must treat both as permanently terminal, but for
+    /// different reasons — this variant exists so a reader auditing "why did
+    /// this delivery id stay Failed forever" finds an explicit answer instead
+    /// of an `Unknown` catch-all.
+    VendorContactAmbiguous,
+}
+
+impl DeliveryFailureKind {
+    /// Every [`DeliveryFailureKind`] variant, for exhaustiveness-style tests
+    /// that need to iterate the type instead of hand-maintaining a literal
+    /// array that silently drifts when a variant is added.
+    pub const ALL: &'static [Self] = &[
+        Self::AuthorizationRevoked,
+        Self::TransientValidatorError,
+        Self::TransportUnavailable,
+        Self::RateLimited,
+        Self::Rejected,
+        Self::Unknown,
+        Self::VendorContactAmbiguous,
+    ];
+
+    /// Whether a `Failed` row carrying this kind may be reopened to a fresh
+    /// `Prepared` reservation under the same deterministic delivery id.
+    /// True only for kinds this codebase provably never writes after the
+    /// vendor-egress claim, so a reopen cannot duplicate an accepted send.
+    pub const fn permits_reopen(self) -> bool {
+        match self {
+            Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => true,
+            Self::AuthorizationRevoked
+            | Self::Rejected
+            | Self::Unknown
+            | Self::VendorContactAmbiguous => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,12 +396,26 @@ pub struct UpdateDeliveryStatusRequest {
 }
 
 /// Atomic ownership claim for the sole vendor-egress writer of a prepared
-/// delivery. Stores transition `Prepared -> Sending` exactly once and return
-/// `false` for replays or already-terminal attempts.
+/// delivery. Stores transition `Prepared -> Sending` exactly once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimDeliveryAttemptForSendRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
+}
+
+/// Result of atomically claiming the sole vendor-egress drive for a prepared
+/// delivery. `Existing` carries the exact row that blocked the claim, read
+/// atomically inside the same CAS attempt that lost — never from a separate
+/// subsequent read, which would reopen a TOCTOU window between the failed
+/// CAS and the re-read (a concurrent caller could reopen the row in between,
+/// and a claim-loser reading it afterward could misclassify a freshly
+/// reopened `Prepared` row as still in flight).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimDeliveryAttemptForSendOutcome {
+    /// This caller persisted `Prepared -> Sending` and owns vendor egress.
+    Claimed,
+    /// The authoritative attempt no longer permits the transition.
+    Existing(Box<OutboundDeliveryAttempt>),
 }
 
 /// Guarded crash-recovery transition for an interrupted send. The store
@@ -360,4 +428,42 @@ pub struct ClaimDeliveryAttemptForSendRequest {
 pub struct RecoverInterruptedDeliveryRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeliveryFailureKind;
+
+    /// G4: an exhaustive match in the test itself (not an array literal), so
+    /// adding a future `DeliveryFailureKind` variant without updating this
+    /// test is a compile error, not a silent gap.
+    #[test]
+    fn permits_reopen_is_exhaustively_classified() {
+        for kind in DeliveryFailureKind::ALL {
+            let expected = match kind {
+                DeliveryFailureKind::TransientValidatorError
+                | DeliveryFailureKind::TransportUnavailable
+                | DeliveryFailureKind::RateLimited => true,
+                DeliveryFailureKind::AuthorizationRevoked
+                | DeliveryFailureKind::Rejected
+                | DeliveryFailureKind::Unknown
+                | DeliveryFailureKind::VendorContactAmbiguous => false,
+            };
+            assert_eq!(kind.permits_reopen(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // Defence-in-depth alongside the exhaustive match above: catches a
+        // typo'd duplicate entry in `ALL` that the match wouldn't.
+        let mut seen = std::collections::HashSet::new();
+        for kind in DeliveryFailureKind::ALL {
+            assert!(
+                seen.insert(format!("{kind:?}")),
+                "duplicate entry: {kind:?}"
+            );
+        }
+        assert_eq!(seen.len(), 7);
+    }
 }

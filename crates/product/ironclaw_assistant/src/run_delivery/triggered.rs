@@ -1126,6 +1126,22 @@ async fn deliver_pre_submit_failure_to_target(
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
+        // Before fix A this claim-loss case surfaced as the coordinator
+        // error `AlreadyInFlight`, which propagated as an `Err` through
+        // `classify_delivery_error` above — never through this match, and
+        // never as a silent success. Now that the claim loss is
+        // success-shaped (`ExistingDeliveryUnconfirmed`, so a `Sending` row
+        // is not misreported as an error), the wildcard arm below would
+        // silently absorb it as `Ok(())` unless handled explicitly here.
+        // Give it the same treatment `Failed` gets — this call has no
+        // durable evidence its own notice was delivered, so callers must
+        // not treat it as delivered.
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { attempt } => {
+            Err(TriggeredNotificationFailure::Other(format!(
+                "delivery unresolved: existing attempt status {:?}",
+                attempt.status
+            )))
+        }
         _ => Ok(()),
     }
 }
@@ -1192,6 +1208,18 @@ async fn deliver_notification_to_target(
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
+        // Same reasoning as `deliver_pre_submit_failure_to_target` above:
+        // a lost sole-writer claim carries no evidence this call delivered
+        // anything, so it must be reported the same way `Failed` is rather
+        // than falling through to `delivered_messages_from_outcome`, which
+        // would silently report zero delivered messages as if this were an
+        // ordinary non-Delivered-but-otherwise-fine outcome.
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { attempt } => {
+            Err(TriggeredNotificationFailure::Other(format!(
+                "delivery unresolved: existing attempt status {:?}",
+                attempt.status
+            )))
+        }
         outcome => Ok(delivered_messages_from_outcome(&outcome)),
     }
 }
