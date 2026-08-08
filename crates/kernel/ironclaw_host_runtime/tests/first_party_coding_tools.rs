@@ -2176,3 +2176,82 @@ fn trust_policy() -> HostTrustPolicy {
     ]))])
     .unwrap()
 }
+
+/// `/` must mean the workspace in every coding tool, not fail with a blank path.
+///
+/// Observed repeatedly on live demo runs. An agent that globbed with a leading wildcard, or looked at
+/// the root to see what existed, got:
+///
+/// ```text
+/// path  is not under an available scoped root (available roots: skills, system skills,
+/// tenant-shared skills, workspace)
+/// ```
+///
+/// The offending path renders BLANK because the safe-summary encoder maps `/` to a space, so the
+/// message named nothing and the agent could only guess. `list_dir` had been special-cased; `glob`,
+/// `grep` and `read_file` had not. Table-driven so a tool cannot be fixed in isolation again.
+#[tokio::test]
+async fn coding_tools_treat_the_filesystem_root_as_the_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("marker.txt"), "found me").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    for (capability, input) in [
+        (GLOB_CAPABILITY_ID, json!({"path": "/", "pattern": "*.txt"})),
+        (GREP_CAPABILITY_ID, json!({"path": "/", "pattern": "found"})),
+        (LIST_DIR_CAPABILITY_ID, json!({"path": "/"})),
+    ] {
+        let outcome = invoke_with_context(
+            &runtime,
+            capability,
+            input.clone(),
+            execution_context_with_mounts(coding_capability_ids(), mounts.clone()),
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "{capability} must accept `/` as the workspace; got {outcome:?} for input {input}"
+        );
+    }
+}
+
+/// A path the tools resolve relative to the workspace stays resolvable when written and read back.
+///
+/// The write-then-read round trip is the invariant an agent depends on when it authors a script and
+/// then uses it, and it is the one that silently broke when `/workspace` meant two different
+/// directories to different tools.
+#[tokio::test]
+async fn a_relative_path_written_by_write_file_is_readable_by_read_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = || execution_context_with_mounts(coding_capability_ids(), mounts.clone());
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "scripts/egfr.py", "content": "print('staged')\n"}),
+        context(),
+    )
+    .await
+    .expect("a relative path must be writable");
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "scripts/egfr.py"}),
+        context(),
+    )
+    .await
+    .expect("the same relative path must be readable");
+
+    assert!(
+        read["content"]
+            .as_str()
+            .expect("read_file returns text")
+            .contains("staged"),
+        "write_file and read_file must resolve one relative path to one place; got {read:?}"
+    );
+}

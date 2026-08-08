@@ -259,6 +259,9 @@ async fn build_local_storage_production_shaped(
         workspace_root,
         host_home_root,
         runtime_policy_for_local_process,
+        // The shell must scope `/workspace` exactly as the file tools do, or one alias names two
+        // directories and a file written by one is invisible to the other.
+        context.workspace_scoped_per_caller,
     )?;
     let root = &host_access.storage_root;
     let workspace_root = &host_access.workspace_root;
@@ -291,6 +294,10 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
+    // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
+    // agent install) left on the host disk has to be brought across or it is silently lost.
+    crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(root, &filesystem)
+        .await?;
     context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,
