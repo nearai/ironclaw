@@ -72,6 +72,23 @@ pub(crate) enum RunNotificationProjectionIdError {
 /// to be the canonical gate ref and bind it through a domain-separated,
 /// length-framed digest, so distinct same-kind gates cannot suppress one
 /// another without persisting the gate ref itself.
+///
+/// Rollout caveat: this id is a durable delivery-dedup key (the outbound
+/// store's `OutboundDeliveryId` is derived from it, precisely so a replay
+/// after a process restart lands on the same durable attempt). Introducing
+/// the gate-ref-bound digest changed the id shape for `ApprovalNeeded` and
+/// `AuthRequired` from the historical `run-notification:{suffix}:{run_id}`
+/// (undiscriminated). A run that is already `BlockedApproval`/`BlockedAuth`
+/// -- with its one gate prompt already durably `Delivered` under the OLD id
+/// -- at the moment this change deploys will, if its delivery loop is
+/// re-entered before the gate resolves (process restart, redeploy), compute
+/// the NEW id, find no durable row there, and send one extra copy of the
+/// same still-outstanding prompt. This is a one-time, self-healing artifact
+/// of the deploy boundary, not a recurring bug: gate resolution is
+/// preconditioned on run state (`ResumeTurnPrecondition::Blocked*Gate`), so
+/// replying to either copy resolves the gate and the second becomes stale.
+/// No compatibility shim is provided for the legacy id shape; this is an
+/// accepted, bounded cost of the migration.
 pub(crate) fn run_notification_projection_id(
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
