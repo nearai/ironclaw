@@ -343,20 +343,67 @@ function shortId(value: string | null): string | null {
   return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
 }
 
-interface ToolDetailText {
-  content: string;
-  original_bytes: number;
-  truncated: boolean;
+interface ToolDetail {
+  capability_name: BoundedDiagnosticText;
+  arguments: BoundedDiagnosticText | null;
+  result: BoundedDiagnosticText | null;
+  status: "started" | "succeeded" | "failed";
+  duration_ms: number | null;
+  output_bytes: number | null;
+  failure_category: BoundedDiagnosticText | null;
+  failure_summary: BoundedDiagnosticText | null;
 }
 
-interface ToolDetail {
-  capability_name: ToolDetailText;
-  arguments: ToolDetailText | null;
-  result: ToolDetailText | null;
-  status: string;
-  output_bytes: number | null;
-  failure_category: ToolDetailText | null;
-  failure_summary: ToolDetailText | null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isBoundedDiagnosticText(value: unknown): value is BoundedDiagnosticText {
+  return isRecord(value)
+    && typeof value.content === "string"
+    && isNonNegativeSafeInteger(value.original_bytes)
+    && typeof value.truncated === "boolean";
+}
+
+function isNullableBoundedDiagnosticText(
+  value: unknown,
+): value is BoundedDiagnosticText | null {
+  return value === null || isBoundedDiagnosticText(value);
+}
+
+function isNullableNonNegativeSafeInteger(value: unknown): value is number | null {
+  return value === null || isNonNegativeSafeInteger(value);
+}
+
+function decodeToolDetailResponse(response: unknown): ToolDetail | null {
+  if (!isRecord(response) || !isRecord(response.tool)) return null;
+  const tool = response.tool;
+  if (
+    !isBoundedDiagnosticText(tool.capability_name)
+    || !isNullableBoundedDiagnosticText(tool.arguments)
+    || !isNullableBoundedDiagnosticText(tool.result)
+    || (tool.status !== "started" && tool.status !== "succeeded" && tool.status !== "failed")
+    || !isNullableNonNegativeSafeInteger(tool.duration_ms)
+    || !isNullableNonNegativeSafeInteger(tool.output_bytes)
+    || !isNullableBoundedDiagnosticText(tool.failure_category)
+    || !isNullableBoundedDiagnosticText(tool.failure_summary)
+  ) {
+    return null;
+  }
+  return {
+    capability_name: tool.capability_name,
+    arguments: tool.arguments,
+    result: tool.result,
+    status: tool.status,
+    duration_ms: tool.duration_ms,
+    output_bytes: tool.output_bytes,
+    failure_category: tool.failure_category,
+    failure_summary: tool.failure_summary,
+  };
 }
 
 function ToolDetailDisclosure({
@@ -372,20 +419,43 @@ function ToolDetailDisclosure({
   const [loading, setLoading] = React.useState(false);
   const [tool, setTool] = React.useState<ToolDetail | null>(null);
   const [unavailable, setUnavailable] = React.useState(false);
+  const requestRef = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
   const load = () => {
     const nextOpen = !open;
     setOpen(nextOpen);
-    if (!nextOpen || tool || loading || unavailable) return;
+    if (!nextOpen) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      setLoading(false);
+      return;
+    }
+    if (tool || loading) return;
     const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
+    setUnavailable(false);
     fetchInspectorTool({ threadId, runId, activityId, signal: controller.signal })
       .then((response) => {
-        const detail = (response as { tool?: ToolDetail | null })?.tool || null;
+        if (controller.signal.aborted || requestRef.current !== controller) return;
+        const detail = decodeToolDetailResponse(response);
         setTool(detail);
         setUnavailable(!detail);
       })
-      .catch(() => setUnavailable(true))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (!controller.signal.aborted && requestRef.current === controller) {
+          setUnavailable(true);
+        }
+      })
+      .finally(() => {
+        if (requestRef.current === controller) {
+          requestRef.current = null;
+          setLoading(false);
+        }
+      });
   };
   return (
     <div className="mt-3 border-t border-[var(--v2-panel-border)] pt-3">
@@ -405,6 +475,7 @@ function ToolDetailDisclosure({
             <>
               <p><span className="font-medium">Capability:</span> {tool.capability_name.content}</p>
               <p><span className="font-medium">Status:</span> {tool.status}</p>
+              {tool.duration_ms != null && <p>Duration: {tool.duration_ms.toLocaleString()} ms</p>}
               <ToolDetailBlock label="Arguments" value={tool.arguments} />
               <ToolDetailBlock label="Output" value={tool.result} />
               {tool.output_bytes != null && <p>Output size: {tool.output_bytes.toLocaleString()} bytes</p>}
@@ -418,7 +489,7 @@ function ToolDetailDisclosure({
   );
 }
 
-function ToolDetailBlock({ label, value }: { label: string; value: ToolDetailText | null }) {
+function ToolDetailBlock({ label, value }: { label: string; value: BoundedDiagnosticText | null }) {
   if (!value) return null;
   return (
     <div>
@@ -480,6 +551,7 @@ function ActivityEntry({
       </p>
       {hasToolDetails && entry.activity_id && threadId && runId && (
         <ToolDetailDisclosure
+          key={`${threadId}:${runId}:${entry.activity_id}`}
           threadId={threadId}
           runId={runId}
           activityId={entry.activity_id}

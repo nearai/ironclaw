@@ -14,9 +14,10 @@ mod oauth;
 mod oauth_start_tests;
 
 use std::{
+    collections::HashMap,
     hash::Hash,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
@@ -118,6 +119,7 @@ const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new
     // SAFETY: 1024 is a non-zero literal cache cap.
     None => unreachable!(),
 };
+const OAUTH_CALLBACK_SINGLE_FLIGHT_CAPACITY: usize = 1024;
 const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
     Some(value) => value,
     // SAFETY: 16 KiB is a non-zero literal body cap.
@@ -177,6 +179,10 @@ pub struct ProductAuthRouteState {
     /// receives the callback's vendor id and resolves what (if anything)
     /// to bind itself.
     provider_identity_hook: Option<Arc<ProviderIdentityHookFactory>>,
+    /// Same-host callback retries for one durable flow wait for the original
+    /// completion instead of racing its one-time claim. Weak entries keep this
+    /// process-local coordination bounded without becoming flow authority.
+    callback_single_flight: CallbackSingleFlight,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -334,6 +340,9 @@ impl ProductAuthRouteState {
             default_agent_id,
             default_project_id,
             provider_identity_hook: None,
+            callback_single_flight: CallbackSingleFlight::new(
+                OAUTH_CALLBACK_SINGLE_FLIGHT_CAPACITY,
+            ),
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
@@ -459,6 +468,13 @@ impl ProductAuthRouteState {
             .and_then(|factory| factory(vendor, callback_scope))
     }
 
+    fn callback_completion_lock(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ProductAuthRouteFailure> {
+        self.callback_single_flight.lock_for(flow_id)
+    }
+
     fn auth_engine(&self) -> Result<Arc<ironclaw_auth::AuthEngine>, ProductAuthRouteFailure> {
         self.product_auth
             .auth_engine()
@@ -525,10 +541,46 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field(
                 "provider_identity_hook",
                 &self.provider_identity_hook.is_some(),
-            );
+            )
+            .field("callback_single_flight", &"CallbackSingleFlight<...>");
         builder
             .field("pkce_verifiers", &"ExpiringLruCache<...>")
             .finish()
+    }
+}
+
+#[derive(Clone)]
+struct CallbackSingleFlight {
+    locks: Arc<Mutex<HashMap<AuthFlowId, Weak<tokio::sync::Mutex<()>>>>>,
+    capacity: usize,
+}
+
+impl CallbackSingleFlight {
+    fn new(capacity: usize) -> Self {
+        Self {
+            locks: Arc::new(Mutex::new(HashMap::new())),
+            capacity,
+        }
+    }
+
+    fn lock_for(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ProductAuthRouteFailure> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&flow_id).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        if locks.len() >= self.capacity {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(flow_id, Arc::downgrade(&lock));
+        Ok(lock)
     }
 }
 
@@ -2484,6 +2536,167 @@ mod tests {
         );
     }
 
+    /// Browser/ngrok cancellation regression: once the hosted callback has
+    /// claimed the one-time flow, dropping that HTTP request must not cancel
+    /// the token exchange and strand the durable flow at `callback_received`.
+    /// A replay of the identical provider redirect must observe the completed
+    /// grant without exchanging the authorization code a second time.
+    #[tokio::test]
+    async fn vendor_oauth_callback_survives_request_disconnect_and_replays_once() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let pausable_provider = Arc::new(PausableAuthProviderClient::default());
+        let provider_client: Arc<dyn AuthProviderClient> = pausable_provider.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(SecretStore::ephemeral()),
+        );
+        let product_auth = Arc::new(
+            RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                Arc::new(NoopDispatcher),
+            )
+            .with_auth_engine(engine),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup();
+        let app = product_auth_route_mount(state.clone())
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "requirement": "vendorco_oauth",
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "/api/reborn/product-auth/oauth/vendorco/callback?state={encoded_state}&code=vendor-auth-code&scope=items:read"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let callback_state = state.clone();
+        let callback_uri = uri.clone();
+
+        let mut request_task = tokio::spawn(async move {
+            oauth::vendor_oauth_callback_handler(
+                State(callback_state),
+                Path("vendorco".to_string()),
+                RawQuery(callback_uri.query().map(str::to_string)),
+                callback_uri,
+                HeaderMap::new(),
+            )
+            .await
+        });
+        tokio::select! {
+            () = pausable_provider.wait_until_entered() => {}
+            result = &mut request_task => {
+                panic!("callback returned before token exchange could be interrupted: {result:?}");
+            }
+        }
+        request_task.abort();
+        request_task
+            .await
+            .expect_err("the simulated browser request must be canceled");
+
+        let replay_state = state.clone();
+        let replay_uri = uri.clone();
+        let mut replay_task = tokio::spawn(async move {
+            oauth::vendor_oauth_callback_handler(
+                State(replay_state),
+                Path("vendorco".to_string()),
+                RawQuery(replay_uri.query().map(str::to_string)),
+                replay_uri,
+                HeaderMap::new(),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut replay_task)
+                .await
+                .is_err(),
+            "the provider retry must wait for the already-running completion"
+        );
+        pausable_provider.release();
+
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let flow = shared
+                    .get_flow(&flow_scope, flow_id)
+                    .await
+                    .expect("flow lookup")
+                    .expect("flow");
+                if flow.status == AuthFlowStatus::Completed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached callback completion must settle after the request disconnects");
+
+        let replay = tokio::time::timeout(Duration::from_secs(2), replay_task)
+            .await
+            .expect("the provider retry must settle after original completion")
+            .expect("the provider retry task must not fail")
+            .expect("the provider's identical retry must observe the completed flow");
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(
+            pausable_provider.call_count(),
+            1,
+            "request recovery must never exchange one authorization code twice"
+        );
+    }
+
     /// Restart/replica regression for the durable setup-PKCE port: the
     /// process-local verifier cache dies with the route state, so a callback
     /// arriving after a restart (or on another replica) can only complete
@@ -2993,6 +3206,59 @@ mod tests {
                 saved_body: None,
                 redaction_applied: false,
             })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PausableAuthProviderClient {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PausableAuthProviderClient {
+        async fn wait_until_entered(&self) {
+            self.entered.notified().await;
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl AuthProviderClient for PausableAuthProviderClient {
+        async fn exchange_callback(
+            &self,
+            _context: ironclaw_auth::OAuthProviderExchangeContext,
+            request: OAuthProviderCallbackRequest,
+        ) -> Result<OAuthProviderExchange, AuthProductError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(OAuthProviderExchange {
+                provider: request.provider,
+                account_label: request.account_label,
+                authorization_code_hash: request.authorization_code_hash,
+                pkce_verifier_hash: request.pkce_verifier_hash,
+                access_secret: SecretHandle::new("pausable-provider-access")
+                    .expect("test secret handle"),
+                refresh_secret: None,
+                scopes: request.scopes,
+                account_id: None,
+                provider_identity: None,
+            })
+        }
+
+        async fn refresh_token(
+            &self,
+            _request: ironclaw_auth::OAuthProviderRefreshRequest,
+        ) -> Result<ironclaw_auth::OAuthProviderRefresh, AuthProductError> {
+            unreachable!("disconnect regression does not refresh credentials")
         }
     }
 }

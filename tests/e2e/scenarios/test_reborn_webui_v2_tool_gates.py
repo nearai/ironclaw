@@ -368,11 +368,19 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
         await expect(detail).to_be_visible(timeout=15000)
         await expect(detail).to_contain_text("builtin.echo")
         await expect(detail).to_contain_text("succeeded")
-        await expect(detail.locator("pre").first).to_contain_text(marker)
+        arguments = detail.get_by_text("Arguments", exact=True).locator("..").locator("pre")
+        await expect(arguments).to_contain_text(marker)
+        await expect(detail.get_by_text("Duration:")).to_have_count(1)
         await expect(detail.get_by_text("Output size:")).to_have_count(1)
-        await expect(detail.get_by_text(re.compile(r"Output · truncated from 5[1-9],[0-9]{3} bytes"))).to_be_visible()
+        await expect(
+            detail.get_by_text(
+                re.compile(r"Output · truncated from 5[1-9],[0-9]{3} bytes")
+            )
+        ).to_be_visible()
         output = detail.locator("pre").nth(1)
-        retained_bytes = await output.evaluate("element => new TextEncoder().encode(element.textContent || '').length")
+        retained_bytes = await output.evaluate(
+            "element => new TextEncoder().encode(element.textContent || '').length"
+        )
         assert retained_bytes <= 50 * 1024
     finally:
         await context.close()

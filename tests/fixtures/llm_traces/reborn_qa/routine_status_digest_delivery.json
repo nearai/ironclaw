@@ -1,0 +1,103 @@
+{
+  "model_name": "synthetic-routine-status-digest-delivery",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every day at 9am UTC, create a routine that checks our status page endpoint and sends me a one-line summary on Slack. Do not run it now."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_digest_targets_list",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_digest_trigger_create",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "name": "daily-status-page-slack-digest",
+              "prompt": "Perform exactly one public HTTP GET to https://status.example.com/api/v2/status.json to check the status page. Compose a one-line summary of the current status. Then call builtin__outbound_deliver with target_id \"slack:qa-trace-dm\" to deliver the summary to my Slack DM. The final answer must include the exact marker ROUTINE_STATUS_DIGEST_DELIVERED_CANARY.",
+              "schedule": {
+                "kind": "cron",
+                "expression": "0 9 * * *",
+                "timezone": "UTC"
+              }
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Routine created. It will check the status page daily at 9am UTC and deliver a one-line summary to your Slack DM via builtin__outbound_deliver. ROUTINE_STATUS_DIGEST_CREATED_CANARY",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Perform exactly one public HTTP GET to https://status.example.com/api/v2/status.json to check the status page. Compose a one-line summary of the current status. Then call builtin__outbound_deliver with target_id \"slack:qa-trace-dm\" to deliver the summary to my Slack DM. The final answer must include the exact marker ROUTINE_STATUS_DIGEST_DELIVERED_CANARY."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_digest_http_get",
+            "name": "builtin__http",
+            "arguments": {
+              "method": "get",
+              "url": "https://status.example.com/api/v2/status.json"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_digest_outbound_deliver",
+            "name": "builtin__outbound_deliver",
+            "arguments": {
+              "target_id": "slack:qa-trace-dm",
+              "content": "Status: all systems operational. ROUTINE_STATUS_DIGEST_DELIVERED_CANARY"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Delivered the status summary to your Slack DM. ROUTINE_STATUS_DIGEST_DELIVERED_CANARY",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

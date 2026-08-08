@@ -218,6 +218,7 @@ test("tool activity loads bounded verbose details from the dedicated endpoint", 
       arguments: { content: '{"path":"safe.txt"}', original_bytes: 19, truncated: false },
       result: { content: "bounded output", original_bytes: 75_000, truncated: true },
       status: "succeeded",
+      duration_ms: 42,
       output_bytes: 75_000,
       failure_category: null,
       failure_summary: null,
@@ -238,8 +239,134 @@ test("tool activity loads bounded verbose details from the dedicated endpoint", 
   const detail = document.querySelector("[data-testid^='inspector-tool-detail-']");
   assert.ok(detail);
   assert.match(detail.textContent || "", /filesystem\.read/);
+  assert.match(detail.textContent || "", /safe\.txt/);
+  assert.match(detail.textContent || "", /Duration: 42 ms/);
   assert.match(detail.textContent || "", /truncated from 75,000 bytes/);
   assert.match(detail.textContent || "", /bounded output/);
+});
+
+test("tool activity rejects detail missing a capability name without disabling inspector", async () => {
+  inspectorState.snapshot = {
+    stream_id: "stream-tool",
+    activity: [{
+      sequence: 1,
+      event: {
+        occurred_at: "2026-08-06T10:00:00Z",
+        kind: "tool_completed",
+        iteration: null,
+        activity_id: "01890a5d-ac96-774b-bcce-b302099a8057",
+        model_call_id: null,
+        summary: { content: "Tool invocation completed", original_bytes: 25, truncated: false },
+      },
+    }],
+  };
+  fetchInspectorTool.mockResolvedValue({
+    tool: {
+      arguments: null,
+      result: null,
+      status: "succeeded",
+      duration_ms: null,
+      output_bytes: null,
+      failure_category: null,
+      failure_summary: null,
+    },
+  });
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-tool" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+  await act(async () => {
+    document.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click();
+    await Promise.resolve();
+  });
+
+  assert.ok(document.querySelector("[data-testid='inspector-panel']"));
+  assert.match(document.body.textContent || "", /Tool details are unavailable/);
+});
+
+test("tool detail request is cancelled when navigating to another run", async () => {
+  inspectorState.snapshot = {
+    stream_id: "stream-tool",
+    activity: [{
+      sequence: 1,
+      event: {
+        occurred_at: "2026-08-06T10:00:00Z",
+        kind: "tool_completed",
+        iteration: null,
+        activity_id: "01890a5d-ac96-774b-bcce-b302099a8057",
+        model_call_id: null,
+        summary: { content: "Tool invocation completed", original_bytes: 25, truncated: false },
+      },
+    }],
+  };
+  fetchInspectorTool.mockImplementation(() => new Promise(() => {}));
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-a" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click(),
+  );
+  const signal = fetchInspectorTool.mock.calls[0]?.[0]?.signal as AbortSignal | undefined;
+  assert.equal(signal?.aborted, false);
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-b" />));
+
+  assert.equal(signal?.aborted, true);
+});
+
+test("tool details can retry after a transient request failure", async () => {
+  inspectorState.snapshot = {
+    stream_id: "stream-tool",
+    activity: [{
+      sequence: 1,
+      event: {
+        occurred_at: "2026-08-06T10:00:00Z",
+        kind: "tool_completed",
+        iteration: null,
+        activity_id: "01890a5d-ac96-774b-bcce-b302099a8057",
+        model_call_id: null,
+        summary: { content: "Tool invocation completed", original_bytes: 25, truncated: false },
+      },
+    }],
+  };
+  fetchInspectorTool
+    .mockRejectedValueOnce(new Error("temporary failure"))
+    .mockResolvedValueOnce({
+      tool: {
+        capability_name: { content: "builtin.echo", original_bytes: 12, truncated: false },
+        arguments: null,
+        result: { content: "retried output", original_bytes: 14, truncated: false },
+        status: "succeeded",
+        duration_ms: null,
+        output_bytes: 14,
+        failure_category: null,
+        failure_summary: null,
+      },
+    });
+
+  await act(async () => root?.render(<InspectorPanel threadId="thread-a" runId="run-tool" />));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+  await act(async () => {
+    document.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click();
+    await Promise.resolve();
+  });
+  assert.match(document.body.textContent || "", /Tool details are unavailable/);
+
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[aria-expanded='true']")?.click(),
+  );
+  await act(async () => {
+    document.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click();
+    await Promise.resolve();
+  });
+
+  assert.equal(fetchInspectorTool.mock.calls.length, 2);
+  assert.match(document.body.textContent || "", /retried output/);
 });
 
 test("activity navigation advances when a pinned run leaves the history window", async () => {
