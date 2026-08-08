@@ -241,7 +241,7 @@ class ScrubArtifactsTests(unittest.TestCase):
             trace = root / "llm-traces" / "case_a.json"
             trace.parent.mkdir()
             trace.write_text(
-                '{"steps":[{"response":{"content":"Bearer relative-secret"}}]}\n',
+                '{"steps":[{"response":{"content":"Bearer relative-secret-token"}}]}\n',
                 encoding="utf-8",
             )
             runner_temp = root / "runner-temp"
@@ -266,6 +266,41 @@ class ScrubArtifactsTests(unittest.TestCase):
                 scrubbed["steps"][0]["response"]["content"],
                 "Bearer <REDACTED>",
             )
+
+    def test_strict_scrub_ignores_bearer_prose_in_tool_descriptions(self) -> None:
+        # Regression for the 2026-08-07 QA 6D-6E lane failure: progressive
+        # tool disclosure records ironclaw.tool_search output in traces, and
+        # the builtin.extension_register_hosted_mcp description legitimately
+        # says "bearer for a static API token or PAT sent as a Bearer token".
+        # Prose after "bearer" is not a credential; only token-shaped strings
+        # (16+ chars of token alphabet) may trip the guardrail.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            trace = root / "traces" / "qa_case.json"
+            trace.parent.mkdir()
+            original = json.dumps(
+                {
+                    "entries": [
+                        {
+                            "content": (
+                                "Choose auth_type from provider documentation: "
+                                "no_auth only for a documented public endpoint, "
+                                "bearer for a static API token or PAT sent as a "
+                                "Bearer token, and oauth for a browser "
+                                "authorization-code flow."
+                            )
+                        }
+                    ]
+                }
+            )
+            trace.write_text(original + "\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertTrue(trace.exists())
+            self.assertEqual(trace.read_text(encoding="utf-8"), original + "\n")
+            self.assertNotIn("Potential secret material", result.stdout)
 
     def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
