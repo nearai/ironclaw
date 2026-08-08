@@ -490,6 +490,14 @@ impl ConversationBindingService for InMemoryConversationServices {
                 external_actor_id: request.external_actor_ref.id().to_string(),
             }
         })?;
+        // Same legacy-row kind-mismatch refusal as resolve: a Direct key can
+        // only collide with a retained pre-per-actor shared row.
+        if binding.route_access.shared && request.route_kind == ConversationRouteKind::Direct {
+            return Err(InboundTurnError::BindingRequired {
+                adapter_kind: request.adapter_kind.as_str().to_string(),
+                external_actor_id: request.external_actor_ref.id().to_string(),
+            });
+        }
         state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
         if !binding
             .route_access
@@ -546,6 +554,13 @@ impl ConversationBindingService for InMemoryConversationServices {
                     external_actor_id: resolve.external_actor_ref.id().to_string(),
                 }
             })?;
+            // Same legacy-row kind-mismatch refusal as resolve/lookup.
+            if current.route_access.shared && resolve.route_kind == ConversationRouteKind::Direct {
+                return Err(InboundTurnError::BindingRequired {
+                    adapter_kind: resolve.adapter_kind.as_str().to_string(),
+                    external_actor_id: resolve.external_actor_ref.id().to_string(),
+                });
+            }
             if current.thread_id != request.expected_thread_id {
                 return Err(InboundTurnError::BindingConflict {
                     thread_id: current.thread_id.to_string(),
@@ -670,6 +685,15 @@ impl ConversationBindingService for InMemoryConversationServices {
                         &request.adapter_installation_id,
                         &request.external_actor_ref,
                     );
+                    // Same legacy-row kind-mismatch refusal as resolve/lookup.
+                    if existing.route_access.shared
+                        && request.route_kind == ConversationRouteKind::Direct
+                    {
+                        return Err(InboundTurnError::AccessDenied {
+                            actor_id: actor_user_id.to_string(),
+                            thread_id: existing.thread_id.to_string(),
+                        });
+                    }
                     if !existing
                         .route_access
                         .allows(&route_actor_key, request.route_kind)
@@ -679,14 +703,6 @@ impl ConversationBindingService for InMemoryConversationServices {
                             thread_id: existing.thread_id.to_string(),
                         });
                     }
-                    if request.route_kind == ConversationRouteKind::Shared {
-                        state.widen_binding_route_access(&binding_key)?;
-                    }
-                    let existing = state
-                        .bindings
-                        .get(&binding_key)
-                        .cloned()
-                        .ok_or(InboundTurnError::StatePoisoned)?;
                     let linked = LinkedConversationBinding {
                         thread_id: existing.thread_id,
                         source_binding_ref: existing.source_binding_ref,
@@ -896,6 +912,20 @@ impl InMemoryConversationServices {
                     .get(&binding_key)
                     .cloned()
                     .ok_or(InboundTurnError::StatePoisoned)?;
+                // A `Direct` request can key-collide only with a legacy
+                // conversation-scoped shared row (pre-per-actor rows carry no
+                // actor component — the Direct key shape). Those rows are
+                // retained-but-unreachable by contract: refuse the kind
+                // mismatch instead of trusting adapters to never re-classify
+                // a conversation's route kind.
+                if binding.route_access.shared
+                    && request.route_kind == ConversationRouteKind::Direct
+                {
+                    return Err(InboundTurnError::BindingRequired {
+                        adapter_kind: request.adapter_kind.as_str().to_string(),
+                        external_actor_id: request.external_actor_ref.id().to_string(),
+                    });
+                }
                 state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
                 if !binding
                     .route_access
@@ -911,9 +941,6 @@ impl InMemoryConversationServices {
                     trusted_agent_id.as_ref(),
                     trusted_project_id.as_ref(),
                 )?;
-                if request.route_kind == ConversationRouteKind::Shared {
-                    state.widen_binding_route_access(&binding_key)?;
-                }
                 state.record_external_event_route(
                     &request.tenant_id,
                     &request.adapter_kind,
@@ -922,11 +949,6 @@ impl InMemoryConversationServices {
                     &external_conversation_identity,
                     &actor_user_id,
                 )?;
-                let binding = state
-                    .bindings
-                    .get(&binding_key)
-                    .cloned()
-                    .ok_or(InboundTurnError::StatePoisoned)?;
                 let resolution =
                     binding.resolution(actor_user_id, binding_epoch, request.tenant_id);
                 (resolution, state.clone())
@@ -1317,30 +1339,6 @@ impl InMemoryState {
         });
     }
 
-    fn widen_binding_route_access(
-        &mut self,
-        binding_key: &BindingKey,
-    ) -> Result<(), InboundTurnError> {
-        let binding = self
-            .bindings
-            .get_mut(binding_key)
-            .ok_or(InboundTurnError::StatePoisoned)?;
-        binding.route_access.allow_shared();
-        if let Some(source_binding) = self
-            .source_bindings
-            .get_mut(binding.source_binding_ref.as_str())
-        {
-            source_binding.route_access.allow_shared();
-        }
-        if let Some(reply_target) = self
-            .reply_targets
-            .get_mut(binding.reply_target_binding_ref.as_str())
-        {
-            reply_target.route_access.allow_shared();
-        }
-        Ok(())
-    }
-
     fn ensure_trusted_scope_not_reinterpreted(
         &self,
         binding: &BindingRecord,
@@ -1635,10 +1633,6 @@ impl ReplyRouteAccess {
             owner_actor_key,
             shared: route_kind == ConversationRouteKind::Shared,
         }
-    }
-
-    fn allow_shared(&mut self) {
-        self.shared = true;
     }
 
     fn allows(&self, actor_key: &ActorKey, route_kind: ConversationRouteKind) -> bool {

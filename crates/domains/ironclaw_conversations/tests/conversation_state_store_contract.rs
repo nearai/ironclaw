@@ -668,6 +668,111 @@ async fn legacy_subject_owned_shared_binding_is_retained_but_unreachable_after_r
         serde_json::Value::String(legacy_thread_id.to_string()),
         "the legacy row still points at its original thread"
     );
+
+    // A `Direct` request builds the same actor-less key shape a legacy shared
+    // row deserializes to. Even for the row's ORIGINAL owner actor — the one
+    // requester `route_access` would admit — the route-kind mismatch is
+    // refused, so no adapter re-classification can silently resurrect the
+    // legacy subject-owned thread as somebody's DM.
+    let direct_probe = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-shared"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-direct-probe",
+    );
+    let refused = reopened
+        .resolve_or_create_binding(direct_probe)
+        .await
+        .expect_err("a Direct request must not reach the legacy shared row");
+    assert!(
+        matches!(refused, InboundTurnError::BindingRequired { .. }),
+        "route-kind mismatch fails closed as BindingRequired, got {refused:?}"
+    );
+}
+
+/// The forward half of the migration contract: NEW per-actor shared bindings
+/// survive a restart. A deserialize-side regression on
+/// `BindingKey.shared_actor_user_id` (a rename, a `skip_deserializing`) would
+/// orphan every group thread on every reopen — each participant silently
+/// re-binding a fresh thread — without failing the legacy-retention test
+/// above, which guards the serialize side only.
+#[tokio::test]
+async fn per_actor_shared_bindings_keep_their_threads_across_reopen() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    for (external, canonical) in [
+        ("telegram-user-alice", "alice"),
+        ("telegram-user-bob", "bob"),
+    ] {
+        services
+            .pair_external_actor(
+                tenant_id("tenant-a"),
+                telegram(),
+                default_installation(),
+                external_actor(external),
+                user_id(canonical),
+            )
+            .await
+            .expect("pair actor");
+    }
+    let mut alice_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-alice"),
+        external_conversation("group-chat-1"),
+        "event-shared-alice-seed",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let alice_seeded = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice's shared resolve binds her own thread");
+    drop(services);
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("reopen");
+    let mut alice_again = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-alice"),
+        external_conversation("group-chat-1"),
+        "event-shared-alice-after-reopen",
+    );
+    alice_again.route_kind = ConversationRouteKind::Shared;
+    let alice_resolved = reopened
+        .resolve_or_create_binding(alice_again)
+        .await
+        .expect("alice's shared resolve after reopen");
+    assert_eq!(
+        alice_resolved.turn_scope.thread_id, alice_seeded.turn_scope.thread_id,
+        "the same (conversation, actor) must resolve the same thread across a restart"
+    );
+
+    let mut bob_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-bob"),
+        external_conversation("group-chat-1"),
+        "event-shared-bob-after-reopen",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+    let bob_resolved = reopened
+        .resolve_or_create_binding(bob_request)
+        .await
+        .expect("bob's shared resolve after reopen");
+    assert_ne!(
+        bob_resolved.turn_scope.thread_id, alice_resolved.turn_scope.thread_id,
+        "a second actor in the same conversation still gets their own thread"
+    );
+    assert_eq!(
+        bob_resolved
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("bob"),
+        "each per-actor thread is owned by its own invoker"
+    );
 }
 
 /// Regression for the `ScopedFilesystem` migration: two
