@@ -124,3 +124,6 @@ mutants.out.old/
 # silently exclude nested `app/` directories (e.g. crates/*/frontend/src/app/).
 # Prefer .git/info/exclude for personal working directories.
 /app/
+
+# Skill bundles staged into a workspace at activation. Build output, never source.
+.skills/
