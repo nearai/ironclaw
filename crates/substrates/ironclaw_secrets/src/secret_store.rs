@@ -31,7 +31,7 @@
 //!
 //! Encryption-at-rest currently lives **inside this store** rather than as a
 //! generic [`EncryptedBackend`] backend decorator. The
-//! [`ironclaw_filesystem::CLAUDE.md`](../ironclaw_filesystem/CLAUDE.md) invariant
+//! [`ironclaw_filesystem::CONTRACT.md`](../ironclaw_filesystem/CONTRACT.md) invariant
 //! `5` describes the eventual destination: a backend wrapper that encrypts
 //! `Entry::body` plus any `IndexValue::Bytes` projection. Until that decorator
 //! lands, the same [`SecretsCrypto`] used by the libSQL/Postgres backends is
@@ -1411,7 +1411,7 @@ fn is_not_found(error: &FilesystemError) -> bool {
 // belt-and-suspenders so an admin-tier query can filter explicitly by
 // tenant, and a path-rewriting bug surfaces as a query-time mismatch
 // rather than silent cross-tenant leakage. See
-// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 
 /// Index key under which the tenant id is projected on every secret /
 /// credential record write. Production secrets/credentials never read by
@@ -2816,7 +2816,7 @@ mod tests {
 
     /// Defense-in-depth regression for the tenant-isolation indexed
     /// projection (see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+    /// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
     /// every secret/lease/account/session write decorates its `Entry`
     /// with a `tenant_id` projection so an admin-tier query can filter
     /// explicitly by tenant and a path-rewriting bug surfaces as a

@@ -6,7 +6,7 @@
 //! a repeated install of the same id does) are reviewable and testable in
 //! one place instead of interleaved with the lifecycle I/O.
 //!
-//! Contract (`docs/plans/2026-07-01-private-tool-installs.md`): lifecycle
+//! Contract (`docs/internal/plans/2026-07-01-private-tool-installs.md`): lifecycle
 //! installs are caller-owned. Any number of callers, including the configured
 //! operator, can independently install the same tool by joining the one
 //! installation row's member set. Tenant-wide deployment state is owned by

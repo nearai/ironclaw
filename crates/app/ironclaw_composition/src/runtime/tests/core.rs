@@ -50,15 +50,15 @@ impl ironclaw_network::NetworkHttpEgress for SlackDmOpenNetworkEgress {
 }
 
 #[test]
-fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
+fn persistent_grantee_resolver_maps_notification_channels_set_to_synthetic_provider() {
     let registry = Arc::new(ironclaw_extension_registry::ExtensionRegistry::new());
     let resolver =
         super::RegistryPersistentApprovalGranteeResolver::new(registry).expect("resolver builds");
     let capability_id =
-        CapabilityId::new(crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID)
+        CapabilityId::new(ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID)
             .expect("capability id");
     let expected_provider =
-        crate::outbound::outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        ironclaw_assistant::outbound_delivery_synthetic_provider().expect("synthetic provider id");
 
     assert_eq!(
         ironclaw_assistant::PersistentApprovalGranteeResolver::persistent_approval_grantee(
@@ -323,6 +323,7 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
     let cfg = super::skill_activation_selector_config(
         false,
         ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         !cfg.regex_activation_enabled,
@@ -343,10 +344,55 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         cfg.regex_activation_enabled,
         "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+    );
+}
+
+/// Every branch of the `IRONCLAW_REBORN_SKILL_INJECTION` decision, including the unset one --
+/// previously unreachable, since unsetting the key in-process races the other tests here.
+#[test]
+fn skill_injection_mode_resolves_every_env_branch() {
+    use ironclaw_loop_host::SkillInjectionMode;
+
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotPresent)),
+            Ok(mode) if mode == super::DEFAULT_SKILL_INJECTION_MODE
+        ),
+        "an unset key must resolve to the product default, not an error"
+    );
+    assert!(matches!(
+        super::skill_injection_mode_from_env_value(Ok("full".to_string())),
+        Ok(SkillInjectionMode::Full)
+    ));
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok("  Listing  ".to_string())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "values are trimmed and case-insensitive"
+    );
+    assert!(
+        matches!(
+            super::skill_injection_mode_from_env_value(Ok(String::new())),
+            Ok(SkillInjectionMode::Listing)
+        ),
+        "an empty value is the same as asking for the listing, not an error"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Ok("bodies".to_string())).is_err(),
+        "an unrecognized mode must fail loudly rather than silently pick one"
+    );
+    assert!(
+        super::skill_injection_mode_from_env_value(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("full")
+        )))
+        .is_err(),
+        "an unreadable value must not be mistaken for an unset key"
     );
 }
 
@@ -355,6 +401,7 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -365,17 +412,45 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
 /// Wiring guard for the `IRONCLAW_REBORN_SKILL_INJECTION` env switch: the
 /// parsed injection mode must reach
 /// [`SkillActivationSelectorConfig::injection_mode`] unchanged (not get
-/// clobbered by the `..default()` spread), and the parser must default to
-/// `listing` while still accepting the `full` legacy escape hatch.
+/// clobbered by the `..default()` spread). The parser still maps an explicit
+/// empty value to `listing`; the ENV-ABSENT default is `full` (see
+/// `DEFAULT_SKILL_INJECTION_MODE`).
 #[test]
 fn standalone_selector_config_propagates_injection_mode() {
     for mode in [
         ironclaw_loop_host::SkillInjectionMode::Listing,
         ironclaw_loop_host::SkillInjectionMode::Full,
     ] {
-        let cfg = super::skill_activation_selector_config(true, mode);
+        let cfg =
+            super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
         assert_eq!(cfg.injection_mode, mode);
     }
+}
+
+/// Guards the injection default.
+///
+/// Currently `Listing`. The measurement argues for `Full` (79.8% -> 85.6% on the
+/// 31-task SkillsBench subset, nearai/benchmarks#287, because the model reads the
+/// one-line listing and then opens a skill in 0 of 30 runs), but three local-dev
+/// tests HANG under `Full` — they drive a mock that expects the listing candidate —
+/// so the flip is a maintainer call and `Full` ships as an opt-in switch.
+///
+/// If you flip `DEFAULT_SKILL_INJECTION_MODE`, update those three tests too:
+/// `local_dev_skill_activate_tool_loads_selected_skill_context`,
+/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
+/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`.
+#[test]
+fn skill_injection_mode_default_is_documented_and_guarded() {
+    assert_eq!(
+        super::DEFAULT_SKILL_INJECTION_MODE,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
+        "flipping this default changes three local-dev expectations; see the doc comment"
+    );
+    // and the opt-in path must still resolve
+    assert_eq!(
+        super::skill_injection_mode_from("full").expect("full parses"),
+        ironclaw_loop_host::SkillInjectionMode::Full
+    );
 }
 
 #[test]
@@ -578,9 +653,9 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
 use ironclaw_assistant::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
     LifecycleReadinessBlocker, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
-    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
-    RebornSetupExtensionResponse, RebornSkillListResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND, approval_gate_ref,
+    RebornExtensionCredentialSetup, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
@@ -611,7 +686,7 @@ use ironclaw_loop_host::{
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedToolResultContent, HostSkillContextBuildError,
     HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
-    SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
+    SubagentKindId, SubagentThreadKind, SubagentThreadMetadata, ToolDisclosureMode,
 };
 use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
@@ -650,6 +725,7 @@ use super::{RebornSkillActivationSource, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const PRODUCTION_SHAPED_BUILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
     runtime.turn_scheduler.stop_for_test().await;
@@ -690,6 +766,11 @@ struct ToolCallingGateway {
     calls: StdMutex<usize>,
     stream_model_calls: StdMutex<usize>,
     requests: StdMutex<Vec<HostManagedModelRequest>>,
+}
+
+#[derive(Debug, Default)]
+struct SandboxShellCallingGateway {
+    calls: StdMutex<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -908,6 +989,97 @@ impl HostManagedModelGateway for ToolCallingGateway {
     }
 }
 
+#[async_trait]
+impl HostManagedModelGateway for SandboxShellCallingGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "expected capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("shell gateway lock poisoned");
+            let call_index = *calls;
+            *calls += 1;
+            call_index
+        };
+        if call_index == 1 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                .expect("second model call should include shell result");
+            assert!(
+                tool_result.content.contains("railway-sandbox-marker"),
+                "shell result should come from the configured sandbox transport: {}",
+                tool_result.content
+            );
+            let envelope: serde_json::Value = serde_json::from_str(&tool_result.content)
+                .expect("tool result should be a structured reference envelope");
+            let preview = envelope["model_observation"]["detail"]["preview"]
+                .as_str()
+                .expect("tool result should include an inline preview");
+            let shell_output: serde_json::Value =
+                serde_json::from_str(preview).expect("shell preview should be structured JSON");
+            assert_eq!(
+                shell_output["sandboxed"],
+                serde_json::json!(true),
+                "model-visible shell result must report sandbox execution"
+            );
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "sandbox shell ok",
+            ));
+        }
+
+        let surface = capabilities
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .map_err(model_capability_error)?;
+        let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
+            .expect("shell capability id");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id == shell_id),
+            "builtin shell must be visible for a sandboxed hosted profile"
+        );
+        let shell_tool = capabilities
+            .tool_definitions()
+            .map_err(model_capability_error)?
+            .into_iter()
+            .find(|definition| definition.capability_id == shell_id)
+            .expect("shell provider tool definition");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("provider-turn-shell".to_string()),
+                id: "shell-call-1".to_string(),
+                name: shell_tool.name,
+                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_capability_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
 /// A long echo argument, sized well over `TOOL_RESULT_RECORD_READ_MAX_BYTES`
 /// (not just the old hardcoded 2KiB), so the default-observer test can
 /// prove the payload is truncated before the observer sees it.
@@ -1039,9 +1211,9 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
             let observation: serde_json::Value =
                 serde_json::from_str(&tool_result.content).expect("result_read observation");
             let detail = &observation["model_observation"]["detail"];
-            assert_ne!(
+            assert_eq!(
                 detail["result_ref"], observation["result_ref"],
-                "result_read replay must retain the original result reference, not its own output ref"
+                "result_read replay must expose only the original pageable result reference"
             );
             assert!(
                 detail["total_bytes"]
@@ -2745,16 +2917,14 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2807,16 +2977,14 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2880,18 +3048,17 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-observer-reject-tenant".to_string(),
         agent_id: "runtime-observer-reject-agent".to_string(),
@@ -2972,6 +3139,126 @@ impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTra
             duration: Duration::ZERO,
         })
     }
+}
+
+#[derive(Debug, Default)]
+struct ShellRecordingSandboxTransport {
+    requests: StdMutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
+    shutdown_calls: AtomicUsize,
+}
+
+#[test]
+fn user_sandbox_shutdown_error_preserves_runtime_process_source() {
+    use std::error::Error as _;
+
+    let source = ironclaw_host_api::process::RuntimeProcessError::ExecutionFailed(
+        "sanitized checkpoint failure".to_string(),
+    );
+    let error = super::RebornRuntimeError::UserSandboxShutdown(source.clone());
+
+    assert_eq!(
+        error.source().map(ToString::to_string),
+        Some(source.to_string())
+    );
+}
+
+#[async_trait]
+impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        request: ironclaw_host_api::process::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
+    > {
+        self.requests
+            .lock()
+            .expect("sandbox request lock poisoned")
+            .push(request);
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
+            output: "railway-sandbox-marker".to_string(),
+            saved_output: None,
+            exit_code: 0,
+            // The trusted process adapter, rather than a provider transport,
+            // owns this provenance bit and must normalize it to true.
+            sandboxed: false,
+            duration: Duration::ZERO,
+        })
+    }
+
+    async fn shutdown(&self) -> Result<(), ironclaw_host_api::process::RuntimeProcessError> {
+        self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(SandboxShellCallingGateway::default());
+    let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+            "runtime-railway-shell-owner",
+            root.path().join("sandboxed"),
+        )
+        .with_runtime_policy(
+            crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
+                .expect("hosted sandbox policy resolves"),
+        )
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(sandbox_transport.clone()),
+        ))),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-railway-shell-tenant".to_string(),
+        agent_id: "runtime-railway-shell-agent".to_string(),
+        source_binding_id: "runtime-railway-shell-source".to_string(),
+        reply_target_binding_id: "runtime-railway-shell-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime =
+        tokio::time::timeout(PRODUCTION_SHAPED_BUILD_TIMEOUT, build_reborn_runtime(input))
+            .await
+            .expect("sandboxed Railway runtime build should finish")
+            .expect("sandboxed Railway runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
+    let reply = tokio::time::timeout(
+        RUNTIME_SEND_TIMEOUT,
+        runtime.send_user_message(&conversation, "run the shell marker"),
+    )
+    .await
+    .expect("sandbox shell turn should finish")
+    .expect("sandbox shell turn succeeds");
+
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("sandbox shell ok"));
+    {
+        let requests = sandbox_transport
+            .requests
+            .lock()
+            .expect("sandbox request lock poisoned");
+        assert_eq!(
+            requests.len(),
+            1,
+            "shell must use the sandbox transport once"
+        );
+        assert_eq!(requests[0].command, "printf railway-sandbox-marker");
+    }
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, runtime.shutdown())
+        .await
+        .expect("runtime shutdown should finish")
+        .expect("runtime shutdown");
+    assert_eq!(sandbox_transport.shutdown_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3648,6 +3935,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
         )
         .with_local_runtime_confirmed_host_home_root(host_home),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-auth-gate-tenant".to_string(),
         agent_id: "runtime-auth-gate-agent".to_string(),
@@ -3829,6 +4117,7 @@ async fn cancel_run_propagates_to_subagent_children() {
                     subagent_kind: SubagentKindId::new("general").unwrap(),
                     mode: SpawnSubagentMode::Blocking,
                     result_ref,
+                    spawn_provider_call_id: None,
                     handoff: None,
                     parent_run_context: parent_run_context.clone(),
                     gate_ref: ironclaw_host_api::turn::TurnGateRef::new(
@@ -3925,6 +4214,7 @@ async fn standalone_runtime_exposes_host_runtime_capabilities_to_model_calls() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-tools-tenant".to_string(),
         agent_id: "runtime-tools-agent".to_string(),
@@ -4069,6 +4359,7 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-trajectory-tenant".to_string(),
         agent_id: "runtime-trajectory-agent".to_string(),
@@ -4145,6 +4436,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-preview-tenant".to_string(),
         agent_id: "runtime-preview-agent".to_string(),
@@ -5003,6 +5295,7 @@ async fn standalone_runtime_maps_workspace_to_configured_root() {
         .with_local_runtime_workspace_root(workspace_root.path().to_path_buf())
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-workspace-tenant".to_string(),
         agent_id: "runtime-workspace-agent".to_string(),
@@ -5635,7 +5928,7 @@ async fn standalone_webui_bundle_uses_lifecycle_product_service_for_setup_extens
 }
 
 #[tokio::test]
-async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
+async fn standalone_webui_bundle_exposes_outbound_delivery_targets_view() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui outbound ok".to_string(),
@@ -5669,30 +5962,6 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
         None,
     );
 
-    let cleared = invoke_product_capability(
-        bundle.as_ref(),
-        caller.clone(),
-        ironclaw_assistant::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-        serde_json::json!({}),
-    )
-    .await
-    .expect("outbound preference clear uses composed service");
-    assert!(matches!(cleared, Resolution::Done(_)));
-    let cleared_page = query_product_surface_page(
-        bundle.as_ref(),
-        caller.clone(),
-        ironclaw_product_contracts::views::RebornViewQuery {
-            view_id: ironclaw_assistant::OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-            params: serde_json::json!({}),
-            cursor: None,
-        },
-    )
-    .await
-    .expect("outbound preference read-back uses composed view");
-    let cleared_preferences: RebornOutboundPreferencesResponse =
-        serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
-    assert!(cleared_preferences.final_reply_target.is_none());
-
     let targets_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
@@ -5708,9 +5977,19 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     .expect("outbound target listing uses composed service");
     let targets: ironclaw_assistant::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
+    // Behavior change (route_current stack deletion): the host no longer seeds a
+    // `builtin:web_app` pseudo-target, so a runtime with no channel extension
+    // active composes an EMPTY catalog. "Keep it in the app" is now the absence
+    // of a delivery call, not a destination the model can address. The view must
+    // still resolve and project a well-formed (empty) catalog rather than error.
     assert!(
-        !targets.targets.is_empty(),
-        "standalone runtime identity should expose at least one composed outbound target"
+        targets.targets.is_empty(),
+        "with no channel extension active the composed catalog must be empty; saw {:?}",
+        targets
+            .targets
+            .iter()
+            .map(|option| option.target.target_id.as_str())
+            .collect::<Vec<_>>()
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -6527,6 +6806,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-multi-tool-surface-tenant".to_string(),
         agent_id: "runtime-multi-tool-surface-agent".to_string(),

@@ -8,7 +8,7 @@
 #
 # Usage:
 #   ./scripts/mutation-audit.sh -p ironclaw_event_projections \
-#       crates/ironclaw_event_projections/src/runtime_projection.rs
+#       crates/events/ironclaw_event_projections/src/runtime_projection.rs
 #   ./scripts/mutation-audit.sh -p ironclaw_capabilities          # whole package
 #
 # Options (env vars):

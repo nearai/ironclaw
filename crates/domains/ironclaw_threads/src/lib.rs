@@ -6,7 +6,7 @@
 //! Backend selection (libSQL, PostgreSQL, in-memory, local-disk) is made at
 //! the `RootFilesystem` layer — the consumer-store level no longer carries
 //! per-backend impls. See
-//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//! `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
 mod attachment_context;
@@ -51,6 +51,7 @@ pub use contract::{
     ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
     ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    effective_tool_result_read_max_bytes,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};

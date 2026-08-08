@@ -30,6 +30,14 @@ pub enum ConversationKind {
     Other,
 }
 
+/// Portable ordering for a cross-conversation message search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMessagesSort {
+    Relevance,
+    Timestamp,
+}
+
 /// Input parameters for the Slack personal (user-token) tool.
 ///
 /// `JsonSchema` is derived so the advertised tool schema mirrors the
@@ -49,6 +57,10 @@ pub enum SlackUserAction {
         /// own messages (NOT `from:@me` — there is no user named "me"), plus
         /// `from:@username`, `in:#channel`, `after:2024-01-01`, `has:link`.
         query: String,
+        /// Result ordering. Relevance is Slack's default; timestamp is
+        /// explicitly mapped to newest-first for latest-message questions.
+        #[serde(default)]
+        sort: Option<SearchMessagesSort>,
         /// Maximum number of matches to return (default: 20, max: 100).
         #[serde(default)]
         limit: Option<u32>,

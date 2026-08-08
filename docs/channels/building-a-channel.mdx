@@ -320,7 +320,9 @@ wasm-tools component new target/wasm32-wasip2/release/my_channel.wasm -o wasm/my
 wasm-tools strip wasm/my_channel.wasm -o wasm/my_channel.wasm
 ```
 
-The extension is installed through the IronClaw extension lifecycle. For host-bundled channels, add the manifest and WASM to `crates/ironclaw_first_party_extensions/assets/<channel>/` and register it in `crates/ironclaw_extension_host/src/available_extensions.rs`. For local development, place the extension directory under `<reborn-home>/local-dev/system/extensions/<channel>/`.
+The extension is installed through the IronClaw extension lifecycle. For host-bundled channels, add the package as a self-contained directory `crates/extensions/packages/<channel>/` (manifest + schemas + prompts + WASM) with a package module `crates/extensions/ironclaw_extension_support/src/packages/<channel>.rs` and its row in `PACKAGES` in `.../src/packages/mod.rs` — there is no separate registration file.
+
+At runtime every package is discovered at the virtual package root `/system/extensions/<extension-id>/manifest.toml`. Users install discovered packages by ID: `ironclaw extension search` lists them, and `ironclaw extension install <extension-id>` installs one — it takes an extension ID from search results, not a filesystem path. The WebUI Extensions area exposes the same list/install/import/remove lifecycle. For local development, place the extension directory under `<reborn-home>/local-dev/system/extensions/<channel>/`.
 
 ---
 

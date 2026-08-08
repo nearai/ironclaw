@@ -3549,6 +3549,8 @@ dependencies = [
  "syn 3.0.3",
  "tempfile",
  "toml 1.1.3+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3780,6 +3782,7 @@ dependencies = [
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
+ "ironclaw_sandbox",
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_extension",
@@ -4337,6 +4340,7 @@ dependencies = [
  "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_memory",
+ "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_openai_compat",
  "ironclaw_outbound",
@@ -5186,6 +5190,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.7.0",
  "tracing",
+ "tracing-subscriber",
  "url",
  "urlencoding",
  "uuid",

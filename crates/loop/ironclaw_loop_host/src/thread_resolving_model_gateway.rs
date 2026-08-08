@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
-    HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
-    ThreadContextWindowCache,
+    HostManagedPromptDiagnosticSink, HostSkillContextSource, LoopAttachmentReadPort,
+    ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
@@ -40,6 +40,7 @@ where
     pub prompt_authority: LoopPromptBundleAuthority,
     pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 }
 
 /// Resolves a thread's transcript into a host-managed model request.
@@ -48,8 +49,8 @@ where
 /// this port implementation out of `ironclaw_turn_runner`, and turning its
 /// `pub(super)` fields into `pub` ones to keep the caller's struct literal
 /// working would have let any downstream crate assemble a gateway with no
-/// host-owned construction path (root `CLAUDE.md`: "module-specific
-/// initialization must live in the owning crate as a public factory").
+/// host-owned construction path (root `AGENTS.md`: "module-specific
+/// initialization stays behind factories or builders in the owning crate").
 pub struct ThreadResolvingLoopModelGateway<S, G>
 where
     S: SessionThreadService + ?Sized,
@@ -66,6 +67,7 @@ where
     prompt_authority: LoopPromptBundleAuthority,
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -86,6 +88,7 @@ where
             prompt_authority,
             context_window_cache,
             attachment_read_port,
+            prompt_diagnostic_sink,
         } = parts;
         Self {
             thread_service,
@@ -99,6 +102,7 @@ where
             prompt_authority,
             context_window_cache,
             attachment_read_port,
+            prompt_diagnostic_sink,
         }
     }
 }
@@ -160,6 +164,9 @@ where
         }
         if let Some(port) = self.attachment_read_port.as_ref() {
             model_port = model_port.with_attachment_read_port(Arc::clone(port));
+        }
+        if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
+            model_port = model_port.with_prompt_diagnostic_sink(Arc::clone(sink));
         }
         if let Some(progress_sink) = progress_sink {
             model_port = model_port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {

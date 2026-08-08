@@ -11,6 +11,9 @@
 
 use std::sync::Arc;
 
+use ironclaw_filesystem::RootFilesystem;
+
+use super::super::builder::StorageMode;
 use super::super::harness::HostRuntimeCapabilityHarness;
 use super::super::harness::options::ToolsProfile;
 use super::{
@@ -65,6 +68,15 @@ impl RebornIntegrationGroup {
         Self::builder().builtin_tools().await
     }
 
+    /// Core built-ins plus the native memory lifecycle over one shared libSQL
+    /// composite. This is the production-backend shape required for proactive
+    /// cross-thread recall tests.
+    pub async fn builtin_tools_with_native_memory_libsql() -> HarnessResult<Self> {
+        Self::builder()
+            .builtin_tools_with_native_memory_libsql()
+            .await
+    }
+
     /// Group with the core built-in tools but NO memory package registered —
     /// the `Disabled` memory-binding shape: zero `ironclaw.memory.*` tools
     /// reach the model's tool surface.
@@ -101,6 +113,14 @@ impl RebornIntegrationGroup {
     /// path (extension-runtime P5, DEL-10).
     pub async fn extension_delivery() -> HarnessResult<Self> {
         Self::builder().extension_delivery().await
+    }
+
+    /// [`Self::extension_delivery`] plus `builtin.write_file`, so a background
+    /// run can park on a REAL approval gate while its notification channels
+    /// stay deliverable. Auto-approve is ON; gate the write per-scenario with
+    /// `set_ask_each_time_override_for_test`.
+    pub async fn extension_delivery_with_gated_write() -> HarnessResult<Self> {
+        Self::builder().extension_delivery_with_gated_write().await
     }
 
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
@@ -327,6 +347,38 @@ impl RebornIntegrationGroupBuilder {
         self.build_with_capability(capability).await
     }
 
+    /// Build memory tools and host-managed lifecycle consumers over the same
+    /// libSQL filesystem. A separate constructor keeps the ordinary
+    /// core-builtins tests lightweight and makes a backend downgrade in the
+    /// recall scenario impossible to miss.
+    pub async fn builtin_tools_with_native_memory_libsql(
+        mut self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        self.storage = StorageMode::LibSql;
+        let base = self.build_base().await?;
+        let user_id = base.canonical_subject_user()?;
+        let filesystem: Arc<dyn RootFilesystem> = base.composite.clone();
+        let provider: Arc<dyn ironclaw_memory::MemoryService> = Arc::new(
+            ironclaw_memory_native::NativeMemoryService::from_filesystem(
+                Arc::clone(&filesystem),
+                None,
+            ),
+        );
+        let lifecycle =
+            ironclaw_host_runtime::memory_native_extension::native_memory_provider_bundle()?
+                .lifecycle;
+        self.bound_memory = Some((provider, lifecycle));
+
+        let host_runtime =
+            super::super::harness::profiles::core_builtin::core_builtin_tools_over_shared_filesystem(
+                Arc::clone(&base.turn_root),
+                Arc::clone(&base.composite),
+                user_id,
+            )?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
     /// Build a core built-in tools group whose runtime registry carries NO
     /// memory package — the `Disabled` memory-binding shape. See
     /// [`RebornIntegrationGroup::builtin_tools_without_memory`].
@@ -474,6 +526,40 @@ impl RebornIntegrationGroupBuilder {
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a delivery-plus-gated-write group. See
+    /// [`RebornIntegrationGroup::extension_delivery_with_gated_write`]. Mirrors
+    /// [`Self::extension_delivery`] exactly (same base, same run-owner-scoped
+    /// dispatch, same channel connection) — only the tools profile differs.
+    pub async fn extension_delivery_with_gated_write(
+        mut self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::extension::extension_delivery_with_gated_write_tools_profile()?,
+            &base,
+        )
+        .await?
+        .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime.reborn_services_for_test().ok_or(
+                    "extension_delivery_with_gated_write harness is missing its RebornServices bundle",
+                )?,
                 ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope

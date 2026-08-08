@@ -1,5 +1,5 @@
 /// Test double substituting the production `HostRuntime` impl
-/// (`DefaultHostRuntime`, `crates/ironclaw_host_runtime/src/production.rs`).
+/// (`DefaultHostRuntime`, `crates/kernel/ironclaw_host_runtime/src/production.rs`).
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

@@ -125,7 +125,10 @@ mod tests {
     fn secret_redaction_growth_past_limit_returns_whole_marker() {
         let filler = "x".repeat(WASM_DIAGNOSTIC_MAX_BYTES - DETECTABLE_SECRET.len());
         let at_limit_with_trailing_secret = format!("{filler}{DETECTABLE_SECRET}");
-        assert_eq!(at_limit_with_trailing_secret.len(), WASM_DIAGNOSTIC_MAX_BYTES);
+        assert_eq!(
+            at_limit_with_trailing_secret.len(),
+            WASM_DIAGNOSTIC_MAX_BYTES
+        );
 
         let sanitized = sanitize_wasm_diagnostic(&at_limit_with_trailing_secret);
 

@@ -39,7 +39,7 @@ reviews:
     - "!README.zh-CN.md"
     - "!docs/zh/**"
     - "!docs/images/**"
-    - "!docs/architecture-video/package-lock.json"
+    - "!docs/internal/architecture-video/package-lock.json"
     - "!tests/test-pages/**" # saved web pages (linguist-generated)
     - "!tests/fixtures/**" # recorded LLM/gateway traces
     - "!tests/snapshots/**" # insta snapshots — the replay gate owns these

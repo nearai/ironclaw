@@ -1,36 +1,55 @@
-# Agent Map — ironclaw_threads
+# ironclaw_threads — working rules
 
-## Start Here
+Orientation (what this crate is, surface, deps, tests) lives in
+[`README.md`](./README.md); the family boundary in
+[`../AGENTS.md`](../AGENTS.md). This file is the canonical crate-local rules —
+consolidated 2026-08-05 from the former `CLAUDE.md` guardrails (now a pointer)
+per `docs/reborn/guidance-conventions.md` rule 1.
 
-- Read `CLAUDE.md` first; it is the crate-local guardrail file.
-- Read `Cargo.toml` for backend feature shape.
-- Use these neighboring contracts before changing behavior:
-  - `crates/kernel/ironclaw_turns/AGENTS.md`
-  - `crates/domains/ironclaw_conversations/AGENTS.md`
-  - `crates/domains/ironclaw_memory/AGENTS.md`
+## Invariants
 
-## What This Crate Owns
-
-- Canonical Reborn `session_threads` and transcript service contracts.
-- Thread identifiers, transcript message contracts, message ordering/status/redaction semantics, context-window reads.
-- In-memory/fake stores and feature-gated durable contract stores.
-- Stable turn/run references supplied by `TurnCoordinator`.
-
-## Do Not Move In Here
-
-- V1 `Agent`, V1 `SessionManager`, product/channel adapters, raw runtime dispatchers, provider clients, capability execution internals, or workspace/memory services.
-- Turn/run lifecycle authority; this crate stores references, not lifecycle decisions.
-- Raw secrets, host paths, raw runtime/tool payloads, or private backend diagnostics as ordinary transcript content.
-- Product delivery policy or model/provider behavior.
+- Own canonical Reborn `session_threads`, transcript message contracts,
+  message ordering/status/redaction semantics, context-window reads, and the
+  in-memory plus filesystem-backed durable contract stores — nothing else.
+- Keep turn/run lifecycle authority out of this crate; store only stable
+  turn/run references supplied by `TurnCoordinator`. Do not infer message
+  status from nullable turn/run refs.
+- Preserve message identity and per-thread sequence across
+  redaction/deletion.
+- Use policy-filtered read APIs for model-visible context; never expose raw
+  secrets, host paths, raw runtime/tool payloads, or private backend
+  diagnostics as ordinary transcript content.
+- Serve thread lists from the declared scope/activity/thread-id projection
+  with a bounded keyset cursor. Do not list the source directory, replay all
+  thread rows, offset-walk the projection, or build a process-wide
+  thread-list cache on requests or normal startup. Projection backfill is
+  explicit migration work.
+- Message and summary projections lead with `thread_id`; sequence and status
+  reads bind that partition before ordering. Existing rows are repaired only
+  through `migrate_transcript_indexes_for_scope`, never through a read
+  fallback.
+- Do not depend on product/channel adapters, raw runtime dispatchers,
+  provider clients, capability execution internals, or workspace/memory
+  services — the `BoundaryRule { crate_name: "ironclaw_threads" }` in
+  `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
+  enforces the list. `ironclaw_safety` is deliberately permitted (validating
+  provider-originated replay metadata before persistence).
+- Never declare a type name `ironclaw_conversations` also declares —
+  `conversations_and_threads_declare_no_name_in_common`
+  (`reborn_conversations_threads_attachments.rs`) fails on the first
+  collision.
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_threads`
-- Focused contract checks: `session_thread_contract`, `db_session_thread_contract`.
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
+- Focused contract suites: `session_thread_contract`,
+  `filesystem_session_thread_contract`, `filesystem_message_range_contract`
+- Boundary check after dependency/API changes:
+  `cargo test -p ironclaw_architecture_tests`
 
-## Agent Notes
+## Neighbors to read before changing behavior
 
-- Preserve message identity and per-thread sequence across redaction/deletion.
-- Use policy-filtered read APIs for model-visible context.
-- Do not infer message status from nullable turn/run refs.
+- `crates/kernel/ironclaw_turns/AGENTS.md` (turn/run reference semantics)
+- `crates/domains/ironclaw_conversations/AGENTS.md` (binding vs transcript —
+  they own the binding, this crate owns the content)
+- `crates/domains/ironclaw_memory/AGENTS.md`

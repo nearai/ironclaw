@@ -39,7 +39,7 @@ impl MasterKeyProvisionOutcome {
 /// dotfile, no keychain key); no-op if either already exists. Never fails
 /// `execute()` — an unavailable/denied keychain reports
 /// [`MasterKeyProvisionOutcome::Suppressed`], matching the resolver's own
-/// env/dotfile fallback (`crates/ironclaw_composition/src/factory.rs`).
+/// env/dotfile fallback (`crates/app/ironclaw_composition/src/factory.rs`).
 ///
 /// Accepted risk (TOCTOU): the `dotfile_path.exists()` check below and the
 /// keychain's own internal `has_master_key()` check

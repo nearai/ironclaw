@@ -78,6 +78,56 @@ async fn install_list_and_remove_user_skills_through_scoped_mounts() {
     assert_eq!(list_skills(&context).await.unwrap().len(), 1);
 }
 
+/// A bundle carrying `scripts/` must report it, so the Skills page can show what a skill contains.
+///
+/// This PR is what lets an agent author a skill containing a script; without this the result is
+/// invisible. The WebUI has rendered a `scripts/` chip since #6194 and the wire field has existed
+/// since #7002, but the server hardcoded `has_scripts: false`, so a scripted skill was
+/// indistinguishable from a prose-only one -- including `portfolio`, a bundled skill shipping four
+/// Python scripts, which displayed as having none.
+#[tokio::test]
+async fn a_skill_bundle_with_scripts_reports_it() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/with-scripts/SKILL.md",
+        skill_md("with-scripts", "runs a script", "PROMPT"),
+    )
+    .await;
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/with-scripts/scripts/run.py",
+        "print('hi')".to_string(),
+    )
+    .await;
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/plain/SKILL.md",
+        skill_md("plain", "instructions only", "PROMPT"),
+    )
+    .await;
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let listed = list_skills(&context).await.expect("skills list");
+    let with_scripts = listed
+        .iter()
+        .find(|skill| skill.name == "with-scripts")
+        .expect("the scripted skill is listed");
+    let plain = listed
+        .iter()
+        .find(|skill| skill.name == "plain")
+        .expect("the prose-only skill is listed");
+
+    assert!(
+        with_scripts.has_scripts,
+        "a bundle with scripts/ must report has_scripts, or the Skills page cannot show it"
+    );
+    assert!(
+        !plain.has_scripts,
+        "a prose-only skill must not claim scripts; the chip would be a lie"
+    );
+}
+
 #[tokio::test]
 async fn install_rejects_name_mismatch() {
     let filesystem = Arc::new(InMemoryBackend::default());

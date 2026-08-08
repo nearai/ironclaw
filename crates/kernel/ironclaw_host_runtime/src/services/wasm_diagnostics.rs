@@ -60,7 +60,7 @@ mod tests {
     use std::future::Future;
     use std::sync::{Arc, Mutex};
 
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
         HostApiContractRegistry, ManifestSource,
     };
@@ -95,7 +95,7 @@ mod tests {
     use super::super::runtime_adapters::{RuntimeAdapter, RuntimeLaneRequest, WasmRuntimeAdapter};
     use super::super::wasm_execution::execute_prepared_wasm;
     use super::*;
-    use crate::obligations::NetworkObligationPolicyStore;
+    use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
     const DETECTABLE_SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
     const DIAGNOSTIC_TARGET: &str = "ironclaw_host_runtime::services::wasm_diagnostics";
@@ -549,6 +549,7 @@ __OUTCOME__)
             max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
+            standard_op: None,
         }
     }
 
@@ -636,6 +637,7 @@ __OUTCOME__)
             Arc::new(NetworkObligationPolicyStore::new()),
             Arc::new(Mutex::new(None)),
             None,
+            Arc::new(RuntimeSecretInjectionStore::new()),
         );
         let package = caller_trace_package();
         let descriptor = caller_trace_descriptor();
