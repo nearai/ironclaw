@@ -32,7 +32,7 @@ import { useInterfacePreferences } from "../../lib/interface-preferences";
 import {
   inspectorDebugEnabled,
   latestInspectorRunId,
-} from "./inspector/inspector-state";
+} from "./inspector/inspector-shell";
 
 let LazyInspectorPanel: React.LazyExoticComponent<
   React.ComponentType<{ threadId: string | null; runId: string | null }>

@@ -1,120 +1,84 @@
 use super::*;
 
-/// delivery target registry: the id must resolve for the trigger creator (the
-/// same ownership check the delivery layer applies at fire time). Fails
-/// closed when no provider is registered or the id is unknown/foreign.
-pub(super) async fn validate_trigger_delivery_target_against_registry(
-    registry: &crate::outbound::MutableOutboundDeliveryTargetRegistry,
-    scope: &ironclaw_host_api::resource::ResourceScope,
-    target: &ironclaw_triggers::TriggerDeliveryTargetId,
-) -> Result<(), TriggerError> {
-    let invalid = |reason: String| TriggerError::InvalidRecord {
-        kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-        reason,
-    };
-    let target_id =
-        crate::outbound::OutboundDeliveryTargetId::new(target.as_str()).map_err(|error| {
-            tracing::debug!(
-                target: "ironclaw::reborn::trigger_create",
-                %error,
-                "per-trigger delivery target id failed outbound target id validation"
-            );
-            invalid("delivery target id is not a valid outbound target id".to_string())
-        })?;
-    let caller = crate::outbound::OutboundDeliveryTargetScope::new(
-        scope.tenant_id.clone(),
-        scope.user_id.clone(),
-    );
-    use crate::outbound::OutboundDeliveryTargetProvider as _;
-    match registry
-        .resolve_outbound_delivery_target(&caller, &target_id)
-        .await
-    {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(invalid(
-            "delivery target is not available to this caller".to_string(),
-        )),
-        Err(error) => {
-            tracing::warn!(
-                target: "ironclaw::reborn::trigger_create",
-                %error,
-                "outbound delivery target lookup failed during trigger create validation"
-            );
-            Err(TriggerError::Backend {
-                reason: "outbound delivery target lookup unavailable".to_string(),
+use ironclaw_turns::TurnError;
+
+/// Late-bindable [`AgentTurnRuntimePort`] view over the runtime's own turn
+/// state — the run-state source every caller-initiated "which run is this"
+/// lookup reads (today `builtin.outbound_deliver`'s same-origin check).
+/// Production installs the runtime's own turn state and never repoints it; a
+/// `test-support` harness repoints it (see
+/// `rebind_standalone_trigger_source_turn_state_for_test`) so those lookups
+/// can see runs recorded in the harness's own store.
+pub(crate) struct LateBoundAgentTurnRuntime {
+    source: Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
+}
+
+impl LateBoundAgentTurnRuntime {
+    pub(crate) fn new(
+        source: Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
+    ) -> Self {
+        Self { source }
+    }
+
+    fn current(&self) -> Result<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>, TurnError> {
+        self.source
+            .read()
+            .map(|source| Arc::clone(&*source))
+            .map_err(|_| TurnError::Unavailable {
+                reason: "late-bound turn-state source lock is unavailable".to_string(),
             })
-        }
     }
 }
 
 #[async_trait::async_trait]
-pub(crate) trait TriggerSourceReplyTarget: Send + Sync {
-    async fn reply_target(
+impl ironclaw_turns::AgentTurnRuntimePort for LateBoundAgentTurnRuntime {
+    async fn submit_turn(
+        &self,
+        request: ironclaw_turns::SubmitTurnRequest,
+        admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+        self.current()?
+            .submit_turn(request, admission_policy, run_profile_resolver)
+            .await
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ironclaw_turns::ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        self.current()?.resume_turn(request).await
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        self.current()?.retry_turn(request).await
+    }
+
+    async fn request_cancel(
+        &self,
+        request: ironclaw_turns::CancelRunRequest,
+    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+        self.current()?.request_cancel(request).await
+    }
+
+    async fn get_run_state(
         &self,
         request: ironclaw_turns::GetRunStateRequest,
-    ) -> Result<ironclaw_turns::ReplyTargetBindingRef, ironclaw_turns::TurnError>;
-}
-
-pub(crate) struct TurnStateTriggerSourceReplyTarget {
-    turn_state: Arc<dyn ironclaw_turns::AgentTurnRuntimePort>,
-}
-
-impl TurnStateTriggerSourceReplyTarget {
-    pub(crate) fn new(turn_state: Arc<dyn ironclaw_turns::AgentTurnRuntimePort>) -> Self {
-        Self { turn_state }
-    }
-}
-
-#[async_trait::async_trait]
-impl TriggerSourceReplyTarget for TurnStateTriggerSourceReplyTarget {
-    async fn reply_target(
-        &self,
-        request: GetRunStateRequest,
-    ) -> Result<ironclaw_turns::ReplyTargetBindingRef, ironclaw_turns::TurnError> {
-        self.turn_state
-            .get_run_state(request)
-            .await
-            .map(|state| state.reply_target_binding_ref)
+    ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
+        self.current()?.get_run_state(request).await
     }
 }
 
 pub(super) struct TriggerCreatorPairingHook {
-    pub(super) outbound_delivery_targets:
-        Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
-    pub(super) source_reply_target: Arc<std::sync::RwLock<Arc<dyn TriggerSourceReplyTarget>>>,
     pub(super) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(super) conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
 }
 
 #[async_trait::async_trait]
 impl TriggerCreateHook for TriggerCreatorPairingHook {
-    async fn resolve_implicit_delivery_target(
-        &self,
-        scope: &ironclaw_host_api::resource::ResourceScope,
-        run_id: Option<RunId>,
-    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-        resolve_current_run_delivery_target(
-            &self.source_reply_target,
-            &self.outbound_delivery_targets,
-            scope,
-            run_id,
-        )
-        .await
-    }
-
-    async fn validate_delivery_target(
-        &self,
-        scope: &ironclaw_host_api::resource::ResourceScope,
-        target: &ironclaw_triggers::TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        validate_trigger_delivery_target_against_registry(
-            &self.outbound_delivery_targets,
-            scope,
-            target,
-        )
-        .await
-    }
-
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let filesystem = Arc::clone(&self.scoped_filesystem);
         let conversations = self
@@ -128,87 +92,6 @@ impl TriggerCreateHook for TriggerCreatorPairingHook {
             })?;
         pair_trigger_creator(conversations, record).await
     }
-}
-
-async fn resolve_current_run_delivery_target(
-    source_reply_target: &std::sync::RwLock<Arc<dyn TriggerSourceReplyTarget>>,
-    registry: &crate::outbound::MutableOutboundDeliveryTargetRegistry,
-    scope: &ResourceScope,
-    run_id: Option<RunId>,
-) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-    let Some(run_id) = run_id else {
-        return Ok(None);
-    };
-    let Some(thread_id) = scope.thread_id.clone() else {
-        return Ok(None);
-    };
-    let turn_scope = TurnScope::new_with_owner(
-        scope.tenant_id.clone(),
-        scope.agent_id.clone(),
-        scope.project_id.clone(),
-        thread_id,
-        Some(scope.user_id.clone()),
-    );
-    let source_reply_target = source_reply_target
-        .read()
-        .map(|source| Arc::clone(&*source))
-        .map_err(|error| {
-            tracing::warn!(
-                target: "ironclaw::reborn::trigger_create",
-                error = ?error,
-                "source reply-target resolver lock is unavailable"
-            );
-            TriggerError::Backend {
-                reason: "source reply-target resolver unavailable".to_string(),
-            }
-        })?;
-    let reply_target = source_reply_target
-        .reply_target(GetRunStateRequest {
-            scope: turn_scope,
-            run_id: ironclaw_turns::TurnRunId::from_uuid(run_id.as_uuid()),
-        })
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                target: "ironclaw::reborn::trigger_create",
-                %error,
-                %run_id,
-                "source run lookup failed during implicit trigger delivery-target resolution"
-            );
-            TriggerError::Backend {
-                reason: "source run lookup unavailable".to_string(),
-            }
-        })?;
-    let caller = crate::outbound::OutboundDeliveryTargetScope::new(
-        scope.tenant_id.clone(),
-        scope.user_id.clone(),
-    );
-    use crate::outbound::OutboundDeliveryTargetProvider as _;
-    let entry = registry
-        .resolve_reply_target_binding(&caller, &reply_target)
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                target: "ironclaw::reborn::trigger_create",
-                %error,
-                %run_id,
-                "outbound target lookup failed during implicit trigger delivery-target resolution"
-            );
-            TriggerError::Backend {
-                reason: "outbound delivery target lookup unavailable".to_string(),
-            }
-        })?;
-    entry
-        .map(|entry| {
-            ironclaw_triggers::TriggerDeliveryTargetId::new(
-                entry.summary.target_id.as_str().to_string(),
-            )
-            .map_err(|reason| TriggerError::InvalidRecord {
-                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-                reason,
-            })
-        })
-        .transpose()
 }
 
 pub(super) async fn pair_trigger_creator(

@@ -187,23 +187,44 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
-        "schemas/builtin/outbound_delivery_target_route_current.input.v1.json" => json!({
+        "schemas/builtin/outbound_deliver.input.v1.json" => json!({
             "type": "object",
             "properties": {
                 "target_id": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
                     "description": "Opaque target id returned by builtin__outbound_delivery_targets_list."
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32768,
+                    "description": "Markdown content to deliver. The channel renders and splits it. The authoritative limit is 32768 UTF-8 BYTES (schema maxLength counts code points, so multi-byte content may pass the schema and still be rejected)."
                 }
             },
-            "required": ["target_id"],
+            "required": ["target_id", "content"],
             "additionalProperties": false
         }),
-        "schemas/builtin/outbound_delivery_target_route_current.output.v1.json" => json!({
+        "schemas/builtin/outbound_deliver.output.v1.json" => json!({
             "type": "object",
             "properties": {
-                "routed": { "type": "boolean", "const": true }
+                "delivered": { "type": "boolean" },
+                "provider_confirmed": { "type": "boolean" },
+                "target_id": { "type": "string" },
+                "channel": { "type": "string" },
+                "display_name": { "type": "string" },
+                "provider_message_refs": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "durably_recorded": { "type": "boolean" },
+                "already_delivered": {
+                    "type": "boolean",
+                    "description": "True when the durable ledger proves this exact delivery already completed earlier in the run. The message was NOT resent; provider_message_refs is empty because the ledger row does not retain them."
+                }
             },
-            "required": ["routed"],
+            "required": ["delivered", "provider_confirmed", "target_id", "channel", "display_name", "provider_message_refs", "durably_recorded", "already_delivered"],
             "additionalProperties": false
         }),
         "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({
@@ -719,29 +740,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["key", "capability_id", "state", "tenant_id", "user_id"],
             "additionalProperties": false
         }),
-        "schemas/builtin/outbound_preferences_set.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "final_reply_target_id": {
-                    "type": ["string", "null"],
-                    "maxLength": 512,
-                    "description": "Outbound delivery target id to use for final replies. Omit or pass null to clear the preference."
-                }
-            },
-            "additionalProperties": false
-        }),
-        "schemas/builtin/outbound_preferences_set.output.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "final_reply_target": {
-                    "type": ["object", "null"]
-                },
-                "final_reply_target_status": { "type": "string" },
-                "default_modality": { "type": "string" }
-            },
-            "required": ["final_reply_target", "final_reply_target_status", "default_modality"],
-            "additionalProperties": false
-        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -909,11 +907,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Write only the action performed at fire time. If delivery_target_id is set, never put a send, post, or deliver-results step for that result here; the host delivers the final reply automatically. Never tell the prompt to send results back to the requesting user — receiving results is routing, never a prompt step, even when phrased as 'send me the result' or when the requester's conversation id is known. Put messaging here only when messaging someone else is itself the task, and pin that third-party recipient while the user is present. Do not describe creating, scheduling, or configuring the trigger. Runtime validation caps UTF-8 content at 32768 bytes."
-                },
-                "delivery_target_id": {
-                    "type": "string",
-                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the host inherits the current source run's authorized delivery route when one exists; otherwise the user's default outbound delivery target at fire time is used. This is resolved from trusted run state, never prompt parsing. Prefer setting this whenever the user names a destination for this trigger's results."
+                    "description": "Prompt submitted when the trigger fires, written for a future run with no memory of this conversation. Write the whole task, including any delivery the user wants: name the destination in an explicit step by pinned target id from builtin__outbound_delivery_targets_list, picked while the user is present (for example \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description a fire would have to look up). A bare \"send me\" means the surface the user is asking from — never ask which channel: from a channel conversation, default to the channel this conversation is on and pin its target id; from the web app with no external destination named there is no delivery step and no web-app target: the fire's final reply IS the delivery (the run thread records it), so end the prompt with the reply itself and write no delivery step. When the user names an external destination (\"send me this in my messaging app\"), that IS a delivery step even from the web app: pin its target id and write the builtin__outbound_deliver step — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver, never through integration messaging tools, which act as the user. Each fire's final reply is recorded in the routine's own run thread automatically, so a fire that makes no delivery call delivers nothing externally. Do not describe creating, scheduling, or configuring the trigger. Runtime validation caps UTF-8 content at 32768 bytes."
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
@@ -1165,6 +1159,41 @@ mod tests {
     }
 
     #[test]
+    fn trigger_create_prompt_description_scopes_web_app_no_delivery_to_unnamed_destinations() {
+        // The categorical "never call builtin__outbound_deliver" web-app
+        // clause was observed live being over-applied when the user DID name
+        // a destination ("send me a Slack message"): creation turns reasoned
+        // "web app → never outbound_deliver" and wrote act-as-user vendor
+        // send_message steps to reach the requester instead. The no-delivery
+        // default must be scoped to unnamed destinations, and the
+        // named-destination case must steer to the pinned
+        // builtin__outbound_deliver step, mirroring TRIGGER_CREATE_DESCRIPTION.
+        let schema =
+            resolve_builtin_input_schema_ref("schemas/builtin/trigger_create.input.v1.json")
+                .expect("trigger_create schema is registered");
+        let description = schema["properties"]["prompt"]["description"]
+            .as_str()
+            .expect("prompt description is a string");
+
+        assert!(
+            description.contains("no external destination named"),
+            "the web-app no-delivery default must be scoped to unnamed destinations: {description}"
+        );
+        assert!(
+            !description.contains("never call builtin__outbound_deliver"),
+            "the categorical never-clause invites vendor-send improvisation when a destination IS named: {description}"
+        );
+        assert!(
+            description.contains("names an external destination"),
+            "the named-destination case must be explicit, web app included: {description}"
+        );
+        assert!(
+            description.contains("never through integration messaging tools"),
+            "messages to the requester must be steered away from act-as-user vendor sends: {description}"
+        );
+    }
+
+    #[test]
     fn operator_config_schemas_are_registered() {
         let input = resolve_builtin_input_schema_ref(
             "schemas/builtin/operator_config_set_auto_approve.input.v1.json",
@@ -1196,6 +1225,22 @@ mod tests {
         assert_eq!(
             tool_output["required"],
             serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
+        );
+    }
+
+    /// The schema's advisory `content.maxLength` and the port's authoritative
+    /// byte cap (`ironclaw_outbound::MODEL_DELIVERY_MAX_CONTENT_BYTES`) must
+    /// carry the same number: the schema is what the model sees, the port is
+    /// what enforces, and silent drift between them turns a schema-valid call
+    /// into an unexplained rejection.
+    #[test]
+    fn outbound_deliver_schema_content_bound_matches_the_port_byte_cap() {
+        let input =
+            resolve_builtin_input_schema_ref("schemas/builtin/outbound_deliver.input.v1.json")
+                .expect("outbound_deliver input schema is registered");
+        assert_eq!(
+            input["properties"]["content"]["maxLength"],
+            serde_json::json!(ironclaw_outbound::MODEL_DELIVERY_MAX_CONTENT_BYTES),
         );
     }
 
@@ -1264,31 +1309,6 @@ mod tests {
             serde_json::json!(["no_auth", "bearer", "oauth"])
         );
         assert_eq!(input["additionalProperties"], false);
-    }
-
-    #[test]
-    fn outbound_preferences_set_schemas_are_registered() {
-        let input = resolve_builtin_input_schema_ref(
-            "schemas/builtin/outbound_preferences_set.input.v1.json",
-        )
-        .expect("outbound preferences set input schema is registered");
-        let output = resolve_builtin_input_schema_ref(
-            "schemas/builtin/outbound_preferences_set.output.v1.json",
-        )
-        .expect("outbound preferences set output schema is registered");
-
-        assert_eq!(
-            input["properties"]["final_reply_target_id"]["type"],
-            serde_json::json!(["string", "null"])
-        );
-        assert_eq!(
-            output["required"],
-            serde_json::json!([
-                "final_reply_target",
-                "final_reply_target_status",
-                "default_modality"
-            ])
-        );
     }
 
     #[test]

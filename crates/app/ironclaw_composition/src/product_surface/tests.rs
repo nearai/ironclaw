@@ -54,7 +54,7 @@ async fn operator_tool_catalog_reads_shared_registry_updates() {
     let catalog = ActiveRegistryOperatorToolCatalog::new(
         Arc::clone(&registry),
         vec![
-            outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
+            notification_channels_set_operator_tool_info(synthetic_provider.clone())
                 .expect("synthetic tool info"),
         ],
         None,
@@ -68,7 +68,7 @@ async fn operator_tool_catalog_reads_shared_registry_updates() {
             .iter()
             .any(|tool| {
                 tool.capability_id.as_str()
-                    == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                    == ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID
                     && tool.provider == synthetic_provider
             }),
         "synthetic outbound delivery capability must use the Settings > Tools provider key"

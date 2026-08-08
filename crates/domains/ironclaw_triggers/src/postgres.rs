@@ -103,6 +103,11 @@ impl TriggerRepository for PostgresTriggerRepository {
         let active_fire_slot = record.active_fire_slot.as_ref().map(fmt_ts);
         let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
         let created_at = fmt_ts(&record.created_at);
+        // Retired routing column: no create path produces a non-null value any
+        // more. The binding stays because composition's boot migration clears
+        // pre-removal rows by upserting the record with `delivery_target: None`
+        // — dropping the write would strand those values forever and make the
+        // migration re-append its prompt step on every boot.
         let delivery_target = record
             .delivery_target
             .as_ref()
@@ -170,6 +175,42 @@ impl TriggerRepository for PostgresTriggerRepository {
         .await
         .map_err(|error| backend_error("upsert trigger record", error))?;
         Ok(())
+    }
+
+    async fn migrate_legacy_delivery_target(
+        &self,
+        expected: &TriggerRecord,
+        migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        let mut migrated = expected.clone();
+        migrated.prompt = migrated_prompt;
+        migrated.delivery_target = None;
+        migrated.validate()?;
+        let Some(expected_target) = expected.delivery_target.as_ref() else {
+            return Ok(false);
+        };
+        let client = self.connect().await?;
+        let updated = cached_execute(
+            &client,
+            &format!(
+                "UPDATE {TRIGGER_TABLE}
+                 SET prompt = $1, delivery_target = NULL
+                 WHERE tenant_id = $2
+                   AND trigger_id = $3
+                   AND prompt = $4
+                   AND delivery_target = $5"
+            ),
+            &[
+                &migrated.prompt,
+                &expected.tenant_id.as_str(),
+                &expected.trigger_id.to_string(),
+                &expected.prompt,
+                &expected_target.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("migrate legacy trigger delivery target", error))?;
+        Ok(updated == 1)
     }
 
     async fn get_trigger(
@@ -337,41 +378,49 @@ impl TriggerRepository for PostgresTriggerRepository {
         new_state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
-        let client = self.connect().await?;
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin scoped trigger state update", error))?;
         let trigger_id = trigger_id.to_string();
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let Some(current) = locked_record(&tx, tenant_id.as_str(), &trigger_id).await? else {
+            return Ok(None);
+        };
+        if current.creator_user_id != creator_user_id
+            || current.agent_id.as_ref().map(AgentId::as_str) != agent_id
+            || current.project_id.as_ref().map(ProjectId::as_str) != project_id
+            || current.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        let next_run_at = crate::next_run_at_for_state_transition(&current, new_state, Utc::now())?;
         let new_state = crate::state_text_codec(new_state);
-        let completed = crate::state_text_codec(TriggerState::Completed);
-        let row = client
+        let next_run_at = fmt_ts(&next_run_at);
+        let row = tx
             .query_opt(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
-                     SET state = $6
+                     SET state = $3,
+                         next_run_at = $4
                      WHERE tenant_id = $1
-                       AND creator_user_id = $2
-                       AND agent_id IS NOT DISTINCT FROM $3
-                       AND project_id IS NOT DISTINCT FROM $4
-                       AND trigger_id = $5
-                       AND state <> $7
+                       AND trigger_id = $2
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
-                &[
-                    &tenant_id.as_str(),
-                    &creator_user_id.as_str(),
-                    &agent_id,
-                    &project_id,
-                    &trigger_id,
-                    &new_state,
-                    &completed,
-                ],
+                &[&tenant_id.as_str(), &trigger_id, &new_state, &next_run_at],
             )
             .await
             .map_err(|error| backend_error("set scoped trigger state", error))?;
-        match row {
+        let record = match row {
             Some(row) => Ok(Some(row_to_record(&row)?)),
             None => Ok(None),
-        }
+        }?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit scoped trigger state update", error))?;
+        Ok(record)
     }
 
     async fn rename_scoped_trigger(
@@ -1342,7 +1391,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
     let delivery_target = optional_text(row, "delivery_target")?
-        .map(crate::parse_trigger_delivery_target_id)
+        .map(crate::decode_legacy_delivery_target)
         .transpose()?;
 
     let record = TriggerRecord {

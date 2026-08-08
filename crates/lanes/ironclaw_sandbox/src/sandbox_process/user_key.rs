@@ -1,17 +1,6 @@
-//! Coarse `{tenant, user}` container identity key for the persistent
-//! per-user sandbox container model (Phase A). Unlike
-//! [`super::scope_key::RebornSandboxScopeKey`] (fine-grained; includes
-//! agent/project/thread/invocation), this key derives container name and
-//! workspace root from `{tenant_id, user_id}` ONLY — every thread/project/
-//! agent for the same user shares one container.
-//!
-//! **Current vs. planned:** `RebornSandboxScopeKey` remains the key the
-//! currently-wired ephemeral exec transport uses for workspace and container
-//! naming today (see `sandbox_process.rs`). `RebornSandboxUserKey` is not
-//! constructed by any production call site in this PR — it is reserved for
-//! the future persistent per-user transport (Task A5's reaper and the
-//! exec-based transport's per-user container reuse), which will replace
-//! `RebornSandboxScopeKey` for container concerns once wired.
+//! `{tenant, user}` identity for per-user sandbox persistence. Every
+//! thread/project/agent owned by the same authenticated user shares one
+//! workspace, while equal user ids in different tenants remain isolated.
 
 use std::path::{Path, PathBuf};
 
@@ -22,20 +11,11 @@ use ironclaw_host_api::{
 
 use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
-// Not constructed by any production call site in this PR: the consumer
-// (the exec-based transport's per-user container reuse and Task A5's
-// reaper) lands in a later PR on top of `exec_transport`, which is out of
-// scope here (see this PR's description). `pub`/re-exported at the crate
-// root today so a downstream composition PR can wire it in without an API
-// change; `#[allow(dead_code)]` keeps this crate's lint gate quiet in the
-// meantime rather than adding a fake caller.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub struct RebornSandboxUserKey {
     digest: String,
 }
 
-#[allow(dead_code)]
 impl RebornSandboxUserKey {
     pub fn from_scope(scope: &ResourceScope) -> Self {
         Self::from_tenant_user(&scope.tenant_id, &scope.user_id)

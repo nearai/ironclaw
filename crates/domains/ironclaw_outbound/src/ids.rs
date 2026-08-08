@@ -67,8 +67,6 @@ macro_rules! bounded_ref {
 
 bounded_ref!(ProjectionSubscriptionId, "projection_subscription_id");
 bounded_ref!(ProjectionUpdateRef, "projection_update_ref");
-bounded_ref!(TriggerOriginRef, "trigger_origin_ref");
-bounded_ref!(TriggerFireSlot, "trigger_fire_slot");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -166,7 +164,5 @@ mod tests {
     fn bounded_refs_reject_invalid_inputs() {
         assert_invalid_inputs!(ProjectionSubscriptionId, "projection_subscription_id");
         assert_invalid_inputs!(ProjectionUpdateRef, "projection_update_ref");
-        assert_invalid_inputs!(TriggerOriginRef, "trigger_origin_ref");
-        assert_invalid_inputs!(TriggerFireSlot, "trigger_fire_slot");
     }
 }

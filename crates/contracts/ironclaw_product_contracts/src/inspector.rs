@@ -30,6 +30,12 @@ pub const PROMPT_COMPONENT_TOTAL_MAX_BYTES: usize = 256 * 1024;
 pub const RECONSTRUCTED_PROMPT_MAX_BYTES: usize = 256 * 1024;
 pub const TOOL_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
 pub const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
+/// Bounded lookahead retained while scanning a tool-result prefix for secrets.
+/// This covers the leak detector's largest structurally validated candidate so
+/// a value crossing the visible retention boundary remains detectable.
+pub const TOOL_RESULT_REDACTION_CONTEXT_BYTES: usize = 64 * 1024;
+pub const TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES: usize =
+    TOOL_RESULT_MAX_BYTES + TOOL_RESULT_REDACTION_CONTEXT_BYTES;
 pub const DIAGNOSTIC_LABEL_MAX_BYTES: usize = 256;
 pub const DIAGNOSTIC_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const MAX_PROMPT_COMPONENTS: usize = 128;
@@ -282,6 +288,24 @@ impl BoundedDiagnosticText {
 
     pub fn tool_result(value: impl Into<String>) -> Self {
         Self::bounded(value.into(), TOOL_RESULT_MAX_BYTES)
+    }
+
+    pub fn retained_tool_result(
+        value: impl Into<String>,
+        original_bytes: u64,
+    ) -> Result<Self, &'static str> {
+        let value = value.into();
+        let source_bytes = u64::try_from(value.len())
+            .map_err(|_| "diagnostic text source byte length is not representable")?;
+        if original_bytes < source_bytes {
+            return Err("diagnostic text original byte length is smaller than source text");
+        }
+        let mut bounded = Self::bounded(value, TOOL_RESULT_MAX_BYTES);
+        let retained_bytes = u64::try_from(bounded.content.len())
+            .map_err(|_| "diagnostic text retained byte length is not representable")?;
+        bounded.original_bytes = original_bytes;
+        bounded.truncated = original_bytes > retained_bytes;
+        Ok(bounded)
     }
 
     pub fn content(&self) -> &str {
@@ -1489,6 +1513,10 @@ mod tests {
     #[test]
     fn tool_result_uses_its_original_length_over_caller_supplied_output_bytes() {
         assert_eq!(TOOL_RESULT_MAX_BYTES, 50 * 1024);
+        assert_eq!(
+            TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES,
+            TOOL_RESULT_MAX_BYTES + TOOL_RESULT_REDACTION_CONTEXT_BYTES
+        );
         let tool = ToolExecutionDiagnostic::new(
             CapabilityActivityId::new(),
             None,
@@ -1503,6 +1531,21 @@ mod tests {
         );
         assert!(tool.result_truncated());
         assert_eq!(tool.output_bytes, Some((TOOL_RESULT_MAX_BYTES + 1) as u64));
+    }
+
+    #[test]
+    fn retained_tool_result_rejects_original_size_smaller_than_source() {
+        let source = "x".repeat(TOOL_RESULT_MAX_BYTES + 100);
+        let error = BoundedDiagnosticText::retained_tool_result(
+            source,
+            u64::try_from(TOOL_RESULT_MAX_BYTES + 50).expect("size"),
+        )
+        .expect_err("source size cannot be understated after truncation");
+
+        assert_eq!(
+            error,
+            "diagnostic text original byte length is smaller than source text",
+        );
     }
 
     #[test]

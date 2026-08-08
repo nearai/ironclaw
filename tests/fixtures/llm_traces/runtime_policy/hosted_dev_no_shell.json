@@ -12,7 +12,7 @@
           "request_hint": { "last_user_message_contains": "summarize" },
           "response": {
             "type": "text",
-            "content": "I can help you reason and write summaries within this tenant sandbox.",
+            "content": "I can help you reason and write summaries within this user sandbox.",
             "input_tokens": 60,
             "output_tokens": 18
           }

@@ -28,6 +28,16 @@ pub(crate) const PAIRING_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web ap
 /// Posted when an OAuth challenge reaches a non-private target: the setup link
 /// is single-use and must not be echoed into a shared thread.
 pub(crate) const OAUTH_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to complete this private authorization step, then ask me again here.";
+/// Posted to a background run's notification channels when it fails. The
+/// failure detail itself stays in the run history — a notification channel is
+/// a shared surface and carries no diagnostics.
+pub(crate) const BACKGROUND_RUN_FAILED_MESSAGE: &str =
+    "A routine run failed — open the Ironclaw web app for details.";
+/// Redacted stand-in for an OAuth auth prompt on a notification channel that
+/// is NOT a personal DM: the authorization URL is a bearer-grade secret and
+/// must never land in a shared conversation.
+pub(crate) const BACKGROUND_RUN_REAUTH_MESSAGE: &str =
+    "A routine needs re-authorization — open the Ironclaw web app to continue.";
 pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
@@ -52,14 +62,20 @@ pub(crate) enum RunNotificationProjectionIdError {
 
 /// Stable projection id for run-notification deliveries.
 ///
-/// Non-gate identities retain their legacy per-(run, kind) shape. Gate
-/// identities additionally bind the canonical gate ref through a
-/// domain-separated, length-framed digest so distinct same-kind gates cannot
-/// suppress one another without persisting the gate ref itself.
+/// `discriminator` separates notices that share an event kind within one run
+/// -- e.g. the several `RunBlocked` notices one run can legitimately produce
+/// (a re-auth stand-in, an unserviceable-auth cancellation, a run failure).
+/// For those kinds it is formatted directly into the id; `None` preserves the
+/// historical id shape for kinds that occur at most once per run.
+///
+/// `ApprovalNeeded` and `AuthRequired` additionally require `discriminator`
+/// to be the canonical gate ref and bind it through a domain-separated,
+/// length-framed digest, so distinct same-kind gates cannot suppress one
+/// another without persisting the gate ref itself.
 pub(crate) fn run_notification_projection_id(
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
-    gate_ref: Option<&str>,
+    discriminator: Option<&str>,
 ) -> Result<String, RunNotificationProjectionIdError> {
     let suffix = match event_kind {
         RunNotificationEventKind::FinalReplyReady => "final",
@@ -68,16 +84,20 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::AuthRequired => "auth",
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
+        RunNotificationEventKind::ModelDelivery => "model-delivery",
     };
 
     if !matches!(
         event_kind,
         RunNotificationEventKind::ApprovalNeeded | RunNotificationEventKind::AuthRequired
     ) {
-        return Ok(format!("run-notification:{suffix}:{run_id}"));
+        return Ok(match discriminator {
+            Some(discriminator) => format!("run-notification:{suffix}:{discriminator}:{run_id}"),
+            None => format!("run-notification:{suffix}:{run_id}"),
+        });
     }
 
-    let gate_ref = gate_ref.ok_or(RunNotificationProjectionIdError::MissingGateRef)?;
+    let gate_ref = discriminator.ok_or(RunNotificationProjectionIdError::MissingGateRef)?;
     let gate_ref = TurnGateRef::new(gate_ref.to_string())
         .map_err(|reason| RunNotificationProjectionIdError::InvalidGateRef { reason })?;
     let mut digest_input = Vec::with_capacity(
@@ -286,6 +306,40 @@ mod tests {
     use super::*;
     use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
     use ironclaw_host_api::turn::TurnRunId;
+
+    /// The delivery id is derived from this ref, so two notices that share a
+    /// string share a durable delivery identity — the second comes back
+    /// `AlreadyDelivered` and is silently never sent while still recorded as
+    /// delivered. One run legitimately emits several `RunBlocked` notices, so
+    /// they must not collapse.
+    #[test]
+    fn run_blocked_notices_in_one_run_do_not_share_a_projection_id() {
+        let run_id = TurnRunId::new();
+        let discriminated: Vec<String> = ["reauth", "auth-unavailable", "failed"]
+            .into_iter()
+            .map(|discriminator| {
+                run_notification_projection_id(
+                    run_id,
+                    RunNotificationEventKind::RunBlocked,
+                    Some(discriminator),
+                )
+                .expect("a RunBlocked discriminator is not a gate identity")
+            })
+            .collect();
+
+        let unique: std::collections::HashSet<&String> = discriminated.iter().collect();
+        assert_eq!(
+            unique.len(),
+            discriminated.len(),
+            "each RunBlocked notice needs its own delivery identity: {discriminated:?}"
+        );
+        for id in &discriminated {
+            assert!(
+                id.contains(&run_id.to_string()),
+                "{id} must stay run-scoped"
+            );
+        }
+    }
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
         AuthPromptView {

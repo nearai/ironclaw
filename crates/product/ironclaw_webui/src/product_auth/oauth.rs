@@ -294,27 +294,19 @@ pub(super) async fn oauth_callback_handler(
     )
     .await?;
 
-    let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+    let response = complete_oauth_callback_resilient(
+        state,
+        scope.clone(),
+        flow_id,
         RebornOAuthCallbackRequest {
-            scope: scope.clone(),
+            scope,
             flow_id,
             opaque_state_hash: state_hash,
             outcome,
         },
-    ))
-    .await
-    {
-        Ok(response) => {
-            state.forget_pkce_verifier_everywhere(&scope, flow_id).await;
-            response
-        }
-        Err(error) => {
-            if should_forget_pkce_verifier(error.body.code) {
-                state.forget_pkce_verifier_everywhere(&scope, flow_id).await;
-            }
-            return Err(error);
-        }
-    };
+        None,
+    )
+    .await?;
 
     Ok(oauth_callback_response(&headers, response))
 }
@@ -438,18 +430,19 @@ async fn vendor_oauth_callback_attempt(
         .as_deref()
         .is_some_and(|value| !value.is_empty())
     {
-        let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+        let response = complete_oauth_callback_resilient(
+            state,
+            callback_scope.clone(),
+            flow_id,
             RebornOAuthCallbackRequest {
                 scope: callback_scope.clone(),
                 flow_id,
                 opaque_state_hash: state_hash.clone(),
                 outcome: RebornOAuthCallbackOutcome::ProviderDenied,
             },
-        ))
+            None,
+        )
         .await;
-        state
-            .forget_pkce_verifier_everywhere(callback_scope, flow_id)
-            .await;
         return oauth_callback_route_result_response(headers, response);
     }
 
@@ -496,33 +489,56 @@ async fn vendor_oauth_callback_attempt(
     // Post-exchange identity binding is a vendor-blind hook registered as
     // data; it receives the callback's vendor id and resolves the rest.
     let identity_check = state.provider_identity_hook(provider.as_str(), callback_scope);
-    let response = match run_with_backend_timeout(
-        state
-            .product_auth
-            .handle_oauth_callback_with_optional_provider_identity_check(
-                callback_request,
-                identity_check,
-            ),
+    let response = complete_oauth_callback_resilient(
+        state,
+        callback_scope.clone(),
+        flow_id,
+        callback_request,
+        identity_check,
     )
-    .await
-    {
-        Ok(response) => {
-            state
-                .forget_pkce_verifier_everywhere(callback_scope, flow_id)
-                .await;
-            response
-        }
-        Err(error) => {
-            if should_forget_pkce_verifier(error.body.code) {
-                state
-                    .forget_pkce_verifier_everywhere(callback_scope, flow_id)
-                    .await;
-            }
-            return Err(error);
-        }
-    };
+    .await?;
 
     Ok(oauth_callback_response(headers, response))
+}
+
+/// Complete a durably claimed OAuth callback independently of the browser's
+/// request lifetime. Provider redirects can be retried by browsers and tunnels
+/// after the first HTTP connection disappears; canceling that connection must
+/// not strand the flow after its one-time callback claim. A same-host retry for
+/// the same flow waits behind this task and then observes the durable result.
+async fn complete_oauth_callback_resilient(
+    state: ProductAuthRouteState,
+    scope: AuthProductScope,
+    flow_id: AuthFlowId,
+    request: RebornOAuthCallbackRequest,
+    identity_check: Option<ironclaw_auth::OAuthProviderIdentityCheck>,
+) -> Result<RebornOAuthCallbackResponse, ProductAuthRouteFailure> {
+    let completion_lock = state.callback_completion_lock(flow_id)?;
+    let completion = tokio::spawn(async move {
+        let _guard = completion_lock.lock().await;
+        let response = state
+            .product_auth
+            .handle_oauth_callback_with_optional_provider_identity_check(request, identity_check)
+            .await
+            .map_err(ProductAuthRouteFailure::from);
+        let should_forget = match response.as_ref() {
+            Ok(_) => true,
+            Err(error) => should_forget_pkce_verifier(error.body.code),
+        };
+        if should_forget {
+            state.forget_pkce_verifier_everywhere(&scope, flow_id).await;
+        }
+        response
+    });
+
+    match tokio::time::timeout(PRODUCT_AUTH_BACKEND_TIMEOUT, completion).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::debug!(%flow_id, %error, "OAuth callback completion task failed");
+            Err(ProductAuthRouteFailure::backend_unavailable())
+        }
+        Err(_) => Err(ProductAuthRouteFailure::backend_timeout()),
+    }
 }
 
 // Formats the success shape only; `Err` propagates so the handler wrapper

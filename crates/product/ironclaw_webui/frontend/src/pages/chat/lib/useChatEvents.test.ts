@@ -25,6 +25,7 @@ import {
   createRunTrackingState,
   resetRunTrackingState,
 } from "./run-tracking-state";
+import { AMBIGUOUS_RUN_ID, mergeRunIdCandidate } from "./run-id-candidate";
 import {
   isFinalAssistantForRun,
   replaceAssistantReplyForRun,
@@ -93,6 +94,7 @@ function createUseChatEventsHarness({
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
   onStreamError = () => {},
+  publishProductInspectorEnvelope = () => {},
   t: selectedTranslator = t,
 } = {}) {
   let threadId = "thread-1";
@@ -146,6 +148,7 @@ function createUseChatEventsHarness({
     };
   }
   const context = {
+    AMBIGUOUS_RUN_ID,
     Date: DateImpl,
     createErrorChatMessage,
     React: {
@@ -163,6 +166,8 @@ function createUseChatEventsHarness({
     isRunFailureMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
+    mergeRunIdCandidate,
+    publishProductInspectorEnvelope,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
     STREAM_FAILURE_ID_PREFIX,
