@@ -390,8 +390,10 @@ Expected fields include:
 When one or more of `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `http_proxy`,
 `https_proxy`, or `all_proxy` are set to a non-empty value, `doctor` also reports a
 `host_mediated_ambient_proxy` check. A variable that is set but empty does not
-trigger the check, matching how the host-mediated transport parses these
-variables. The check reports only that ambient proxy configuration is present; it
+trigger the check; this non-empty rule is `doctor`'s own presence-detection logic,
+not behavior mirrored from the host-mediated transport. The transport does not
+parse these variables at all: it disables ambient proxy discovery outright. The
+check reports only that ambient proxy configuration is present; it
 never emits proxy URLs, credentials, or other environment-variable values. When
 none of those variables are set to a non-empty value, the check is omitted.
 `NO_PROXY` and `no_proxy` specify proxy bypass rules, not
