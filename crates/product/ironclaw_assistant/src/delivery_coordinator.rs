@@ -22,14 +22,17 @@
 //!
 //! On a deterministic-id row, `Failed(TransportUnavailable)` (and the other
 //! `DeliveryFailureKind::permits_reopen()`-true kinds) implies no vendor
-//! egress ever occurred for that delivery id — this codebase only ever
-//! settles those kinds before the vendor-egress claim. That invariant is
-//! what makes reopening them safe: [`ironclaw_outbound::OutboundStateStore`]
+//! egress was ever attempted for that delivery id — this codebase only ever
+//! settles those kinds before any `adapter.deliver` call is made. That
+//! invariant is what makes reopening them safe: [`ironclaw_outbound::OutboundStateStore`]
 //! (via `record_delivery_attempt`) may CAS a stale `Failed` row of that kind
 //! back to a fresh `Prepared` reservation for a replay to claim, without
-//! risking a duplicate send. Anything settled after the claim that cannot
-//! prove the vendor was never contacted uses
-//! [`DeliveryFailureKind::VendorContactAmbiguous`] instead, which never
+//! risking a duplicate send. Note this is a narrower claim than "before the
+//! vendor-egress claim": `TransportUnavailable` is written post-claim, on
+//! channel-resolution failure (`resolve_channel_context`), but that failure
+//! path never reaches `adapter.deliver`. Anything settled after an
+//! `adapter.deliver` call that cannot prove the vendor was never contacted
+//! uses [`DeliveryFailureKind::VendorContactAmbiguous`] instead, which never
 //! permits reopen.
 
 use std::collections::HashSet;

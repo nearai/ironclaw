@@ -268,8 +268,12 @@ impl DeliveryFailureKind {
 
     /// Whether a `Failed` row carrying this kind may be reopened to a fresh
     /// `Prepared` reservation under the same deterministic delivery id.
-    /// True only for kinds this codebase provably never writes after the
-    /// vendor-egress claim, so a reopen cannot duplicate an accepted send.
+    /// True only for kinds this codebase provably never writes after an
+    /// `adapter.deliver` call has been made, so a reopen cannot duplicate an
+    /// accepted send. This is a narrower boundary than "before the
+    /// vendor-egress claim": `TransportUnavailable` is written post-claim, on
+    /// channel-resolution failure, but that failure path never reaches
+    /// `adapter.deliver` — so no vendor egress was ever attempted.
     pub const fn permits_reopen(self) -> bool {
         match self {
             Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => true,
@@ -455,15 +459,32 @@ mod tests {
 
     #[test]
     fn all_lists_every_variant_exactly_once() {
-        // Defence-in-depth alongside the exhaustive match above: catches a
-        // typo'd duplicate entry in `ALL` that the match wouldn't.
+        // Catches both a duplicated entry and an omitted one. The witness
+        // list below is exhaustive by construction: a new variant forces a
+        // new binding here (the match below is non-exhaustive otherwise),
+        // which then forces the `ALL` membership check for it.
+        let witnesses = [
+            DeliveryFailureKind::AuthorizationRevoked,
+            DeliveryFailureKind::TransientValidatorError,
+            DeliveryFailureKind::TransportUnavailable,
+            DeliveryFailureKind::RateLimited,
+            DeliveryFailureKind::Rejected,
+            DeliveryFailureKind::Unknown,
+            DeliveryFailureKind::VendorContactAmbiguous,
+        ];
         let mut seen = std::collections::HashSet::new();
         for kind in DeliveryFailureKind::ALL {
             assert!(
-                seen.insert(format!("{kind:?}")),
+                seen.insert(std::mem::discriminant(kind)),
                 "duplicate entry: {kind:?}"
             );
         }
-        assert_eq!(seen.len(), 7);
+        for witness in witnesses {
+            assert!(
+                seen.contains(&std::mem::discriminant(&witness)),
+                "ALL omits {witness:?}"
+            );
+        }
+        assert_eq!(seen.len(), witnesses.len());
     }
 }

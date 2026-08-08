@@ -830,7 +830,9 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
 
     // G2: a lost sole-writer claim (no vendor evidence from this call) must
     // stay model-visible and model-correctable, exactly as the removed
-    // `AlreadyInFlight` coordinator error was treated.
+    // `AlreadyInFlight` coordinator error was treated. It must not assert a
+    // definite `Rejected`: the blocking row may be `Sending`, so the vendor
+    // could already have accepted the message.
     let existing_unconfirmed = classify_delivery_outcome(
         target.clone(),
         CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
@@ -840,7 +842,7 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
     assert_eq!(
         existing_unconfirmed,
         Err(ModelChannelDeliveryError::Failed {
-            kind: DeliveryFailureKind::Rejected
+            kind: DeliveryFailureKind::VendorContactAmbiguous
         })
     );
 
