@@ -605,6 +605,42 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
             second_run_id
         )
 
+        # A third turn takes navigation past the old two-run retention depth.
+        # Stopping at two made the browser's wider navigation window look sound
+        # while every turn beyond the second rendered blank, so this walks back
+        # two turns and asserts the FIRST run still renders real activity rather
+        # than the empty state.
+        async with httpx.AsyncClient(headers=headers) as client:
+            await _send_and_settle(
+                client,
+                reborn_v2_server,
+                thread_id,
+                f"retention-depth-e2e-{uuid.uuid4()}",
+                expected=3,
+            )
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible(
+            timeout=30000
+        )
+
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 1 of 3", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(run_id)
+        # The timeline container only renders when the run has retained
+        # activity; the empty state omits it. Its presence two turns back is the
+        # evidence that host retention actually covers the navigable window.
+        await expect(page.locator(SEL_V2["inspector_activity_content"])).to_be_visible()
+        await expect(
+            activity.get_by_text("No activity yet", exact=True)
+        ).to_have_count(0)
+
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+
         await page.evaluate(
             """() => {
               Object.defineProperty(document, "visibilityState", {
@@ -633,7 +669,9 @@ async def test_inspector_prompt_and_stats_render_host_diagnostics(
         reconnect_response = await reconnect_info.value
         assert reconnect_response.status == 200, reconnect_response.url
         activity = page.locator(SEL_V2["inspector_activity_content"])
-        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
+        # The thread now holds three turns and navigation was left on the
+        # latest, so the reconnect resumes observing that run.
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
         await expect(
             activity.locator("[data-activity-kind='model_call_started']")
         ).to_have_count(1)

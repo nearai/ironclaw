@@ -8,7 +8,10 @@ import { afterEach, beforeEach, test, vi } from "vitest";
 import "../../../i18n/en";
 import "../../../i18n/zh-CN";
 import { I18nProvider } from "../../../lib/i18n";
-import { inspectorRunHistoryKey } from "./inspector-activity";
+import {
+  MAX_INSPECTOR_RUNS_PER_THREAD,
+  inspectorRunHistoryKey,
+} from "./inspector-activity";
 import { INSPECTOR_HEALTH } from "./inspector-state";
 import { InspectorPanel } from "./inspector-panel";
 import { resetInspectorSessionStats } from "./inspector-session-stats";
@@ -455,21 +458,22 @@ test("activity navigation advances when a pinned run leaves the history window",
   );
   assert.equal(inspectorCalls.at(-1)?.runId, "run-0");
 
+  const window = MAX_INSPECTOR_RUNS_PER_THREAD;
   sessionStorage.setItem(
     inspectorRunHistoryKey(),
     JSON.stringify({
-      "thread-a": Array.from({ length: 32 }, (_, index) => `run-${index + 1}`),
+      "thread-a": Array.from({ length: window }, (_, index) => `run-${index + 1}`),
     }),
   );
   await act(async () =>
-    root?.render(<InspectorPanel threadId="thread-a" runId="run-32" />),
+    root?.render(<InspectorPanel threadId="thread-a" runId={`run-${window}`} />),
   );
 
   // The pinned run-0 was evicted from the bounded window. Rejoin the latest
   // observed turn — the default selection — rather than the oldest retained
   // one, so eviction never silently parks navigation on stale history.
-  assert.equal(inspectorCalls.at(-1)?.runId, "run-32");
-  assert.match(document.body.textContent || "", /Turn 32 of 32/);
+  assert.equal(inspectorCalls.at(-1)?.runId, `run-${window}`);
+  assert.match(document.body.textContent || "", new RegExp(`Turn ${window} of ${window}`));
   assert.equal(
     document.querySelector<HTMLButtonElement>("[aria-label='Previous turn']")?.disabled,
     false,

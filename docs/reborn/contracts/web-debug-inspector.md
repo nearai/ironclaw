@@ -45,8 +45,10 @@ expands that activity.
   truncation are explicit.
 - Per run: 128 retained model calls, 16 retained tool executions, 1,000
   activity entries, and 1,024 retained updates.
-- Process defaults: eight caller sessions and two runs per session, all with
-  deterministic bounded eviction.
+- Process defaults: eight caller sessions and four runs per session, all with
+  deterministic bounded eviction. Capture is unconditional, so these are
+  resident-memory choices, not debug-time ones. Every limit is a ceiling as
+  well as a default — a deployment may shrink one, never raise it.
 - Prompt, model, tool, failure, and summary text crosses control-character
   sanitation and secret scanning before retention. Diagnostic text types
   validate UTF-8-safe bounds and reject inconsistent size metadata.
@@ -73,10 +75,16 @@ product lifecycle hints while waiting for host diagnostics, but replaces those
 hints when the matching authoritative event arrives. A started model or tool
 activity remains pending until its correlated terminal event arrives.
 
-Turn navigation is session-local. The browser retains at most 32 observed run
-ids per thread in `sessionStorage`, selects the active/latest run by default,
-and lets the operator move to the previous, next, or latest observed turn. It
-does not create a durable run index.
+Turn navigation is session-local. The browser retains observed run ids per
+thread in `sessionStorage`, selects the active/latest run by default, and lets
+the operator move to the previous, next, or latest observed turn. It does not
+create a durable run index.
+
+That window is capped at the host's retained runs per session, and the
+`reborn_inspector_retention_alignment` gate pins the two constants together. A
+wider window would advertise turns whose snapshot is already evicted, so
+navigation would silently walk into blank turns. A run that leaves the window,
+or that is evicted while pinned, drops the operator back to the latest turn.
 
 The Stats view also reports browser-observed stream state, reconnect attempts,
 accepted diagnostic-update count, and the last accepted update time. These

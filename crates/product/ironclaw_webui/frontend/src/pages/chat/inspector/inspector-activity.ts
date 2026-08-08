@@ -20,7 +20,16 @@ export function inspectorRunHistoryKey(): string {
 }
 
 export { MAX_INSPECTOR_ACTIVITY_ENTRIES } from "./activity-kind";
-const MAX_INSPECTOR_RUNS_PER_THREAD = 32;
+/**
+ * Turn-navigation window, mirroring `DEFAULT_MAX_RETAINED_RUNS_PER_SESSION` in
+ * `crates/contracts/ironclaw_product_contracts/src/inspector.rs`.
+ *
+ * Navigation must never offer more turns than the host retains diagnostics
+ * for: an older run resolves to an empty snapshot, so a wider window just
+ * advertises turns that read as blank. The `reborn_inspector_retention_alignment`
+ * architecture test pins these two constants together.
+ */
+export const MAX_INSPECTOR_RUNS_PER_THREAD = 4;
 
 export interface BoundedDiagnosticText {
   content: string;

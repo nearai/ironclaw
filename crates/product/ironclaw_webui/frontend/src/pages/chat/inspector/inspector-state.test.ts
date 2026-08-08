@@ -5,6 +5,7 @@ import { setAuthScope } from "../../../lib/auth-scope";
 import { ActivityKind } from "./activity-kind";
 import {
   MAX_INSPECTOR_ACTIVITY_ENTRIES,
+  MAX_INSPECTOR_RUNS_PER_THREAD,
   inspectorRunHistoryKey,
   reduceInspectorActivity,
   rememberInspectorRun,
@@ -301,13 +302,15 @@ test("run navigation history is thread-scoped, deduplicated, and bounded", () =>
   assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
   assert.deepEqual(saved["thread-b"], ["run-b"]);
 
-  for (let index = 1; index <= 33; index += 1) {
+  // Bounded to the host's retention depth: navigation must not offer a turn
+  // whose diagnostics the host has already evicted.
+  for (let index = 1; index <= MAX_INSPECTOR_RUNS_PER_THREAD + 1; index += 1) {
     rememberInspectorRun("bounded-thread", `run-${index}`, memory);
   }
   const bounded = JSON.parse(memory.dump()[inspectorRunHistoryKey()])["bounded-thread"];
-  assert.equal(bounded.length, 32);
+  assert.equal(bounded.length, MAX_INSPECTOR_RUNS_PER_THREAD);
   assert.equal(bounded[0], "run-2");
-  assert.equal(bounded.at(-1), "run-33");
+  assert.equal(bounded.at(-1), `run-${MAX_INSPECTOR_RUNS_PER_THREAD + 1}`);
 });
 
 test("stream metrics persist in the browser session without duplicate update counts", () => {
