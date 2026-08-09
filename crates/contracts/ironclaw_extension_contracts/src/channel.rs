@@ -107,7 +107,7 @@ pub struct ChannelDescriptor {
     /// This channel can fulfil blocked-automation notifications (approval/auth
     /// gates, failure notices). Independent of `inbound`/`outbound`: a channel
     /// may deliver notifications without being a two-way conversation surface
-    /// (the web app declares this without yet declaring outbound delivery).
+    /// (e.g. a browser-push channel, notification-only for final replies).
     #[serde(default)]
     pub notifications: bool,
     /// Required: how external conversations bind (checklist MAN-10).

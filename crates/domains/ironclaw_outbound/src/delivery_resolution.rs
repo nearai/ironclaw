@@ -444,7 +444,21 @@ mod tests {
         assert!(!capabilities.progress);
         assert!(!capabilities.gate_prompts);
         assert!(!capabilities.auth_prompts);
+        assert!(!capabilities.notifications);
         assert!(capabilities.modalities.is_empty());
+    }
+
+    #[test]
+    fn delivery_target_capabilities_deserialize_defaults_notifications_to_false() {
+        // A historical payload predating the `notifications` capability must
+        // deserialize with `notifications = false` via `#[serde(default)]`,
+        // never fail — preserving wire/persist compatibility.
+        let decoded: DeliveryTargetCapabilities = from_str(
+            r#"{"final_replies":true,"progress":false,"gate_prompts":true,"auth_prompts":true,"modalities":[]}"#,
+        )
+        .expect("deserialize legacy capabilities without notifications");
+        assert!(!decoded.notifications);
+        assert!(decoded.final_replies);
     }
 
     #[test]
