@@ -301,14 +301,14 @@ function MarkdownRendererImpl({
             <div className="whitespace-pre-wrap">{normalizedContent}</div>
           )}
         >
-          <StreamingMarkdown
+          <EmojiStreamingMarkdown
             animated={{ duration: 100, easing: "ease-out", sep: "word", stagger: 15 }}
             controls={false}
             isAnimating={streaming}
             mode={streaming ? "streaming" : "static"}
           >
             {normalizedContent}
-          </StreamingMarkdown>
+          </EmojiStreamingMarkdown>
         </React.Suspense>
       </div>
     );
@@ -336,8 +336,10 @@ function MarkdownRendererImpl({
   );
 }
 
-const StreamingMarkdown = React.lazy(() =>
-  import("streamdown").then(({ Streamdown }) => ({ default: Streamdown }))
+const EmojiStreamingMarkdown = React.lazy(() =>
+  import("./emoji-streaming-markdown").then(({ EmojiStreamingMarkdown }) => ({
+    default: EmojiStreamingMarkdown,
+  }))
 );
 
 // Memoized so a bubble whose `content`/`className`/`streaming` are unchanged skips
