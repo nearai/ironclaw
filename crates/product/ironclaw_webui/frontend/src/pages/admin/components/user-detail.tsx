@@ -8,6 +8,7 @@ import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import { UserSecretsPanel } from "./user-secrets-panel";
+import { ThreadScrapingPanel } from "./thread-scraping-panel";
 import {
   formatRelativeTime,
   formatCost,
@@ -30,7 +31,7 @@ function DetailRow({ label, children }) {
   );
 }
 
-export function UserDetail({ userId, onBack }) {
+export function UserDetail({ userId, onBack, threadScrapingEnabled = false }) {
   const userQuery = useAdminUserDetail(userId);
   const usageQuery = useUsage("month", userId);
   const adminState = useAdminUsers();
@@ -41,11 +42,12 @@ export function UserDetail({ userId, onBack }) {
       userQuery={userQuery}
       usageQuery={usageQuery}
       adminState={adminState}
+      threadScrapingEnabled={threadScrapingEnabled}
     />
   );
 }
 
-export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
+export function UserDetailView({ onBack, userQuery, usageQuery, adminState, threadScrapingEnabled = false }) {
   const t = useT();
   const {
     suspendUser,
@@ -254,6 +256,8 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
       </Panel>
 
       <UserSecretsPanel key={user.id} userId={user.id} />
+
+      {threadScrapingEnabled && <ThreadScrapingPanel userId={user.id} />}
 
       <Panel className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.usage30Days")}</h3>

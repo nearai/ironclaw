@@ -16,7 +16,7 @@ SLACK_DECLARED = {
     "slack_api_app_id",
     "slack_installation_id",
     "slack_bot_user_id",
-    "slack_shared_subject_user_id",
+    "slack_allowed_channels",
     "slack_oauth_client_id",
     "slack_oauth_client_secret",
 }
@@ -30,7 +30,7 @@ class AdminHandleMappingTests(unittest.TestCase):
                 "api_app_id": "A456",
                 "installation_id": "I789",
                 "bot_user_id": "U000",
-                "shared_subject_user_id": "U111",
+                "allowed_channels": '["C0SHARED"]',
                 "oauth_client_id": "C222",
             },
             SLACK_DECLARED,
@@ -42,7 +42,7 @@ class AdminHandleMappingTests(unittest.TestCase):
                 "slack_api_app_id": "A456",
                 "slack_installation_id": "I789",
                 "slack_bot_user_id": "U000",
-                "slack_shared_subject_user_id": "U111",
+                "slack_allowed_channels": '["C0SHARED"]',
                 "slack_oauth_client_id": "C222",
             },
         )
@@ -64,11 +64,13 @@ class AdminHandleMappingTests(unittest.TestCase):
         self.assertEqual(unmapped, ["auth_user_id", "bot_username"])
 
     def test_suffix_ambiguity_across_declared_handles_is_unmapped(self):
-        # `user_id` suffix-matches both bot_user_id and shared_subject_user_id
-        # declared handles -> ambiguous, never guessed.
+        # `user_id` suffix-matches both declared handles -> ambiguous, never
+        # guessed. (Synthetic second handle: the live Slack manifest no longer
+        # declares a second `*_user_id` field since the shared-subject handle
+        # retired, but the mapping is generic and the pin stays.)
         declared, unmapped = _map_admin_configuration_values(
             {"user_id": "U1"},
-            {"slack_bot_user_id", "slack_shared_subject_user_id"},
+            {"slack_bot_user_id", "slack_admin_user_id"},
         )
         self.assertEqual(declared, {})
         self.assertEqual(unmapped, ["user_id"])

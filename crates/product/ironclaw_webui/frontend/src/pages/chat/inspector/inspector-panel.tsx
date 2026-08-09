@@ -2,6 +2,7 @@ import React from "react";
 
 import { cn } from "../../../utils/cn";
 import { ActivityKind } from "./activity-kind";
+import { fetchInspectorTool } from "./inspector-api";
 import {
   reduceInspectorActivity,
   rememberInspectorRun,
@@ -223,12 +224,14 @@ function ActivityShell({
   runHistory,
   selectedRunId,
   onSelectRun,
+  threadId,
 }: {
   snapshot: Record<string, unknown> | null;
   updates: Array<Record<string, unknown>>;
   runHistory: string[];
   selectedRunId: string | null;
   onSelectRun: (runId: string) => void;
+  threadId: string | null;
 }) {
   const activity = React.useMemo(
     () => reduceInspectorActivity(snapshot, updates),
@@ -267,7 +270,14 @@ function ActivityShell({
         onSelectRun={onSelectRun}
       />
       <ol className="space-y-2" aria-label="Run activity timeline">
-        {activity.map((entry) => <ActivityEntry key={entry.key} entry={entry} />)}
+        {activity.map((entry) => (
+          <ActivityEntry
+            key={entry.key}
+            entry={entry}
+            threadId={threadId}
+            runId={selectedRunId}
+          />
+        ))}
       </ol>
     </div>
   );
@@ -333,10 +343,181 @@ function shortId(value: string | null): string | null {
   return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
 }
 
-function ActivityEntry({ entry }: { entry: InspectorActivityRow }) {
+interface ToolDetail {
+  capability_name: BoundedDiagnosticText;
+  arguments: BoundedDiagnosticText | null;
+  result: BoundedDiagnosticText | null;
+  status: "started" | "succeeded" | "failed";
+  duration_ms: number | null;
+  output_bytes: number | null;
+  failure_category: BoundedDiagnosticText | null;
+  failure_summary: BoundedDiagnosticText | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isBoundedDiagnosticText(value: unknown): value is BoundedDiagnosticText {
+  return isRecord(value)
+    && typeof value.content === "string"
+    && isNonNegativeSafeInteger(value.original_bytes)
+    && typeof value.truncated === "boolean";
+}
+
+function isNullableBoundedDiagnosticText(
+  value: unknown,
+): value is BoundedDiagnosticText | null {
+  return value === null || isBoundedDiagnosticText(value);
+}
+
+function isNullableNonNegativeSafeInteger(value: unknown): value is number | null {
+  return value === null || isNonNegativeSafeInteger(value);
+}
+
+function decodeToolDetailResponse(response: unknown): ToolDetail | null {
+  if (!isRecord(response) || !isRecord(response.tool)) return null;
+  const tool = response.tool;
+  if (
+    !isBoundedDiagnosticText(tool.capability_name)
+    || !isNullableBoundedDiagnosticText(tool.arguments)
+    || !isNullableBoundedDiagnosticText(tool.result)
+    || (tool.status !== "started" && tool.status !== "succeeded" && tool.status !== "failed")
+    || !isNullableNonNegativeSafeInteger(tool.duration_ms)
+    || !isNullableNonNegativeSafeInteger(tool.output_bytes)
+    || !isNullableBoundedDiagnosticText(tool.failure_category)
+    || !isNullableBoundedDiagnosticText(tool.failure_summary)
+  ) {
+    return null;
+  }
+  return {
+    capability_name: tool.capability_name,
+    arguments: tool.arguments,
+    result: tool.result,
+    status: tool.status,
+    duration_ms: tool.duration_ms,
+    output_bytes: tool.output_bytes,
+    failure_category: tool.failure_category,
+    failure_summary: tool.failure_summary,
+  };
+}
+
+function ToolDetailDisclosure({
+  threadId,
+  runId,
+  activityId,
+}: {
+  threadId: string;
+  runId: string;
+  activityId: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
+  const [tool, setTool] = React.useState<ToolDetail | null>(null);
+  const [unavailable, setUnavailable] = React.useState(false);
+  const requestRef = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
+  const load = () => {
+    const nextOpen = !open;
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      setLoading(false);
+      return;
+    }
+    if (tool || loading) return;
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setLoading(true);
+    setUnavailable(false);
+    fetchInspectorTool({ threadId, runId, activityId, signal: controller.signal })
+      .then((response) => {
+        if (controller.signal.aborted || requestRef.current !== controller) return;
+        const detail = decodeToolDetailResponse(response);
+        setTool(detail);
+        setUnavailable(!detail);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && requestRef.current === controller) {
+          setUnavailable(true);
+        }
+      })
+      .finally(() => {
+        if (requestRef.current === controller) {
+          requestRef.current = null;
+          setLoading(false);
+        }
+      });
+  };
+  return (
+    <div className="mt-3 border-t border-[var(--v2-panel-border)] pt-3">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={load}
+        className="text-xs font-medium text-[var(--v2-accent-text)]"
+      >
+        {open ? "Hide details" : "Show details"}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-3 text-xs" data-testid={`inspector-tool-detail-${activityId}`}>
+          {loading && <p role="status">Loading tool details…</p>}
+          {unavailable && <p role="status">Tool details are unavailable or no longer retained.</p>}
+          {tool && (
+            <>
+              <p><span className="font-medium">Capability:</span> {tool.capability_name.content}</p>
+              <p><span className="font-medium">Status:</span> {tool.status}</p>
+              {tool.duration_ms != null && <p>Duration: {tool.duration_ms.toLocaleString()} ms</p>}
+              <ToolDetailBlock label="Arguments" value={tool.arguments} />
+              <ToolDetailBlock label="Output" value={tool.result} />
+              {tool.output_bytes != null && <p>Output size: {tool.output_bytes.toLocaleString()} bytes</p>}
+              <ToolDetailBlock label="Failure category" value={tool.failure_category} />
+              <ToolDetailBlock label="Failure" value={tool.failure_summary} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolDetailBlock({ label, value }: { label: string; value: BoundedDiagnosticText | null }) {
+  if (!value) return null;
+  return (
+    <div>
+      <p className="mb-1 font-medium">
+        {label}{value.truncated ? ` · truncated from ${value.original_bytes.toLocaleString()} bytes` : ""}
+      </p>
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--v2-surface-soft)] p-3 text-[11px]">
+        {value.content}
+      </pre>
+    </div>
+  );
+}
+
+function ActivityEntry({
+  entry,
+  threadId,
+  runId,
+}: {
+  entry: InspectorActivityRow;
+  threadId: string | null;
+  runId: string | null;
+}) {
   const failed = entry.kind === ActivityKind.ModelCallFailed
     || entry.kind === ActivityKind.ToolFailed
     || entry.kind === ActivityKind.GateBlocked;
+  const hasToolDetails = entry.kind === ActivityKind.ToolStarted
+    || entry.kind === ActivityKind.ToolCompleted
+    || entry.kind === ActivityKind.ToolFailed;
   const correlation = shortId(entry.activity_id || entry.model_call_id);
   const timestamp = new Date(entry.occurred_at);
   return (
@@ -368,6 +549,14 @@ function ActivityEntry({ entry }: { entry: InspectorActivityRow }) {
         {entry.iteration != null ? ` · iteration ${entry.iteration}` : ""}
         {correlation ? ` · ${correlation}` : ""}
       </p>
+      {hasToolDetails && entry.activity_id && threadId && runId && (
+        <ToolDetailDisclosure
+          key={`${threadId}:${runId}:${entry.activity_id}`}
+          threadId={threadId}
+          runId={runId}
+          activityId={entry.activity_id}
+        />
+      )}
     </li>
   );
 }
@@ -621,6 +810,7 @@ function InspectorPanelCore({
             runHistory={runHistory}
             selectedRunId={selectedRunId}
             onSelectRun={selectRun}
+            threadId={threadId}
           />
         )}
         {preferences.activeTab === "stats" && <StatsShell snapshot={snapshot} />}

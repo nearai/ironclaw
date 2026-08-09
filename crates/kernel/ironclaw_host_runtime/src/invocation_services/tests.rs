@@ -121,9 +121,9 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
     // The post-edit check rides filesystem-only edit plans, so it must NOT run
     // through the deployment-blind local `process` port. The resolver bundles it
     // with the port matching the plan's process backend: the local host port
-    // under LocalSingleUser+LocalHost, the tenant-sandbox port under a hosted
-    // tenant-sandbox deployment (so a tenant's command runs isolated in that
-    // tenant's sandbox, never on the provider host), and nothing when no backend
+    // under LocalSingleUser+LocalHost, the user-sandbox port under a hosted
+    // user-sandbox deployment (so each command runs in the sandbox scoped to its
+    // tenant and user, never on the provider host), and nothing when no backend
     // can run it in isolation.
     let resolver = ConfiguredInvocationServicesResolver::new(
         Arc::new(DiskFilesystem::new()),
@@ -135,7 +135,7 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
         "cargo check",
         std::time::Duration::from_secs(30),
     ))
-    .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("tenant-sandbox")));
+    .with_user_sandbox_process_port(Arc::new(NamedProcessPort("user-sandbox")));
 
     let resolve = |process_backend, deployment, resolved_profile| {
         let mut plan = plan(process_backend, false, false, NetworkMode::Deny, false);
@@ -180,15 +180,15 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
         "local single-user runs the check on the local host port"
     );
 
-    let tenant_sandbox = resolve(
-        ProcessBackendKind::TenantSandbox,
+    let user_sandbox = resolve(
+        ProcessBackendKind::UserSandbox,
         DeploymentMode::HostedMultiTenant,
         RuntimeProfile::HostedDev,
     );
     assert_eq!(
-        bundled_port_name(&tenant_sandbox).await.as_deref(),
-        Some("tenant-sandbox"),
-        "hosted multi-tenant runs the check ISOLATED in the tenant sandbox, \
+        bundled_port_name(&user_sandbox).await.as_deref(),
+        Some("user-sandbox"),
+        "hosted multi-tenant runs the check ISOLATED in the user sandbox, \
          never on the provider host"
     );
 
@@ -217,7 +217,7 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
 fn local_resolver_rejects_sandbox_process_backend_without_local_fallback() {
     let resolver = resolver_without_http();
     let plan = plan(
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
         true,
         false,
         NetworkMode::Allowlist,
@@ -236,7 +236,7 @@ fn local_resolver_rejects_sandbox_process_backend_without_local_fallback() {
     assert!(matches!(
         error,
         InvocationServicesError::UnsupportedProcessBackend {
-            backend: ProcessBackendKind::TenantSandbox
+            backend: ProcessBackendKind::UserSandbox
         }
     ));
 }
@@ -244,9 +244,9 @@ fn local_resolver_rejects_sandbox_process_backend_without_local_fallback() {
 #[tokio::test]
 async fn local_resolver_uses_configured_sandbox_process_backend() {
     let resolver = resolver_without_http()
-        .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("sandbox")));
+        .with_user_sandbox_process_port(Arc::new(NamedProcessPort("sandbox")));
     let plan = plan(
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
         true,
         false,
         NetworkMode::Allowlist,
@@ -352,6 +352,51 @@ fn local_resolver_rejects_unsupported_filesystem_backend() {
             backend: FilesystemBackendKind::TenantWorkspace
         }
     ));
+}
+
+#[tokio::test]
+async fn hosted_tenant_workspace_uses_the_invocations_scoped_mounts() {
+    let backing: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let alice_file = vpath("/projects/workspace/tenants/acme/users/alice/marker.txt");
+    let bob_file = vpath("/projects/workspace/tenants/acme/users/bob/marker.txt");
+    backing.write_file(&alice_file, b"alice").await.unwrap();
+    backing.write_file(&bob_file, b"bob").await.unwrap();
+
+    let resolver = resolver_with_filesystem(backing);
+    let mut plan = plan(
+        ProcessBackendKind::UserSandbox,
+        false,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::HostedSafe;
+    plan.requires_filesystem = true;
+    plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        vpath("/projects/workspace/tenants/acme/users/alice"),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let services = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: Some(&mounts),
+        })
+        .expect("hosted tenant workspace should resolve through its scoped mount grants");
+
+    assert_eq!(
+        services.filesystem.read_file(&alice_file).await.unwrap(),
+        b"alice"
+    );
+    assert_permission_denied(
+        services.filesystem.read_file(&bob_file).await.unwrap_err(),
+        FilesystemOperation::ReadFile,
+    );
 }
 
 #[test]

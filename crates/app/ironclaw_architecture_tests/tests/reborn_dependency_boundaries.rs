@@ -617,7 +617,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     /// failure message. Never counted by eye.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
-        ("ironclaw_extension_contracts", 7_738),
+        // 7_727 -> 7_748 (2026-08-05, #7157): +21 lines for the
+        // `ActivePreferenceTargetCodecs` port beside its sibling
+        // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
+        // no logic. Count read from this test's own failure message.
+        // 7_748 -> 7_759 by #7076 (RFC 7617 Basic credential target): the
+        // channel-descriptor vocabulary for the Basic injection target is
+        // declarations only; enforcement stays in host_runtime. Count read
+        // from this test's own failure message after merging main.
+        ("ironclaw_extension_contracts", 7_759),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -627,18 +635,62 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
-        // Raised 18_784 -> 18_804 by #7076 (RFC 7617 Basic credential target):
-        // the `RuntimeCredentialTarget::Basic` declaration, its username
+        // Raised 18_784 -> 18_799 by #7214: the user-sandbox backend rename
+        // preserves the legacy `tenant_sandbox` wire value, and the neutral
+        // sandbox transport now exposes graceful lifecycle release. This is
+        // contract vocabulary; execution and provider cleanup remain in the
+        // sandbox runtime lane.
+        // 18_799 -> 18_819 by #7076 (RFC 7617 Basic credential target): the
+        // `RuntimeCredentialTarget::Basic` declaration, its username
         // validation, and wire-format round-trip coverage are contract
         // vocabulary; composition, injection, and enforcement stay in
-        // host_runtime.
-        ("ironclaw_host_api", 18_804),
-        ("ironclaw_loop_contracts", 14_479),
+        // host_runtime. Count read from this test's own failure message
+        // after merging main.
+        ("ironclaw_host_api", 18_819),
+        // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
+        // delivery-heuristic vocabulary (stored trigger delivery targets and
+        // their run-profile plumbing) left this crate with the two-lane
+        // delivery model. The final count includes 96 prompt-inspection lines
+        // and 3 model-accounting lines subsequently merged from main; #7157
+        // remains a net 229-line reduction against that main baseline.
+        // 13_949 -> 13_115 (2026-08-07, #7157 review round): the
+        // connected-channels line gained a byte budget so the runtime-context
+        // slice cannot exceed the 4 KiB prompt surface it is validated on (a
+        // worst case measured 4,391 bytes, which would end every run for that
+        // user), and `runtime_context.rs`'s 919-line inline `#[cfg(test)]`
+        // module was split verbatim into a `runtime_context/tests.rs` sibling
+        // — which `production_rust_files` excludes, unlike an inline module in
+        // a production file. Net effect is a smaller crate than before the
+        // fixes, so the ceiling ratchets DOWN rather than being raised. Count
+        // read from this test's own failure message.
+        // 13_115 -> 13_028 (2026-08-07, run-acts-as-invoker follow-up):
+        // `LoopRunContext::acting_user_id` (+16 lines) declares the one
+        // acting-identity ladder both the composition gate raise and the
+        // loop-host resume replay load key their scope-keyed stores by —
+        // hand-synced copies of it had already diverged once. Paid for by
+        // splitting `host/run_context.rs`'s 104-line inline `#[cfg(test)]`
+        // module into its `run_context/tests.rs` sibling, so the ceiling
+        // ratchets DOWN. Count read from this test's own failure message.
+        // 13_028 -> 13_094 (2026-08-08, merge with main): main's
+        // #7361/#7363 added +66 lines to `instruction_bundle.rs`, folded
+        // in when this branch merged main. Not growth from this PR; count
+        // read from this test's own failure message after the merge.
+        // 13_094 -> 13_107 (2026-08-08, run-acts-as-invoker review
+        // hardening): +13 lines for `LoopRunContext::acting_resource_scope`
+        // — the raise/resume scope recipe both gate-dance crates previously
+        // hand-synced now lives once on the contract type (its callers in
+        // composition and loop_host DELETED their copies). Reason recorded
+        // in the PR body; count read from this test's failure message.
+        ("ironclaw_loop_contracts", 13_107),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
         // non-contract crates.
-        ("ironclaw_product_contracts", 15_758),
+        // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
+        // growth is the three admin scrape request DTOs and the wire
+        // `RebornListThreadsResponse` reuse — declarations only; authorization,
+        // audit, and artifact building stay in ironclaw_assistant.
+        ("ironclaw_product_contracts", 15_800),
         ("ironclaw_prompt_envelope", 832),
     ];
 

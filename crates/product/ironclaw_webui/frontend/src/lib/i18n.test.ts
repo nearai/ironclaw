@@ -296,6 +296,47 @@ test("locale packs include automation action failure copy", () => {
   }
 });
 
+test("locale packs localize every builtin outbound-delivery tool description", () => {
+  // `builtin.notification_channels_set` is a registered operator tool
+  // (`notification_channels_set_operator_tool_info`) and renders in the
+  // settings Tools tab beside its two siblings. Without a pack entry it is
+  // the one row falling back to the raw model-oriented backend description
+  // in every locale, so the three keys are pinned together.
+  const requiredKeys = [
+    "tools.description.builtin.outbound_delivery_targets_list",
+    "tools.description.builtin.outbound_deliver",
+    "tools.description.builtin.notification_channels_set",
+  ];
+  const english = loadLocalePack("en");
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+      if (locale === "en") continue;
+      assert.notEqual(
+        pack[key],
+        english[key],
+        `${locale} must localize ${key}, not echo the English string`,
+      );
+    }
+  }
+});
+
+test("locale packs explain why the notification-channels panel locks after a failed read", () => {
+  // The panel disables editing when the channels read fails (a stale,
+  // all-unchecked form would turn one toggle into a destructive full
+  // replace). The disabled state is only honest if every locale can say so.
+  const key = "automations.notificationChannels.loadFailedEditingDisabled";
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+    assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+  }
+});
+
 test("locale packs include client-generated chat failure copy", () => {
   const requiredKeys = [
     "chat.failure.connectionLost",

@@ -24,11 +24,12 @@ use ironclaw_approvals::{
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_assistant::{
-    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
-    ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
-    ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
-    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW,
-    AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
+    ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
+    ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
+    ADMIN_USER_DELETE_SECRET_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID,
+    ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY_ID,
+    ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
+    ADMIN_USERS_VIEW, AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
     AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
     AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
@@ -52,12 +53,10 @@ use ironclaw_assistant::{
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, OutboundPreferencesProductService,
-    PRODUCT_COMMAND_EXECUTE_COMMAND_ID, PRODUCT_COMMAND_LIST_COMMAND_ID,
-    PRODUCT_NEW_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    OutboundPreferencesProductService, PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
+    PRODUCT_COMMAND_LIST_COMMAND_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
@@ -78,17 +77,16 @@ use ironclaw_assistant::{
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
     RebornProductCommandListResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
     RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
     RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServices,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
@@ -106,9 +104,10 @@ use ironclaw_assistant::{
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
     RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse,
+    RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
+    RebornAdminThreadScrapeRunArtifactRequest, RebornAdminUpdateUserProductRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
 };
 use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
@@ -1611,83 +1610,17 @@ impl AutomationProductService for ErroringAutomationService {
 
 #[derive(Default)]
 struct RecordingOutboundPreferencesService {
-    get_calls: Mutex<Vec<ProductSurfaceCaller>>,
-    set_calls: Mutex<usize>,
     list_calls: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
 impl RecordingOutboundPreferencesService {
-    fn get_calls(&self) -> Vec<ProductSurfaceCaller> {
-        self.get_calls.lock().expect("lock").clone()
-    }
-
-    fn set_calls(&self) -> usize {
-        *self.set_calls.lock().expect("lock")
-    }
-
     fn list_calls(&self) -> Vec<ProductSurfaceCaller> {
         self.list_calls.lock().expect("lock").clone()
     }
 }
 
-type OutboundPreferencesInvokeCall = (ProductSurfaceCaller, CapabilityId, serde_json::Value);
-
-#[derive(Default, Clone)]
-struct RecordingOutboundPreferencesInvoker {
-    calls: Arc<Mutex<Vec<OutboundPreferencesInvokeCall>>>,
-}
-
-impl RecordingOutboundPreferencesInvoker {
-    fn calls(&self) -> Vec<OutboundPreferencesInvokeCall> {
-        self.calls.lock().expect("lock").clone()
-    }
-}
-
-#[async_trait]
-impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
-    async fn invoke(
-        &self,
-        caller: ProductSurfaceCaller,
-        capability: CapabilityId,
-        input: serde_json::Value,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push((caller, capability, input));
-        Ok(operator_config_success_resolution(activity_id))
-    }
-}
-
 #[async_trait]
 impl OutboundPreferencesProductService for RecordingOutboundPreferencesService {
-    async fn get_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        self.get_calls.lock().expect("lock").push(caller);
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-            default_modality: RebornOutboundDeliveryModality::Text,
-        })
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        *self.set_calls.lock().expect("lock") += 1;
-        Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: Some(outbound_target_summary("slack-dm-beta")),
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-            default_modality: RebornOutboundDeliveryModality::Text,
-        })
-    }
-
     async fn list_outbound_delivery_targets(
         &self,
         caller: ProductSurfaceCaller,
@@ -3653,14 +3586,6 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
 
     assert!(response.threads.is_empty());
     assert_eq!(response.next_cursor.as_deref(), Some("cursor-2"));
-
-    assert_eq!(
-        OUTBOUND_PREFERENCES_SET_CAPABILITY
-            .capability_id()
-            .expect("capability id")
-            .as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
 }
 
 #[test]
@@ -7043,164 +6968,6 @@ fn channel_connect_action_serializes_neutral_input_placeholder() {
     assert_eq!(serialized["input_placeholder"], "C0123456789");
 }
 
-#[tokio::test]
-async fn get_outbound_preferences_unwired_returns_empty_projection() {
-    // arch-exempt: large_file, outbound pref tests belong at API seam, plan docs/internal/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-    );
-
-    let page = services
-        .query(
-            caller(),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("default outbound preferences");
-    let response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(page.payload).expect("outbound preferences payload");
-
-    assert!(response.final_reply_target.is_none());
-    assert_eq!(
-        response.default_modality,
-        RebornOutboundDeliveryModality::Text
-    );
-}
-
-#[test]
-fn outbound_delivery_modality_text_round_trips_as_text() {
-    let serialized = serde_json::to_value(RebornOutboundDeliveryModality::Text)
-        .expect("serialize text modality");
-    assert_eq!(serialized, json!("text"));
-
-    let deserialized: RebornOutboundDeliveryModality =
-        serde_json::from_value(serialized).expect("deserialize text modality");
-    assert_eq!(deserialized, RebornOutboundDeliveryModality::Text);
-}
-
-#[test]
-fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
-    let request: RebornSetOutboundPreferencesRequest =
-        serde_json::from_value(json!({})).expect("deserialize empty preferences request");
-
-    assert!(request.final_reply_target_id.is_none());
-}
-
-#[test]
-fn outbound_preferences_response_preserves_client_json_shape() {
-    let response = RebornOutboundPreferencesResponse {
-        final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
-        default_modality: RebornOutboundDeliveryModality::Text,
-    };
-
-    let serialized = serde_json::to_value(&response).expect("serialize preferences response");
-    assert_eq!(
-        serialized,
-        json!({
-            "final_reply_target": {
-                "target_id": "slack-dm-alpha",
-                "channel": "slack",
-                "display_name": "Slack DM",
-                "description": "Slack direct message",
-            },
-            "final_reply_target_status": "available",
-            "default_modality": "text",
-        })
-    );
-
-    let deserialized: RebornOutboundPreferencesResponse =
-        serde_json::from_value(serialized).expect("deserialize preferences response");
-    assert_eq!(deserialized, response);
-}
-
-#[test]
-fn outbound_preferences_response_empty_json_defaults_to_text_without_target() {
-    let response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(json!({})).expect("deserialize empty preferences response");
-
-    assert!(response.final_reply_target.is_none());
-    assert_eq!(
-        response.final_reply_target_status,
-        RebornOutboundDeliveryTargetStatus::NoneConfigured
-    );
-    assert_eq!(
-        response.default_modality,
-        RebornOutboundDeliveryModality::Text
-    );
-}
-
-#[test]
-fn outbound_preferences_response_missing_status_defaults_to_available_when_target_present() {
-    let response: RebornOutboundPreferencesResponse = serde_json::from_value(json!({
-        "final_reply_target": {
-            "target_id": "slack-dm-alpha",
-            "channel": "slack",
-            "display_name": "Slack DM",
-            "description": "Slack direct message",
-        },
-        "default_modality": "text",
-    }))
-    .expect("deserialize legacy preferences response");
-
-    assert_eq!(
-        response.final_reply_target_status,
-        RebornOutboundDeliveryTargetStatus::Available
-    );
-    assert!(response.final_reply_target.is_some());
-    assert_eq!(
-        response.default_modality,
-        RebornOutboundDeliveryModality::Text
-    );
-}
-
-#[test]
-fn outbound_preferences_response_serializes_unavailable_status_without_target() {
-    let response = RebornOutboundPreferencesResponse {
-        final_reply_target: None,
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
-        default_modality: RebornOutboundDeliveryModality::Text,
-    };
-
-    let serialized =
-        serde_json::to_value(&response).expect("serialize unavailable preferences response");
-    assert_eq!(
-        serialized,
-        json!({
-            "final_reply_target_status": "unavailable",
-            "default_modality": "text",
-        })
-    );
-
-    let deserialized: RebornOutboundPreferencesResponse =
-        serde_json::from_value(serialized).expect("deserialize unavailable preferences response");
-    assert_eq!(deserialized, response);
-}
-
-#[test]
-fn outbound_preferences_response_serializes_none_configured_status_explicitly() {
-    let response = RebornOutboundPreferencesResponse {
-        final_reply_target: None,
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
-        default_modality: RebornOutboundDeliveryModality::Text,
-    };
-
-    let serialized =
-        serde_json::to_value(&response).expect("serialize none configured preferences response");
-    assert_eq!(
-        serialized,
-        json!({
-            "final_reply_target_status": "none_configured",
-            "default_modality": "text",
-        })
-    );
-}
-
 #[test]
 fn outbound_target_summary_preserves_client_json_shape() {
     let summary = outbound_target_summary("slack-dm-alpha");
@@ -7372,10 +7139,10 @@ fn outbound_target_id_and_display_fields_reject_unicode_line_separators() {
     ] {
         RebornOutboundDeliveryTargetId::new(target_id)
             .expect_err("target id rejects unicode line separators");
-        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-            "final_reply_target_id": target_id,
+        serde_json::from_value::<RebornSetNotificationChannelsRequest>(json!({
+            "target_ids": [target_id],
         }))
-        .expect_err("preference request rejects target id unicode line separators");
+        .expect_err("notification-channels request rejects target id unicode line separators");
     }
 
     for (field, invalid_value) in [
@@ -7409,10 +7176,10 @@ fn outbound_target_id_and_display_fields_reject_unsafe_unicode_formatting() {
     ] {
         RebornOutboundDeliveryTargetId::new(target_id)
             .expect_err("target id rejects unsafe unicode formatting characters");
-        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-            "final_reply_target_id": target_id,
+        serde_json::from_value::<RebornSetNotificationChannelsRequest>(json!({
+            "target_ids": [target_id],
         }))
-        .expect_err("preference request rejects unsafe unicode formatting characters");
+        .expect_err("notification-channels request rejects unsafe unicode formatting characters");
     }
 
     for (field, invalid_value) in [
@@ -7466,24 +7233,11 @@ fn outbound_target_empty_description_is_accepted() {
 }
 
 #[tokio::test]
-async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed() {
+async fn outbound_unwired_target_listing_fails_closed() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
-
-    let set_error = services
-        .invoke(
-            caller(),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": "slack-dm-alpha" }),
-            ActivityId::new(),
-        )
-        .await
-        .expect_err("unwired preference mutation");
-    assert_eq!(set_error.code, ProductSurfaceErrorCode::Unavailable);
-    assert_eq!(set_error.status_code, 503);
-    assert!(!set_error.retryable);
 
     let list_error = services
         .query(
@@ -7502,144 +7256,14 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
 }
 
 #[tokio::test]
-async fn outbound_preferences_service_forwards_caller_and_request() {
-    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let invoker = RecordingOutboundPreferencesInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_outbound_preferences_product_service(outbound_service.clone());
-
-    let get_page = services
-        .query(
-            caller(),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("get outbound preferences");
-    let get_response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(get_page.payload).expect("outbound preferences payload");
-    assert_eq!(
-        get_response
-            .final_reply_target
-            .as_ref()
-            .map(|target| target.target_id.as_str()),
-        Some("slack-dm-alpha")
-    );
-
-    services
-        .invoke(
-            caller_for_user_with_project("user-bravo", None),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": "slack-dm-beta" }),
-            ActivityId::new(),
-        )
-        .await
-        .expect("set outbound preferences");
-    let set_page = services
-        .query(
-            caller_for_user_with_project("user-bravo", None),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("read outbound preferences after mutation");
-    let set_response: RebornOutboundPreferencesResponse =
-        serde_json::from_value(set_page.payload).expect("outbound preferences payload");
-    assert_eq!(
-        set_response
-            .final_reply_target
-            .as_ref()
-            .map(|target| target.target_id.as_str()),
-        Some("slack-dm-alpha")
-    );
-
-    let targets_page = services
-        .query(
-            caller_for_user("user-charlie"),
-            RebornViewQuery {
-                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("list outbound targets");
-    let targets: RebornOutboundDeliveryTargetListResponse =
-        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    assert_eq!(targets.targets.len(), 1);
-    assert_eq!(
-        targets.targets[0].target.target_id.as_str(),
-        "slack-dm-alpha"
-    );
-    assert!(targets.targets[0].capabilities.final_replies);
-
-    let get_calls = outbound_service.get_calls();
-    assert_eq!(get_calls.len(), 2);
-    assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
-    assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
-    assert_eq!(get_calls[1].user_id.as_str(), "user-bravo");
-
-    assert_eq!(outbound_service.set_calls(), 0);
-    let invoke_calls = invoker.calls();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(invoke_calls[0].0.user_id.as_str(), "user-bravo");
-    assert!(invoke_calls[0].0.agent_id.is_some());
-    assert!(invoke_calls[0].0.project_id.is_none());
-    assert_eq!(
-        invoke_calls[0].1.as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
-    assert_eq!(
-        invoke_calls[0].2,
-        json!({ "final_reply_target_id": "slack-dm-beta" })
-    );
-
-    let list_calls = outbound_service.list_calls();
-    assert_eq!(list_calls.len(), 1);
-    assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
-}
-
-#[tokio::test]
-async fn outbound_preferences_reads_are_available_as_product_views() {
+async fn outbound_delivery_targets_are_available_as_a_product_view() {
     let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_outbound_preferences_product_service(outbound_service.clone());
-    let preferences_caller = caller_for_user("user-outbound-preferences");
     let targets_caller = caller_for_user("user-outbound-targets");
-
-    let preferences_page = services
-        .query(
-            preferences_caller.clone(),
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("outbound preferences view");
-    let preferences: RebornOutboundPreferencesResponse =
-        serde_json::from_value(preferences_page.payload).expect("outbound preferences payload");
-    assert_eq!(
-        preferences
-            .final_reply_target
-            .as_ref()
-            .map(|target| target.target_id.as_str()),
-        Some("slack-dm-alpha")
-    );
 
     let targets_page = services
         .query(
@@ -7655,7 +7279,6 @@ async fn outbound_preferences_reads_are_available_as_product_views() {
     let targets: RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert_eq!(targets.targets.len(), 1);
-    assert_eq!(outbound_service.get_calls(), vec![preferences_caller]);
     assert_eq!(outbound_service.list_calls(), vec![targets_caller]);
 }
 
@@ -7712,94 +7335,6 @@ async fn trace_reads_are_available_as_product_views() {
         serde_json::from_value(traces_page.payload).expect("trace account traces payload");
     assert!(!traces.enrolled);
     assert!(traces.traces.is_empty());
-}
-
-#[tokio::test]
-async fn set_outbound_preferences_can_clear_final_target() {
-    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let invoker = RecordingOutboundPreferencesInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_outbound_preferences_product_service(outbound_service.clone());
-
-    services
-        .invoke(
-            caller(),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({}),
-            ActivityId::new(),
-        )
-        .await
-        .expect("clear outbound preferences");
-
-    assert_eq!(outbound_service.set_calls(), 0);
-    let invoke_calls = invoker.calls();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0].1.as_str(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
-    );
-    assert_eq!(invoke_calls[0].2, json!({}));
-}
-
-#[tokio::test]
-async fn set_outbound_preferences_rejects_malformed_target_id_before_service() {
-    for target_id in [
-        "",
-        " ",
-        " slack-dm-alpha",
-        "slack-dm-alpha ",
-        "slack-dm-alpha\ninjected",
-        "slack-dm-alpha\0injected",
-    ] {
-        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-            "final_reply_target_id": target_id,
-        }))
-        .expect_err("malformed target id");
-    }
-
-    let oversized_target_id = "a".repeat(513);
-    serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
-        "final_reply_target_id": oversized_target_id,
-    }))
-    .expect_err("oversized target id");
-}
-
-#[tokio::test]
-async fn set_outbound_preferences_accepts_max_length_target_id_before_service() {
-    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let invoker = RecordingOutboundPreferencesInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_outbound_preferences_product_service(outbound_service.clone());
-
-    let max_length_target_id = "a".repeat(512);
-    services
-        .invoke(
-            caller(),
-            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": max_length_target_id }),
-            ActivityId::new(),
-        )
-        .await
-        .expect("max-length target id");
-
-    assert_eq!(outbound_service.set_calls(), 0);
-    let invoke_calls = invoker.calls();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0]
-            .2
-            .get("final_reply_target_id")
-            .and_then(serde_json::Value::as_str),
-        Some(max_length_target_id.as_str())
-    );
 }
 
 #[tokio::test]
@@ -15398,7 +14933,7 @@ fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> 
 
 #[derive(Default)]
 struct FakeAdminUsers {
-    users: Mutex<HashMap<String, AdminUserRecord>>,
+    users: Mutex<HashMap<(String, String), AdminUserRecord>>,
     // Regression counter for item 6 of the PR-2 palette review fix wave:
     // `execute_product_command` must read the admin directory exactly once
     // per request (resolved once at the top and reused), never twice (the
@@ -15409,9 +14944,21 @@ struct FakeAdminUsers {
 
 impl FakeAdminUsers {
     fn with(records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        Self::with_tenant("tenant-alpha", records)
+    }
+
+    fn with_tenant(tenant_id: &str, records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        Self::with_tenant_records(
+            records
+                .into_iter()
+                .map(|record| (tenant_id.to_string(), record)),
+        )
+    }
+
+    fn with_tenant_records(records: impl IntoIterator<Item = (String, AdminUserRecord)>) -> Self {
         let map = records
             .into_iter()
-            .map(|record| (record.user_id.as_str().to_string(), record))
+            .map(|(tenant_id, record)| ((tenant_id, record.user_id.as_str().to_string()), record))
             .collect();
         Self {
             users: Mutex::new(map),
@@ -15422,13 +14969,17 @@ impl FakeAdminUsers {
     fn get_user_calls(&self) -> usize {
         *self.get_user_calls.lock().unwrap()
     }
+
+    fn key(tenant: &TenantId, user_id: &UserId) -> (String, String) {
+        (tenant.as_str().to_string(), user_id.as_str().to_string())
+    }
 }
 
 #[async_trait]
 impl AdminUserService for FakeAdminUsers {
     async fn list_users(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         status: Option<AdminUserStatus>,
         after: Option<&UserId>,
         limit: usize,
@@ -15439,7 +14990,9 @@ impl AdminUserService for FakeAdminUsers {
             .users
             .lock()
             .unwrap()
-            .values()
+            .iter()
+            .filter(|((tenant_id, _), _)| tenant_id == tenant.as_str())
+            .map(|(_, record)| record)
             .filter(|record| status.is_none_or(|want| record.status == want))
             .cloned()
             .collect();
@@ -15454,16 +15007,21 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn get_user(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
     ) -> Result<Option<AdminUserRecord>, AdminUserError> {
         *self.get_user_calls.lock().unwrap() += 1;
-        Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .get(&Self::key(tenant, user_id))
+            .cloned())
     }
 
     async fn create_user(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         _actor: &UserId,
         fields: AdminCreateUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
@@ -15471,7 +15029,7 @@ impl AdminUserService for FakeAdminUsers {
         self.users
             .lock()
             .unwrap()
-            .insert("created-user".to_string(), record.clone());
+            .insert(Self::key(tenant, &record.user_id), record.clone());
         Ok(AdminCreatedUser {
             record,
             api_token: SecretString::from("minted-token"),
@@ -15480,14 +15038,14 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn update_profile(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
         display_name: Option<String>,
         _metadata: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<AdminUserRecord, AdminUserError> {
         let mut users = self.users.lock().unwrap();
         let record = users
-            .get_mut(user_id.as_str())
+            .get_mut(&Self::key(tenant, user_id))
             .ok_or(AdminUserError::NotFound)?;
         if display_name.is_some() {
             record.display_name = display_name;
@@ -15497,13 +15055,13 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn set_status(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
         status: AdminUserStatus,
     ) -> Result<AdminUserRecord, AdminUserError> {
         let mut users = self.users.lock().unwrap();
         let record = users
-            .get_mut(user_id.as_str())
+            .get_mut(&Self::key(tenant, user_id))
             .ok_or(AdminUserError::NotFound)?;
         record.status = status;
         Ok(record.clone())
@@ -15511,34 +15069,37 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn set_role(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
         role: AdminUserRole,
     ) -> Result<AdminUserRecord, AdminUserError> {
         let mut users = self.users.lock().unwrap();
         let record = users
-            .get_mut(user_id.as_str())
+            .get_mut(&Self::key(tenant, user_id))
             .ok_or(AdminUserError::NotFound)?;
         record.role = role;
         Ok(record.clone())
     }
 
-    async fn delete_user(
-        &self,
-        _tenant: &TenantId,
-        user_id: &UserId,
-    ) -> Result<(), AdminUserError> {
-        self.users.lock().unwrap().remove(user_id.as_str());
+    async fn delete_user(&self, tenant: &TenantId, user_id: &UserId) -> Result<(), AdminUserError> {
+        self.users
+            .lock()
+            .unwrap()
+            .remove(&Self::key(tenant, user_id));
         Ok(())
     }
 
-    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+    async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError> {
         Ok(self
             .users
             .lock()
             .unwrap()
-            .values()
-            .filter(|record| record.status == AdminUserStatus::Active && record.role.is_admin())
+            .iter()
+            .filter(|((tenant_id, _), record)| {
+                tenant_id == tenant.as_str()
+                    && record.status == AdminUserStatus::Active
+                    && record.role.is_admin()
+            })
             .count())
     }
 
@@ -15585,6 +15146,399 @@ fn admin_services(fake: FakeAdminUsers) -> RebornServices {
 fn assert_forbidden(err: ProductSurfaceError) {
     assert_eq!(err.status_code, 403, "expected a 403 authorization failure");
     assert_eq!(err.code, ProductSurfaceErrorCode::Forbidden);
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scraping_reads_only_the_selected_users_threads() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ])))
+    .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
+    setup_owned_thread(&services, caller(), "thread-admin").await;
+    let target_caller = caller_for_user("user-beta");
+    setup_owned_thread(&services, target_caller.clone(), "thread-target").await;
+    let thread_id = ThreadId::new("thread-target").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope_for(&target_caller),
+        &thread_id,
+        &run_id,
+        "target trajectory",
+    )
+    .await;
+    let target = UserId::new("user-beta").expect("target user");
+
+    let threads = services
+        .list_admin_thread_scrape_threads(
+            caller(),
+            RebornAdminThreadScrapeListRequest {
+                user_id: target.clone(),
+                limit: Some(50),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("admin thread scrape list");
+
+    assert_eq!(threads.threads.len(), 1);
+    assert_eq!(threads.threads[0].thread_id.as_str(), "thread-target");
+
+    let artifact = services
+        .build_admin_thread_scrape_artifact(
+            caller(),
+            RebornAdminThreadScrapeArtifactRequest {
+                user_id: target.clone(),
+                thread_id: "thread-target".to_string(),
+            },
+        )
+        .await
+        .expect("admin thread scrape artifact");
+    assert_eq!(artifact.thread_id, "thread-target");
+
+    let run_artifact = services
+        .build_admin_thread_scrape_run_artifact(
+            caller(),
+            RebornAdminThreadScrapeRunArtifactRequest {
+                user_id: target,
+                thread_id: "thread-target".to_string(),
+                run_id: run_id.to_string(),
+            },
+        )
+        .await
+        .expect("admin run scrape artifact");
+    assert_eq!(run_artifact.thread_id, "thread-target");
+    assert_eq!(run_artifact.run.run_id, run_id);
+    assert_eq!(run_artifact.messages.len(), 1);
+    assert_eq!(run_artifact.messages[0].content, "target trajectory");
+    assert!(logs_contain(
+        "action=\"threads_listed\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"thread_artifact_exported\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"run_artifact_exported\" outcome=\"success\""
+    ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scraping_rejects_a_non_admin_before_reading_threads() {
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let error = services
+        .list_admin_thread_scrape_threads(
+            caller(),
+            RebornAdminThreadScrapeListRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                limit: Some(50),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("member must not scrape threads");
+
+    assert_forbidden(error);
+    assert!(logs_contain(
+        "action=\"threads_listed\" outcome=\"failure\""
+    ));
+}
+
+#[tokio::test]
+async fn admin_thread_scraping_does_not_match_a_target_from_another_tenant() {
+    let services = admin_services(FakeAdminUsers::with_tenant_records([
+        (
+            "tenant-alpha".to_string(),
+            admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        ),
+        (
+            "tenant-beta".to_string(),
+            admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+        ),
+    ]));
+
+    let error = services
+        .list_admin_thread_scrape_threads(
+            caller(),
+            RebornAdminThreadScrapeListRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                limit: Some(50),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("cross-tenant target must not be visible");
+
+    assert_eq!(error.status_code, 404);
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scrape_views_dispatch_through_query() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ])));
+    setup_owned_thread(&services, caller(), "thread-admin").await;
+    let target_caller = caller_for_user("user-beta");
+    setup_owned_thread(&services, target_caller.clone(), "thread-target").await;
+    let thread_id = ThreadId::new("thread-target").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope_for(&target_caller),
+        &thread_id,
+        &run_id,
+        "target trajectory",
+    )
+    .await;
+    // Two more target threads, created strictly after the seeded one, so the
+    // activity-sorted page order is deterministic: [thread-target-new,
+    // thread-target-mid, thread-target].
+    let mid = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&target_caller),
+            thread_id: Some(ThreadId::new("thread-target-mid").expect("mid thread id")),
+            created_by_actor_id: target_caller.user_id.as_str().to_string(),
+            title: Some("Mid target chat".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("mid target thread");
+    wait_until_after(mid.updated_at.expect("activity stamp")).await;
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&target_caller),
+            thread_id: Some(ThreadId::new("thread-target-new").expect("new thread id")),
+            created_by_actor_id: target_caller.user_id.as_str().to_string(),
+            title: Some("New target chat".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("new target thread");
+    let target = UserId::new("user-beta").expect("target user");
+
+    // The three scrape views must be reachable through the real query
+    // dispatch (param deserialization, the page-cursor merge, and
+    // view_page_with_cursor propagation) — not only by calling the service
+    // methods directly.
+    // safety: ProductSurface service query calls in a contract test; no
+    // database transaction is involved.
+    let threads_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_THREADS_VIEW
+                .query(
+                    RebornAdminThreadScrapeListRequest {
+                        user_id: target.clone(),
+                        limit: Some(50),
+                        cursor: None,
+                    },
+                    None,
+                )
+                .expect("threads query"),
+        )
+        .await
+        .expect("threads view");
+    let threads: RebornListThreadsResponse =
+        serde_json::from_value(threads_page.payload).expect("threads payload");
+    assert_eq!(threads.threads.len(), 3);
+    assert_eq!(
+        threads
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["thread-target-new", "thread-target-mid", "thread-target"],
+    );
+
+    // The transport page cursor must override a conflicting params cursor and
+    // the page boundary must round-trip as the next cursor. The params cursor
+    // alone (the oldest thread) would select an empty page; the transport
+    // cursor (the newest thread) must win and return the middle page.
+    let cursor_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_THREADS_VIEW
+                .query(
+                    RebornAdminThreadScrapeListRequest {
+                        user_id: target.clone(),
+                        limit: Some(1),
+                        cursor: Some("thread-target".to_string()),
+                    },
+                    Some("thread-target-new".to_string()),
+                )
+                .expect("threads query"),
+        )
+        .await
+        .expect("threads view");
+    let cursor_threads: RebornListThreadsResponse =
+        serde_json::from_value(cursor_page.payload).expect("threads payload");
+    assert_eq!(cursor_threads.threads.len(), 1);
+    assert_eq!(
+        cursor_threads.threads[0].thread_id.as_str(),
+        "thread-target-mid",
+        "the transport cursor must determine the returned page"
+    );
+    assert_eq!(
+        cursor_page.next_cursor.as_deref(),
+        Some("thread-target-mid"),
+        "the page boundary must propagate as the next cursor"
+    );
+
+    let artifact_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW
+                .query(
+                    RebornAdminThreadScrapeArtifactRequest {
+                        user_id: target.clone(),
+                        thread_id: "thread-target".to_string(),
+                    },
+                    None,
+                )
+                .expect("artifact query"),
+        )
+        .await
+        .expect("artifact view");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(artifact_page.payload).expect("artifact payload");
+    assert_eq!(artifact.thread_id, "thread-target");
+
+    let run_page = services
+        .query(
+            caller(),
+            ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW
+                .query(
+                    RebornAdminThreadScrapeRunArtifactRequest {
+                        user_id: target,
+                        thread_id: "thread-target".to_string(),
+                        run_id: run_id.to_string(),
+                    },
+                    None,
+                )
+                .expect("run query"),
+        )
+        .await
+        .expect("run view");
+    let run_artifact: RebornRunArtifact =
+        serde_json::from_value(run_page.payload).expect("run payload");
+    assert_eq!(run_artifact.run.run_id, run_id);
+    assert_eq!(run_artifact.messages.len(), 1);
+    assert_eq!(run_artifact.messages[0].content, "target trajectory");
+    assert!(logs_contain(
+        "action=\"threads_listed\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"thread_artifact_exported\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"run_artifact_exported\" outcome=\"success\""
+    ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scraping_denies_non_admin_artifact_and_run_artifact_exports() {
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let thread_error = services
+        .build_admin_thread_scrape_artifact(
+            caller(),
+            RebornAdminThreadScrapeArtifactRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                thread_id: "thread-target".to_string(),
+            },
+        )
+        .await
+        .expect_err("member must not export another member's thread artifact");
+    assert_forbidden(thread_error);
+    assert!(logs_contain(
+        "action=\"thread_artifact_exported\" outcome=\"failure\""
+    ));
+
+    let run_error = services
+        .build_admin_thread_scrape_run_artifact(
+            caller(),
+            RebornAdminThreadScrapeRunArtifactRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                thread_id: "thread-target".to_string(),
+                run_id: "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string(),
+            },
+        )
+        .await
+        .expect_err("member must not export another member's run artifact");
+    assert_forbidden(run_error);
+    assert!(logs_contain(
+        "action=\"run_artifact_exported\" outcome=\"failure\""
+    ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn admin_thread_scraping_rejects_malformed_ids_before_any_audit_emission() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+
+    // A newline inside a path segment must be rejected as validation before
+    // it can be Display-formatted into the audit trail (forged audit lines).
+    let thread_error = services
+        .build_admin_thread_scrape_artifact(
+            caller(),
+            RebornAdminThreadScrapeArtifactRequest {
+                user_id: UserId::new("user-alpha").expect("target user"),
+                thread_id: "thread-target\nforged-line".to_string(),
+            },
+        )
+        .await
+        .expect_err("malformed thread id must be rejected");
+    assert_eq!(thread_error.status_code, 400);
+    assert_eq!(thread_error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert!(
+        !logs_contain("forged-line"),
+        "the raw id must never reach the audit trail"
+    );
+
+    let run_error = services
+        .build_admin_thread_scrape_run_artifact(
+            caller(),
+            RebornAdminThreadScrapeRunArtifactRequest {
+                user_id: UserId::new("user-alpha").expect("target user"),
+                thread_id: "thread-target".to_string(),
+                run_id: "not-a-uuid\nforged".to_string(),
+            },
+        )
+        .await
+        .expect_err("malformed run id must be rejected");
+    assert_eq!(run_error.status_code, 400);
+    assert_eq!(run_error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert!(
+        !logs_contain("forged"),
+        "the raw run id must never reach the audit trail"
+    );
 }
 
 #[tokio::test]
