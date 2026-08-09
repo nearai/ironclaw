@@ -51,7 +51,15 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // initial route, and prevents model-authored `data-workspace-path` metadata
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
 // retains about 1.2 KB of explicit headroom without weakening the feature.
-const CHAT_GZIP_BUDGET = 217_000;
+// Web Push notifications then added ~13 `automations.notificationChannels.webPush.*`
+// keys plus a reworded `webOnlyHelper` to the eager `en.ts` fallback pack. The
+// eager-code weight was kept OUT of /chat: `registerServiceWorker` lives in the
+// dependency-free `lib/register-sw.ts` (so boot does not pull the enrollment
+// lib's api + WebCrypto imports), and the enrollment UI rides the already-lazy
+// automations route — so the residual growth is localized string content in the
+// fallback pack, not new eager code. Measured /chat closure is now 217.4 KB
+// gzip; 218.0 KB retains ~0.6 KB headroom without gutting user-facing copy.
+const CHAT_GZIP_BUDGET = 218_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

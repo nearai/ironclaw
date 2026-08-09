@@ -9,21 +9,11 @@
 
 import { subscribeWebPush, unsubscribeWebPush } from "./api";
 
-const SERVICE_WORKER_URL = "/sw.js";
-
-/** Register the notification service worker. Safe to call on every boot;
- * failures are logged and swallowed so app startup never depends on it. */
-export function registerServiceWorker() {
-  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
-    return Promise.resolve(null);
-  }
-  return navigator.serviceWorker
-    .register(SERVICE_WORKER_URL)
-    .catch((error) => {
-      console.warn("IronClaw service worker registration failed", error);
-      return null;
-    });
-}
+// `registerServiceWorker` lives in the dependency-free `./register-sw` module
+// so app boot (`main.tsx`) does not pull this enrollment lib — and its api +
+// WebCrypto imports — into the initial `/chat` bundle. Re-exported here so the
+// automations-page hook keeps one import site for the web-push surface.
+export { registerServiceWorker } from "./register-sw";
 
 function pushSupported() {
   return (
