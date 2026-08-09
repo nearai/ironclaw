@@ -67,7 +67,10 @@ impl OutboundPreferencesProductService for RebornOutboundPreferencesService {
             .await
             .map_err(map_outbound_repository_error)?
             .into_iter()
-            .filter(|entry| entry.capabilities.final_replies)
+            // Notification-channel picker: any target that can receive
+            // blocked-automation notices. The model-facing delivery list narrows
+            // this to `final_replies` in `list_outbound_delivery_targets_for_model`.
+            .filter(|entry| entry.capabilities.notifications)
             .map(|entry| {
                 Ok(RebornOutboundDeliveryTargetOption {
                     target: reborn_summary_from_outbound(&entry.summary)?,
@@ -256,6 +259,17 @@ mod tests {
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok((self.entry.destination.as_str() == target.as_str()).then(|| self.entry.clone()))
         }
+
+        async fn resolve_notification_target(
+            &self,
+            _caller: &OutboundDeliveryTargetScope,
+            target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Ok(
+                (self.entry.summary.target_id.as_str() == target_id.as_str())
+                    .then(|| self.entry.clone()),
+            )
+        }
     }
 
     struct ResolveFailingTargetProvider;
@@ -284,6 +298,14 @@ mod tests {
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Err(OutboundError::Backend)
         }
+
+        async fn resolve_notification_target(
+            &self,
+            _caller: &OutboundDeliveryTargetScope,
+            _target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Err(OutboundError::Backend)
+        }
     }
 
     struct NullResolvingTargetProvider;
@@ -309,6 +331,14 @@ mod tests {
             &self,
             _caller: &OutboundDeliveryTargetScope,
             _target: &ReplyTargetBindingRef,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Ok(None)
+        }
+
+        async fn resolve_notification_target(
+            &self,
+            _caller: &OutboundDeliveryTargetScope,
+            _target_id: &OutboundDeliveryTargetId,
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(None)
         }

@@ -184,6 +184,12 @@ pub struct DeliveryTargetCapabilities {
     pub progress: bool,
     pub gate_prompts: bool,
     pub auth_prompts: bool,
+    /// This target receives blocked-automation notifications (approval-gate,
+    /// auth, and failure notices). Independent of `final_replies`: the web app
+    /// is a notification target but not a model/final-reply delivery target
+    /// (until it gains outbound thread creation).
+    #[serde(default)]
+    pub notifications: bool,
     pub modalities: Vec<CommunicationModality>,
 }
 
@@ -420,6 +426,7 @@ mod tests {
             progress: true,
             gate_prompts: false,
             auth_prompts: true,
+            notifications: true,
             modalities: vec![CommunicationModality::Text, CommunicationModality::Mixed],
         };
 

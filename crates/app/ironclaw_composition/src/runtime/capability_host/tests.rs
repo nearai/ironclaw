@@ -3996,6 +3996,7 @@ mod tests {
             progress: false,
             gate_prompts: false,
             auth_prompts: false,
+            notifications: true,
             modalities: Vec::new(),
         };
         let slack_reply_target =
@@ -4245,6 +4246,7 @@ mod tests {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 destination: slack_reply_target.clone(),
@@ -4480,6 +4482,7 @@ mod tests {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 destination: slack_reply_target,

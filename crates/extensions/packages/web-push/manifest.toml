@@ -40,6 +40,7 @@ id = "notifications"
 display_name = "Web UI"
 inbound = false
 outbound = true
+notifications = true
 conversation_model = "continuous"
 
 # Exact push-service hosts, in lockstep with

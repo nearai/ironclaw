@@ -106,7 +106,7 @@ pub(crate) async fn resolve_effective_notification_channels(
     }
     for target_id in effective_ids {
         match targets
-            .resolve_outbound_delivery_target(scope, &target_id)
+            .resolve_notification_target(scope, &target_id)
             .await
         {
             Ok(Some(entry)) => channels.push(EffectiveNotificationChannel::Resolved(entry)),

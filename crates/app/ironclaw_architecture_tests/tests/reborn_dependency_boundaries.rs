@@ -624,7 +624,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 7_748 -> 7_752 (2026-08-08, web-push channel): +4 lines for the
         // `VapidAuthorization` arm in the channel egress injection validator
         // — schema vocabulary only; signing lives in ironclaw_host_runtime.
-        ("ironclaw_extension_contracts", 7_752),
+        // 7_752 -> 7_758 (2026-08-09, notifications capability): +6 lines for the
+        // `ChannelDescriptor.notifications` field + its doc — a manifest capability
+        // declaration only; notification delivery gating lives in
+        // ironclaw_outbound (DeliveryTargetCapabilities) and product resolution.
+        ("ironclaw_extension_contracts", 7_758),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

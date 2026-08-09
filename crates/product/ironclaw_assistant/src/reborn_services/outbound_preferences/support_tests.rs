@@ -81,6 +81,9 @@ pub(super) fn target_entry_for_channel(
             progress: false,
             gate_prompts: true,
             auth_prompts: true,
+            // Track final_replies so existing capability-filter tests hold: the
+            // notification picker now filters on `notifications`.
+            notifications: final_replies,
             modalities: Vec::new(),
         },
         destination: reply_ref(reply_target),

@@ -75,4 +75,9 @@ fn manifest_identity_matches_the_grammar_constants() {
         channel.get("outbound").and_then(toml::Value::as_bool),
         Some(true)
     );
+    assert_eq!(
+        channel.get("notifications").and_then(toml::Value::as_bool),
+        Some(true),
+        "the web app declares the notifications capability"
+    );
 }

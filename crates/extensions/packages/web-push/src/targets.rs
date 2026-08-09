@@ -62,10 +62,15 @@ fn web_push_entry(
     Ok(OutboundDeliveryTargetEntry {
         summary,
         capabilities: DeliveryTargetCapabilities {
-            final_replies: true,
+            // The web app is a NOTIFICATION target (blocked-automation notices),
+            // not a final-reply/model-delivery target — a run's reply already
+            // lands in the web app; browser push is only for notices. Outbound
+            // thread creation is a later capability.
+            final_replies: false,
             progress: false,
             gate_prompts: true,
             auth_prompts: true,
+            notifications: true,
             modalities: vec![CommunicationModality::Text],
         },
         destination,
@@ -111,7 +116,11 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(entry.summary.target_id.as_str(), WEB_PUSH_TARGET_ID);
         assert_eq!(entry.summary.channel.as_str(), WEB_PUSH_CHANNEL_NAME);
-        assert!(entry.capabilities.final_replies);
+        assert!(
+            !entry.capabilities.final_replies,
+            "the web app is a notification target, not a final-reply/model-delivery target"
+        );
+        assert!(entry.capabilities.notifications);
         assert!(entry.capabilities.gate_prompts);
         assert!(entry.capabilities.auth_prompts);
         assert!(!entry.capabilities.progress);
@@ -123,15 +132,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_by_id_uses_the_default_final_replies_gate() {
+    async fn resolves_as_a_notification_target_but_not_a_final_reply_target() {
         let provider = WebPushOutboundTargetProvider::new();
-        let resolved = provider
-            .resolve_outbound_delivery_target(
-                &scope(),
-                &OutboundDeliveryTargetId::new(WEB_PUSH_TARGET_ID).expect("id"),
-            )
+        let id = OutboundDeliveryTargetId::new(WEB_PUSH_TARGET_ID).expect("id");
+        // Notification path (blocked-automation notices) resolves it.
+        let notification = provider
+            .resolve_notification_target(&scope(), &id)
             .await
             .expect("resolve");
-        assert!(resolved.is_some(), "final_replies=true keeps it resolvable");
+        assert!(
+            notification.is_some(),
+            "notifications=true keeps it resolvable as a notification target"
+        );
+        // Model/final-reply path must NOT resolve it: browser push is not where
+        // a final reply or a model-chosen delivery lands.
+        let final_reply = provider
+            .resolve_outbound_delivery_target(&scope(), &id)
+            .await
+            .expect("resolve");
+        assert!(
+            final_reply.is_none(),
+            "final_replies=false keeps it out of model/final-reply delivery"
+        );
     }
 }
