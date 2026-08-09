@@ -507,7 +507,7 @@ mod tests {
             source_text("pages/automations/components/notification-channels-panel.tsx");
         assert!(channels_panel.contains(r#"type="checkbox""#));
         assert!(channels_panel.contains("saveNotificationChannels"));
-        assert!(channels_panel.contains("automations.notificationChannels.webOnlyHelper"));
+        assert!(channels_panel.contains("automations.notificationChannels.noSelectionHelper"));
         // Badge label must branch on row status — an unavailable (stored but
         // no-longer-resolving) channel must not display the "ready" label.
         assert!(
