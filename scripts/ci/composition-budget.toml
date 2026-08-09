@@ -158,7 +158,10 @@ observed_date = "2026-08-07"
 # (base_resource_scope_for_run) and the shared-admission wiring add +64
 # production LOC on the merged tree. Recorded here rather than parked in the
 # 150-line tolerance; measured with `bash scripts/ci/check-composition-budget.sh`.
-loc_ceiling = 40811
+# Re-seeded 40811 -> 40861 on 2026-08-08 for #7131 merged onto that tree: the
+# run-failure settlement observer lands +50 governed LOC on the merged tree
+# (measured with the gate; set to current, not padded).
+loc_ceiling = 40861
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -169,7 +172,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40811
+loc_observed = 40861
 loc_observed_date = "2026-08-08"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

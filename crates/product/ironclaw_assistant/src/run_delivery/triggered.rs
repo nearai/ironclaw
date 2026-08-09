@@ -745,7 +745,7 @@ async fn notify_background_run(
                     notifications: vec![TriggeredNotification {
                         event_kind: RunNotificationEventKind::RunBlocked,
                         intent: DeliveryIntent::BackgroundRunNotice,
-                        notice_discriminator: Some("timeout"),
+                        notice_discriminator: Some("timeout".to_string()),
                         text: format!(
                             "{}{}",
                             prompts::DELIVERY_TIMEOUT_MESSAGE,
@@ -1187,7 +1187,7 @@ async fn notification_plan_for_state(
                 notifications: vec![TriggeredNotification {
                     event_kind: RunNotificationEventKind::RunBlocked,
                     intent: DeliveryIntent::BackgroundRunNotice,
-                    notice_discriminator: Some(discriminator),
+                    notice_discriminator: Some(discriminator.to_string()),
                     text: format!("{text}{}", prompts::triggered_update_footer(trigger_label)),
                     audience: TargetAudience::All,
                     require_direct_message_target: false,
