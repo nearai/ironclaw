@@ -39,7 +39,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // thread B. If `with_actor_id` ever regressed to a no-op, both bindings
     // would share the default actor's owner and this scenario would silently
     // degrade to the already-covered one-actor/two-conversations case.
-    if a.binding.subject_user_id == b.binding.subject_user_id {
+    if a.binding.actor_user_id == b.binding.actor_user_id {
         return Err("with_actor_id seam no-op: both threads resolved the same owner".into());
     }
 

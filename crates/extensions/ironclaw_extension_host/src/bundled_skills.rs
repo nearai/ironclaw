@@ -26,7 +26,7 @@ const EMBEDDED_REBORN_SKILL_BUNDLES_JSON: &str = include_str!(concat!(
 ));
 const BUNDLED_MARKER_FILE: &str = ".ironclaw-reborn-bundled.json";
 const BUNDLED_INSTALL_LOCK_FILE: &str = ".ironclaw-reborn-bundled.lock";
-const BUNDLED_MARKER_OWNER: &str = "ironclaw_reborn_composition_bundled_skill";
+const BUNDLED_MARKER_OWNER: &str = "ironclaw_composition_bundled_skill";
 const BUNDLED_INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUNDLED_INSTALL_LOCK_RETRY: Duration = Duration::from_millis(25);
 const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";

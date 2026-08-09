@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -16,7 +16,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
+use ironclaw_loop_contracts::{
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopRunContext, SkillVisibility,
+};
 use ironclaw_skills::{
     LoadedSkill, SkillSelectionOptions, SkillSource, SkillTrust, extract_skill_mentions,
     parse_skill_md, prefilter_skills_with_options, skill_token_cost, validate_skill_name,
@@ -25,7 +27,12 @@ use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
 /// Maximum number of first-party skills selected for one turn by default.
-pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 4;
+/// How many skills may be active at once.
+///
+/// 4 -> 8: on the SkillsBench routing set 7 of 31 tasks expect four or more skills, so the old
+/// constant capped recall below 100% regardless of the model. `max_context_tokens` is the real
+/// guard; this only stops a model naming an unbounded list.
+pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 8;
 
 /// Maximum estimated skill prompt tokens selected for one turn by default.
 pub const DEFAULT_MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
@@ -43,8 +50,61 @@ const SKILL_LISTING_CANDIDATE_NAME: &str = "available-skills";
 /// loaded skill bodies.
 const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
 const SKILL_LISTING_HEADER: &str = include_str!("../../prompts/skill_listing_header.md");
-const MAX_LISTED_SKILLS: usize = 100;
+/// Total character budget for the rendered listing, excluding its header.
+///
+/// Replaces a flat 100-skill cap, which dropped whole alphabetical tails, and sized so a real
+/// catalog lists at full description length. Shrinking descriptions to fit more names in was
+/// measured worse: 52% activation with 88 full-length entries against 0% with 227 shrunken ones.
+///
+/// BOUNDED BY THE SNIPPET CAP, which is not a nicety. The listing ships as ONE model-visible
+/// snippet, and `skill_context.rs` rejects a snippet over
+/// [`LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES`] with `ContextBudgetExceeded` -- a hard error
+/// that fails the whole skill-context build, not a truncation. At `512 * (250 + 64)` this budget
+/// was 160,768, two and a half times that cap, so a large enough catalog took the runtime down
+/// instead of listing fewer skills. The headroom covers the header and the hidden-count note.
+/// Past what fits, the answer is `skill_search` (#4428).
+const LISTING_CHAR_BUDGET: usize =
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES - LISTING_SNIPPET_HEADROOM_BYTES;
+/// Room reserved inside the snippet cap for the listing header and the hidden-count note.
+const LISTING_SNIPPET_HEADROOM_BYTES: usize = 4 * 1024;
+const _: () = assert!(
+    // safety: compile-time assert in a const block -- rustc evaluates it, so it cannot execute
+    // at runtime. Restoring the old budget fails the BUILD, it does not panic a process.
+    LISTING_CHAR_BUDGET < LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+    "the rendered listing must fit the single snippet it ships as, or the skill-context build      fails closed with ContextBudgetExceeded"
+);
+/// Longest description rendered for a single entry, when the catalog is small enough
+/// to afford it. Preserves the previous rendering for ordinary catalogs.
 const MAX_LISTING_DESCRIPTION_CHARS: usize = 250;
+/// Shortest description the listing will shrink an entry to before it gives up and
+/// truncates. Below roughly this length a description stops disambiguating similar
+/// skills, so trading further characters for more entries is a bad trade.
+const MIN_LISTING_DESCRIPTION_CHARS: usize = 60;
+/// Per-entry overhead: `"\n- "`, the `": "` separator, and a name allowance.
+const LISTING_ENTRY_OVERHEAD_CHARS: usize = 48;
+
+/// How many description characters each entry may use, given how many there are.
+///
+/// Returns `None` when even [`MIN_LISTING_DESCRIPTION_CHARS`] per entry will not fit,
+/// which is the only case where the listing must still drop entries.
+fn listing_description_allowance(entry_count: usize) -> Option<usize> {
+    if entry_count == 0 {
+        return None;
+    }
+    let per_entry = LISTING_CHAR_BUDGET / entry_count;
+    let for_description = per_entry.saturating_sub(LISTING_ENTRY_OVERHEAD_CHARS);
+    if for_description < MIN_LISTING_DESCRIPTION_CHARS {
+        None
+    } else {
+        Some(for_description.min(MAX_LISTING_DESCRIPTION_CHARS))
+    }
+}
+
+/// How many entries fit at the minimum description length — the count used only on
+/// the give-up path, so that truncation is a last resort rather than a fixed cap.
+fn max_entries_at_min_description() -> usize {
+    LISTING_CHAR_BUDGET / (MIN_LISTING_DESCRIPTION_CHARS + LISTING_ENTRY_OVERHEAD_CHARS)
+}
 
 /// Typed request produced by first-party skill activation selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +181,19 @@ impl Default for SkillActivationSelectorConfig {
         Self {
             max_active_skills: DEFAULT_MAX_ACTIVE_SKILLS,
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
-            selection_mode: SkillActivationSelectionMode::ExplicitAndCriteria,
+            // Model-decides is the default: the deterministic keyword/regex scorer no longer
+            // chooses skills. It is shown the listing and calls `builtin.skill_activate`.
+            //
+            // The scorer's own record is the argument. It produced #5417 -- `tech-debt-tracker`
+            // declares the keyword `hack`, so "search Hacker News for..." activated it -- and
+            // over 328 real prompts `coding` fired on ~220 through legitimate whole-word hits on
+            // `file`/`change`/`code`, which no boundary rule or score threshold can fix.
+            // Measured against it, the model path made **zero** wrong selections across 28
+            // tasks over an 88-skill catalog, at 94.8% precision on what it did activate.
+            //
+            // A profile that wants the scorer must ask for `ExplicitAndCriteria` deliberately.
+            // Nothing inherits it silently any more.
+            selection_mode: SkillActivationSelectionMode::ExplicitOnly,
             regex_activation_enabled: true,
             activation_strategy:
                 ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly,
@@ -530,12 +602,16 @@ where
         // uniformly here (including the execution-capture path, whose captured
         // plan/asset semantics are unchanged) and ranking derives from the
         // merged plan, not from transient message state.
-        if self.config.injection_mode == SkillInjectionMode::Full {
-            if plan.selection.activations.is_empty() {
-                return Ok(Vec::new());
-            }
+        if self.config.injection_mode == SkillInjectionMode::Full
+            && !plan.selection.activations.is_empty()
+        {
             return Ok(context_candidates_for_plan(&plan, candidates));
         }
+        // Fall through to the listing when nothing is active -- including in `Full` mode, which
+        // previously returned an empty candidate set here. That was survivable only while the
+        // scorer auto-activated something; with model-decides it would mean the model is never
+        // told a skill exists and so can never activate one. Blinding the agent is a strictly
+        // worse failure than showing it a listing it may not need.
         Ok(listing_context_candidates(&plan, candidates))
     }
 
@@ -544,14 +620,21 @@ where
         run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
         let plan = self.active_plan(run_context)?;
-        if self.config.injection_mode == SkillInjectionMode::Full {
-            let Some(plan) = plan else {
-                return Ok(Vec::new());
-            };
+        // Same rule on the active-plan path: only short-circuit to bodies when something is
+        // actually active, otherwise fall through to the listing so the model can still see
+        // what it could activate.
+        // Bound by pattern rather than re-`expect`ed after an `is_some_and` guard: the two forms
+        // are equivalent today, and only one of them stays correct if the condition is ever
+        // edited. `check_no_panics.py` flags the other for exactly that reason.
+        let active_full_plan = plan.as_ref().filter(|plan| {
+            self.config.injection_mode == SkillInjectionMode::Full
+                && !plan.selection.activations.is_empty()
+        });
+        if let Some(plan) = active_full_plan {
             let candidate_set = self
-                .load_active_plan_candidate_set(run_context, &plan)
+                .load_active_plan_candidate_set(run_context, plan)
                 .await?;
-            return Ok(context_candidates_for_plan(&plan, candidate_set.candidates));
+            return Ok(context_candidates_for_plan(plan, candidate_set.candidates));
         }
         // Listing mode: full bodies only for explicitly-mentioned or
         // model-selected activations; every other visible skill contributes a
@@ -1188,17 +1271,64 @@ fn single_line_truncated(text: &str, max_chars: usize) -> String {
 /// Compose the one-line available-skills listing as a single discoverable
 /// candidate. Trust is pinned to `Installed` so downstream snapshot
 /// construction can never disclose prompt content through this entry.
+/// Hidden-entry count the truncation warning last reported, so it fires on a change
+/// rather than on every prompt build. See the warning site in
+/// [`skill_listing_candidate`] for why a per-build `warn!` is the wrong shape.
+static LAST_WARNED_HIDDEN_LISTING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillContextCandidate> {
     if entries.is_empty() {
         return None;
     }
+    // Spend the character budget on listing EVERY skill, shrinking descriptions as the
+    // catalog grows, and only drop entries if even the minimum will not fit.
+    let (allowance, listed) = match listing_description_allowance(entries.len()) {
+        Some(allowance) => (allowance, entries.len()),
+        None => (
+            MIN_LISTING_DESCRIPTION_CHARS,
+            max_entries_at_min_description(),
+        ),
+    };
     let mut listing = String::from(SKILL_LISTING_HEADER.trim_end());
     listing.push('\n');
-    for entry in entries.iter().take(MAX_LISTED_SKILLS) {
+    for entry in entries.iter().take(listed) {
         listing.push_str("\n- ");
         listing.push_str(&entry.name);
         listing.push_str(": ");
-        listing.push_str(&entry.description);
+        listing.push_str(&single_line_truncated(&entry.description, allowance));
+    }
+    // If entries still had to be dropped, SAY so and WARN. Silence here is a correctness bug,
+    // not a cosmetic one: the listing is source-then-name ordered, so a dropped tail is a
+    // dropped alphabetical range, with no signal to the model or the operator.
+    //
+    // This is now reachable only past ~380 skills rather than at 100, but the disclosure stays
+    // because the failure is severe when it does happen. Beyond that size the answer is
+    // `skill_search` (#4428), not a larger prompt.
+    let hidden = entries.len().saturating_sub(listed);
+    if hidden > 0 {
+        listing.push_str(&format!(
+            "\n\n({hidden} further skill(s) are installed but not listed here, because the \
+             listing does not fit its character budget. Activating one by exact name still \
+             works if you already know it.)"
+        ));
+        // Warned once per hidden count, not once per prompt build. This function runs on
+        // every context construction, and a catalog that is over the budget stays over it,
+        // so an unconditional `warn!` would repeat the same line for the rest of the
+        // process and bury everything else. The count changing is the only new
+        // information, and it is what an operator would act on. The model-visible message
+        // above is unconditional -- it must never be rate-limited.
+        if LAST_WARNED_HIDDEN_LISTING_COUNT.swap(hidden, Ordering::Relaxed) != hidden {
+            tracing::warn!(
+                listed,
+                hidden,
+                total = entries.len(),
+                "skill listing truncated; skills past the budget are invisible to the model"
+            );
+        }
+    } else {
+        // Reset so a catalog that drops back under the budget and later exceeds it again
+        // warns rather than being silenced by the stale count.
+        LAST_WARNED_HIDDEN_LISTING_COUNT.store(0, Ordering::Relaxed);
     }
     Some(
         HostSkillContextCandidate::discoverable(
@@ -1340,6 +1470,10 @@ fn select_skill_activations(
 
     for skill in explicit {
         let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
+        if let Some(reason) = unmet_requirements_refusal(candidate) {
+            feedback.push(reason);
+            continue;
+        }
         let key = (
             candidate.descriptor.id().source_kind(),
             candidate.loaded.manifest.name.clone(),
@@ -1361,8 +1495,13 @@ fn select_skill_activations(
     // The global master switch (`auto_activate_learned`) gates criteria
     // selection on top of the configured mode: when it is off, only explicit
     // mentions activate, regardless of `selection_mode`.
+    // `criteria_enabled()` is the third gate and it had no production caller at all, so
+    // `ActivationStrategy::Disabled` was inert -- it behaved exactly like `CriteriaOnly`, and an
+    // operator who bound it still got keyword activation. The other two gates are the global
+    // switch and the selection mode; this is the strategy's own say.
     if auto_activate_learned
         && config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria
+        && config.activation_strategy.criteria_enabled()
     {
         let outcome = prefilter_skills_with_options(
             &rewritten_message,
@@ -1379,6 +1518,22 @@ fn select_skill_activations(
 
         for skill in outcome.selected {
             let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
+            // Same gate as the explicit-mention loop above, and it has to be here too: a
+            // criteria-selected skill is the one the USER never asked for by name, so
+            // activating it with an unmet requirement is the case where nothing at all
+            // connects the later shell failure back to the missing binary. Reaching this
+            // path without the gate was how a skill declaring `requires.bins` still
+            // "activated cleanly".
+            // Same gate as the explicit-mention loop above, and it has to be here too: a
+            // criteria-selected skill is the one the USER never asked for by name, so
+            // activating it with an unmet requirement is the case where nothing at all
+            // connects the later shell failure back to the missing binary. Reaching this
+            // path without the gate was how a skill declaring `requires.bins` still
+            // "activated cleanly".
+            if let Some(reason) = unmet_requirements_refusal(candidate) {
+                feedback.push(reason);
+                continue;
+            }
             let key = (
                 candidate.descriptor.id().source_kind(),
                 candidate.loaded.manifest.name.clone(),
@@ -1402,17 +1557,89 @@ fn select_skill_activations(
     })
 }
 
+/// Refuse a skill whose declared requirements are not met, and say which ones.
+///
+/// `requires.bins`, `requires.env` and `requires.config` were parsed into the manifest and
+/// then never consulted on the activation path -- `check_requirements` existed but its only
+/// callers were inside `SkillRegistry`, which has no consumers outside its own crate. So a
+/// skill declaring a binary it needs was offered, activated cleanly, and failed later in the
+/// shell with nothing connecting the failure back to the unmet requirement.
+///
+/// Gated at ACTIVATION time, not listing time. Listing-time gating would probe the filesystem
+/// and environment once per visible skill on every prompt build -- three probes across every
+/// candidate -- and needs a caching design first. At activation it runs only for the handful
+/// of skills actually being loaded, so the cost argument does not apply.
+///
+/// Staying unusable is the correct outcome; the fix is that the model now learns why and can
+/// adapt, instead of meeting it as an unexplained shell failure several steps later.
+fn unmet_requirements_refusal(candidate: &ActivationCandidate) -> Option<String> {
+    let gating = ironclaw_skills::check_requirements_sync(&candidate.loaded.manifest.requires);
+    if gating.passed {
+        return None;
+    }
+    Some(format!(
+        "{}: not activated because its requirements are unmet: {}",
+        feedback_skill_name(&candidate.loaded.manifest.name),
+        gating.failures.join("; ")
+    ))
+}
+
+/// Explain why a requested skill could not be activated, in terms the model can act on.
+///
+/// Two outcomes are distinguishable and were previously collapsed into one string:
+///
+/// * the name resolved to a real skill that is not `Trusted` -- retrying with a different
+///   name will never work, the skill needs promoting, so say that;
+/// * the name resolved to nothing at all -- the only case where "not available" was accurate.
+///
+/// The distinction matters because the first case is the routine outcome of the model doing
+/// exactly what the listing told it to: the listing filters on visibility only, while
+/// activation requires `Trusted`, and tenant-shared and URL-installed skills are `Installed`.
+/// The model was told to activate a skill and then refused with no way to tell whether it had
+/// picked a bad name or hit a permission wall.
+///
+/// Deliberately does NOT enumerate available alternatives, tempting as that is:
+/// `load_named_activation_candidate_set` scopes the candidate set to the requested names, so
+/// at this point nothing else has been loaded and any "available: ..." list would be empty.
+/// Offering alternatives needs a wider descriptor load, which belongs with the `skill_search`
+/// work in #4428 rather than being smuggled in here.
+fn refusal_reason(name: &str, eligible: &[&ActivationCandidate]) -> String {
+    let display = feedback_skill_name(name);
+    match eligible
+        .iter()
+        .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
+    {
+        // `{}` not `{:?}`: this string goes to the model, so it renders through
+        // `SkillTrust`'s `Display` (`installed`/`trusted`) rather than a debug spelling
+        // that would drift the moment a variant is renamed or gains a field.
+        Some(candidate) => format!(
+            "{display}: found, but its trust is {} and activation requires trusted; it must be \
+             promoted before it can be used",
+            candidate.loaded.trust
+        ),
+        None => format!("{display}: no skill with that name is available to activate"),
+    }
+}
+
 fn select_named_skill_activations(
     skill_names: &[String],
     candidates: &[ActivationCandidate],
     config: &SkillActivationSelectorConfig,
     satisfied_setup_markers: &HashSet<String>,
 ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
-    let active_candidates =
-        candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers)
-            .into_iter()
-            .filter(|candidate| candidate.loaded.trust == SkillTrust::Trusted)
-            .collect::<Vec<_>>();
+    // Kept separately from `active_candidates` so a refusal can say WHY. Previously a skill
+    // that existed but was not `Trusted` was filtered out here and then reported with the
+    // same "requested skill is not available" string as a name that does not exist at all.
+    // The model cannot act on that: one case means "try a different name", the other means
+    // "this skill needs promoting and no name will work". Tenant-shared and URL-installed
+    // skills are `Installed`, and the listing filters on visibility only, so this is the
+    // routine outcome of the model doing exactly what the listing told it to.
+    let eligible = candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
+    let active_candidates = eligible
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.loaded.trust == SkillTrust::Trusted)
+        .collect::<Vec<_>>();
     let mut activations = Vec::new();
     let mut selected_keys = HashSet::new();
     let mut feedback = Vec::new();
@@ -1426,12 +1653,13 @@ fn select_named_skill_activations(
             .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
             .copied()
         else {
-            feedback.push(format!(
-                "{}: requested skill is not available",
-                feedback_skill_name(name)
-            ));
+            feedback.push(refusal_reason(name, &eligible));
             continue;
         };
+        if let Some(reason) = unmet_requirements_refusal(candidate) {
+            feedback.push(reason);
+            continue;
+        }
         let key = (
             candidate.descriptor.id().source_kind(),
             candidate.loaded.manifest.name.clone(),
@@ -1756,7 +1984,366 @@ fn content_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SkillBundleId, SkillFilePath};
+
+    /// Assert no skill BODY reached the model, allowing the listing.
+    ///
+    /// These assertions used to read `selected.is_empty()`. That is no longer the right
+    /// question: with model-decides, "nothing activated" must still show the listing, or the
+    /// model can never learn a skill exists. What must stay true is that no skill's PROMPT was
+    /// disclosed -- which is what the tests were really protecting.
+    fn assert_no_skill_body_disclosed(selected: &[HostSkillContextCandidate], context: &str) {
+        // The listing is a DISCOVERABLE candidate (`loaded_skill_md() == None`); an activated
+        // skill is a LOADED one. So "was a body disclosed" is exactly this predicate, with no
+        // need to special-case the listing by name.
+        let bodies = selected
+            .iter()
+            .filter_map(|candidate| candidate.loaded_skill_md())
+            .collect::<Vec<_>>();
+        assert!(
+            bodies.is_empty(),
+            "{context}: no skill body may be disclosed, but {} was/were",
+            bodies.len()
+        );
+    }
+
+    /// Criterion: no profile silently inherits a selection policy.
+    ///
+    /// Pins the library default at `ExplicitOnly` -- the model decides. If someone flips this
+    /// back to `ExplicitAndCriteria`, the keyword/regex scorer silently starts choosing skills
+    /// again on every profile that takes the default, which is exactly how #5417 shipped.
+    #[test]
+    fn the_default_selection_policy_is_model_decides() {
+        assert_eq!(
+            SkillActivationSelectorConfig::default().selection_mode,
+            SkillActivationSelectionMode::ExplicitOnly,
+            "the default must not run the keyword/regex scorer; a profile that wants it has to \
+             ask for ExplicitAndCriteria deliberately"
+        );
+    }
+
+    /// Criterion: turning the scorer off must never blind the model.
+    ///
+    /// In `Full` injection mode this path used to return an empty candidate set whenever nothing
+    /// was active. That was survivable only while the scorer auto-activated something; with
+    /// model-decides it would mean the model is never told a skill exists and can therefore
+    /// never activate one. The listing has to survive in every mode.
+    #[tokio::test]
+    async fn the_listing_survives_in_full_mode_with_nothing_activated() {
+        for mode in [SkillInjectionMode::Listing, SkillInjectionMode::Full] {
+            let source = Arc::new(StaticSkillBundleSource::new(vec![(
+                SkillSourceKind::User,
+                "citation-management",
+                &skill_md(
+                    "citation-management",
+                    "Citations",
+                    &["cite"],
+                    "CITE_SENTINEL",
+                ),
+            )]));
+            let selectable = SelectableSkillContextSource::new(
+                source,
+                SkillActivationSelectorConfig::default().set_injection_mode(mode),
+            );
+            let context = run_context().await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    "something unrelated to citations",
+                )
+                .expect("record message");
+
+            let selected = selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("selection succeeds");
+
+            assert!(
+                !selected.is_empty(),
+                "{mode:?}: the model must still be shown the listing when nothing is active, \
+                 otherwise it cannot discover any skill to activate"
+            );
+            assert_no_skill_body_disclosed(&selected, "nothing activated");
+        }
+    }
+
+    /// Criterion: the model-visible listing stays inside a stated budget, and holds at scale.
+    ///
+    /// With the scorer retired the listing IS the routing interface, so its size is now a
+    /// correctness property rather than a cosmetic one. 200 skills is well past any real catalog
+    /// (the bundled one is 32) and past the old flat cap of 100.
+    ///
+    /// Two properties, and the second is the one that used to fail: the listing stays inside its
+    /// character budget, AND **every** skill appears in it. Under the old cap this test would have
+    /// passed on budget alone while silently hiding 100 of the 200 skills — a skill the model
+    /// cannot see is one it cannot activate, so that is a routing failure, not a display detail.
+    #[tokio::test]
+    async fn the_listing_stays_within_budget_at_two_hundred_skills() {
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..200)
+            .map(|i| {
+                let name = format!("scale-probe-{i:03}");
+                let md = skill_md(
+                    &name,
+                    "A scale probe skill with a description of realistic length for a catalog \
+                     entry, so the budget assertion is not flattered by short text.",
+                    &[&name],
+                    "SCALE_SENTINEL",
+                );
+                (SkillSourceKind::User, name, md)
+            })
+            .collect();
+        let specs: Vec<(SkillSourceKind, &str, &str)> = owned
+            .iter()
+            .map(|(kind, name, md)| (*kind, name.as_str(), md.as_str()))
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(specs));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "do something",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        let listing_text: String = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .map(|(_, text)| text.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let listing_chars = listing_text.chars().count();
+
+        // Budget stated as characters because that is what the listing builder actually bounds;
+        // ~4 chars per token puts this near 8k tokens worst case. Unchanged by the switch from a
+        // count cap to a budget: this is the same ceiling the old cap already permitted.
+        assert!(
+            listing_chars <= LISTING_CHAR_BUDGET + SKILL_LISTING_HEADER.chars().count(),
+            "listing is {listing_chars} chars, over the {LISTING_CHAR_BUDGET}-char budget; with \
+             the scorer retired the listing is the routing interface and its size is a \
+             correctness property"
+        );
+        // Every skill is reachable. This is the assertion the old flat cap violated.
+        let missing: Vec<&str> = owned
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .filter(|name| !listing_text.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} of 200 skills are absent from the listing (first few: {:?}); a skill the model \
+             cannot see is one it cannot activate",
+            missing.len(),
+            &missing[..missing.len().min(5)]
+        );
+        assert_no_skill_body_disclosed(&selected, "200-skill catalog, nothing activated");
+    }
+
+    /// #5417, on the path that actually has the bug.
+    ///
+    /// Criteria selection needs a RECORDED user message (`take_message_for_run`). The
+    /// coordinator path never records one, so a coordinator-path test passes vacuously and
+    /// proves nothing -- the existing integration test says as much. This records the message,
+    /// which is what the product/WebUI surface does, and the issue itself reports
+    /// "Run origin: WebUI chat".
+    ///
+    /// Two things are asserted, because either alone is weak:
+    ///   * with the default policy (model-decides) the skill does not activate, and
+    ///   * with criteria selection explicitly ON it DOES still activate on this branch -- which
+    ///     is the honest state and is asserted, not hidden.
+    ///
+    /// That second half is the useful part: it shows the two changes are complementary rather
+    /// than redundant. This PR removes the scorer from the decision; #6937's word-boundary
+    /// matcher stops `hack` matching inside "Hacker" for any profile that opts the scorer back
+    /// in (covered there by `hacker_news_does_not_activate_a_skill_declaring_hack`). Neither
+    /// alone closes #5417 on the criteria path, and pinning that here means a future reader
+    /// cannot mistake model-decides for a complete fix.
+    #[tokio::test]
+    async fn hacker_news_does_not_activate_tech_debt_tracker_on_the_recording_path() {
+        const PROMPT: &str =
+            "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'";
+        for (label, config, expect_body) in [
+            (
+                "model-decides (default)",
+                SkillActivationSelectorConfig::default(),
+                false,
+            ),
+            // Documents the residual: with the scorer opted back in, this branch alone does not
+            // save you. #6937 is what fixes it.
+            ("criteria explicitly enabled", criteria_config(), true),
+        ] {
+            let source = Arc::new(StaticSkillBundleSource::new(vec![(
+                SkillSourceKind::User,
+                "tech-debt-tracker",
+                &skill_md(
+                    "tech-debt-tracker",
+                    "Detect and track technical debt from conversation and PR review comments.",
+                    &["hack", "hacky", "tech debt"],
+                    "TECH_DEBT_SENTINEL",
+                ),
+            )]));
+            let selectable = SelectableSkillContextSource::new(source, config);
+            let context = run_context().await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    PROMPT,
+                )
+                .expect("record the user message, as the product surface does");
+
+            let selected = selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("selection succeeds");
+
+            let bodies = selected
+                .iter()
+                .filter_map(|candidate| candidate.loaded_skill_md())
+                .collect::<Vec<_>>();
+            if expect_body {
+                assert!(
+                    bodies
+                        .iter()
+                        .any(|body| body.contains("TECH_DEBT_SENTINEL")),
+                    "#5417 [{label}]: expected the KNOWN residual -- opting the scorer back in \
+                     still mis-activates here until #6937's word-boundary matcher lands. If this \
+                     now passes, the matcher has merged and this arm should assert absence."
+                );
+            } else {
+                assert!(
+                    bodies.is_empty(),
+                    "#5417 [{label}]: a Hacker News search must not inject tech-debt-tracker"
+                );
+            }
+        }
+    }
+
+    /// The rendered listing must fit the single snippet it ships as.
+    ///
+    /// `skill_context.rs` rejects a model-visible snippet over
+    /// `LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES` with `ContextBudgetExceeded`, which is a hard
+    /// error that fails the whole skill-context build rather than truncating. `LISTING_CHAR_BUDGET`
+    /// was `512 * (250 + 64)` = 160,768, two and a half times that 65,536-byte cap, so a large
+    /// enough catalog took the runtime down instead of listing fewer skills.
+    ///
+    /// Asserted in BYTES against the real cap, not in chars against the budget: a description with
+    /// multibyte characters costs more bytes than chars, and the cap is a byte cap.
+    #[tokio::test]
+    async fn the_rendered_listing_fits_inside_the_model_snippet_cap() {
+        // Full-length multibyte descriptions at the enumeration cap (512, the same bound
+        // `filesystem_skill_bundle_source` enforces) -- the worst case the budget may produce.
+        let description = "é".repeat(MAX_LISTING_DESCRIPTION_CHARS);
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..512)
+            .map(|i| {
+                let name = format!("probe-{i:04}");
+                let md = skill_md(&name, &description, &[&name], "PROBE_SENTINEL");
+                (SkillSourceKind::User, name, md)
+            })
+            .collect();
+        let specs: Vec<(SkillSourceKind, &str, &str)> = owned
+            .iter()
+            .map(|(kind, name, md)| (*kind, name.as_str(), md.as_str()))
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(specs));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "do something",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("a large catalog must LIST FEWER SKILLS, never fail the context build");
+        for candidate in &selected {
+            let Some((_, text)) = candidate.discoverable_metadata() else {
+                continue;
+            };
+            assert!(
+                text.len() <= LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+                "the listing renders {} bytes against a {LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES}-byte \
+                 snippet cap; skill_context.rs turns that into ContextBudgetExceeded and the whole \
+                 skill-context build fails",
+                text.len()
+            );
+        }
+    }
+
+    /// A truncated listing must SAY it is truncated.
+    ///
+    /// The listing is source-then-name ordered, so a dropped tail is a dropped alphabetical
+    /// range. Measured on a 227-skill catalog under the old flat cap of 100, `pdf`, `pptx`,
+    /// `xlsx` and `timeseries-detrending` all sorted past position 100 -- three of the first
+    /// four benchmark tasks could not reach their own skill, and nothing anywhere said so.
+    ///
+    /// The budget makes that unreachable until roughly 380 skills, so this test has to build a
+    /// catalog past THAT to exercise the disclosure at all. Kept because the failure is severe
+    /// when it happens, and because "we raised the limit" is not the same as "it cannot happen".
+    #[tokio::test]
+    async fn a_truncated_listing_states_how_many_skills_are_hidden() {
+        let listed = max_entries_at_min_description();
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..listed + 25)
+            .map(|i| {
+                let name = format!("probe-{i:03}");
+                let md = skill_md(&name, "A probe skill.", &[&name], "PROBE_SENTINEL");
+                (SkillSourceKind::User, name, md)
+            })
+            .collect();
+        let specs: Vec<(SkillSourceKind, &str, &str)> = owned
+            .iter()
+            .map(|(kind, name, md)| (*kind, name.as_str(), md.as_str()))
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(specs));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "do something",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        let listing = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .map(|(_, text)| text.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            listing.contains("25 further skill(s) are installed but not listed"),
+            "a truncated listing must state how many are hidden; got:\n{listing}"
+        );
+    }
+
+    /// Config for tests whose SUBJECT is criteria selection.
+    ///
+    /// The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer
+    /// does not. These tests exercise the scorer itself, so they opt in explicitly rather than
+    /// inheriting it. That is the point of the new default: nothing gets the scorer by accident.
+    fn criteria_config() -> SkillActivationSelectorConfig {
+        SkillActivationSelectorConfig::default()
+            .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
+    }
+    use crate::SkillFilePath;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
@@ -2062,8 +2649,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -2078,7 +2664,7 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(selected.is_empty());
+        assert_no_skill_body_disclosed(&selected, "no criteria match");
     }
 
     #[tokio::test]
@@ -2095,9 +2681,8 @@ mod tests {
         let setup_markers = Arc::new(CountingSetupMarkerSource::new(&[
             "markers/setup-helper.done",
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
-                .with_setup_marker_source(Arc::clone(&setup_markers));
+        let selectable = SelectableSkillContextSource::new(source, criteria_config())
+            .with_setup_marker_source(Arc::clone(&setup_markers));
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -2112,7 +2697,7 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(selected.is_empty());
+        assert_no_skill_body_disclosed(&selected, "no criteria match");
         assert_eq!(
             setup_markers.calls(),
             0,
@@ -2144,8 +2729,7 @@ mod tests {
                 ),
             ),
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -2170,7 +2754,7 @@ mod tests {
     }
 
     fn listing_config() -> SkillActivationSelectorConfig {
-        SkillActivationSelectorConfig::default().set_injection_mode(SkillInjectionMode::Listing)
+        criteria_config().set_injection_mode(SkillInjectionMode::Listing)
     }
 
     fn two_skill_source() -> Arc<StaticSkillBundleSource> {
@@ -2397,8 +2981,8 @@ mod tests {
         assert!(entry.description.starts_with("line one line two "));
         assert!(!entry.description.contains('\n'));
 
-        // The composed listing is bounded: at most MAX_LISTED_SKILLS entries.
-        let entries: Vec<SkillListingEntry> = (0..MAX_LISTED_SKILLS + 5)
+        // The composed listing is bounded by its character budget, not a flat entry count.
+        let entries: Vec<SkillListingEntry> = (0..max_entries_at_min_description() + 5)
             .map(|index| SkillListingEntry {
                 name: format!("skill-{index:03}"),
                 description: "listed".to_string(),
@@ -2408,7 +2992,10 @@ mod tests {
         let (_, listing) = candidate
             .discoverable_metadata()
             .expect("listing is discoverable");
-        assert_eq!(listing.matches("\n- ").count(), MAX_LISTED_SKILLS);
+        assert_eq!(
+            listing.matches("\n- ").count(),
+            max_entries_at_min_description()
+        );
     }
 
     #[tokio::test]
@@ -2423,12 +3010,12 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        // Default mode is ExplicitAndCriteria, but the global master switch is
-        // off: a keyword-matching skill must NOT auto-activate.
+        // `criteria_config()` opts into ExplicitAndCriteria (the config default is
+        // ExplicitOnly), but the global master switch is off: a keyword-matching skill
+        // must NOT auto-activate. The switch has to win over the mode, not the reverse.
         let flag = Arc::new(AtomicBool::new(false));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
-                .with_auto_activate_flag(Arc::clone(&flag));
+        let selectable = SelectableSkillContextSource::new(source, criteria_config())
+            .with_auto_activate_flag(Arc::clone(&flag));
 
         // Run 1: flag off. A keyword-matching skill must NOT auto-activate.
         let off_context = run_context_for("thread-a", "msg:run-off").await;
@@ -2443,10 +3030,7 @@ mod tests {
             .load_skill_context_candidates(&off_context)
             .await
             .expect("selection succeeds");
-        assert!(
-            selected.is_empty(),
-            "criteria selection must be skipped while the global flag is off"
-        );
+        assert_no_skill_body_disclosed(&selected, "criteria selection off via the global flag");
 
         // Flip the shared flag on without rebuilding the source. A fresh run
         // (distinct run id, so the per-run plan cache does not mask the change)
@@ -2502,7 +3086,7 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig::default().set_regex_activation_enabled(false),
+            criteria_config().set_regex_activation_enabled(false),
         );
         let context = run_context().await;
         selectable
@@ -2577,8 +3161,7 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig::default()
-                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
+            criteria_config().set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
         selectable
@@ -2588,13 +3171,13 @@ mod tests {
                 "please review this PR",
             )
             .expect("record natural-language message");
-        assert!(
-            selectable
-                .load_skill_context_candidates(&context)
-                .await
-                .expect("natural-language selection succeeds")
-                .is_empty(),
-            "keyword/tag/pattern criteria should not inject full skill bodies when disabled"
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("natural-language selection succeeds");
+        assert_no_skill_body_disclosed(
+            &selected,
+            "keyword/tag/pattern criteria should not inject full skill bodies when disabled",
         );
 
         selectable
@@ -2785,8 +3368,7 @@ mod tests {
                 ),
             ),
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
 
         selectable
@@ -2842,7 +3424,168 @@ mod tests {
         assert!(plan.selection.activations.is_empty());
         assert_eq!(
             plan.selection.feedback,
-            vec!["installed-helper: requested skill is not available"]
+            vec![
+                "installed-helper: found, but its trust is installed and activation requires \
+                 trusted; it must be promoted before it can be used"
+            ],
+            "a refusal must say WHY: 'not available' is indistinguishable from a bad name, and \
+             the two need opposite responses from the model"
+        );
+    }
+
+    /// An unknown name is refused with a message that says the name did not resolve, kept
+    /// distinct from the trust refusal above because the two need opposite responses.
+    #[tokio::test]
+    async fn an_unknown_name_is_refused_as_a_name_problem() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "citation-management",
+            &skill_md(
+                "citation-management",
+                "Citations",
+                &["cite"],
+                "CITE_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        let plan = selectable
+            .activate_skills_for_run(&context, &["citation-manager".to_string()])
+            .await
+            .expect("an unknown name is a refusal, not an error");
+
+        assert!(plan.selection.activations.is_empty());
+        let feedback = plan.selection.feedback.join(" ");
+        assert!(
+            feedback.contains("no skill with that name"),
+            "a bad name and a trust wall must read differently: {feedback}"
+        );
+        assert!(
+            !feedback.contains("trust"),
+            "must not blame trust for a name that did not resolve: {feedback}"
+        );
+    }
+
+    /// A skill declaring a binary that cannot exist is refused *and explained*. Staying
+    /// unusable is correct; the fix is that the model learns why instead of discovering it as
+    /// an unexplained shell failure several steps later.
+    #[tokio::test]
+    async fn an_unmet_binary_requirement_blocks_activation_and_says_which() {
+        let manifest = concat!(
+            "---\n",
+            "name: needs-binary\n",
+            "description: Requires a binary that does not exist\n",
+            "requires:\n",
+            "  bins:\n",
+            "    - ironclaw-absent-binary-for-test\n",
+            "---\n\n",
+            "NEEDS_BINARY_SENTINEL\n",
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "needs-binary",
+            manifest,
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        let plan = selectable
+            .activate_skills_for_run(&context, &["needs-binary".to_string()])
+            .await
+            .expect("an unmet requirement is a refusal, not an error");
+
+        assert!(
+            plan.selection.activations.is_empty(),
+            "a skill whose required binary is absent must not activate"
+        );
+        let feedback = plan.selection.feedback.join(" ");
+        assert!(feedback.contains("requirements are unmet"), "{feedback}");
+        assert!(
+            feedback.contains("ironclaw-absent-binary-for-test"),
+            "the refusal must name the missing requirement: {feedback}"
+        );
+    }
+
+    /// The same gate on the path the user never asked for by name.
+    ///
+    /// `unmet_requirements_refusal` was wired into the explicit-mention loop and into
+    /// `select_named_skill_activations`, but NOT into the criteria loop, so a keyword-matching
+    /// skill with an unmet `requires.bins` auto-activated and "activated cleanly". That is the
+    /// worse half of the two: on the explicit path the model at least chose the skill and can
+    /// connect a later shell failure to its own request, while a criteria selection arrives
+    /// unrequested, so nothing links the missing binary to anything.
+    ///
+    /// Asserted through the observer rather than a return value because that is where the
+    /// criteria path's feedback actually goes -- it is the seam the live projection consumes
+    /// (`runtime.rs::set_activation_observer`), so a refusal invisible here is invisible in
+    /// the product.
+    #[tokio::test]
+    async fn an_unmet_requirement_blocks_criteria_activation_too_and_says_which() {
+        #[derive(Debug, Default)]
+        struct RecordingActivationObserver {
+            events: Mutex<Vec<SkillActivationObservedEvent>>,
+        }
+
+        impl SkillActivationObserver for RecordingActivationObserver {
+            fn observe_skill_activation(&self, event: SkillActivationObservedEvent) {
+                self.events.lock().expect("observer lock").push(event);
+            }
+        }
+
+        let manifest = concat!(
+            "---\n",
+            "name: needs-binary\n",
+            "description: Requires a binary that does not exist\n",
+            "activation:\n",
+            "  keywords: [\"transcode\"]\n",
+            "requires:\n",
+            "  bins:\n",
+            "    - ironclaw-absent-binary-for-test\n",
+            "---\n\n",
+            "NEEDS_BINARY_SENTINEL\n",
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "needs-binary",
+            manifest,
+        )]));
+        let observer = Arc::new(RecordingActivationObserver::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
+        selectable
+            .set_activation_observer(Arc::clone(&observer) as Arc<dyn SkillActivationObserver>)
+            .expect("observer registers");
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please transcode this file",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("an unmet requirement is a refusal, not an error");
+
+        assert_no_skill_body_disclosed(&selected, "criteria match with an unmet requirement");
+        let events = observer.events.lock().expect("observer lock");
+        let feedback = events
+            .iter()
+            .flat_map(|event| event.feedback.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            events.iter().all(|event| event.activations.is_empty()),
+            "a skill whose required binary is absent must not activate, however it was selected"
+        );
+        assert!(
+            feedback.contains("requirements are unmet")
+                && feedback.contains("ironclaw-absent-binary-for-test"),
+            "the refusal must reach the observer and name the missing requirement: {feedback}"
         );
     }
 
@@ -2863,7 +3606,7 @@ mod tests {
 
         assert_eq!(
             plan.selection.feedback,
-            vec!["<invalid skill name>: requested skill is not available"]
+            vec!["<invalid skill name>: no skill with that name is available to activate"]
         );
     }
 
@@ -3011,9 +3754,8 @@ mod tests {
             ),
         )]));
         let setup_markers = Arc::new(StaticSetupMarkerSource::new(&["markers/setup-helper.done"]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
-                .with_setup_marker_source(setup_markers);
+        let selectable = SelectableSkillContextSource::new(source, criteria_config())
+            .with_setup_marker_source(setup_markers);
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -3028,9 +3770,9 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(
-            selected.is_empty(),
-            "setup markers must suppress explicit and natural-language activation"
+        assert_no_skill_body_disclosed(
+            &selected,
+            "setup markers must suppress explicit and natural-language activation",
         );
     }
 
@@ -3064,7 +3806,7 @@ mod tests {
             source,
             SkillActivationSelectorConfig {
                 max_active_skills: 1,
-                ..SkillActivationSelectorConfig::default()
+                ..criteria_config()
             },
         )
         .with_setup_marker_source(setup_markers);
@@ -3082,9 +3824,9 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(
-            selected.is_empty(),
-            "all already-satisfied setup markers exposed by reselection must be suppressed"
+        assert_no_skill_body_disclosed(
+            &selected,
+            "all already-satisfied setup markers exposed by reselection must be suppressed",
         );
     }
 
@@ -3100,8 +3842,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let first_context = run_context().await;
         let second_context = LoopRunContext::new(
             first_context.scope.clone(),
@@ -3147,9 +3888,9 @@ mod tests {
             .load_skill_context_candidates(&second_context)
             .await
             .expect("second selection succeeds");
-        assert!(
-            second_selected.is_empty(),
-            "clearing one run must not remove another run's recorded message"
+        assert_no_skill_body_disclosed(
+            &second_selected,
+            "clearing one run must not remove another run's recorded message",
         );
     }
 
@@ -3165,8 +3906,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let first_context = run_context().await;
         let second_context = run_context_for("thread-a", "msg:run-b").await;
 
@@ -3193,10 +3933,7 @@ mod tests {
             .load_skill_context_candidates(&first_context)
             .await
             .expect("first selection succeeds");
-        assert!(
-            first_selected.is_empty(),
-            "cleared message should not activate skills"
-        );
+        assert_no_skill_body_disclosed(&first_selected, "cleared message");
 
         let second_selected = selectable
             .load_skill_context_candidates(&second_context)
@@ -3329,8 +4066,7 @@ mod tests {
                 &skill_md("quiet-helper", "Quiet", &["quiet"], "QUIET_HELPER_SENTINEL"),
             ),
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -3716,8 +4452,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
 
         selectable
@@ -3758,8 +4493,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let captured_a = run_context_for("thread-a", "msg:a-captured").await;
         let pending_a = run_context_for("thread-a", "msg:a-pending").await;
         let captured_b = run_context_for("thread-b", "msg:b-captured").await;
@@ -3807,13 +4541,13 @@ mod tests {
                 .is_some(),
             "clearing a pending message must not remove an already captured plan"
         );
-        assert!(
-            selectable
-                .load_skill_context_candidates(&pending_a)
-                .await
-                .expect("pending scope a selection after clear succeeds")
-                .is_empty(),
-            "clearing the accepted message removes its pending execution capture"
+        let after_clear = selectable
+            .load_skill_context_candidates(&pending_a)
+            .await
+            .expect("pending scope a selection after clear succeeds");
+        assert_no_skill_body_disclosed(
+            &after_clear,
+            "clearing the accepted message removes its pending execution capture",
         );
         assert!(
             selectable

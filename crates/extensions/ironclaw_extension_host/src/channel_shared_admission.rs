@@ -1,45 +1,39 @@
 //! Generic shared-channel admission over `[channel.config]`
 //! (extension-runtime §5.3).
 //!
-//! A channel extension opts into shared-conversation admission by declaring
-//! non-secret `[channel.config]` fields with the handle-suffix convention
-//! `*_allowed_channels` / `*_subject_routes` (or the bare names). When either
-//! field is declared, the generic channel host assembly installs
-//! [`ChannelConfigSubjectRouteResolver`] on the extension's installation
-//! scope and requires a configured route for every shared conversation —
-//! unrouted shared conversations fail closed instead of falling to the
-//! default subject.
+//! A channel extension opts into shared-conversation admission by declaring a
+//! non-secret `[channel.config]` field with the handle-suffix convention
+//! `*_allowed_channels` (or the bare name). When the field is declared, the
+//! generic channel host assembly installs [`ChannelConfigSharedAdmission`] on
+//! the extension's installation scope; shared conversations the saved value
+//! does not list fail closed.
 //!
-//! The two values are operator-saved JSON:
-//! - `*_subject_routes`: object mapping external conversation id to the
-//!   subject user id turns in that conversation run as (explicit routes win).
-//! - `*_allowed_channels`: array of external conversation ids admitted with
-//!   a host-derived managed subject (`user:{extension_id}-channel:{sha16}` —
-//!   the exact scheme the retired lane's route store derived, so folded
-//!   deployments keep their managed-subject value shape).
+//! The value is operator-saved JSON: an array of external conversation ids
+//! connected to this deployment. There is no subject half any more — a run
+//! acts as the user who invoked it, so admission answers only "is this
+//! conversation connected", never "whom does it run as". The retired
+//! `*_subject_routes` handle is deliberately not read: legacy saved values
+//! are inert, and a deployment that admitted conversations only through
+//! subject routes re-admits them through `*_allowed_channels`.
 //!
 //! Reads are per-request through [`ChannelConfigService`]: a configure save
 //! takes effect on the next inbound admission with no route rebuild.
 
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
-use ironclaw_host_api::ids::{ExtensionId, TenantId, UserId};
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_product_contracts::error::ProductOperationFailure;
-use ironclaw_product_contracts::subject_route::{
-    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
+use ironclaw_product_contracts::shared_admission::{
+    SharedConversationAdmission, SharedConversationAdmissionRequest,
 };
-use sha2::{Digest, Sha256};
 
 use crate::ChannelConfigService;
 use crate::channel_config::ChannelConfigError;
 
 const ALLOWED_CHANNELS_FIELD: &str = "allowed_channels";
-const SUBJECT_ROUTES_FIELD: &str = "subject_routes";
 
 /// Handle-suffix convention shared with the connection-scoping claims:
 /// `{name}` or `*_{name}` declares the admission field.
@@ -50,96 +44,46 @@ pub fn handle_declares_field(handle: &str, name: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('_'))
 }
 
-/// The admission config handles one extension's `[channel.config]` declares.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SharedChannelAdmissionHandles {
-    pub allowed_channels: Option<String>,
-    pub subject_routes: Option<String>,
+/// Scan the manifest's `[channel.config]` field descriptors for the admission
+/// handle an extension declares, if any (non-secret fields only — admission
+/// config is operator routing data, never secret material).
+pub fn shared_channel_admission_handle(fields: &[RecipeSecretField]) -> Option<String> {
+    fields
+        .iter()
+        .filter(|field| !field.secret)
+        .find(|field| handle_declares_field(field.handle.as_str(), ALLOWED_CHANNELS_FIELD))
+        .map(|field| field.handle.as_str().to_string())
 }
 
-impl SharedChannelAdmissionHandles {
-    pub fn declared(&self) -> bool {
-        self.allowed_channels.is_some() || self.subject_routes.is_some()
-    }
-}
-
-/// Scan the manifest's `[channel.config]` field descriptors for the
-/// admission handles (non-secret fields only — admission config is operator
-/// routing data, never secret material).
-pub fn shared_channel_admission_handles(
-    fields: &[RecipeSecretField],
-) -> SharedChannelAdmissionHandles {
-    let find = |name: &str| {
-        fields
-            .iter()
-            .filter(|field| !field.secret)
-            .find(|field| handle_declares_field(field.handle.as_str(), name))
-            .map(|field| field.handle.as_str().to_string())
-    };
-    SharedChannelAdmissionHandles {
-        allowed_channels: find(ALLOWED_CHANNELS_FIELD),
-        subject_routes: find(SUBJECT_ROUTES_FIELD),
-    }
-}
-
-/// The host-derived managed subject for one allowed shared conversation:
-/// `user:{extension_id}-channel:{first 16 digest bytes as hex}` over
-/// `sha256(tenant \0 installation \0 space \0 conversation)` — ported
-/// unchanged from the retired lane's route store so folded deployments
-/// derive the same subject ids for the same channels.
-pub fn managed_channel_subject_user_id(
-    extension_id: &str,
-    tenant_id: &TenantId,
-    installation_id: &AdapterInstallationId,
-    space_id: Option<&str>,
-    conversation_id: &str,
-) -> Result<UserId, String> {
-    let mut hasher = Sha256::new();
-    hasher.update(tenant_id.as_str().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(installation_id.as_str().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(space_id.unwrap_or_default().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(conversation_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut suffix = String::with_capacity(32);
-    for byte in digest.iter().take(16) {
-        write!(&mut suffix, "{byte:02x}")
-            .map_err(|error| format!("managed subject render failed: {error}"))?;
-    }
-    UserId::new(format!("user:{extension_id}-channel:{suffix}"))
-        .map_err(|error| format!("managed subject id invalid: {error}"))
-}
-
-/// The default generic subject-route resolver: explicit `*_subject_routes`
-/// entries win; `*_allowed_channels` entries admit with the managed derived
-/// subject; everything else resolves to no route (which the assembly's
-/// require-configured-route policy fails closed).
-pub struct ChannelConfigSubjectRouteResolver {
+/// The generic admission resolver: a shared conversation is admitted iff the
+/// operator-saved `*_allowed_channels` array lists its conversation id.
+/// Everything else — no saved value, malformed value, unlisted conversation,
+/// foreign adapter/installation — resolves to not-admitted, which the product
+/// workflow fails closed.
+pub struct ChannelConfigSharedAdmission {
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
-    tenant_id: TenantId,
     extension_id: ExtensionId,
-    handles: SharedChannelAdmissionHandles,
+    /// The manifest-declared `*_allowed_channels` handle. A resolver exists
+    /// only for a channel that declares one — "installed but handle-less" is
+    /// not a representable state.
+    allowed_channels_handle: String,
     channel_config: Arc<ChannelConfigService>,
 }
 
-impl ChannelConfigSubjectRouteResolver {
+impl ChannelConfigSharedAdmission {
     pub fn new(
         adapter_id: ProductAdapterId,
         installation_id: AdapterInstallationId,
-        tenant_id: TenantId,
         extension_id: ExtensionId,
-        handles: SharedChannelAdmissionHandles,
+        allowed_channels_handle: String,
         channel_config: Arc<ChannelConfigService>,
     ) -> Self {
         Self {
             adapter_id,
             installation_id,
-            tenant_id,
             extension_id,
-            handles,
+            allowed_channels_handle,
             channel_config,
         }
     }
@@ -167,84 +111,49 @@ fn channel_config_unavailable(error: ChannelConfigError) -> ProductOperationFail
     }
 }
 
-impl std::fmt::Debug for ChannelConfigSubjectRouteResolver {
+impl std::fmt::Debug for ChannelConfigSharedAdmission {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ChannelConfigSubjectRouteResolver")
+            .debug_struct("ChannelConfigSharedAdmission")
             .field("extension_id", &self.extension_id)
-            .field("handles", &self.handles)
+            .field("allowed_channels_handle", &self.allowed_channels_handle)
             .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolver {
-    async fn resolve_product_conversation_subject_route(
+impl SharedConversationAdmission for ChannelConfigSharedAdmission {
+    async fn shared_conversation_admitted(
         &self,
-        request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure> {
+        request: SharedConversationAdmissionRequest,
+    ) -> Result<bool, ProductOperationFailure> {
         if request.adapter_id != self.adapter_id || request.installation_id != self.installation_id
         {
-            return Ok(None);
+            return Ok(false);
         }
         let conversation_id = request.route_key.conversation_id();
-        if let Some(handle) = &self.handles.subject_routes
-            && let Some(raw) = self.config_value(handle).await?
+        if let Some(raw) = self
+            .config_value(self.allowed_channels_handle.as_str())
+            .await?
         {
-            match serde_json::from_str::<BTreeMap<String, String>>(&raw) {
-                Ok(routes) => {
-                    if let Some(subject) = routes.get(conversation_id) {
-                        return UserId::new(subject.clone()).map(Some).map_err(|error| {
-                            ProductOperationFailure::InvalidBindingRequest {
-                                reason: format!("configured subject route is invalid: {error}"),
-                            }
-                        });
-                    }
+            match serde_json::from_str::<Vec<String>>(&raw) {
+                Ok(allowed) => {
+                    return Ok(allowed.iter().any(|entry| entry == conversation_id));
                 }
-                // Malformed operator JSON fails closed: no route resolves
+                // Malformed operator JSON fails closed: nothing is admitted
                 // until the value is fixed through the configure surface.
                 Err(error) => {
                     tracing::warn!(
                         target: "ironclaw::reborn::channel_host",
                         extension_id = %self.extension_id,
-                        handle = %handle,
-                        %error,
-                        "subject-route config value is not a JSON object; treating as no routes"
-                    );
-                }
-            }
-        }
-        if let Some(handle) = &self.handles.allowed_channels
-            && let Some(raw) = self.config_value(handle).await?
-        {
-            match serde_json::from_str::<Vec<String>>(&raw) {
-                Ok(allowed) => {
-                    if allowed.iter().any(|entry| entry == conversation_id) {
-                        return managed_channel_subject_user_id(
-                            self.extension_id.as_str(),
-                            &self.tenant_id,
-                            &self.installation_id,
-                            request.route_key.space_id(),
-                            conversation_id,
-                        )
-                        .map(Some)
-                        .map_err(|reason| {
-                            ProductOperationFailure::InvalidBindingRequest { reason }
-                        });
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "ironclaw::reborn::channel_host",
-                        extension_id = %self.extension_id,
-                        handle = %handle,
+                        handle = %self.allowed_channels_handle,
                         %error,
                         "allowed-channel config value is not a JSON array; treating as empty"
                     );
                 }
             }
         }
-        Ok(None)
+        Ok(false)
     }
 }
 
@@ -258,20 +167,23 @@ mod tests {
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         host_port::HostPortCatalog,
-        ids::InvocationId,
+        ids::{InvocationId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
     };
-    use ironclaw_product_contracts::subject_route::ProductConversationRouteKey;
+    use ironclaw_product_contracts::shared_admission::ProductConversationRouteKey;
     use ironclaw_product_contracts::surface::ProductSurfaceError;
     use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
     use crate::{AdminConfigurationService, FilesystemAdminConfigurationStore};
 
-    /// Invented channel extension declaring the admission fields by the
-    /// handle-suffix convention.
+    /// Invented channel extension declaring the admission field by the
+    /// handle-suffix convention — plus the RETIRED `*_subject_routes` handle,
+    /// kept in the fixture on purpose: a legacy deployment may still declare
+    /// and hold saved subject-route values, and admission must treat them as
+    /// inert rather than admitting their conversations.
     const ADMISSION_FIXTURE_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "vendorx"
@@ -307,7 +219,7 @@ display_name = "VendorX channel"
 fields = [
   { handle = "vendorx_webhook_secret", label = "Webhook secret", secret = true },
   { handle = "vendorx_allowed_channels", label = "Allowed channels", secret = false },
-  { handle = "vendorx_subject_routes", label = "Subject routes", secret = false },
+  { handle = "vendorx_subject_routes", label = "Subject routes (retired)", secret = false },
 ]
 
 [channel.presentation]
@@ -315,11 +227,10 @@ supports_markdown = false
 supports_threads = false
 "#;
 
-    const TENANT: &str = "tenant-alpha";
     const INSTALLATION: &str = "vendorx-install-1";
 
     struct Fixture {
-        resolver: ChannelConfigSubjectRouteResolver,
+        resolver: ChannelConfigSharedAdmission,
         channel_config: Arc<ChannelConfigService>,
         extension_id: ExtensionId,
     }
@@ -431,16 +342,11 @@ supports_threads = false
             )
             .with_admin_configuration(admin, scope),
         );
-        let handles = SharedChannelAdmissionHandles {
-            allowed_channels: Some("vendorx_allowed_channels".to_string()),
-            subject_routes: Some("vendorx_subject_routes".to_string()),
-        };
-        let resolver = ChannelConfigSubjectRouteResolver::new(
+        let resolver = ChannelConfigSharedAdmission::new(
             ProductAdapterId::new("vendorx").expect("adapter id"),
             AdapterInstallationId::new(INSTALLATION).expect("installation id"),
-            TenantId::new(TENANT).expect("tenant"),
             extension_id.clone(),
-            handles,
+            "vendorx_allowed_channels".to_string(),
             Arc::clone(&channel_config),
         );
         Fixture {
@@ -455,8 +361,8 @@ supports_threads = false
         installation: &str,
         space: Option<&str>,
         conversation: &str,
-    ) -> ProductConversationSubjectRouteResolutionRequest {
-        ProductConversationSubjectRouteResolutionRequest {
+    ) -> SharedConversationAdmissionRequest {
+        SharedConversationAdmissionRequest {
             adapter_id: ProductAdapterId::new(adapter).expect("adapter id"),
             installation_id: AdapterInstallationId::new(installation).expect("installation id"),
             route_key: ProductConversationRouteKey::new(
@@ -493,7 +399,7 @@ supports_threads = false
                 extension_id: "channel-fixture".to_string(),
             },
             ChannelConfigError::UnknownField {
-                handle: "subject_routes".to_string(),
+                handle: "allowed_channels".to_string(),
             },
             ChannelConfigError::Storage {
                 reason: "backend offline".to_string(),
@@ -536,139 +442,71 @@ supports_threads = false
                 secret: field.secret,
             })
             .collect::<Vec<_>>();
-        let handles = shared_channel_admission_handles(&fields);
-        assert_eq!(
-            handles,
-            SharedChannelAdmissionHandles {
-                allowed_channels: Some("vendorx_allowed_channels".to_string()),
-                subject_routes: Some("vendorx_subject_routes".to_string()),
-            }
-        );
-        assert!(handles.declared());
-        // A channel without the convention declares nothing.
-        assert!(!shared_channel_admission_handles(&[]).declared());
-        assert!(handle_declares_field(
-            "allowed_channels",
-            "allowed_channels"
-        ));
-        assert!(!handle_declares_field(
-            "disallowed_channels",
-            "allowed_channels"
-        ));
+        let handle = shared_channel_admission_handle(&fields);
+        assert_eq!(handle.as_deref(), Some("vendorx_allowed_channels"));
+        // A secret field never declares admission config, whatever its name.
+        let secret_only = [RecipeSecretField {
+            handle: ironclaw_host_api::ids::SecretHandle::new("vendorx_allowed_channels")
+                .expect("valid handle"),
+            label: "secret impostor".to_string(),
+            secret: true,
+        }];
+        assert_eq!(shared_channel_admission_handle(&secret_only), None);
     }
 
     #[tokio::test]
-    async fn unconfigured_admission_resolves_no_route() {
+    async fn unconfigured_admission_admits_nothing() {
         let fixture = fixture().await;
-        let resolved = fixture
+        let admitted = fixture
             .resolver
-            .resolve_product_conversation_subject_route(request(
-                "vendorx",
-                INSTALLATION,
-                Some("S-1"),
-                "C777",
-            ))
+            .shared_conversation_admitted(request("vendorx", INSTALLATION, Some("S1"), "C777"))
             .await
-            .expect("resolution succeeds");
-        assert_eq!(resolved, None, "no saved config admits nothing");
+            .expect("admission resolves");
+        assert!(!admitted, "no saved config admits nothing");
     }
 
     #[tokio::test]
-    async fn explicit_subject_routes_win_over_allowed_channels() {
+    async fn allowed_channels_admit_exactly_the_listed_conversations() {
         let fixture = fixture().await;
         save(&fixture, "vendorx_allowed_channels", r#"["C777","C888"]"#).await;
+
+        for (conversation, expected) in [("C777", true), ("C888", true), ("C999", false)] {
+            let admitted = fixture
+                .resolver
+                .shared_conversation_admitted(request(
+                    "vendorx",
+                    INSTALLATION,
+                    Some("S1"),
+                    conversation,
+                ))
+                .await
+                .expect("admission resolves");
+            assert_eq!(admitted, expected, "conversation {conversation}");
+        }
+    }
+
+    /// Legacy `*_subject_routes` values are INERT: they neither admit their
+    /// conversations nor scope anyone. A deployment that admitted
+    /// conversations only through subject routes re-admits them through
+    /// `*_allowed_channels`.
+    #[tokio::test]
+    async fn legacy_subject_route_values_do_not_admit() {
+        let fixture = fixture().await;
         save(
             &fixture,
             "vendorx_subject_routes",
-            r#"{"C888":"user:ops-agent"}"#,
+            r#"{"C777":"user:someone"}"#,
         )
         .await;
 
-        let explicit = fixture
+        let admitted = fixture
             .resolver
-            .resolve_product_conversation_subject_route(request(
-                "vendorx",
-                INSTALLATION,
-                Some("S-1"),
-                "C888",
-            ))
+            .shared_conversation_admitted(request("vendorx", INSTALLATION, Some("S1"), "C777"))
             .await
-            .expect("resolution succeeds")
-            .expect("explicit route resolves");
-        assert_eq!(explicit.as_str(), "user:ops-agent");
-
-        let managed = fixture
-            .resolver
-            .resolve_product_conversation_subject_route(request(
-                "vendorx",
-                INSTALLATION,
-                Some("S-1"),
-                "C777",
-            ))
-            .await
-            .expect("resolution succeeds")
-            .expect("allowed channel resolves a managed subject");
-        let expected = managed_channel_subject_user_id(
-            "vendorx",
-            &TenantId::new(TENANT).expect("tenant"),
-            &AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            Some("S-1"),
-            "C777",
-        )
-        .expect("derivation");
-        assert_eq!(managed, expected);
-        assert!(managed.as_str().starts_with("user:vendorx-channel:"));
-        assert_eq!(
-            managed.as_str().len(),
-            "user:vendorx-channel:".len() + 32,
-            "managed subject carries a 16-byte hex digest"
-        );
-
-        // A channel in neither value stays unrouted.
-        assert_eq!(
-            fixture
-                .resolver
-                .resolve_product_conversation_subject_route(request(
-                    "vendorx",
-                    INSTALLATION,
-                    Some("S-1"),
-                    "C999",
-                ))
-                .await
-                .expect("resolution succeeds"),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn managed_subject_derivation_matches_the_retired_lane_scheme() {
-        // Independent recomputation of the ported derivation:
-        // sha256(tenant \0 installation \0 space \0 conversation), first 16
-        // digest bytes hex-encoded under `user:{extension}-channel:`.
-        let mut hasher = Sha256::new();
-        for (index, part) in [TENANT, INSTALLATION, "S-1", "C777"].iter().enumerate() {
-            if index > 0 {
-                hasher.update(b"\0");
-            }
-            hasher.update(part.as_bytes());
-        }
-        let digest = hasher.finalize();
-        let expected_suffix = digest
-            .iter()
-            .take(16)
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let derived = managed_channel_subject_user_id(
-            "vendorx",
-            &TenantId::new(TENANT).expect("tenant"),
-            &AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            Some("S-1"),
-            "C777",
-        )
-        .expect("derivation");
-        assert_eq!(
-            derived.as_str(),
-            format!("user:vendorx-channel:{expected_suffix}")
+            .expect("admission resolves");
+        assert!(
+            !admitted,
+            "a saved subject-route value must not admit its conversation"
         );
     }
 
@@ -676,64 +514,51 @@ supports_threads = false
     async fn malformed_config_json_fails_closed() {
         let fixture = fixture().await;
         save(&fixture, "vendorx_allowed_channels", "not-json").await;
-        save(&fixture, "vendorx_subject_routes", "[]").await;
 
-        assert_eq!(
-            fixture
-                .resolver
-                .resolve_product_conversation_subject_route(request(
-                    "vendorx",
-                    INSTALLATION,
-                    Some("S-1"),
-                    "C777",
-                ))
-                .await
-                .expect("resolution succeeds"),
-            None,
-            "malformed operator JSON must never admit"
-        );
+        let admitted = fixture
+            .resolver
+            .shared_conversation_admitted(request("vendorx", INSTALLATION, Some("S1"), "C777"))
+            .await
+            .expect("malformed config is not an error");
+        assert!(!admitted, "malformed config admits nothing");
     }
 
     #[tokio::test]
-    async fn foreign_adapter_or_installation_resolves_nothing() {
+    async fn foreign_adapter_or_installation_admits_nothing() {
         let fixture = fixture().await;
         save(&fixture, "vendorx_allowed_channels", r#"["C777"]"#).await;
 
-        for request in [
-            request("othervendor", INSTALLATION, Some("S-1"), "C777"),
-            request("vendorx", "other-install", Some("S-1"), "C777"),
+        for req in [
+            request("vendory", INSTALLATION, Some("S1"), "C777"),
+            request("vendorx", "vendorx-install-2", Some("S1"), "C777"),
         ] {
-            assert_eq!(
-                fixture
-                    .resolver
-                    .resolve_product_conversation_subject_route(request)
-                    .await
-                    .expect("resolution succeeds"),
-                None
-            );
+            let admitted = fixture
+                .resolver
+                .shared_conversation_admitted(req)
+                .await
+                .expect("admission resolves");
+            assert!(!admitted);
         }
     }
 
     #[tokio::test]
     async fn config_saves_take_effect_per_request() {
         let fixture = fixture().await;
-        let request_c7 = || request("vendorx", INSTALLATION, Some("S-1"), "C777");
-        assert_eq!(
-            fixture
+        let req = request("vendorx", INSTALLATION, Some("S1"), "C777");
+        assert!(
+            !fixture
                 .resolver
-                .resolve_product_conversation_subject_route(request_c7())
+                .shared_conversation_admitted(req.clone())
                 .await
-                .expect("resolution succeeds"),
-            None
+                .expect("admission resolves")
         );
         save(&fixture, "vendorx_allowed_channels", r#"["C777"]"#).await;
         assert!(
             fixture
                 .resolver
-                .resolve_product_conversation_subject_route(request_c7())
+                .shared_conversation_admitted(req)
                 .await
-                .expect("resolution succeeds")
-                .is_some(),
+                .expect("admission resolves"),
             "a configure save admits on the next request with no rebuild"
         );
     }

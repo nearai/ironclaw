@@ -43,6 +43,8 @@
 /// resolution, behavior-preserving default. See the module docs for why an
 /// agent-authored skill is unreachable under the historical criteria-only rule.
 pub mod activation_strategy;
+pub mod gating;
+pub use gating::{GatingResult, binary_exists, check_requirements_sync};
 pub mod install_metadata;
 pub mod learning;
 pub mod management;
@@ -83,9 +85,10 @@ pub use selector::{
     prefilter_skills_with_options, skill_token_cost,
 };
 pub use validation::{
-    SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,
-    normalize_safe_relative_path, validate_credential_name, validate_credential_spec,
-    validate_path_pattern, validate_skill_name,
+    SafeRelativePathError, escape_skill_content, escape_xml_attr, lint_skill_routing_metadata,
+    lint_skill_routing_metadata_advisory, lint_skill_routing_metadata_blocking,
+    normalize_line_endings, normalize_safe_relative_path, validate_credential_name,
+    validate_credential_spec, validate_path_pattern, validate_skill_name,
 };
 #[cfg(test)]
 mod replacement_snapshot_public_surface_tests {

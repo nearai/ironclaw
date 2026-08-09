@@ -26,7 +26,7 @@ enum CapabilityDispatchScope {
     RunOwner,
 }
 
-/// Shared "align user to the group's canonical binding subject, then build"
+/// Shared "align user to the group's canonical binding actor, then build"
 /// step for the preset constructors below whose capability executes under
 /// the group's resolved binding user rather than a fixed constructor test
 /// user (`live_approvals`, `live_auth_and_approval`, `profile_tools`,
@@ -39,7 +39,7 @@ async fn build_group_capability_with_base(
     mut profile: ToolsProfile,
     base: &GroupBaseData,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
-    let subject_user = base.canonical_subject_user()?;
+    let actor_user = base.canonical_actor_user()?;
     let product_scope = &base.product_harness.scope;
     let agent_id = product_scope
         .agent_id
@@ -49,7 +49,7 @@ async fn build_group_capability_with_base(
         .options
         .with_local_runtime_identity(product_scope.tenant_id.clone(), agent_id);
     let harness = profile.build().await?;
-    Ok(harness.with_user_id(subject_user))
+    Ok(harness.with_user_id(actor_user))
 }
 
 impl RebornIntegrationGroup {
@@ -300,7 +300,7 @@ impl RebornIntegrationGroupBuilder {
     /// resolved base (`builtin_tools`/`extension_lifecycle`) and the degenerate
     /// single-shot path (`RebornIntegrationHarnessBuilder::build`).
     /// `live_approvals` and `profile_tools` both resolve their capability's
-    /// executor user FROM `base` (`canonical_subject_user()`), so they call
+    /// executor user FROM `base` (`canonical_actor_user()`), so they call
     /// `build_base` + `into_group` directly instead, reusing the SAME `base`
     /// for both the user lookup and the group assembly.
     pub(crate) async fn build_with_capability(
@@ -314,7 +314,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
     pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Align capability execution to the run's CANONICAL binding subject user
+        // Align capability execution to the run's CANONICAL binding actor user
         // (not the constructor's fixed test user) so dispatch, approval, auto-
         // approve keying, and gate-evidence lookup share one `(tenant, user)` —
         // matching production. `build_group_capability_with_base` (above) is the
@@ -356,7 +356,7 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         self.storage = StorageMode::LibSql;
         let base = self.build_base().await?;
-        let user_id = base.canonical_subject_user()?;
+        let user_id = base.canonical_actor_user()?;
         let filesystem: Arc<dyn RootFilesystem> = base.composite.clone();
         let provider: Arc<dyn ironclaw_memory::MemoryService> = Arc::new(
             ironclaw_memory_native::NativeMemoryService::from_filesystem(
@@ -440,13 +440,13 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Build the profile with the
-        // canonical binding subject before credentials are seeded, then align
-        // the shared capability harness to that same subject. Building first
+        // canonical binding actor before credentials are seeded, then align
+        // the shared capability harness to that same actor. Building first
         // with the fixed fixture user and only calling `with_user_id` would
         // leave the credential rows under the old user and incorrectly block
         // otherwise credential-ready installs on auth.
-        let subject_user = base.canonical_subject_user()?;
-        let profile = profile_for_user(subject_user.as_str())?;
+        let actor_user = base.canonical_actor_user()?;
+        let profile = profile_for_user(actor_user.as_str())?;
         let mut host_runtime = build_group_capability_with_base(profile, &base).await?;
         if matches!(dispatch_scope, CapabilityDispatchScope::RunOwner) {
             host_runtime = host_runtime.with_run_owner_scoped_capability_dispatch();
@@ -610,7 +610,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build an auth+approval convergence group. See
     /// [`RebornIntegrationGroup::live_auth_and_approval`]. Cannot go through
     /// `build_with_capability` — like `live_approvals`, the capability's
-    /// executor user must be aligned to `base`'s canonical binding subject
+    /// executor user must be aligned to `base`'s canonical binding actor
     /// user (`.with_user_id`) so dispatch-time capability resolution
     /// (approval persistence AND the seeded GitHub credential account's
     /// visibility scope) matches the run's actual `(tenant, user)`, not the
@@ -661,7 +661,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Align `ironclaw.memory.profile_set`'s executor to the canonical subject user
+        // Align `ironclaw.memory.profile_set`'s executor to the canonical actor user
         // (mirrors `live_approvals`) — otherwise a write and its read-back
         // resolve under different users. Needs `base` first, so can't go
         // through `build_with_capability`.
@@ -742,7 +742,7 @@ impl RebornIntegrationGroupBuilder {
     /// C-MULTIUSER over a PER-CALLER-SCOPED workspace: the runtime is built
     /// with the same raise `serve` applies unconditionally
     /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`), and
-    /// the harness's capability grants confine to the canonical subject's own
+    /// the harness's capability grants confine to the canonical actor's own
     /// `tenants/{tenant}/users/{user}` subtree via the SAME production
     /// resolver a scoped deployment's factory uses
     /// (`scoped_workspace_mount_view_for_test`). File tools stay at `Ask`
@@ -752,10 +752,10 @@ impl RebornIntegrationGroupBuilder {
     /// turn path.
     ///
     /// SINGLE-CALLER GROUP — do not add a second actor. The harness's grant
-    /// view is resolved ONCE for the canonical subject, while
+    /// view is resolved ONCE for the canonical actor, while
     /// `with_run_owner_scoped_capability_dispatch` resolves the execution
     /// user per run: a thread built `.with_actor_id(..)` would execute under
-    /// its own owner while holding the canonical subject's subtree grant,
+    /// its own owner while holding the canonical actor's subtree grant,
     /// silently inverting the isolation this group exists to prove.
     /// Cross-actor mount isolation is pinned where the grant is per-caller by
     /// construction: `workspace_scoping_tests` (crate tier) and the two-user
@@ -763,11 +763,11 @@ impl RebornIntegrationGroupBuilder {
     pub async fn multiuser_scoped_workspace(self) -> HarnessResult<RebornIntegrationGroup> {
         use ironclaw_host_api::ids::CapabilityId;
         let base = self.build_base().await?;
-        let subject_user = base.canonical_subject_user()?;
+        let actor_user = base.canonical_actor_user()?;
         let product_scope = &base.product_harness.scope;
         let caller_scope = ironclaw_host_api::resource::ResourceScope {
             tenant_id: product_scope.tenant_id.clone(),
-            user_id: subject_user,
+            user_id: actor_user,
             agent_id: product_scope.agent_id.clone(),
             project_id: None,
             mission_id: None,
@@ -799,7 +799,7 @@ impl RebornIntegrationGroupBuilder {
     /// Outbound-target-tools group. See
     /// [`RebornIntegrationGroup::outbound_target_tools`]. Mirrors
     /// `live_approvals`/`profile_tools`: the synthetic `outbound_delivery_*`
-    /// capabilities run under the run's canonical binding subject user, so the
+    /// capabilities run under the run's canonical binding actor user, so the
     /// dispatch-time auto-approve scope aligns with tests' per-test disables.
     /// Auto-approve stays default-ON here; the gate arm disables it per-test.
     pub async fn outbound_target_tools(self) -> HarnessResult<RebornIntegrationGroup> {

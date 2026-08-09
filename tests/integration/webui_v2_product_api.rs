@@ -1571,10 +1571,12 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
         "telegram_webhook_secret",
         "telegram_webhook_url",
         "bot_username",
+        "telegram_allowed_channels",
         "Bot token",
         "Webhook secret token",
         "Public webhook URL",
         "Bot username",
+        "Allowed group chats (JSON array of Telegram chat IDs)",
         "Telegram deployment configuration",
     ] {
         for (surface, wire) in &ordinary_caller_wires {

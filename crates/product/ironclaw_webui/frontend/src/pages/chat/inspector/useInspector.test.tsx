@@ -14,6 +14,7 @@ vi.mock("event-source-plus", () => ({
   EventSourcePlus: class EventSourcePlus {
     url: string;
     options: Record<string, unknown>;
+    requestOptions: Record<string, any> = {};
     hooks: Record<string, Function> = {};
     listenCalls = 0;
     controller: { abort: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> };
@@ -23,7 +24,7 @@ vi.mock("event-source-plus", () => ({
       this.options = options;
       this.controller = {
         abort: vi.fn(),
-        reconnect: vi.fn(() => this.hooks.onRequest?.({})),
+        reconnect: vi.fn(() => this.hooks.onRequest?.({ options: this.requestOptions })),
       };
       eventStreams.push(this);
     }
@@ -31,7 +32,7 @@ vi.mock("event-source-plus", () => ({
     listen(hooks: Record<string, Function>) {
       this.listenCalls += 1;
       this.hooks = hooks;
-      hooks.onRequest?.({});
+      hooks.onRequest?.({ options: this.requestOptions });
       return this.controller;
     }
 
@@ -100,6 +101,11 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
     Authorization: "Bearer operator-token",
   });
   assert.equal(new URL(stream.url).searchParams.has("token"), false);
+  assert.match(stream.requestOptions.query.connection_id, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.equal(stream.requestOptions.query.connection_generation, 1);
+
+  await act(async () => stream.message("diagnostic_connected", "", {}));
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
 
   await act(async () => stream.respond());
   assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
@@ -110,6 +116,9 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
 
   await act(async () => stream.respond());
   assert.equal((latestState?.updates[1].update as any)?.data?.kind, "stream_resumed");
+
+  await act(async () => stream.controller.reconnect());
+  assert.equal(stream.requestOptions.query.connection_generation, 2);
 });
 
 test("recovers a transient snapshot failure after the diagnostics stream connects", async () => {

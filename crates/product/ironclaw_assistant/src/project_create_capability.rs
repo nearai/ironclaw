@@ -11,7 +11,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityProgress,
-    ConcurrencyHint, LoopRunContext, resolution,
+    ConcurrencyHint, resolution,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
@@ -73,7 +73,11 @@ impl SyntheticCapabilityHandler for ProjectCreateHandler {
         // agent-writable.
         let caller = ProjectCaller {
             tenant_id: invocation.run_context.scope.tenant_id.clone(),
-            user_id: effective_user_id(&invocation.run_context, &self.fallback_user_id),
+            // One contract ladder for every capability-host synthetic
+            // capability: the run acts as the user who invoked it.
+            user_id: invocation
+                .run_context
+                .acting_user_id(&self.fallback_user_id),
         };
         let request = RebornCreateProjectRequest {
             name: input.name,
@@ -233,24 +237,6 @@ fn diagnostic_failure(error_kind: FailureKind, safe_summary: String) -> Resoluti
         safe_summary.clone(),
         CapabilityFailureDetail::Diagnostic { text: safe_summary },
     )
-}
-
-/// Resolve the user the run acts on behalf of: the explicit thread owner, else
-/// the run actor, else the configured fallback. Mirrors the same resolution used
-/// by the outbound-delivery capabilities so all capability-host synthetic
-/// capabilities scope to one identity.
-fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
-    run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| {
-            run_context
-                .actor
-                .as_ref()
-                .map(|actor| actor.user_id.clone())
-        })
-        .unwrap_or_else(|| fallback_user_id.clone())
 }
 
 #[cfg(test)]

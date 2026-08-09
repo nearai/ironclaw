@@ -15,9 +15,8 @@ use ironclaw_product_contracts::binding::{
     ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
-use ironclaw_product_contracts::subject_route::{
-    ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
-    ProductConversationSubjectRouteResolver,
+use ironclaw_product_contracts::shared_admission::{
+    ProductConversationRouteKey, SharedConversationAdmission, SharedConversationAdmissionRequest,
 };
 
 /// Tenant-scoped installation identity used before external actor/conversation
@@ -37,16 +36,17 @@ impl ProductInstallationKey {
     }
 }
 
-/// Build a subject-route resolution request from an inbound binding request.
+/// Build a shared-conversation admission request from an inbound binding
+/// request.
 ///
 /// A free function rather than an associated one: the request type is declared
 /// in `ironclaw_product_contracts` (so the extension host can implement the
 /// resolver without depending on product), and `ResolveBindingRequest` is
 /// product's own, so the bridge between them belongs here.
-fn subject_route_request_from_binding_request(
+fn admission_request_from_binding_request(
     request: &ResolveBindingRequest,
-) -> ProductConversationSubjectRouteResolutionRequest {
-    ProductConversationSubjectRouteResolutionRequest {
+) -> SharedConversationAdmissionRequest {
+    SharedConversationAdmissionRequest {
         adapter_id: request.adapter_id.clone(),
         installation_id: request.installation_id.clone(),
         route_key: ProductConversationRouteKey::from_external_conversation_ref(
@@ -110,23 +110,17 @@ impl std::fmt::Debug for ProductActorBindingPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnroutedSharedConversationSubjectPolicy {
-    UseDefaultSubject,
-    RequireConfiguredRoute,
-}
-
 /// Trusted host configuration for one adapter installation.
 #[derive(Debug, Clone)]
 pub struct ProductInstallationScope {
     pub tenant_id: TenantId,
     pub default_agent_id: Option<AgentId>,
     pub default_project_id: Option<ProjectId>,
-    pub default_subject_user_id: Option<UserId>,
-    pub unrouted_shared_conversation_subject_policy: UnroutedSharedConversationSubjectPolicy,
-    pub conversation_subject_routes: HashMap<ProductConversationRouteKey, UserId>,
-    pub conversation_subject_route_resolver:
-        Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    /// Shared-conversation admission. Fail-closed either way: `None` rejects
+    /// every shared conversation; `Some` admits exactly the conversations the
+    /// resolver says are connected. There is no subject half — a run acts as
+    /// the user who invoked it, on every route kind.
+    pub shared_conversation_admission: Option<Arc<dyn SharedConversationAdmission>>,
     pub actor_binding_policy: ProductActorBindingPolicy,
 }
 
@@ -136,11 +130,7 @@ impl ProductInstallationScope {
             tenant_id,
             default_agent_id: None,
             default_project_id: None,
-            default_subject_user_id: None,
-            unrouted_shared_conversation_subject_policy:
-                UnroutedSharedConversationSubjectPolicy::UseDefaultSubject,
-            conversation_subject_routes: HashMap::new(),
-            conversation_subject_route_resolver: None,
+            shared_conversation_admission: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
         }
     }
@@ -154,41 +144,16 @@ impl ProductInstallationScope {
             tenant_id,
             default_agent_id: Some(default_agent_id),
             default_project_id,
-            default_subject_user_id: None,
-            unrouted_shared_conversation_subject_policy:
-                UnroutedSharedConversationSubjectPolicy::UseDefaultSubject,
-            conversation_subject_routes: HashMap::new(),
-            conversation_subject_route_resolver: None,
+            shared_conversation_admission: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
         }
     }
 
-    pub fn with_default_subject_user_id(mut self, subject_user_id: UserId) -> Self {
-        self.default_subject_user_id = Some(subject_user_id);
-        self
-    }
-
-    pub fn without_default_subject_for_unrouted_shared_conversations(mut self) -> Self {
-        self.unrouted_shared_conversation_subject_policy =
-            UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute;
-        self
-    }
-
-    pub fn with_conversation_subject_route(
+    pub fn with_shared_conversation_admission(
         mut self,
-        route_key: ProductConversationRouteKey,
-        subject_user_id: UserId,
+        admission: Arc<dyn SharedConversationAdmission>,
     ) -> Self {
-        self.conversation_subject_routes
-            .insert(route_key, subject_user_id);
-        self
-    }
-
-    pub fn with_conversation_subject_route_resolver(
-        mut self,
-        resolver: Arc<dyn ProductConversationSubjectRouteResolver>,
-    ) -> Self {
-        self.conversation_subject_route_resolver = Some(resolver);
+        self.shared_conversation_admission = Some(admission);
         self
     }
 
@@ -228,69 +193,32 @@ impl ProductInstallationScope {
         })
     }
 
-    async fn shared_subject_user_id_for(
+    /// Fail-closed shared-conversation admission: a `Shared` route resolves
+    /// only when the installation's admission resolver says the conversation
+    /// is connected. `Direct` routes are never gated here. Checked on every
+    /// resolve, lookup, and reset, so a disconnected conversation stops
+    /// routing immediately — the same admission semantics the retired
+    /// subject-route requirement carried, without the subject.
+    async fn ensure_shared_route_admitted(
         &self,
         request: &ResolveBindingRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure> {
-        if let Some(resolver) = &self.conversation_subject_route_resolver
-            && let Some(subject_user_id) = resolver
-                .resolve_product_conversation_subject_route(
-                    subject_route_request_from_binding_request(request),
-                )
-                .await?
-        {
-            return Ok(Some(subject_user_id));
+    ) -> Result<(), ProductOperationFailure> {
+        if request.route_kind != ProductConversationRouteKind::Shared {
+            return Ok(());
         }
-        let route_key = ProductConversationRouteKey::from_external_conversation_ref(
-            &request.external_conversation_ref,
-        );
-        if route_key.space_id().is_none() && !self.conversation_subject_routes.is_empty() {
-            tracing::warn!(
-                "conversation ref has no space_id; channel route lookup will not match configured routes"
-            );
-        }
-        if let Some(subject_user_id) = self.conversation_subject_routes.get(&route_key) {
-            return Ok(Some(subject_user_id.clone()));
-        }
-        match self.unrouted_shared_conversation_subject_policy {
-            UnroutedSharedConversationSubjectPolicy::UseDefaultSubject => {
-                Ok(self.default_subject_user_id.clone())
+        let admitted = match &self.shared_conversation_admission {
+            None => false,
+            Some(admission) => {
+                admission
+                    .shared_conversation_admitted(admission_request_from_binding_request(request))
+                    .await?
             }
-            UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute => Ok(None),
+        };
+        if admitted {
+            Ok(())
+        } else {
+            Err(shared_conversation_not_connected_error())
         }
-    }
-
-    async fn configured_subject_user_id_for_route(
-        &self,
-        request: &ResolveBindingRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure> {
-        match request.route_kind {
-            ProductConversationRouteKind::Direct => Ok(None),
-            ProductConversationRouteKind::Shared => self.shared_subject_user_id_for(request).await,
-        }
-    }
-
-    fn requires_current_subject_route_for_existing_shared_binding(&self) -> bool {
-        self.conversation_subject_route_resolver.is_some()
-            && self.unrouted_shared_conversation_subject_policy
-                == UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute
-    }
-
-    async fn current_subject_for_existing_shared_binding(
-        &self,
-        request: &ResolveBindingRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure> {
-        if request.route_kind != ProductConversationRouteKind::Shared
-            || !self.requires_current_subject_route_for_existing_shared_binding()
-        {
-            return Ok(None);
-        }
-        let configured_subject_user_id = self.configured_subject_user_id_for_route(request).await?;
-        ensure_shared_route_has_configured_subject(
-            request.route_kind,
-            configured_subject_user_id.as_ref(),
-        )?;
-        Ok(configured_subject_user_id)
     }
 }
 
@@ -438,21 +366,17 @@ impl ProductConversationBindingService {
         })
     }
 
-    /// The reset authorization triple, shared by `reset_binding`'s pre- and
-    /// post-rotation checks so the two cannot drift: shared-route subject
-    /// match, resolved-actor match, and resolver-backed actor currency.
+    /// The reset authorization pair, shared by `reset_binding`'s pre- and
+    /// post-rotation checks so the two cannot drift: resolved-actor match and
+    /// resolver-backed actor currency. (Shared-conversation admission is
+    /// checked once before any mutation; it is pure per-request state.)
     async fn ensure_reset_resolution_authorized(
         &self,
         installation_scope: &ProductInstallationScope,
         resolve_request: &ResolveBindingRequest,
-        current_subject_user_id: Option<&UserId>,
         expected_actor: Option<&ResolvedProductActorUser>,
         resolution: &ironclaw_conversations::ConversationBindingResolution,
     ) -> Result<(), ProductOperationFailure> {
-        ensure_existing_shared_binding_matches_current_subject(
-            current_subject_user_id,
-            resolution,
-        )?;
         ensure_resolved_actor_matches_expected_user(expected_actor, resolution)?;
         self.ensure_resolved_actor_binding_still_current(
             installation_scope,
@@ -513,80 +437,24 @@ impl ProductBindingResolver for ProductConversationBindingService {
             .resolve(&request.adapter_id, &request.installation_id)?;
         let conversation_request =
             conversation_request(&request, installation_scope.tenant_id.clone())?;
-        if request.route_kind == ProductConversationRouteKind::Shared
-            && installation_scope
-                .conversation_subject_route_resolver
-                .is_some()
-        {
-            match self
-                .conversations
-                .lookup_binding(conversation_request.clone())
-                .await
-            {
-                Ok(resolution) if resolution.turn_scope.explicit_owner_user_id().is_some() => {
-                    let current_subject_user_id = installation_scope
-                        .current_subject_for_existing_shared_binding(&request)
-                        .await?;
-                    ensure_existing_shared_binding_matches_current_subject(
-                        current_subject_user_id.as_ref(),
-                        &resolution,
-                    )?;
-                    let owner_user_id = resolution.turn_scope.explicit_owner_user_id().cloned();
-                    let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
-                    if let Some(resolved_actor) = expected_actor.as_ref() {
-                        self.apply_resolved_actor_binding(
-                            &installation_scope,
-                            &request,
-                            resolved_actor,
-                        )
-                        .await?;
-                    }
-                    let resolution = self
-                        .conversations
-                        .resolve_or_create_binding_with_trusted_scope(
-                            conversation_request,
-                            installation_scope.default_agent_id.clone(),
-                            installation_scope.default_project_id.clone(),
-                            owner_user_id,
-                        )
-                        .await
-                        .map_err(map_conversation_error)?;
-                    ensure_resolved_actor_matches_expected_user(
-                        expected_actor.as_ref(),
-                        &resolution,
-                    )?;
-                    self.ensure_resolved_actor_binding_still_current(
-                        &installation_scope,
-                        &request,
-                        expected_actor.as_ref(),
-                    )
-                    .await?;
-
-                    return resolved_binding_from_resolution(resolution, request.route_kind);
-                }
-                Ok(_) | Err(ironclaw_conversations::InboundTurnError::BindingRequired { .. }) => {}
-                Err(error) => return Err(map_conversation_error(error)),
-            }
-        }
-        let configured_subject_user_id = installation_scope
-            .configured_subject_user_id_for_route(&request)
+        installation_scope
+            .ensure_shared_route_admitted(&request)
             .await?;
-        ensure_shared_route_has_configured_subject(
-            request.route_kind,
-            configured_subject_user_id.as_ref(),
-        )?;
         let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
         if let Some(resolved_actor) = expected_actor.as_ref() {
             self.apply_resolved_actor_binding(&installation_scope, &request, resolved_actor)
                 .await?;
         }
+        // No trusted owner: the conversations domain keys and owns shared
+        // bindings by the paired actor (a run acts as the user who invoked
+        // it), and Direct product bindings carry no explicit owner.
         let resolution = self
             .conversations
             .resolve_or_create_binding_with_trusted_scope(
                 conversation_request,
                 installation_scope.default_agent_id.clone(),
                 installation_scope.default_project_id.clone(),
-                configured_subject_user_id.clone(),
+                None,
             )
             .await
             .map_err(map_conversation_error)?;
@@ -598,7 +466,7 @@ impl ProductBindingResolver for ProductConversationBindingService {
         )
         .await?;
 
-        resolved_binding_from_resolution(resolution, request.route_kind)
+        resolved_binding_from_resolution(resolution)
     }
 
     async fn lookup_binding(
@@ -610,25 +478,18 @@ impl ProductBindingResolver for ProductConversationBindingService {
             .resolve(&request.adapter_id, &request.installation_id)?;
         let conversation_request =
             conversation_request(&request, installation_scope.tenant_id.clone())?;
+        installation_scope
+            .ensure_shared_route_admitted(&request)
+            .await?;
         let resolution = self
             .conversations
             .lookup_binding(conversation_request)
             .await
             .map_err(map_conversation_error)?;
-        if request.route_kind == ProductConversationRouteKind::Shared {
-            let current_subject_user_id = installation_scope
-                .current_subject_for_existing_shared_binding(&request)
-                .await?;
-            ensure_existing_shared_binding_matches_current_subject(
-                current_subject_user_id.as_ref(),
-                &resolution,
-            )?;
-        }
-
         let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
         ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &resolution)?;
 
-        resolved_binding_from_resolution(resolution, request.route_kind)
+        resolved_binding_from_resolution(resolution)
     }
 
     async fn reset_binding(
@@ -645,27 +506,16 @@ impl ProductBindingResolver for ProductConversationBindingService {
         )?;
         let conversation_request =
             conversation_request(&resolve_request, installation_scope.tenant_id.clone())?;
+        // Gate the pairing write below on shared-conversation admission before
+        // any mutation.
+        installation_scope
+            .ensure_shared_route_admitted(&resolve_request)
+            .await?;
         let existing = self
             .conversations
             .lookup_binding(conversation_request.clone())
             .await
             .map_err(map_conversation_error)?;
-        let current_subject_user_id =
-            if resolve_request.route_kind == ProductConversationRouteKind::Shared {
-                installation_scope
-                    .current_subject_for_existing_shared_binding(&resolve_request)
-                    .await?
-            } else {
-                None
-            };
-        // Gate the pairing write below on the shared-route subject before any
-        // mutation; the full triple re-runs through
-        // `ensure_reset_resolution_authorized` (this first check is pure, so
-        // the re-run cannot change the outcome).
-        ensure_existing_shared_binding_matches_current_subject(
-            current_subject_user_id.as_ref(),
-            &existing,
-        )?;
 
         let expected_actor = resolve_actor_user(&installation_scope, &resolve_request).await?;
         if let Some(resolved_actor) = expected_actor.as_ref() {
@@ -679,7 +529,6 @@ impl ProductBindingResolver for ProductConversationBindingService {
         self.ensure_reset_resolution_authorized(
             &installation_scope,
             &resolve_request,
-            current_subject_user_id.as_ref(),
             expected_actor.as_ref(),
             &existing,
         )
@@ -696,13 +545,11 @@ impl ProductBindingResolver for ProductConversationBindingService {
         self.ensure_reset_resolution_authorized(
             &installation_scope,
             &resolve_request,
-            current_subject_user_id.as_ref(),
             expected_actor.as_ref(),
             &outcome.resolution,
         )
         .await?;
-        let binding =
-            resolved_binding_from_resolution(outcome.resolution, resolve_request.route_kind)?;
+        let binding = resolved_binding_from_resolution(outcome.resolution)?;
         Ok(ResetBindingOutcome {
             previous_thread_id: outcome.previous_thread_id,
             binding,
@@ -710,62 +557,22 @@ impl ProductBindingResolver for ProductConversationBindingService {
     }
 }
 
-fn ensure_existing_shared_binding_matches_current_subject(
-    current_subject_user_id: Option<&UserId>,
-    resolution: &ironclaw_conversations::ConversationBindingResolution,
-) -> Result<(), ProductOperationFailure> {
-    let Some(current_subject_user_id) = current_subject_user_id else {
-        return Ok(());
-    };
-    if resolution.turn_scope.explicit_owner_user_id() != Some(current_subject_user_id) {
-        return Err(ProductOperationFailure::BindingAccessDenied);
-    }
-    Ok(())
-}
-
 fn resolved_binding_from_resolution(
     resolution: ironclaw_conversations::ConversationBindingResolution,
-    route_kind: ProductConversationRouteKind,
 ) -> Result<ResolvedBinding, ProductOperationFailure> {
-    let actor_user_id = resolution.actor.user_id;
-    let subject_user_id = match route_kind {
-        ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
-        ProductConversationRouteKind::Shared => Some(
-            resolution
-                .turn_scope
-                .explicit_owner_user_id()
-                .cloned()
-                .ok_or_else(shared_route_missing_persisted_subject_error)?,
-        ),
-    };
     Ok(ResolvedBinding {
         tenant_id: resolution.tenant_id,
-        actor_user_id,
-        subject_user_id,
+        actor_user_id: resolution.actor.user_id,
         thread_id: resolution.turn_scope.thread_id,
         agent_id: resolution.turn_scope.agent_id,
         project_id: resolution.turn_scope.project_id,
     })
 }
 
-fn ensure_shared_route_has_configured_subject(
-    route_kind: ProductConversationRouteKind,
-    configured_subject_user_id: Option<&UserId>,
-) -> Result<(), ProductOperationFailure> {
-    if route_kind == ProductConversationRouteKind::Shared && configured_subject_user_id.is_none() {
-        return Err(shared_route_requires_subject_error());
-    }
-    Ok(())
-}
-
-fn shared_route_requires_subject_error() -> ProductOperationFailure {
+fn shared_conversation_not_connected_error() -> ProductOperationFailure {
     ProductOperationFailure::BindingRequired {
-        reason: "shared product route requires a configured subject user".into(),
+        reason: "shared conversation is not connected for this channel".into(),
     }
-}
-
-fn shared_route_missing_persisted_subject_error() -> ProductOperationFailure {
-    ProductOperationFailure::BindingAccessDenied
 }
 
 fn conversation_request(

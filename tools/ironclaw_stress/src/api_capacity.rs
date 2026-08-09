@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     net::SocketAddr,
     path::Path,
     sync::{
@@ -22,6 +22,7 @@ use tokio::{
 use crate::{
     Args, Sample,
     progress::ProgressCounters,
+    scripted::{self, ScriptKey, ScriptedDecision, ScriptedMockCounters},
     summary::{FailureCause, LatencySummary, latency_summary, summarize_failure_causes},
 };
 
@@ -51,6 +52,75 @@ pub(crate) struct ApiCapacitySummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mock_llm: Option<MockLlmSummary>,
     pub(crate) endpoints: BTreeMap<String, ApiEndpointSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scripted: Option<ApiScriptedSummary>,
+}
+
+/// Driver-side summary of scripted tool-call workloads, bucketed by
+/// document size.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ApiScriptedSummary {
+    pub(crate) script: String,
+    pub(crate) doc_sizes: Vec<usize>,
+    pub(crate) hot_writers: usize,
+    pub(crate) size_buckets: BTreeMap<String, ApiScriptedSizeSummary>,
+}
+
+/// Per-document-size scripted workload results.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ApiScriptedSizeSummary {
+    pub(crate) attempted: u64,
+    pub(crate) succeeded: u64,
+    pub(crate) failed: u64,
+    #[serde(default)]
+    pub(crate) verdicts: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub(crate) failure_buckets: BTreeMap<String, u64>,
+    /// Tool-result messages observed for this bucket's operations (read-back
+    /// correlation evidence).
+    #[serde(default)]
+    pub(crate) tool_results: u64,
+    /// Submit-to-first-tool-visible and submit-to-finalize latencies in
+    /// microseconds, per stage.
+    #[serde(default)]
+    pub(crate) stage_latency_us: BTreeMap<String, LatencySummary>,
+}
+
+/// One scripted operation sample, carried from the writer tasks to the
+/// summary.
+#[derive(Debug, Clone)]
+pub(crate) struct ScriptedOpSample {
+    pub(crate) size_bytes: usize,
+    pub(crate) verdict: Option<scripted::Verdict>,
+    /// Tool-result messages observed for this operation, relative to the
+    /// previous operation on the same thread.
+    pub(crate) tools_executed: usize,
+    /// Submit to first tool result visible in the timeline.
+    pub(crate) tool_visible_latency: Option<Duration>,
+    /// Submit to finalized assistant.
+    pub(crate) finalize_latency: Option<Duration>,
+    pub(crate) failure: Option<FailureCause>,
+}
+
+/// Scripted-mode task identity: the operation id prefix (empty for regular
+/// users, `h{k}-` for hot writers) and the user identity part of markers.
+#[derive(Debug, Clone)]
+struct ScriptedTaskIdentity {
+    op_prefix: String,
+    marker_user: String,
+}
+
+/// Everything a scripted operation needs besides the harness and user.
+#[derive(Debug, Clone)]
+struct ScriptedFlowContext {
+    key: scripted::ScriptKey,
+    identity: ScriptedTaskIdentity,
+    expected_tool_results: usize,
+    /// Highest message sequence observed in the timeline before this
+    /// operation's marker was submitted. Tool results with a sequence above
+    /// the baseline belong to this operation, so per-op tool evidence stays
+    /// correct even once the thread outgrows one timeline page.
+    baseline_sequence: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,6 +148,8 @@ pub(crate) struct MockLlmSummary {
     pub(crate) last_request_offset_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) request_start_spread_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scripted: Option<ScriptedMockCounters>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +178,11 @@ struct ApiUser {
     label: String,
     bearer_token: Option<String>,
     thread_id: String,
+    /// Additional threads of the same user. Scripted hot writers use these
+    /// so concurrent operations run on distinct threads (no per-thread turn
+    /// serialization) while still contending on the same per-user durable
+    /// memory document.
+    extra_thread_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,6 +290,7 @@ struct MockLlmConfig {
     jitter_ms: u64,
     output_bytes: usize,
     failure_rate: f64,
+    scripted: Option<ScriptKey>,
 }
 
 #[derive(Debug)]
@@ -223,6 +301,8 @@ struct MockLlmState {
     jitter_ms: u64,
     output_bytes: usize,
     failure_rate: f64,
+    scripted: Option<ScriptKey>,
+    scripted_counters: Mutex<ScriptedMockCounters>,
     counter: AtomicU64,
     foreground_counter: AtomicU64,
     background_counter: AtomicU64,
@@ -259,6 +339,11 @@ impl MockLlmState {
             .unwrap_or_default();
         let first_request_offset = request_start_offsets.iter().min().copied();
         let last_request_offset = request_start_offsets.iter().max().copied();
+        let scripted = self
+            .scripted_counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         MockLlmSummary {
             base_url,
             model: self.model.clone(),
@@ -279,6 +364,7 @@ impl MockLlmState {
             request_start_spread_ms: first_request_offset
                 .zip(last_request_offset)
                 .map(|(first, last)| last.saturating_sub(first).as_millis()),
+            scripted: self.scripted.map(|_| scripted),
         }
     }
 
@@ -489,6 +575,7 @@ pub(crate) async fn run(
         poll_interval_ms: args.api_poll_interval_ms,
         mock_llm: mock_summary,
         endpoints,
+        scripted: summarize_scripted(&window.scripted_samples, args),
     };
 
     Ok(ApiCapacityRun {
@@ -499,10 +586,78 @@ pub(crate) async fn run(
     })
 }
 
+/// Aggregate scripted operation samples into per-document-size buckets.
+fn summarize_scripted(samples: &[ScriptedOpSample], args: &Args) -> Option<ApiScriptedSummary> {
+    let script = args.api_scripted_tool?;
+    if samples.is_empty() {
+        return None;
+    }
+    let mut size_buckets: BTreeMap<String, ApiScriptedSizeSummary> = BTreeMap::new();
+    let mut stage_latencies: BTreeMap<String, BTreeMap<String, Vec<u128>>> = BTreeMap::new();
+    for sample in samples {
+        let size_key = sample.size_bytes.to_string();
+        let bucket = size_buckets.entry(size_key.clone()).or_default();
+        bucket.attempted += 1;
+        bucket.tool_results += sample.tools_executed as u64;
+        match &sample.failure {
+            Some(failure) => {
+                bucket.failed += 1;
+                *bucket
+                    .failure_buckets
+                    .entry(failure.bucket.clone())
+                    .or_insert(0) += 1;
+            }
+            None => {
+                bucket.succeeded += 1;
+                if let Some(verdict) = sample.verdict {
+                    *bucket
+                        .verdicts
+                        .entry(verdict.as_str().to_string())
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+        let stages = stage_latencies.entry(size_key).or_default();
+        if let Some(latency) = sample.tool_visible_latency {
+            stages
+                .entry("tool_visible".to_string())
+                .or_default()
+                .push(latency.as_micros());
+        }
+        if let Some(latency) = sample.finalize_latency {
+            stages
+                .entry("finalize".to_string())
+                .or_default()
+                .push(latency.as_micros());
+        }
+    }
+    for (size_key, stages) in stage_latencies {
+        let bucket = size_buckets.get_mut(&size_key);
+        let Some(bucket) = bucket else {
+            continue;
+        };
+        for (stage, mut values) in stages {
+            // `latency_summary` reads percentiles and min/max by index, so
+            // values must be sorted before aggregation.
+            values.sort_unstable();
+            bucket
+                .stage_latency_us
+                .insert(stage, latency_summary(&values));
+        }
+    }
+    Some(ApiScriptedSummary {
+        script: script.as_str().to_string(),
+        doc_sizes: args.api_scripted_doc_sizes.clone(),
+        hot_writers: args.api_hot_writers,
+        size_buckets,
+    })
+}
+
 struct WindowResult {
     flow_samples: Vec<Sample>,
     background_flow_samples: Vec<Sample>,
     api_samples: Vec<ApiRequestSample>,
+    scripted_samples: Vec<ScriptedOpSample>,
 }
 
 struct ReadShutdown {
@@ -543,6 +698,7 @@ async fn run_window(
 ) -> Result<WindowResult, String> {
     let mut background_tasks = JoinSet::new();
     let mut writer_tasks = JoinSet::new();
+    let mut hot_writer_tasks = JoinSet::new();
     let mut read_tasks = JoinSet::new();
     let stop_reads = Arc::new(ReadShutdown::new());
 
@@ -579,6 +735,37 @@ async fn run_window(
         });
     }
 
+    // Scripted hot writers: extra concurrent writers on distinct threads of
+    // the first user so several operations contend on the same per-user
+    // durable memory document at once (CAS contention on one document).
+    // They drain in their own JoinSet after the regular writer loop so a hot
+    // writer finishing never triggers a `run_virtual_user` refill — hot
+    // writers are deliberately extra concurrency beyond `--concurrency`,
+    // not part of the writer accounting.
+    if args.api_scripted_tool.is_some()
+        && args.api_hot_writers > 0
+        && let Some(hot_user) = users.first().cloned()
+    {
+        for hot_index in 0..args.api_hot_writers {
+            let harness = harness.clone();
+            let progress = Arc::clone(&progress);
+            let args = args.clone();
+            let operation_namespace = operation_namespace.to_string();
+            let user = hot_user.clone();
+            hot_writer_tasks.spawn(async move {
+                run_hot_writer(
+                    &args,
+                    &operation_namespace,
+                    harness,
+                    user,
+                    progress,
+                    hot_index,
+                )
+                .await
+            });
+        }
+    }
+
     if args.api_read_qps_per_user > 0.0 {
         let read_workers = read_worker_count(args);
         for worker_index in 0..read_workers {
@@ -596,11 +783,13 @@ async fn run_window(
     let mut flow_samples = Vec::new();
     let mut background_flow_samples = Vec::new();
     let mut api_samples = Vec::new();
+    let mut scripted_samples = Vec::new();
     while let Some(joined) = writer_tasks.join_next().await {
         let result = joined.map_err(|error| format!("api task join failed: {error}"))??;
         flow_samples.extend(result.flow_samples);
         background_flow_samples.extend(result.background_flow_samples);
         api_samples.extend(result.api_samples);
+        scripted_samples.extend(result.scripted_samples);
 
         if next_writer_index < writer_user_count {
             let user = users[next_writer_index].clone();
@@ -613,6 +802,15 @@ async fn run_window(
                 run_virtual_user(&args, &operation_namespace, harness, user, progress).await
             });
         }
+    }
+
+    while let Some(joined) = hot_writer_tasks.join_next().await {
+        let result =
+            joined.map_err(|error| format!("api hot-writer task join failed: {error}"))??;
+        flow_samples.extend(result.flow_samples);
+        background_flow_samples.extend(result.background_flow_samples);
+        api_samples.extend(result.api_samples);
+        scripted_samples.extend(result.scripted_samples);
     }
 
     stop_reads.stop();
@@ -628,6 +826,7 @@ async fn run_window(
             joined.map_err(|error| format!("api background task join failed: {error}"))??;
         background_flow_samples.extend(result.background_flow_samples);
         api_samples.extend(result.api_samples);
+        scripted_samples.extend(result.scripted_samples);
 
         if next_background_index < background_users.len() {
             let user = background_users[next_background_index].clone();
@@ -645,6 +844,7 @@ async fn run_window(
         flow_samples,
         background_flow_samples,
         api_samples,
+        scripted_samples,
     })
 }
 
@@ -676,6 +876,7 @@ struct TaskResult {
     flow_samples: Vec<Sample>,
     background_flow_samples: Vec<Sample>,
     api_samples: Vec<ApiRequestSample>,
+    scripted_samples: Vec<ScriptedOpSample>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -723,29 +924,116 @@ async fn run_virtual_user(
     user: ApiUser,
     progress: Arc<ProgressCounters>,
 ) -> Result<TaskResult, String> {
+    run_virtual_user_with_identity(args, operation_namespace, harness, user, progress, None).await
+}
+
+/// A hot writer task: a scripted writer on its own thread of the first user
+/// so several operations run concurrently (no per-thread turn
+/// serialization) while contending on the same per-user durable memory
+/// document.
+async fn run_hot_writer(
+    args: &Args,
+    operation_namespace: &str,
+    harness: ApiHarness,
+    user: ApiUser,
+    progress: Arc<ProgressCounters>,
+    hot_index: usize,
+) -> Result<TaskResult, String> {
+    let thread_id = user
+        .extra_thread_ids
+        .get(hot_index)
+        .cloned()
+        .unwrap_or_else(|| user.thread_id.clone());
+    let user = ApiUser { thread_id, ..user };
+    let identity = ScriptedTaskIdentity {
+        op_prefix: format!("h{hot_index}-"),
+        marker_user: format!("u{}", user.index),
+    };
+    run_virtual_user_with_identity(
+        args,
+        operation_namespace,
+        harness,
+        user,
+        progress,
+        Some(identity),
+    )
+    .await
+}
+
+async fn run_virtual_user_with_identity(
+    args: &Args,
+    operation_namespace: &str,
+    harness: ApiHarness,
+    user: ApiUser,
+    progress: Arc<ProgressCounters>,
+    scripted_identity: Option<ScriptedTaskIdentity>,
+) -> Result<TaskResult, String> {
+    let script_key = args.api_scripted_tool;
+    let identity = scripted_identity.or_else(|| {
+        script_key.map(|_| ScriptedTaskIdentity {
+            op_prefix: String::new(),
+            marker_user: format!("u{}", user.index),
+        })
+    });
     let target = args.operation_target();
     let started = Instant::now();
     let mut operation_index = 0;
     let mut expected_finalized_assistant_count = 0usize;
+    let mut max_sequence_seen = 0u64;
     let mut flow_samples = Vec::with_capacity(args.initial_worker_sample_capacity());
     let mut api_samples = Vec::new();
+    let mut scripted_samples = Vec::new();
 
     while crate::should_run_operation(target, started, operation_index) {
+        // The op prefix (hot writers: `h{k}-`) is part of the client action
+        // id so concurrent writers never collide on a duplicate-action
+        // conflict even when they share the same user.
+        let op_prefix = identity
+            .as_ref()
+            .map(|identity| identity.op_prefix.as_str())
+            .unwrap_or("");
         let operation_ref = format!(
-            "{operation_namespace}:{}:{}:{}",
+            "{operation_namespace}:{}:{}:{op_prefix}{}",
             user.label, user.index, operation_index
         );
-        let (flow, mut operation_api_samples, updated_finalized_assistant_count) = run_full_flow(
-            args,
-            &harness,
-            &user,
-            operation_index,
-            &operation_ref,
-            expected_finalized_assistant_count,
-            ApiFlowKind::Foreground,
-        )
-        .await;
+        let (flow, mut operation_api_samples, updated_finalized_assistant_count, max_sequence) =
+            match (script_key, identity.as_ref()) {
+                (Some(key), Some(identity)) => {
+                    let flow_context = ScriptedFlowContext {
+                        key,
+                        identity: identity.clone(),
+                        expected_tool_results: key.expected_tool_results(),
+                        baseline_sequence: max_sequence_seen,
+                    };
+                    let (flow, api, finalized, sequence, op_sample) = run_scripted_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        ApiFlowKind::Foreground,
+                        &flow_context,
+                    )
+                    .await;
+                    scripted_samples.push(op_sample);
+                    (flow, api, finalized, sequence)
+                }
+                _ => {
+                    let (flow, api, finalized) = run_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        expected_finalized_assistant_count,
+                        ApiFlowKind::Foreground,
+                    )
+                    .await;
+                    (flow, api, finalized, max_sequence_seen)
+                }
+            };
         expected_finalized_assistant_count = updated_finalized_assistant_count;
+        max_sequence_seen = max_sequence;
         progress.record(flow.error.is_some(), flow.latency);
         api_samples.append(&mut operation_api_samples);
         flow_samples.push(flow);
@@ -761,6 +1049,7 @@ async fn run_virtual_user(
         flow_samples,
         background_flow_samples: Vec::new(),
         api_samples,
+        scripted_samples,
     })
 }
 
@@ -770,26 +1059,68 @@ async fn run_background_user(
     harness: ApiHarness,
     user: ApiUser,
 ) -> Result<TaskResult, String> {
+    let script_key = args.api_scripted_tool;
+    // Background users are namespaced `b{index}` so their marker identities
+    // cannot collide with foreground user `u{index}` operations: a real
+    // cross-cohort isolation violation would otherwise read back as its own
+    // token and be reported `confirmed`.
+    let identity = script_key.map(|_| ScriptedTaskIdentity {
+        op_prefix: String::new(),
+        marker_user: format!("b{}", user.index),
+    });
     let mut expected_finalized_assistant_count = 0usize;
+    let mut max_sequence_seen = 0u64;
     let mut background_flow_samples = Vec::with_capacity(args.api_background_operations);
     let mut api_samples = Vec::new();
+    let mut scripted_samples = Vec::new();
 
     for operation_index in 0..args.api_background_operations {
+        let op_prefix = identity
+            .as_ref()
+            .map(|identity| identity.op_prefix.as_str())
+            .unwrap_or("");
         let operation_ref = format!(
-            "{operation_namespace}:background:{}:{}:{}",
+            "{operation_namespace}:background:{}:{}:{op_prefix}{}",
             user.label, user.index, operation_index
         );
-        let (flow, mut operation_api_samples, updated_finalized_assistant_count) = run_full_flow(
-            args,
-            &harness,
-            &user,
-            operation_index,
-            &operation_ref,
-            expected_finalized_assistant_count,
-            ApiFlowKind::Background,
-        )
-        .await;
+        let (flow, mut operation_api_samples, updated_finalized_assistant_count, max_sequence) =
+            match (script_key, identity.as_ref()) {
+                (Some(key), Some(identity)) => {
+                    let flow_context = ScriptedFlowContext {
+                        key,
+                        identity: identity.clone(),
+                        expected_tool_results: key.expected_tool_results(),
+                        baseline_sequence: max_sequence_seen,
+                    };
+                    let (flow, api, finalized, sequence, op_sample) = run_scripted_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        ApiFlowKind::Background,
+                        &flow_context,
+                    )
+                    .await;
+                    scripted_samples.push(op_sample);
+                    (flow, api, finalized, sequence)
+                }
+                _ => {
+                    let (flow, api, finalized) = run_full_flow(
+                        args,
+                        &harness,
+                        &user,
+                        operation_index,
+                        &operation_ref,
+                        expected_finalized_assistant_count,
+                        ApiFlowKind::Background,
+                    )
+                    .await;
+                    (flow, api, finalized, max_sequence_seen)
+                }
+            };
         expected_finalized_assistant_count = updated_finalized_assistant_count;
+        max_sequence_seen = max_sequence;
         api_samples.append(&mut operation_api_samples);
         background_flow_samples.push(flow);
     }
@@ -798,6 +1129,7 @@ async fn run_background_user(
         flow_samples: Vec::new(),
         background_flow_samples,
         api_samples,
+        scripted_samples,
     })
 }
 
@@ -916,6 +1248,247 @@ async fn run_full_flow(
     )
 }
 
+/// Drive one scripted operation: submit the marker message, then poll the
+/// timeline until the operation's verdict text is visible, recording the
+/// submit-to-first-tool and submit-to-finalize stages and the read-back
+/// verdict.
+///
+/// Completion is detected by verdict-text presence rather than assistant
+/// counts because hot writers share one thread: several operations race on
+/// the same timeline and counts cannot be attributed to a single op.
+async fn run_scripted_full_flow(
+    args: &Args,
+    harness: &ApiHarness,
+    user: &ApiUser,
+    operation_index: usize,
+    operation_ref: &str,
+    flow_kind: ApiFlowKind,
+    flow: &ScriptedFlowContext,
+) -> (Sample, Vec<ApiRequestSample>, usize, u64, ScriptedOpSample) {
+    let started = Instant::now();
+    let mut api_samples = Vec::new();
+    let key = flow.key;
+    let op = scripted::ScriptedOp {
+        key,
+        user: flow.identity.marker_user.clone(),
+        op: format!("{}{}", flow.identity.op_prefix, operation_index),
+        size_bytes: scripted::doc_size_for(&args.api_scripted_doc_sizes, operation_index),
+    };
+    let marker = scripted::marker_message(key, &op.user, &op.op, op.size_bytes);
+    let body = json!({
+        "client_action_id": format!("ironclaw-stress-api:{operation_ref}"),
+        "content": stress_payload(marker, args.user_message_bytes),
+    });
+    let send = harness
+        .request_json(
+            user,
+            flow_kind.send_sample_name(),
+            Method::POST,
+            &format!("/api/webchat/v2/threads/{}/messages", user.thread_id),
+            Some(body),
+        )
+        .await;
+    let send_value = send.value.clone();
+    api_samples.push(send.sample);
+
+    // Outcome of the submit step: verdict, failure, and the observed tool
+    // count at completion.
+    let mut verdict: Option<scripted::Verdict> = None;
+    let mut failure: Option<FailureCause> = None;
+    let mut tools_seen = 0usize;
+    let mut latest_sequence = flow.baseline_sequence;
+    let mut tool_visible_latency: Option<Duration> = None;
+    let mut finalize_latency: Option<Duration> = None;
+
+    match send_value {
+        Ok(value) if submitted_or_already_submitted(&value) => {
+            let verdict_prefix = format!("{} {}", scripted::RESULT_PREFIX, op.identity());
+            let deadline = Instant::now() + Duration::from_millis(args.api_terminal_timeout_ms);
+            let mut placeholder_seen = false;
+            let mut my_final_content: Option<String> = None;
+            loop {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let timeline = harness
+                    .timeline_with_name(user, flow_kind.timeline_sample_name())
+                    .await;
+                let value = timeline.value.clone();
+                api_samples.push(timeline.sample);
+                match value {
+                    Ok(value) => {
+                        // Count only tool results that landed after this
+                        // operation's baseline: subtracting page-limited
+                        // absolute counts would under-count once the thread
+                        // outgrows a single timeline page.
+                        tools_seen = timeline_tool_results_after(&value, flow.baseline_sequence);
+                        latest_sequence = timeline_max_sequence(&value).max(latest_sequence);
+                        if tool_visible_latency.is_none() && tools_seen >= 1 {
+                            tool_visible_latency = Some(started.elapsed());
+                        }
+                        placeholder_seen |= timeline_has_placeholder(&value);
+                        if let Some(content) =
+                            timeline_finalized_verdict_content(&value, &verdict_prefix)
+                        {
+                            finalize_latency = Some(started.elapsed());
+                            my_final_content = Some(content);
+                            break;
+                        }
+                    }
+                    Err(timeline_failure) => {
+                        failure = Some(timeline_failure);
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(args.api_poll_interval_ms)).await;
+            }
+
+            let final_verdict = my_final_content
+                .as_ref()
+                .and_then(|content| scripted::parse_result_verdict(content, &op));
+            verdict = final_verdict;
+            failure = failure.or_else(|| match &my_final_content {
+                Some(_) => match final_verdict {
+                    Some(parsed) if !parsed.is_failure() => None,
+                    Some(parsed) => Some(FailureCause::new(
+                        format!("scripted_verdict_{}", parsed.as_str()),
+                        flow_kind.wait_sample_name(),
+                        format!(
+                            "operation {} finalized with failing verdict {}",
+                            op.identity(),
+                            parsed.as_str()
+                        ),
+                    )),
+                    None => Some(FailureCause::new(
+                        "scripted_no_verdict",
+                        flow_kind.wait_sample_name(),
+                        format!(
+                            "operation {} finalized without a verdict text",
+                            op.identity()
+                        ),
+                    )),
+                },
+                None => Some(FailureCause::new(
+                    if placeholder_seen {
+                        "scripted_tool_undisclosed"
+                    } else {
+                        "api_full_flow_timeout"
+                    },
+                    flow_kind.wait_sample_name(),
+                    format!(
+                        "operation {} verdict not visible after {}ms",
+                        op.identity(),
+                        args.api_terminal_timeout_ms
+                    ),
+                )),
+            });
+            if failure.is_none() && tools_seen < flow.expected_tool_results {
+                failure = Some(FailureCause::new(
+                    "scripted_tools_not_executed",
+                    flow_kind.wait_sample_name(),
+                    format!(
+                        "operation {} finalized with {tools_seen}/{} tool results",
+                        op.identity(),
+                        flow.expected_tool_results
+                    ),
+                ));
+            }
+        }
+        Ok(value) => {
+            failure = Some(FailureCause::new(
+                "api_submit_not_accepted",
+                flow_kind.send_sample_name(),
+                compact_json(&value),
+            ));
+        }
+        Err(send_failure) => {
+            failure = Some(send_failure);
+        }
+    }
+
+    let latency = started.elapsed();
+    let error = failure.as_ref().map(|cause| cause.bucket.clone());
+    (
+        Sample {
+            latency,
+            error,
+            failure: failure.clone(),
+            stages: None,
+        },
+        api_samples,
+        operation_index + 1,
+        latest_sequence,
+        ScriptedOpSample {
+            size_bytes: op.size_bytes,
+            verdict,
+            tools_executed: tools_seen,
+            tool_visible_latency,
+            finalize_latency,
+            failure,
+        },
+    )
+}
+
+fn timeline_tool_results_after(value: &Value, baseline_sequence: u64) -> usize {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            message.get("kind").and_then(Value::as_str) == Some("tool_result_reference")
+                && message
+                    .get("sequence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|sequence| sequence > baseline_sequence)
+        })
+        .count()
+}
+
+fn timeline_max_sequence(value: &Value) -> u64 {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.get("sequence").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
+}
+
+fn timeline_has_placeholder(value: &Value) -> bool {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            message.get("kind").and_then(Value::as_str) == Some("assistant")
+                && message.get("status").and_then(Value::as_str) == Some("finalized")
+        })
+        .filter_map(|message| message.get("content").and_then(Value::as_str))
+        .any(|content| content.contains(scripted::PLACEHOLDER_TEXT))
+}
+
+fn timeline_finalized_verdict_content(value: &Value, verdict_prefix: &str) -> Option<String> {
+    // Match the prefix followed by a space so operation `1` cannot
+    // terminate on operation `10`'s finalized message (`u0__1 ` is not a
+    // substring of `...u0__10 confirmed`).
+    let delimited = format!("{verdict_prefix} ");
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            message.get("kind").and_then(Value::as_str) == Some("assistant")
+                && message.get("status").and_then(Value::as_str) == Some("finalized")
+        })
+        .filter_map(|message| message.get("content").and_then(Value::as_str))
+        .find(|content| content.contains(&delimited))
+        .map(str::to_string)
+}
+
 async fn wait_for_assistant(
     args: &Args,
     harness: &ApiHarness,
@@ -998,6 +1571,7 @@ async fn run_read_worker(
         flow_samples: Vec::new(),
         background_flow_samples: Vec::new(),
         api_samples,
+        scripted_samples: Vec::new(),
     })
 }
 
@@ -1034,6 +1608,7 @@ impl ApiHarness {
             label: identity.label.clone(),
             bearer_token: identity.bearer_token.clone(),
             thread_id: requested_thread_id.to_string(),
+            extra_thread_ids: Vec::new(),
         };
         self.request_json(
             &user,
@@ -1122,6 +1697,20 @@ impl ApiHarness {
             Method::GET,
             "/api/webchat/v2/session",
             None,
+        )
+        .await
+    }
+
+    /// Enable the per-user Tools global auto-approve setting so scripted
+    /// gated tool calls (`builtin.write_file`, memory writes) can execute
+    /// without an interactive approver.
+    async fn enable_tools_auto_approve(&self, user: &ApiUser) -> ApiCallResult {
+        self.request_json(
+            user,
+            "enable_auto_approve",
+            Method::POST,
+            "/api/webchat/v2/settings/tools",
+            Some(json!({ "enabled": true })),
         )
         .await
     }
@@ -1225,6 +1814,15 @@ async fn setup_users(
             let thread_id = format!("stress-{run_id}-{thread_label}-{next_index}");
             let user_index = next_index;
             let threads_per_user = args.api_threads_per_user.max(1);
+            let enable_auto_approve = args.api_scripted_tool.is_some();
+            // The first user hosts the scripted hot writers: one thread per
+            // hot writer in addition to the primary thread.
+            let hot_extra_count = if enable_auto_approve && user_index == 0 {
+                args.api_hot_writers
+            } else {
+                0
+            };
+            let extra_count = threads_per_user.saturating_sub(1).max(hot_extra_count);
             join_set.spawn(async move {
                 let create = harness.create_thread(&identity, &thread_id).await;
                 let primary = match create.value {
@@ -1236,16 +1834,43 @@ async fn setup_users(
                         ));
                     }
                 };
-                // Extra threads exist purely to grow the user's sidebar; sends
-                // keep targeting the primary thread.
-                for extra in 1..threads_per_user {
-                    let extra_id = format!("{primary}-extra-{extra}");
-                    let create = harness.create_thread(&identity, &extra_id).await;
-                    if let Err(failure) = create.value {
+                if enable_auto_approve {
+                    // Scripted tools (`builtin.write_file`, memory writes) are
+                    // gated_unless_granted for loop-run origins; enable the
+                    // per-user Tools auto-approve setting through the same
+                    // settings API a real user would use.
+                    let user = ApiUser {
+                        index: user_index,
+                        label: identity.label.clone(),
+                        bearer_token: identity.bearer_token.clone(),
+                        thread_id: primary.clone(),
+                        extra_thread_ids: Vec::new(),
+                    };
+                    let approve = harness.enable_tools_auto_approve(&user).await;
+                    if let Err(failure) = approve.value {
                         return Err(format!(
-                            "create extra thread {extra} for api user {user_index}: {}: {}",
+                            "enable auto-approve for api user {user_index}: {}: {}",
                             failure.bucket, failure.detail
                         ));
+                    }
+                }
+                // Extra threads grow the user's sidebar; scripted hot writers
+                // additionally use them as distinct contention lanes. Sends
+                // keep targeting the primary thread.
+                let mut extra_thread_ids = Vec::with_capacity(extra_count);
+                for extra in 1..=extra_count {
+                    let extra_id = format!("{primary}-extra-{extra}");
+                    let create = harness.create_thread(&identity, &extra_id).await;
+                    match create.value {
+                        Ok(value) => {
+                            extra_thread_ids.push(extract_thread_id(&value).unwrap_or(extra_id));
+                        }
+                        Err(failure) => {
+                            return Err(format!(
+                                "create extra thread {extra} for api user {user_index}: {}: {}",
+                                failure.bucket, failure.detail
+                            ));
+                        }
                     }
                 }
                 Ok(ApiUser {
@@ -1253,6 +1878,7 @@ async fn setup_users(
                     label: identity.label,
                     bearer_token: identity.bearer_token,
                     thread_id: primary,
+                    extra_thread_ids,
                 })
             });
             next_index += 1;
@@ -1787,6 +2413,7 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         jitter_ms: args.mock_llm_jitter_ms,
         output_bytes: args.mock_llm_output_bytes,
         failure_rate: args.mock_llm_failure_rate,
+        scripted: args.api_scripted_tool,
     };
     let listener = TcpListener::bind(config.bind)
         .await
@@ -1801,6 +2428,8 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         jitter_ms: config.jitter_ms,
         output_bytes: config.output_bytes,
         failure_rate: config.failure_rate,
+        scripted: config.scripted,
+        scripted_counters: Mutex::new(ScriptedMockCounters::default()),
         counter: AtomicU64::new(0),
         foreground_counter: AtomicU64::new(0),
         background_counter: AtomicU64::new(0),
@@ -1959,15 +2588,124 @@ async fn handle_mock_completion(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let content = stress_payload("mock assistant response".to_string(), state.output_bytes);
-    if stream_response {
-        let (chunk, done) = mock_streaming_completion_chunks(&state.model, request_index, content);
-        let payload = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
-        write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
-    } else {
-        let response = mock_completion_response(&state.model, request_index, content);
-        write_json_response(stream, 200, &response).await
+
+    let decision = scripted_decision_for(&state, &request);
+    match &decision {
+        ScriptedDecision::ToolCall(call) => {
+            if stream_response {
+                let (header, body, done) =
+                    mock_streaming_tool_call_chunks(&state.model, request_index, call);
+                let payload =
+                    format!("data: {header}\n\ndata: {body}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+                write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
+            } else {
+                let response = mock_tool_call_response(&state.model, request_index, call);
+                write_json_response(stream, 200, &response).await
+            }
+        }
+        ScriptedDecision::FinalText(text) => {
+            if stream_response {
+                let (chunk, done) =
+                    mock_streaming_completion_chunks(&state.model, request_index, text.clone());
+                let payload = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+                write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
+            } else {
+                let response = mock_completion_response(&state.model, request_index, text.clone());
+                write_json_response(stream, 200, &response).await
+            }
+        }
+        ScriptedDecision::Placeholder => {
+            let text = scripted::PLACEHOLDER_TEXT.to_string();
+            if stream_response {
+                let (chunk, done) =
+                    mock_streaming_completion_chunks(&state.model, request_index, text);
+                let payload = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+                write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
+            } else {
+                let response = mock_completion_response(&state.model, request_index, text);
+                write_json_response(stream, 200, &response).await
+            }
+        }
+        ScriptedDecision::None => {
+            let content = stress_payload("mock assistant response".to_string(), state.output_bytes);
+            if stream_response {
+                let (chunk, done) =
+                    mock_streaming_completion_chunks(&state.model, request_index, content);
+                let payload = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+                write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
+            } else {
+                let response = mock_completion_response(&state.model, request_index, content);
+                write_json_response(stream, 200, &response).await
+            }
+        }
     }
+}
+
+/// Advertised tool names in a chat completion request (`tools[].function.name`).
+fn available_tool_names(request: &Value) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let Some(tools) = request.get("tools").and_then(Value::as_array) else {
+        return names;
+    };
+    for tool in tools {
+        let function = tool
+            .get("function")
+            .filter(|function| function.is_object())
+            .or_else(|| (tool.is_object()).then_some(tool));
+        let Some(function) = function else {
+            continue;
+        };
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+/// Decide the scripted response for a request and record sidecar counters.
+fn scripted_decision_for(state: &MockLlmState, request: &Value) -> ScriptedDecision {
+    if state.scripted.is_none() {
+        return ScriptedDecision::None;
+    }
+    let messages = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let available = available_tool_names(request);
+    let (decision, op) = scripted::decide_with_op(&messages, &available);
+    let Some(op) = op else {
+        return ScriptedDecision::None;
+    };
+    let mut counters = state
+        .scripted_counters
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counters
+        .requests_seen
+        .entry(op.key.as_str().to_string())
+        .or_insert(0) += 1;
+    match &decision {
+        ScriptedDecision::ToolCall(_) => {
+            *counters
+                .tool_calls_emitted
+                .entry(op.key.as_str().to_string())
+                .or_insert(0) += 1;
+        }
+        ScriptedDecision::Placeholder => {
+            counters.placeholder_responses += 1;
+        }
+        ScriptedDecision::FinalText(text) => {
+            if let Some(verdict) = scripted::parse_result_verdict(text, &op) {
+                *counters
+                    .final_verdicts
+                    .entry(verdict.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+        ScriptedDecision::None => {}
+    }
+    decision
 }
 
 fn classify_mock_request(body: &[u8]) -> MockRequestKind {
@@ -2003,6 +2741,116 @@ fn mock_completion_response(model: &str, request_index: u64, content: String) ->
             "prompt_tokens_details": null
         }
     })
+}
+
+/// Non-streaming chat completion carrying one tool call. The `arguments`
+/// field is a JSON string, matching the rig OpenAI wire shape the server
+/// parses (`Function::arguments` uses `stringified_json`).
+fn mock_tool_call_response(
+    model: &str,
+    request_index: u64,
+    call: &scripted::ToolCallSpec,
+) -> Value {
+    let arguments = match serde_json::to_string(&call.arguments) {
+        Ok(arguments) => arguments,
+        Err(_) => "{}".to_string(),
+    };
+    json!({
+        "id": format!("chatcmpl-stress-{request_index}"),
+        "object": "chat.completion",
+        "created": MOCK_COMPLETION_CREATED_AT,
+        "model": model,
+        "system_fingerprint": null,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": format!("call-stress-{request_index}"),
+                    "type": "function",
+                    "function": {
+                        "name": call.wire_name,
+                        "arguments": arguments
+                    }
+                }],
+                "refusal": null
+            },
+            "logprobs": null,
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 16,
+            "completion_tokens": 5,
+            "total_tokens": 21,
+            "prompt_tokens_details": null
+        }
+    })
+}
+
+/// Streaming chat-completion chunks carrying one tool call: a header chunk
+/// with the call id and name, an arguments chunk, and a finish chunk.
+fn mock_streaming_tool_call_chunks(
+    model: &str,
+    request_index: u64,
+    call: &scripted::ToolCallSpec,
+) -> (Value, Value, Value) {
+    let base = json!({
+        "id": format!("chatcmpl-stress-{request_index}"),
+        "object": "chat.completion.chunk",
+        "created": MOCK_COMPLETION_CREATED_AT,
+        "model": model,
+        "system_fingerprint": null,
+    });
+    let call_id = format!("call-stress-{request_index}");
+    let mut header = base.clone();
+    header["choices"] = json!([{
+        "index": 0,
+        "delta": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "index": 0,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": call.wire_name, "arguments": ""}
+            }]
+        },
+        "logprobs": null,
+        "finish_reason": null
+    }]);
+
+    let arguments = match serde_json::to_string(&call.arguments) {
+        Ok(arguments) => arguments,
+        Err(_) => "{}".to_string(),
+    };
+    let mut body = base.clone();
+    body["choices"] = json!([{
+        "index": 0,
+        "delta": {
+            "tool_calls": [{
+                "index": 0,
+                "function": {"arguments": arguments}
+            }]
+        },
+        "logprobs": null,
+        "finish_reason": null
+    }]);
+
+    let mut done = base;
+    done["choices"] = json!([{
+        "index": 0,
+        "delta": {},
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+    }]);
+    done["usage"] = json!({
+        "prompt_tokens": 16,
+        "completion_tokens": 5,
+        "total_tokens": 21,
+        "prompt_tokens_details": null
+    });
+    (header, body, done)
 }
 
 fn mock_streaming_completion_chunks(
@@ -2213,6 +3061,62 @@ mod tests {
     }
 
     #[test]
+    fn mock_tool_call_response_matches_rig_openai_shape() {
+        let call = scripted::ToolCallSpec {
+            wire_name: "ironclaw__memory__write".to_string(),
+            arguments: json!({
+                "target": "stress/shared.md",
+                "content": "IRONCLAW_STRESS_READBACK_u0__1 payload",
+                "append": false,
+            }),
+        };
+        let response = mock_tool_call_response("stress-mock", 7, &call);
+
+        assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(response["choices"][0]["message"]["content"], Value::Null);
+        let parsed: rig::providers::openai::completion::CompletionResponse =
+            serde_json::from_value(response)
+                .expect("stress mock tool call should deserialize as rig-core OpenAI completion");
+        let message = &parsed.choices[0].message;
+        let tool_calls = match message {
+            rig::providers::openai::Message::Assistant { tool_calls, .. } => tool_calls,
+            other => panic!("expected assistant message, got {other:?}"),
+        };
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "ironclaw__memory__write");
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            json!({
+                "target": "stress/shared.md",
+                "content": "IRONCLAW_STRESS_READBACK_u0__1 payload",
+                "append": false,
+            })
+        );
+    }
+
+    #[test]
+    fn mock_streaming_tool_call_chunks_carry_indexed_delta_tool_calls() {
+        let call = scripted::ToolCallSpec {
+            wire_name: "builtin__write_file".to_string(),
+            arguments: json!({"path": "stress/u0__1.txt", "content": "payload"}),
+        };
+        let (header, body, done) = mock_streaming_tool_call_chunks("stress-mock", 7, &call);
+
+        let header_call = &header["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(header_call["index"], 0);
+        assert_eq!(header_call["function"]["name"], "builtin__write_file");
+        assert_eq!(header["choices"][0]["delta"]["role"], "assistant");
+
+        let body_call = &body["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(body_call["index"], 0);
+        let arguments: Value =
+            serde_json::from_str(body_call["function"]["arguments"].as_str().expect("string"))
+                .expect("arguments json");
+        assert_eq!(arguments["path"], "stress/u0__1.txt");
+        assert_eq!(done["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
     fn read_worker_interval_clamps_invalid_or_huge_values() {
         assert_eq!(
             read_worker_interval_for(f64::NAN, 10, 4),
@@ -2280,5 +3184,137 @@ mod tests {
             ),
             MockRequestKind::Background
         );
+    }
+
+    #[test]
+    fn timeline_counts_tool_results_after_baseline_sequence() {
+        let value = json!({
+            "messages": [
+                {"kind": "user", "status": "finalized", "sequence": 1},
+                {"kind": "assistant", "status": "finalized", "content": "ok", "sequence": 2},
+                {"kind": "tool_result_reference", "tool_result_ref": "r1", "sequence": 3},
+                {"kind": "tool_result_reference", "tool_result_ref": "r2", "sequence": 4},
+                {"kind": "tool_result_reference", "tool_result_ref": "r3", "sequence": 7}
+            ]
+        });
+        assert_eq!(timeline_tool_results_after(&value, 2), 3);
+        assert_eq!(timeline_tool_results_after(&value, 4), 1);
+        assert_eq!(timeline_tool_results_after(&value, 7), 0);
+        assert_eq!(timeline_max_sequence(&value), 7);
+        assert_eq!(timeline_tool_results_after(&json!({"messages": []}), 0), 0);
+    }
+
+    #[test]
+    fn timeline_finds_finalized_verdict_content() {
+        let value = json!({
+            "messages": [
+                {"kind": "assistant", "status": "submitted", "content": "working"},
+                {"kind": "assistant", "status": "finalized",
+                 "content": "ironclaw-stress-tool result u0__1 confirmed"}
+            ]
+        });
+        assert_eq!(
+            timeline_finalized_verdict_content(&value, "ironclaw-stress-tool result u0__1")
+                .as_deref(),
+            Some("ironclaw-stress-tool result u0__1 confirmed")
+        );
+        assert_eq!(
+            timeline_finalized_verdict_content(&value, "ironclaw-stress-tool result u0__2"),
+            None
+        );
+        // `u0__1` must not match `u0__10`: the prefix is delimited by the
+        // following space so op 1 cannot terminate on op 10's message.
+        let longer_op = json!({
+            "messages": [
+                {"kind": "assistant", "status": "finalized",
+                 "content": "ironclaw-stress-tool result u0__10 confirmed"}
+            ]
+        });
+        assert_eq!(
+            timeline_finalized_verdict_content(&longer_op, "ironclaw-stress-tool result u0__1"),
+            None
+        );
+        assert_eq!(
+            timeline_finalized_verdict_content(&longer_op, "ironclaw-stress-tool result u0__10")
+                .as_deref(),
+            Some("ironclaw-stress-tool result u0__10 confirmed")
+        );
+    }
+
+    #[test]
+    fn timeline_detects_placeholder_text() {
+        let value = json!({
+            "messages": [
+                {"kind": "assistant", "status": "finalized",
+                 "content": "ironclaw-stress-tool pending \u{2014} I'll perform the stress tool action next."}
+            ]
+        });
+        assert!(timeline_has_placeholder(&value));
+        let normal = json!({
+            "messages": [
+                {"kind": "assistant", "status": "finalized", "content": "hello"}
+            ]
+        });
+        assert!(!timeline_has_placeholder(&normal));
+    }
+
+    #[test]
+    fn scripted_summary_buckets_by_size_and_verdict() {
+        let mut args = parsed_api_args(&[]);
+        args.api_scripted_tool = Some(scripted::ScriptKey::MemoryRoundtrip);
+        args.api_scripted_doc_sizes = vec![4096, 32768];
+        let samples = vec![
+            ScriptedOpSample {
+                size_bytes: 4096,
+                verdict: Some(scripted::Verdict::Confirmed),
+                tools_executed: 2,
+                tool_visible_latency: Some(Duration::from_millis(100)),
+                finalize_latency: Some(Duration::from_millis(500)),
+                failure: None,
+            },
+            ScriptedOpSample {
+                size_bytes: 4096,
+                verdict: None,
+                tools_executed: 0,
+                tool_visible_latency: None,
+                finalize_latency: None,
+                failure: Some(FailureCause::new(
+                    "scripted_verdict_leak",
+                    "wait_for_assistant",
+                    "leak detected",
+                )),
+            },
+            ScriptedOpSample {
+                size_bytes: 32768,
+                verdict: Some(scripted::Verdict::Contended),
+                tools_executed: 2,
+                tool_visible_latency: Some(Duration::from_millis(90)),
+                finalize_latency: Some(Duration::from_millis(450)),
+                failure: None,
+            },
+        ];
+        let summary = summarize_scripted(&samples, &args).expect("scripted summary present");
+
+        assert_eq!(summary.script, "memory_roundtrip");
+        assert_eq!(summary.doc_sizes, vec![4096, 32768]);
+        let four_kb = &summary.size_buckets["4096"];
+        assert_eq!(four_kb.attempted, 2);
+        assert_eq!(four_kb.succeeded, 1);
+        assert_eq!(four_kb.failed, 1);
+        assert_eq!(four_kb.verdicts["confirmed"], 1);
+        assert_eq!(four_kb.failure_buckets["scripted_verdict_leak"], 1);
+        assert_eq!(four_kb.tool_results, 2);
+        assert_eq!(four_kb.stage_latency_us["finalize"].p50_us, 500_000);
+        let thirty_two_kb = &summary.size_buckets["32768"];
+        assert_eq!(thirty_two_kb.verdicts["contended"], 1);
+    }
+
+    #[test]
+    fn scripted_summary_absent_without_script() {
+        let args = parsed_api_args(&[]);
+        assert!(summarize_scripted(&[], &args).is_none());
+        let mut scripted = parsed_api_args(&[]);
+        scripted.api_scripted_tool = Some(scripted::ScriptKey::MemoryRoundtrip);
+        assert!(summarize_scripted(&[], &scripted).is_none());
     }
 }

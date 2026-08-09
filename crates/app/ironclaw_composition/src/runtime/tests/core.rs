@@ -329,13 +329,23 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
         !cfg.regex_activation_enabled,
         "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
     );
-    // Standalone uses criteria selection so a learned skill auto-activates on
-    // a keyword/pattern match (the learn→reuse loop), not only on an
-    // explicit `$name` mention. A revert to `ExplicitOnly` would silently
-    // break auto-reuse, so lock it here.
+    // Selection is the MODEL's decision, so this must be `ExplicitOnly`.
+    //
+    // This assertion previously locked `ExplicitAndCriteria`, on the reasoning that
+    // criteria selection is what closes the learn→reuse loop -- a learned skill
+    // auto-activating on a keyword match rather than only on an explicit `$name`.
+    // That reasoning does not survive contact with the corpus: **0 of 30
+    // agent-authored skills declare an `activation:` block**, so the scorer could
+    // never select a learned skill and the loop it was protecting did not exist.
+    // What actually closes the loop is the skill appearing in the listing, which is
+    // why this PR makes the listing complete.
+    //
+    // Kept as an assertion rather than deleted, with the polarity flipped: a revert
+    // to `ExplicitAndCriteria` reinstates host-side keyword matching on the model's
+    // behalf, which is the #5417 class.
     assert!(matches!(
         cfg.selection_mode,
-        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitOnly
     ));
 }
 
@@ -425,6 +435,34 @@ fn standalone_selector_config_propagates_injection_mode() {
             super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
         assert_eq!(cfg.injection_mode, mode);
     }
+}
+
+/// Skill selection on the Reborn path must be the model's decision, not a host-side
+/// keyword guess.
+///
+/// This exists because changing the default in `activation.rs` was, on its own, a
+/// no-op here: `skill_activation_selector_config` used to pin
+/// `ExplicitAndCriteria` at the call site, so no real Reborn user could ever see
+/// `ExplicitOnly` however the default was written. The bug was invisible to every
+/// test in `ironclaw_loop_host`, because those construct their own
+/// config — only a test at the composition layer, on the value this function
+/// actually returns, can catch it.
+///
+/// If a later change re-pins the mode here, this fails rather than silently
+/// reinstating host-side matching.
+#[test]
+fn reborn_skill_selection_is_model_decided() {
+    let cfg = super::skill_activation_selector_config(
+        true,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
+    );
+    assert_eq!(
+        cfg.selection_mode,
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitOnly,
+        "Reborn must let the model choose the skill from the listing; pinning \
+         ExplicitAndCriteria here makes the host keyword-match on the model's behalf"
+    );
 }
 
 /// Guards the injection default.

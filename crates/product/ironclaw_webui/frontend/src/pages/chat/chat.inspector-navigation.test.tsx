@@ -8,6 +8,8 @@ import { afterEach, beforeEach, test, vi } from "vitest";
 
 import { Chat } from "./chat";
 
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
 const eventStreams = vi.hoisted(() => [] as any[]);
 const chatState = vi.hoisted(() => ({
   messages: [],
@@ -39,6 +41,7 @@ const chatState = vi.hoisted(() => ({
 vi.mock("event-source-plus", () => ({
   EventSourcePlus: class EventSourcePlus {
     hooks: Record<string, Function> = {};
+    requestOptions = { query: {} as Record<string, unknown> };
     controller = { abort: vi.fn(), reconnect: vi.fn() };
 
     constructor() {
@@ -47,7 +50,7 @@ vi.mock("event-source-plus", () => ({
 
     listen(hooks: Record<string, Function>) {
       this.hooks = hooks;
-      hooks.onRequest?.({});
+      hooks.onRequest?.({ options: this.requestOptions });
       return this.controller;
     }
   },
@@ -106,13 +109,15 @@ afterEach(async () => {
 });
 
 test("removing the debug query unmounts the inspector and releases its stream", async () => {
+  // Prime the lazy chunk before rendering so the async act below owns the
+  // Suspense retry as well as the initial Chat commit.
+  await import("./inspector/inspector-panel");
   await act(async () => {
     root?.render(
       <MemoryRouter initialEntries={["/chat?debug=true"]}>
         <NavigationHarness />
       </MemoryRouter>,
     );
-    await import("./inspector/inspector-panel");
   });
 
   assert.ok(document.querySelector("[data-testid='inspector-panel']"));
