@@ -59,10 +59,10 @@ pub(super) async fn list_extensions(
         LifecycleProductAction::ExtensionList,
     )
     .await?;
-    // Host-managed channels (outbound-only, no connect affordance — the web
-    // UI's browser push) are infrastructure, not browse-and-install
-    // extensions: keep them out of the install UI while they stay working
-    // notification channels. See `is_host_managed_channel`.
+    // The web UI's browser-push channel is host infrastructure, not a
+    // browse-and-install integration, so keep it out of the install UI while it
+    // stays a working notification channel. Classified by id (see
+    // `is_builtin_host_surface`), not by channel direction.
     let installed = lifecycle_installed_extensions(&lifecycle)
         .into_iter()
         .filter(|extension| !is_builtin_host_surface(&extension.summary))
