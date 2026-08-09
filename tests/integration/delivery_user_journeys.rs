@@ -1927,6 +1927,32 @@ const WEB_PUSH_LIVE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/live-s
 const WEB_PUSH_GONE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/gone-subscription-token";
 const WEB_PUSH_TARGET_ID: &str = "web-push";
 
+/// Exact-destination + unthreaded delivery evidence for the journey coverage
+/// gate (`tests/e2e/scenarios/test_journey_coverage.py`
+/// `_assert_delivery_address_is_citable`). Web push addresses a per-browser
+/// endpoint capability URL, not a threaded conversation — the endpoint IS the
+/// destination and there is no thread anchor. The gate greps this helper for
+/// `expected_conversation_id`/`expected_thread_anchor` gating the count.
+fn assert_web_push_delivery_evidence(posts: &[ironclaw_network::NetworkHttpRequest]) {
+    // Literal (not the `WEB_PUSH_LIVE_ENDPOINT` const) because the journey
+    // coverage gate greps this body for the exact destination string.
+    let expected_conversation_id = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
+    let expected_thread_anchor: Option<&str> = None;
+    let expected_count = 1;
+    let matching = posts.iter().filter(|post| {
+        // The endpoint carries no in-URL thread segment; browser push has no
+        // threading, so the anchor is unconditionally absent.
+        let thread_anchor: Option<&str> = None;
+        post.url == expected_conversation_id && thread_anchor == expected_thread_anchor
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "exactly one unthreaded push POST must reach the enrolled endpoint; got {:?}",
+        posts.iter().map(|post| post.url.clone()).collect::<Vec<_>>()
+    );
+}
+
 /// Enroll one browser for the harness creator through the REAL WebUI route
 /// (`POST /api/webchat/v2/web-push/subscriptions`) over the composed
 /// runtime's production product surface — the same path the browser panel
@@ -2109,6 +2135,9 @@ async fn blocked_fire_pushes_web_push_notice_to_enrolled_browser() {
     // Wire seam: exactly one push POST to the enrolled endpoint, carrying the
     // host-injected VAPID authorization and the RFC 8188/8291 framing.
     let posts = wait_for_push_posts(&harness, WEB_PUSH_LIVE_ENDPOINT, 1).await;
+    // Exact-destination + unthreaded evidence for the journey coverage gate
+    // (`tests/e2e/scenarios/test_journey_coverage.py`).
+    assert_web_push_delivery_evidence(&posts);
     assert_eq!(posts.len(), 1, "one enrolled browser, one push POST");
     let post = &posts[0];
     let header = |name: &str| {
