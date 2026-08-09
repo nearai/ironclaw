@@ -5,9 +5,9 @@
 # seeded by the host at boot (never typed by an operator).
 schema_version = "reborn.extension_manifest.v3"
 id = "web-push"
-name = "Browser notifications"
+name = "Web UI"
 version = "0.1.0"
-description = "Web Push notifications to the web app's enrolled browsers"
+description = "Web Push notifications to the web UI's enrolled browsers"
 trust = "first_party_requested"
 
 [runtime]
@@ -37,7 +37,7 @@ fields = [
 
 [channel]
 id = "notifications"
-display_name = "Browser notifications"
+display_name = "Web UI"
 inbound = false
 outbound = true
 conversation_model = "continuous"

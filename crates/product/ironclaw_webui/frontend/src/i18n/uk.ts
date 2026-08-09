@@ -794,7 +794,7 @@ registerPack("uk", {
   "automations.notificationChannels.explainer":
     "Виберіть, які підключені канали отримуватимуть запити на схвалення, запити автентифікації та сповіщення про невдалі запуски.",
   "automations.notificationChannels.empty": "Підключених каналів поки немає.",
-  "automations.notificationChannels.webOnlyHelper": "Канал сповіщень не вибрано — запити на схвалення, підказки автентифікації та сповіщення про збої нікуди не доставлятимуться.",
+  "automations.notificationChannels.noSelectionHelper": "Канал сповіщень не вибрано — запити на схвалення, підказки автентифікації та сповіщення про збої нікуди не доставлятимуться.",
   "automations.notificationChannels.webPush.deviceHeading": "Цей браузер",
   "automations.notificationChannels.webPush.checking": "Перевіряємо підтримку сповіщень у цьому браузері…",
   "automations.notificationChannels.webPush.unsupported": "Push-сповіщення недоступні в цьому браузері.",

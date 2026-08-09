@@ -843,7 +843,7 @@ registerPack("en", {
   "automations.notificationChannels.explainer":
     "Choose which connected channels receive approval prompts, auth prompts, and run-failure notices.",
   "automations.notificationChannels.empty": "No connected channels yet.",
-  "automations.notificationChannels.webOnlyHelper": "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
+  "automations.notificationChannels.noSelectionHelper": "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
   "automations.notificationChannels.webPush.deviceHeading": "This browser",
   "automations.notificationChannels.webPush.checking": "Checking this browser's notification support…",
   "automations.notificationChannels.webPush.unsupported": "Push notifications aren't available in this browser.",

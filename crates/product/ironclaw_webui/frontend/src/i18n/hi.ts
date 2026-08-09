@@ -794,7 +794,7 @@ registerPack("hi", {
   "automations.notificationChannels.explainer":
     "चुनें कि कौन से कनेक्टेड चैनल अनुमोदन अनुरोध, प्रमाणीकरण अनुरोध और रन विफलता की सूचनाएँ प्राप्त करें।",
   "automations.notificationChannels.empty": "अभी कोई कनेक्टेड चैनल नहीं है।",
-  "automations.notificationChannels.webOnlyHelper": "कोई सूचना चैनल चयनित नहीं है — अनुमोदन अनुरोध, प्रमाणीकरण संकेत और विफलता सूचनाएँ कहीं नहीं पहुँचाई जाएँगी।",
+  "automations.notificationChannels.noSelectionHelper": "कोई सूचना चैनल चयनित नहीं है — अनुमोदन अनुरोध, प्रमाणीकरण संकेत और विफलता सूचनाएँ कहीं नहीं पहुँचाई जाएँगी।",
   "automations.notificationChannels.webPush.deviceHeading": "यह ब्राउज़र",
   "automations.notificationChannels.webPush.checking": "इस ब्राउज़र में सूचना समर्थन की जाँच हो रही है…",
   "automations.notificationChannels.webPush.unsupported": "इस ब्राउज़र में पुश सूचनाएँ उपलब्ध नहीं हैं।",

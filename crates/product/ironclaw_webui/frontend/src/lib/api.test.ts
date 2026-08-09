@@ -405,8 +405,8 @@ test("setNotificationChannels sends an explicit empty array as the intentional c
   };
 
   // An explicit `[]` stays the one supported way to clear the set (spec §7:
-  // "an empty list means notifications stay in the web app only") — the
-  // guard above rejects only the *absent* argument.
+  // an empty list clears every notification channel) — the guard above
+  // rejects only the *absent* argument.
   await setNotificationChannels({ targetIds: [] });
 
   assert.equal(calls.length, 1);

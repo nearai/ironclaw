@@ -77,7 +77,7 @@ pub(crate) fn bundled_first_party_bundles() -> Vec<FirstPartyPackageBundle> {
     // cross-crate include inventory instead.
     bundles.push(FirstPartyPackageBundle {
         id: ironclaw_web_push::WEB_PUSH_EXTENSION_ID.to_string(),
-        display_name: "Browser notifications".to_string(),
+        display_name: "Web UI".to_string(),
         manifest_toml: ironclaw_web_push_extension::MANIFEST.to_string(),
         assets: vec![FirstPartyPackageAsset {
             path: "manifest.toml".to_string(),

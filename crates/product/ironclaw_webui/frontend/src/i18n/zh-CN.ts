@@ -793,7 +793,7 @@ registerPack("zh-CN", {
   "automations.notificationChannels.explainer":
     "选择哪些已连接的渠道接收审批请求、认证请求和运行失败通知。",
   "automations.notificationChannels.empty": "暂无已连接的渠道。",
-  "automations.notificationChannels.webOnlyHelper": "未选择任何通知渠道——审批请求、认证提示和失败通知将不会送达任何地方。",
+  "automations.notificationChannels.noSelectionHelper": "未选择任何通知渠道——审批请求、认证提示和失败通知将不会送达任何地方。",
   "automations.notificationChannels.webPush.deviceHeading": "此浏览器",
   "automations.notificationChannels.webPush.checking": "正在检查此浏览器的通知支持…",
   "automations.notificationChannels.webPush.unsupported": "此浏览器无法使用推送通知。",

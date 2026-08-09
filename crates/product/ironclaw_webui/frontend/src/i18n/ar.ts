@@ -794,7 +794,7 @@ registerPack("ar", {
   "automations.notificationChannels.explainer":
     "اختر القنوات المتصلة التي تتلقى طلبات الموافقة وطلبات المصادقة وإشعارات فشل التشغيل.",
   "automations.notificationChannels.empty": "لا توجد قنوات متصلة بعد.",
-  "automations.notificationChannels.webOnlyHelper": "لم يتم اختيار أي قناة إشعارات — لن يتم تسليم طلبات الموافقة وتنبيهات المصادقة وإشعارات الفشل إلى أي وجهة.",
+  "automations.notificationChannels.noSelectionHelper": "لم يتم اختيار أي قناة إشعارات — لن يتم تسليم طلبات الموافقة وتنبيهات المصادقة وإشعارات الفشل إلى أي وجهة.",
   "automations.notificationChannels.webPush.deviceHeading": "هذا المتصفح",
   "automations.notificationChannels.webPush.checking": "جارٍ التحقق من دعم الإشعارات في هذا المتصفح…",
   "automations.notificationChannels.webPush.unsupported": "إشعارات الدفع غير متاحة في هذا المتصفح.",

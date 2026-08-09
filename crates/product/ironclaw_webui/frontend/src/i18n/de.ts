@@ -794,7 +794,7 @@ registerPack("de", {
   "automations.notificationChannels.explainer":
     "Wähle, welche verbundenen Kanäle Freigabe-Anfragen, Anmelde-Aufforderungen und Hinweise zu fehlgeschlagenen Läufen erhalten.",
   "automations.notificationChannels.empty": "Noch keine verbundenen Kanäle.",
-  "automations.notificationChannels.webOnlyHelper": "Kein Benachrichtigungskanal ausgewählt — Freigabe-Anfragen, Anmelde-Aufforderungen und Fehlermeldungen werden nirgendwohin zugestellt.",
+  "automations.notificationChannels.noSelectionHelper": "Kein Benachrichtigungskanal ausgewählt — Freigabe-Anfragen, Anmelde-Aufforderungen und Fehlermeldungen werden nirgendwohin zugestellt.",
   "automations.notificationChannels.webPush.deviceHeading": "Dieser Browser",
   "automations.notificationChannels.webPush.checking": "Benachrichtigungsunterstützung dieses Browsers wird geprüft…",
   "automations.notificationChannels.webPush.unsupported": "Push-Benachrichtigungen sind in diesem Browser nicht verfügbar.",

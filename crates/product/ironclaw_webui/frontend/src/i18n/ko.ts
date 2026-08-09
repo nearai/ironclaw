@@ -794,7 +794,7 @@ registerPack("ko", {
   "automations.notificationChannels.explainer":
     "승인 요청, 인증 요청, 실행 실패 알림을 받을 연결된 채널을 선택하세요.",
   "automations.notificationChannels.empty": "아직 연결된 채널이 없습니다.",
-  "automations.notificationChannels.webOnlyHelper": "선택된 알림 채널이 없습니다 — 승인 요청, 인증 안내, 실패 알림이 어디에도 전달되지 않습니다.",
+  "automations.notificationChannels.noSelectionHelper": "선택된 알림 채널이 없습니다 — 승인 요청, 인증 안내, 실패 알림이 어디에도 전달되지 않습니다.",
   "automations.notificationChannels.webPush.deviceHeading": "이 브라우저",
   "automations.notificationChannels.webPush.checking": "이 브라우저의 알림 지원을 확인하는 중…",
   "automations.notificationChannels.webPush.unsupported": "이 브라우저에서는 푸시 알림을 사용할 수 없습니다.",

@@ -794,7 +794,7 @@ registerPack("es", {
   "automations.notificationChannels.explainer":
     "Elige qué canales conectados reciben solicitudes de aprobación, solicitudes de autenticación y avisos de ejecuciones fallidas.",
   "automations.notificationChannels.empty": "Aún no hay canales conectados.",
-  "automations.notificationChannels.webOnlyHelper": "No hay ningún canal de notificaciones seleccionado: las solicitudes de aprobación, los avisos de autenticación y los fallos no se entregarán a ningún destino.",
+  "automations.notificationChannels.noSelectionHelper": "No hay ningún canal de notificaciones seleccionado: las solicitudes de aprobación, los avisos de autenticación y los fallos no se entregarán a ningún destino.",
   "automations.notificationChannels.webPush.deviceHeading": "Este navegador",
   "automations.notificationChannels.webPush.checking": "Comprobando la compatibilidad de notificaciones de este navegador…",
   "automations.notificationChannels.webPush.unsupported": "Las notificaciones push no están disponibles en este navegador.",

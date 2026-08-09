@@ -2512,6 +2512,30 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
         "{body}"
     );
 
+    // web-push is host infrastructure, not a browse-and-install extension: it
+    // must NOT appear in the install catalog (registry or installed lists),
+    // even though it stays a selectable outbound notification target (above).
+    let (status, body) = get_json(router(), "/api/webchat/v2/extensions/registry").await;
+    assert_eq!(status, StatusCode::OK, "registry response: {body}");
+    assert!(
+        !body["entries"]
+            .as_array()
+            .expect("registry entries array")
+            .iter()
+            .any(|entry| entry["package_ref"]["id"] == "web-push"),
+        "web-push must be hidden from the install registry: {body}"
+    );
+    let (status, body) = get_json(router(), "/api/webchat/v2/extensions").await;
+    assert_eq!(status, StatusCode::OK, "extensions response: {body}");
+    assert!(
+        !body["extensions"]
+            .as_array()
+            .expect("installed extensions array")
+            .iter()
+            .any(|entry| entry["package_ref"]["id"] == "web-push"),
+        "web-push must be hidden from the installed extensions list: {body}"
+    );
+
     // Enroll → enrolled; identical repeat → refreshed.
     let subscription = browser_subscription_body(ENDPOINT);
     let (status, body) = post_json(

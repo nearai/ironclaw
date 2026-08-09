@@ -12,7 +12,7 @@ const COPY = {
   "automations.notificationChannels.explainer":
     "Choose which connected channels receive approval prompts, auth prompts, and run-failure notices.",
   "automations.notificationChannels.empty": "No connected channels yet.",
-  "automations.notificationChannels.webOnlyHelper":
+  "automations.notificationChannels.noSelectionHelper":
     "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
   "automations.notificationChannels.webPush.deviceHeading": "This browser",
   "automations.notificationChannels.webPush.checking":
@@ -65,7 +65,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, WebPushDeviceBlock };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, WebPushDeviceBlock, WebPushDeviceRow };`;
 }
 
 function html(strings, ...values) {
@@ -427,7 +427,7 @@ test("NotificationChannelsPanel Save posts the full-replace target_ids array", (
   );
 });
 
-test("NotificationChannelsPanel shows the web-app-only helper text once every channel is unchecked", () => {
+test("NotificationChannelsPanel shows the no-channel-selected helper text once every channel is unchecked", () => {
   const harness = createHarness();
   let rendered = harness.render({
     targets: [target("slack-alpha")],
@@ -663,25 +663,39 @@ function fakeDevice(overrides = {}) {
 // block is MOUNTED with the right props (and only under the web-push row),
 // and the block's own rendering is asserted by calling it directly.
 
-test("NotificationChannelsPanel mounts the device block under the web-push row only", () => {
+test("NotificationChannelsPanel mounts the device row under the web-push row only", () => {
   const harness = createHarness();
   const withWebPush = harness.render({
     targets: [target("slack-alpha"), webPushTarget()],
     channels: [],
   });
-  const blocks = componentProps(withWebPush, harness.exports.WebPushDeviceBlock);
-  assert.equal(blocks.length, 1, "exactly one device block for the web-push row");
-  assert.ok(blocks[0].device, "the block receives the device state");
+  assert.equal(
+    componentProps(withWebPush, harness.exports.WebPushDeviceRow).length,
+    1,
+    "exactly one device row for the web-push row",
+  );
 
   const withoutWebPush = harness.render({
     targets: [target("slack-alpha"), target("slack-beta")],
     channels: [],
   });
   assert.equal(
-    componentProps(withoutWebPush, harness.exports.WebPushDeviceBlock).length,
+    componentProps(withoutWebPush, harness.exports.WebPushDeviceRow).length,
     0,
-    "no device block without a web-push row",
+    "no device row without a web-push row — the status query never mounts for users without web push",
   );
+});
+
+test("WebPushDeviceRow wires the device hook into the block", () => {
+  // The row is the only place the web-push device hook runs; the block itself
+  // stays a pure view. Prove the wrapper passes the hook's state through, so
+  // moving the hook off the panel top didn't sever the block from its data.
+  const device = fakeDevice({ browser: { state: "enrolled", accountMatch: true } });
+  const harness = createHarness({ webPushDevice: device });
+  const rendered = harness.exports.WebPushDeviceRow();
+  const [block] = componentProps(rendered, harness.exports.WebPushDeviceBlock);
+  assert.ok(block, "the row renders the device block");
+  assert.equal(block.device, device, "the block receives the hook's device state");
 });
 
 test("NotificationChannelsPanel toggles the web-push target into the full-replace save set like any channel", () => {

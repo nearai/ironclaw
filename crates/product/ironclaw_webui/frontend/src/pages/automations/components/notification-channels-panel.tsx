@@ -63,7 +63,7 @@ function WebPushDeviceBlock({ device, t }) {
   const canUnenroll = state === "enrolled" && !device.isBusy;
   return (
     <div
-      className="ml-7 rounded-[10px] border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-muted)]"
+      className="rounded-[10px] border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-muted)]"
     >
       <div className="font-semibold text-[var(--v2-text-strong)]">
         {t("automations.notificationChannels.webPush.deviceHeading")}
@@ -121,9 +121,23 @@ function WebPushDeviceBlock({ device, t }) {
   );
 }
 
+/**
+ * Thin wrapper that owns the web-push device hook so it runs ONLY when a
+ * web-push row is present (it is mounted for that row alone in
+ * NotificationChannelsPanel). Keeping the hook here — instead of at the panel
+ * top, where it fired the account status query and per-browser probe for every
+ * automations view, including users and deployments with no web-push channel —
+ * scopes that work to the one row that uses it. `WebPushDeviceBlock` stays a
+ * pure, prop-driven view.
+ */
+function WebPushDeviceRow() {
+  const t = useT();
+  const device = useWebPushDevice();
+  return <WebPushDeviceBlock device={device} t={t} />;
+}
+
 export function NotificationChannelsPanel({ channelsState }) {
   const t = useT();
-  const webPushDevice = useWebPushDevice();
   const rows = channelsState.rows;
   // `selectedIds` is the server truth (the caller's stored notification-
   // channel set, spec §7); `draftIds` is the staged, locally-toggled copy
@@ -304,8 +318,7 @@ export function NotificationChannelsPanel({ channelsState }) {
             return (
               <div key={row.target_id} className="flex flex-col gap-2">
                 {rowLabel}
-                {isWebPushRow &&
-                (<WebPushDeviceBlock device={webPushDevice} t={t} />)}
+                {isWebPushRow && <WebPushDeviceRow />}
               </div>
             );
           })}
@@ -357,14 +370,14 @@ export function NotificationChannelsPanel({ channelsState }) {
         {/* ── Empty-selection helper (draft, not stored — reflects what
              the next Save would do). Suppressed after a failed read: the
              draft is then only an artifact of the channels the GET never
-             returned, so "notifications stay in the web app" would be a
+             returned, so asserting that nothing is selected would be a
              claim about state the panel does not actually know. ──────── */}
         {!hasLoadError && draftIds.size === 0 &&
         (
           <div
             className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
           >
-            {t("automations.notificationChannels.webOnlyHelper")}
+            {t("automations.notificationChannels.noSelectionHelper")}
           </div>
         )}
 

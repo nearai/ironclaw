@@ -794,7 +794,7 @@ registerPack("fr", {
   "automations.notificationChannels.explainer":
     "Choisissez quels canaux connectés reçoivent les demandes d'approbation, les invites d'authentification et les avis d'échec d'exécution.",
   "automations.notificationChannels.empty": "Aucun canal connecté pour le moment.",
-  "automations.notificationChannels.webOnlyHelper": "Aucun canal de notification n'est sélectionné — les demandes d'approbation, les invites d'authentification et les avis d'échec ne seront livrés nulle part.",
+  "automations.notificationChannels.noSelectionHelper": "Aucun canal de notification n'est sélectionné — les demandes d'approbation, les invites d'authentification et les avis d'échec ne seront livrés nulle part.",
   "automations.notificationChannels.webPush.deviceHeading": "Ce navigateur",
   "automations.notificationChannels.webPush.checking": "Vérification de la prise en charge des notifications par ce navigateur…",
   "automations.notificationChannels.webPush.unsupported": "Les notifications push ne sont pas disponibles dans ce navigateur.",

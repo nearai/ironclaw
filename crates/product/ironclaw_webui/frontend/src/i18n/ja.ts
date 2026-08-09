@@ -794,7 +794,7 @@ registerPack("ja", {
   "automations.notificationChannels.explainer":
     "承認リクエスト、認証リクエスト、実行失敗の通知を受け取る接続済みチャネルを選択します。",
   "automations.notificationChannels.empty": "接続済みのチャネルはまだありません。",
-  "automations.notificationChannels.webOnlyHelper": "通知チャネルが選択されていません — 承認リクエスト、認証プロンプト、失敗通知はどこにも配信されません。",
+  "automations.notificationChannels.noSelectionHelper": "通知チャネルが選択されていません — 承認リクエスト、認証プロンプト、失敗通知はどこにも配信されません。",
   "automations.notificationChannels.webPush.deviceHeading": "このブラウザ",
   "automations.notificationChannels.webPush.checking": "このブラウザの通知サポートを確認しています…",
   "automations.notificationChannels.webPush.unsupported": "このブラウザではプッシュ通知を利用できません。",
