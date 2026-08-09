@@ -340,9 +340,9 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
         caller: &OutboundDeliveryTargetScope,
         target_id: &OutboundDeliveryTargetId,
     ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
-        // Generic channels (Slack/Telegram DMs) are both final-reply and
-        // notification targets; id resolution is identical, and the registry
-        // applies the `notifications` capability post-filter.
+        // A channel DM is both a final-reply and a notification target; id
+        // resolution is identical, and the registry applies the `notifications`
+        // capability post-filter.
         self.resolve_outbound_delivery_target(caller, target_id)
             .await
     }

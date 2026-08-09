@@ -1846,8 +1846,8 @@ impl RebornRuntime {
                     gate_prompts: false,
                     auth_prompts: false,
                     // A registered channel DM is both a final-reply target and a
-                    // notification channel, mirroring the generic provider's
-                    // `full_capabilities` (Slack/Telegram).
+                    // notification channel, mirroring the generic channel
+                    // provider's `full_capabilities`.
                     notifications: true,
                     modalities: Vec::new(),
                 },
