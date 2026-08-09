@@ -1949,7 +1949,10 @@ fn assert_web_push_delivery_evidence(posts: &[ironclaw_network::NetworkHttpReque
         matching.count(),
         expected_count,
         "exactly one unthreaded push POST must reach the enrolled endpoint; got {:?}",
-        posts.iter().map(|post| post.url.clone()).collect::<Vec<_>>()
+        posts
+            .iter()
+            .map(|post| post.url.clone())
+            .collect::<Vec<_>>()
     );
 }
 
