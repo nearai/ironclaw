@@ -291,11 +291,14 @@ def validate_code_style_docs_guard_order(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 PRODUCTION_LINT_STEP = "Check production-target lints"
+WINDOWS_CLIPPY_JOB = "clippy-windows"
+WEBUI_INSTALL_STEP = "Install WebUI frontend dependencies"
 
 # One `- name:` step heading. The scan is bounded to its own step because the
 # neighbouring `Check all-target lints` legitimately passes `--tests
 # --examples`; unbounded, this contract would blame this step for them.
 STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
+JOB_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
 
 # `${{ matrix.flags }}` is the lane's other flag channel: `clippy_matrix` is
 # defined in this same workflow and expands into the command, so a target
@@ -345,6 +348,38 @@ def step_body(text: str, step_name: str) -> str | None:
         following = STEP_HEADING.search(text, heading.end())
         return text[heading.end() : following.start() if following else len(text)]
     return None
+
+
+def job_body(text: str, job_name: str) -> str | None:
+    """Return one workflow job's body, bounded by the next job heading."""
+    for heading in JOB_HEADING.finditer(text):
+        if heading.group("name") != job_name:
+            continue
+        following = JOB_HEADING.search(text, heading.end())
+        return text[heading.end() : following.start() if following else len(text)]
+    return None
+
+
+def validate_windows_webui_install_shell(text: str) -> list[str]:
+    """Keep POSIX WebUI setup commands out of PowerShell on Windows."""
+    windows_job = job_body(text, WINDOWS_CLIPPY_JOB)
+    if windows_job is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: could not find the {WINDOWS_CLIPPY_JOB!r} job"
+        ]
+    install_step = step_body(windows_job, WEBUI_INSTALL_STEP)
+    if install_step is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: {WINDOWS_CLIPPY_JOB!r} has no "
+            f"{WEBUI_INSTALL_STEP!r} step"
+        ]
+    if re.search(r"^[ \t]*shell:[ \t]*bash[ \t]*$", install_step, re.MULTILINE):
+        return []
+    return [
+        f"{CODE_STYLE_WORKFLOW}: {WINDOWS_CLIPPY_JOB!r} must run "
+        f"{WEBUI_INSTALL_STEP!r} with `shell: bash` because its commands use "
+        "POSIX shell syntax"
+    ]
 
 
 def validate_production_lint_targets(text: str) -> list[str]:
@@ -1001,6 +1036,7 @@ def validate_workflow_texts(
     if code_style is not None:
         errors.extend(validate_production_lint_targets(code_style))
         errors.extend(validate_code_style_docs_guard_order(code_style))
+        errors.extend(validate_windows_webui_install_shell(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))
