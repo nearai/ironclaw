@@ -354,7 +354,7 @@ fn validate_manifest_artifacts(
         }
         let mut bundle_bytes: u64 = 0;
         let mut bundle_destinations = BTreeSet::from([
-            "SKILL.md".to_string(),
+            ironclaw_skills::SKILL_FILE_NAME.to_string(),
             ironclaw_skills::INSTALL_METADATA_FILE_NAME.to_string(),
         ]);
         for file in &entry.files {

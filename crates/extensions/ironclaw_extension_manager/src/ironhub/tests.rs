@@ -1354,6 +1354,11 @@ async fn bundled_file_checksum_mismatch_aborts_skill_install() {
             .to_vec();
     let expected_bundled_file = b"print('expected')\n".to_vec();
     let tampered_bundled_file = b"print('tampered')\n".to_vec();
+    assert_eq!(
+        expected_bundled_file.len(),
+        tampered_bundled_file.len(),
+        "equal lengths keep this test attributed to the checksum check"
+    );
     let manifest = signed_manifest(
         mixed_manifest_json(MixedManifestFixture {
             tool_url: "https://hub.ironclaw.com/tests/bundle-mismatch/tool.wasm",
@@ -1366,7 +1371,7 @@ async fn bundled_file_checksum_mismatch_aborts_skill_install() {
             skill_size: skill_bytes.len(),
             skill_sha: &sha256_hex(&skill_bytes),
             skill_file_url: bundled_file_url,
-            skill_file_size: tampered_bundled_file.len(),
+            skill_file_size: expected_bundled_file.len(),
             skill_file_sha: &sha256_hex(&expected_bundled_file),
             tool_manifest_url: "https://hub.ironclaw.com/tests/bundle-mismatch/manifest.toml",
             input_schema_url: "https://hub.ironclaw.com/tests/bundle-mismatch/input.json",

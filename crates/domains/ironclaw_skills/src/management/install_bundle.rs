@@ -396,7 +396,10 @@ pub(super) fn validate_install_bundle_files(
         ));
     }
     let mut total_bytes = 0usize;
-    let mut destinations = BTreeSet::new();
+    let mut destinations = BTreeSet::from([
+        SKILL_FILE_NAME.to_string(),
+        INSTALL_METADATA_FILE_NAME.to_string(),
+    ]);
     for file in files {
         if file.contents.len() > MAX_INSTALL_BUNDLE_FILE_BYTES {
             return Err(SkillManagementError::new(
@@ -412,12 +415,21 @@ pub(super) fn validate_install_bundle_files(
             ));
         }
         let destination = normalize_install_relative_path(file.relative_path)?;
-        if !destinations.insert(destination) {
+        if destinations.iter().any(|existing| {
+            existing == &destination
+                || existing
+                    .strip_prefix(&destination)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || destination
+                    .strip_prefix(existing)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
             return Err(SkillManagementError::with_reason(
                 SkillManagementErrorKind::InvalidInput,
-                "skill install bundle contains duplicate destination paths",
+                "skill install bundle contains colliding destination paths",
             ));
         }
+        destinations.insert(destination);
     }
     Ok(())
 }
