@@ -10,7 +10,10 @@ use super::error::AgentLoopHostError;
 use super::model::PromptMode;
 use super::refs::{LoopInputCursorToken, origin_input_cursor_token};
 use super::run_context::LoopRunContext;
-use crate::SkillTrustLevel;
+use crate::{
+    SkillTrustLevel,
+    prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopContextRequest {
@@ -86,6 +89,31 @@ pub struct LoopContextSnippet {
     /// `skill:` ref namespace must populate this so telemetry can record active
     /// skill name/trust without leaking prompt content.
     pub metadata: Option<LoopContextSnippetMetadata>,
+}
+
+impl LoopContextSnippet {
+    /// Construct a model-visible snippet returned by an untrusted memory
+    /// provider. The content keeps useful security prose and paths, while the
+    /// same credential-value policy used by prompt assembly rejects actual
+    /// secrets before the snippet enters the loop context.
+    pub fn from_untrusted_memory(
+        snippet_ref: String,
+        model_content: String,
+    ) -> Result<Self, AgentLoopHostError> {
+        let model_content = validate_prompt_text(
+            model_content,
+            "memory context content",
+            PromptTextSurface::GenericModelContent,
+        )?;
+        let safe_summary =
+            validate_model_safe_text("memory context snippet".to_string(), "memory summary")?;
+        Ok(Self {
+            snippet_ref,
+            model_content,
+            safe_summary,
+            metadata: None,
+        })
+    }
 }
 
 #[async_trait]

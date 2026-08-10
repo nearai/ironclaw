@@ -1531,14 +1531,22 @@ async fn instruction_bundle_rejects_trusted_skill_credential_value_in_summary() 
 
 #[tokio::test]
 async fn instruction_bundle_allows_untrusted_skill_security_vocabulary() {
+    let body = "Use the GitHub API with an Authorization: Bearer header.".to_string();
     let context = claimed_run_context().await;
-    InstructionBundleBuilder::new(context)
+    let bundle = InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
-            "Use the GitHub API with an Authorization: Bearer header.",
+            body.clone(),
             "GitHub skill",
             SkillTrustLevel::Installed,
         ))
         .expect("security vocabulary without a credential value must remain usable");
+
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == body)
+    );
 }
 
 #[tokio::test]
@@ -1593,14 +1601,21 @@ async fn instruction_bundle_allows_untrusted_skill_host_path_but_rejects_secret_
     // #5169 boundary: the content-check exemption is trust-scoped. An *installed*
     // (untrusted) skill body may describe a host path, but a credential-shaped
     // value is still rejected.
+    let body = "Read /Users/alice/.config/token before calling GitHub".to_string();
     let context = claimed_run_context().await;
-    InstructionBundleBuilder::new(context.clone())
+    let bundle = InstructionBundleBuilder::new(context.clone())
         .build(skill_instruction_request(
-            "Read /Users/alice/.config/token before calling GitHub",
+            body.clone(),
             "GitHub skill",
             SkillTrustLevel::Installed,
         ))
         .expect("a host path alone is not a credential value");
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == body)
+    );
 
     let error = InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
@@ -1614,8 +1629,9 @@ async fn instruction_bundle_allows_untrusted_skill_host_path_but_rejects_secret_
 
 #[tokio::test]
 async fn instruction_bundle_allows_generic_model_content_security_vocabulary() {
+    let model_content = "Review authorization checks before release".to_string();
     let context = claimed_run_context().await;
-    InstructionBundleBuilder::new(context)
+    let bundle = InstructionBundleBuilder::new(context)
         .build(InstructionBundleRequest {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
@@ -1623,7 +1639,7 @@ async fn instruction_bundle_allows_generic_model_content_security_vocabulary() {
                 compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
-                    model_content: "Review authorization checks before release".to_string(),
+                    model_content: model_content.clone(),
                     safe_summary: "Release review instruction".to_string(),
                     metadata: None,
                 }],
@@ -1635,6 +1651,12 @@ async fn instruction_bundle_allows_generic_model_content_security_vocabulary() {
             runtime_context: None,
         })
         .expect("security vocabulary without a credential value must remain usable");
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == model_content)
+    );
 }
 
 #[tokio::test]
@@ -1642,14 +1664,21 @@ async fn instruction_bundle_allows_trusted_skill_host_path() {
     // #5169: a host path in a trusted skill body is allowed (a path is not a
     // leak, and skill docs reference paths constantly). Generic and installed
     // context also allow paths while retaining credential-shaped value checks.
+    let body = "Read /Users/alice/.config/token before calling GitHub".to_string();
     let context = claimed_run_context().await;
-    InstructionBundleBuilder::new(context)
+    let bundle = InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
-            "Read /Users/alice/.config/token before calling GitHub",
+            body.clone(),
             "GitHub skill",
             SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass the host-path check after #5169");
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == body)
+    );
 }
 
 /// CR review (lane priority at the render boundary): memory snippets render in the
@@ -1705,10 +1734,11 @@ async fn instruction_bundle_preserves_memory_snippet_insertion_order() {
 
 #[tokio::test]
 async fn instruction_bundle_builder_allows_host_path_instruction_context() {
+    let model_content = "leaks /Users/alice/.ssh/id_rsa path".to_string();
     let context = claimed_run_context().await;
     let builder = InstructionBundleBuilder::new(context);
 
-    builder
+    let bundle = builder
         .build(InstructionBundleRequest {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
@@ -1716,8 +1746,8 @@ async fn instruction_bundle_builder_allows_host_path_instruction_context() {
                 compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
-                    model_content: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
-                    safe_summary: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
+                    model_content: model_content.clone(),
+                    safe_summary: model_content.clone(),
                     metadata: None,
                 }],
                 memory_snippets: Vec::new(),
@@ -1728,6 +1758,12 @@ async fn instruction_bundle_builder_allows_host_path_instruction_context() {
             runtime_context: None,
         })
         .expect("a host path alone must not make instruction context unusable");
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == model_content)
+    );
 }
 
 #[tokio::test]

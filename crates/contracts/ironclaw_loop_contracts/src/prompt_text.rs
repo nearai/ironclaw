@@ -1,6 +1,10 @@
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
 };
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, STANDARD_NO_PAD},
+};
 
 const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
 const SENSITIVE_TERMS: &[SensitiveTerm] = &[
@@ -175,7 +179,7 @@ fn reject_sensitive_text(
 ) -> Result<(), PromptTextValidationError> {
     let lower = value.to_ascii_lowercase();
     for term in SENSITIVE_TERMS {
-        if contains_credential_value_after_label(&lower, term.phrase) {
+        if contains_credential_value_after_label(value, &lower, term.phrase) {
             return non_model_safe(label, term.phrase);
         }
     }
@@ -188,17 +192,22 @@ fn reject_sensitive_text(
     Ok(())
 }
 
-fn contains_credential_value_after_label(value: &str, label: &str) -> bool {
-    value.match_indices(label).any(|(start, matched)| {
+fn contains_credential_value_after_label(value: &str, lower: &str, label: &str) -> bool {
+    lower.match_indices(label).any(|(start, matched)| {
         let end = start + matched.len();
-        if !is_token_boundary(char_before(value, start)) || !is_token_boundary(char_at(value, end))
+        if !is_token_boundary(char_before(lower, start)) || !is_token_boundary(char_at(lower, end))
         {
             return false;
         }
         let suffix = &value[end..];
         credential_value_candidate(suffix).is_some_and(is_secret_like_token)
             || (label == "authorization"
-                && authorization_scheme_value_candidate(suffix).is_some_and(is_secret_like_token))
+                && authorization_scheme_value_candidate(suffix).is_some_and(
+                    |(scheme, candidate)| {
+                        is_secret_like_token(candidate)
+                            || is_basic_authorization_credential(scheme, candidate)
+                    },
+                ))
     })
 }
 
@@ -206,12 +215,11 @@ fn credential_value_candidate(suffix: &str) -> Option<&str> {
     credential_value_candidates(suffix).next()
 }
 
-fn authorization_scheme_value_candidate(suffix: &str) -> Option<&str> {
+fn authorization_scheme_value_candidate(suffix: &str) -> Option<(&str, &str)> {
     let mut candidates = credential_value_candidates(suffix);
     let scheme = candidates.next()?;
-    is_authorization_scheme(scheme)
-        .then(|| candidates.next())
-        .flatten()
+    let candidate = candidates.next()?;
+    is_authorization_scheme(scheme).then_some((scheme, candidate))
 }
 
 fn credential_value_candidates(suffix: &str) -> impl Iterator<Item = &str> {
@@ -245,10 +253,24 @@ fn credential_value_candidates(suffix: &str) -> impl Iterator<Item = &str> {
 }
 
 fn is_authorization_scheme(candidate: &str) -> bool {
-    ["basic", "bearer", "digest", "negotiate", "oauth", "token"].contains(&candidate)
+    ["basic", "bearer", "digest", "negotiate", "oauth", "token"]
+        .iter()
+        .any(|scheme| candidate.eq_ignore_ascii_case(scheme))
+}
+
+fn is_basic_authorization_credential(scheme: &str, candidate: &str) -> bool {
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return false;
+    }
+    BASE64_STANDARD
+        .decode(candidate)
+        .or_else(|_| STANDARD_NO_PAD.decode(candidate))
+        .is_ok_and(|decoded| decoded.contains(&b':'))
 }
 
 fn is_secret_like_token(candidate: &str) -> bool {
+    let lower = candidate.to_ascii_lowercase();
+    let candidate = lower.as_str();
     if candidate.starts_with('$') {
         return false;
     }
@@ -339,6 +361,7 @@ mod tests {
 
     const CREDENTIAL_SAMPLES: &[&str] = &[
         "Use the Authorization: Bearer ghp_secretvalue123 header.",
+        "Use the Authorization: Basic dXNlcjpwYXNz header.",
         "api key: abc123def456",
         "here is my key sk-abc123def456ghi789",
     ];

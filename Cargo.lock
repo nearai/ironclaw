@@ -4445,6 +4445,7 @@ name = "ironclaw_loop_contracts"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "chrono-tz",

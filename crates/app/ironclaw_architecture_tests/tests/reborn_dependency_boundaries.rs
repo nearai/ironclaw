@@ -671,7 +671,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // hand-synced now lives once on the contract type (its callers in
         // composition and loop_host DELETED their copies). Reason recorded
         // in the PR body; count read from this test's failure message.
-        ("ironclaw_loop_contracts", 13_107),
+        // 13_107 -> 13_200 (2026-08-10, prompt recovery hardening): the
+        // contract-owned prompt validator now recognizes decoded Basic auth
+        // credentials, and `LoopContextSnippet::from_untrusted_memory` keeps
+        // memory admission on that same credential-value policy. Runtime
+        // retrieval, sanitization, and budgeting remain in host_runtime.
+        ("ironclaw_loop_contracts", 13_200),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

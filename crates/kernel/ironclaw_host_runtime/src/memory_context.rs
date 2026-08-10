@@ -24,8 +24,8 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopSafeSummary,
-    MemoryPromptContextRequest, MemoryPromptContextService, memory_snippet_display_ref,
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, MemoryPromptContextRequest,
+    MemoryPromptContextService, memory_snippet_display_ref,
 };
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
@@ -147,7 +147,7 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             let Some(loop_snippet) = to_loop_context_snippet(snippet) else {
                 continue;
             };
-            let snippet_bytes = loop_snippet.safe_summary.len();
+            let snippet_bytes = loop_snippet.model_content.len();
             if total_bytes.saturating_add(snippet_bytes) > MAX_MEMORY_CONTEXT_TOTAL_BYTES {
                 break;
             }
@@ -289,10 +289,9 @@ fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
 /// untrusted-enveloped) and scope-checked by the host pipeline above. This step
 /// adds the two host concerns that depend on loop-layer types: it builds the
 /// model-visible `memory-snippet:*` reference from the scope/path components,
-/// and runs the loop's prompt-content denylist ([`LoopSafeSummary`]) as a
-/// DROP-filter — a prompt-layer policy applied to all model context — so a
-/// memory doc carrying a denylisted secret/path is skipped here rather than
-/// failing the instruction bundle at render time.
+/// and constructs an untrusted memory snippet through the loop contract's
+/// credential-value policy. Actual credential values are dropped here, while
+/// ordinary security prose and host paths remain available for recovery.
 fn to_loop_context_snippet(snippet: MemoryServiceContextSnippet) -> Option<LoopContextSnippet> {
     let snippet_ref = memory_snippet_display_ref([
         snippet.tenant_id.as_str(),
@@ -301,16 +300,7 @@ fn to_loop_context_snippet(snippet: MemoryServiceContextSnippet) -> Option<LoopC
         snippet.project_id.as_deref().unwrap_or(""),
         snippet.relative_path.as_str(),
     ]);
-    let safe = LoopSafeSummary::new(snippet.text)
-        .ok()?
-        .as_str()
-        .to_string();
-    Some(LoopContextSnippet {
-        snippet_ref,
-        safe_summary: safe.clone(),
-        model_content: safe,
-        metadata: None,
-    })
+    LoopContextSnippet::from_untrusted_memory(snippet_ref, snippet.text).ok()
 }
 
 fn invocation_for_context_request(request: &MemoryPromptContextRequest) -> MemoryInvocation {
