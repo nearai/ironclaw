@@ -335,6 +335,7 @@ registerPack("uk", {
   "llm.configureToUse": "Налаштувати цього провайдера перед його активацією.",
   "llm.confirmDelete": "Видалити постачальника \"{id}\"?",
   "llm.defaultModel": "Модель за замовчуванням",
+  "llm.searchModels": "Пошук моделей",
   "llm.editProvider": "Редагувати постачальника",
   "llm.fetchModels": "Отримати моделі",
   "llm.fetchingModels": "Отримати...",

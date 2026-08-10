@@ -347,6 +347,7 @@ registerPack("en", {
   "llm.configureToUse": "Configure this provider before activating it.",
   "llm.confirmDelete": "Delete provider \"{id}\"?",
   "llm.defaultModel": "Default model",
+  "llm.searchModels": "Search models",
   "llm.editProvider": "Edit provider",
   "llm.fetchModels": "Fetch models",
   "llm.fetchingModels": "Fetching...",
