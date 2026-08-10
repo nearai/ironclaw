@@ -45,6 +45,14 @@ const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
 const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 const MAX_MEMORY_PATCH_RETRIES: usize = 8;
 
+/// Conventional tool search results are snippets, not full documents, but the
+/// filesystem backend currently returns whole document bodies. The host caps
+/// the search tool's output at 1 MiB per call, so one oversized document must
+/// never be shipped whole; bound each result's content to this many UTF-8
+/// bytes. The context-retrieval lanes are untouched — the host owns their
+/// model-visible budgets.
+const MAX_SEARCH_SNIPPET_BYTES: usize = 8 * 1024;
+
 pub struct NativeMemoryService {
     backend: Arc<dyn MemoryBackend>,
 }
@@ -113,7 +121,7 @@ impl NativeMemoryService {
             .into_iter()
             .map(|result| MemoryServiceSearchResult {
                 is_hybrid_match: result.is_hybrid(),
-                content: result.snippet,
+                content: bound_search_snippet(result.snippet, &request.query),
                 score: result.score,
                 path: result.path.relative_path().to_string(),
             })
@@ -330,6 +338,130 @@ impl NativeMemoryService {
         }
         Err(MemoryServiceError::operation())
     }
+}
+
+/// Bound a conventional tool search result's content to
+/// [`MAX_SEARCH_SNIPPET_BYTES`] UTF-8 bytes.
+///
+/// Short snippets are returned unchanged — zero allocation, byte-for-byte
+/// identical. Oversized snippets are reduced deterministically:
+///
+/// - When the exact literal query occurs in the snippet, the preview is the
+///   query occurrences' excerpts: around every occurrence it keeps
+///   [`EXCERPT_PRE_BYTES`] preceding and [`EXCERPT_POST_BYTES`] following
+///   bytes — enough to carry a scripted read-back identity (the marker, its
+///   `_<user>__<op>` suffix, the step ordinal, and the canonical marker) —
+///   joined by an ellipsis delimiter. Excerpts whose window is fully inside
+///   an already-emitted window are skipped (their identity is already
+///   present), and accumulation stops at the cap, so a document with more
+///   occurrences than can fit still returns a bounded, complete prefix of
+///   the excerpt list.
+/// - When the exact literal query does not occur (the backend may stem or
+///   otherwise normalize matches the provider cannot reproduce), the
+///   preview falls back to a plain bounded head. The provider claims no
+///   parity with the backend's FTS: matching is byte-exact on the raw query
+///   — no case folding, stemming, or token heuristics — so a backend match
+///   the literal query cannot reproduce is honestly shown as a head, never
+///   as positioned excerpts.
+///
+/// Truncation never splits a multi-byte character, and the result is
+/// deterministic.
+fn bound_search_snippet(snippet: String, query: &str) -> String {
+    if snippet.len() <= MAX_SEARCH_SNIPPET_BYTES {
+        return snippet;
+    }
+    if query.is_empty() {
+        // The empty query matches everywhere; excerpting would degenerate to
+        // the whole snippet. Keep the plain head.
+        return bounded_head(snippet, MAX_SEARCH_SNIPPET_BYTES);
+    }
+    if !snippet.contains(query) {
+        return bounded_head(snippet, MAX_SEARCH_SNIPPET_BYTES);
+    }
+    bounded_excerpts(&snippet, query)
+        .unwrap_or_else(|| bounded_head(snippet, MAX_SEARCH_SNIPPET_BYTES))
+}
+
+/// Preceding context bytes kept around each exact-literal query occurrence
+/// in a bounded search preview.
+const EXCERPT_PRE_BYTES: usize = 128;
+/// Following context bytes kept around each exact-literal query occurrence
+/// in a bounded search preview. The scripted read-back identity is the
+/// marker, its `_<user>__<op>` suffix (at most ~130 bytes for the longest
+/// scripted identities), the `sNNNN` step ordinal, and the canonical
+/// marker; this window covers them for every planned chunk layout, so a
+/// bounded preview exposes the identity tokens the scripted classifier
+/// scans for.
+const EXCERPT_POST_BYTES: usize = 256;
+/// Separator between consecutive excerpts. The ellipsis is Unicode (three
+/// UTF-8 bytes) and signals that bytes were elided between the excerpts.
+const EXCERPT_DELIMITER: &str = "\n…\n";
+
+/// Join bounded excerpts around every exact-literal occurrence of `query`
+/// in `snippet`, stopping at [`MAX_SEARCH_SNIPPET_BYTES`]. Each excerpt is
+/// `[position - EXCERPT_PRE_BYTES, position + query.len() + EXCERPT_POST_BYTES)`
+/// rounded to UTF-8 char boundaries; an occurrence already fully inside the
+/// previously emitted window is skipped because its identity is already in
+/// the output. The scan is a single left-to-right pass (no occurrence list
+/// is materialized), and it stops as soon as the cap is reached. Returns
+/// `None` when even one excerpt cannot fit (a query at or above the cap),
+/// so the caller falls back to the bounded head.
+fn bounded_excerpts(snippet: &str, query: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut search_from = 0usize;
+    let mut previous_end = 0usize;
+    while let Some(relative) = snippet[search_from..].find(query) {
+        let position = search_from + relative;
+        let mut start = position.saturating_sub(EXCERPT_PRE_BYTES);
+        while start > 0 && !snippet.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = (position + query.len() + EXCERPT_POST_BYTES).min(snippet.len());
+        while !snippet.is_char_boundary(end) {
+            end -= 1;
+        }
+        if start < previous_end {
+            if end <= previous_end {
+                // Fully covered by the previous excerpt; the identity is
+                // already present.
+                search_from = position + query.len();
+                continue;
+            }
+            start = previous_end;
+        }
+        let excerpt = &snippet[start..end];
+        let added = if out.is_empty() {
+            excerpt.len()
+        } else {
+            EXCERPT_DELIMITER.len() + excerpt.len()
+        };
+        if out.len() + added > MAX_SEARCH_SNIPPET_BYTES {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(EXCERPT_DELIMITER);
+        }
+        out.push_str(excerpt);
+        previous_end = end;
+        search_from = position + query.len();
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Cut `snippet` to a UTF-8-safe head of at most `bound` bytes, truncating in
+/// place so an oversized snippet is not copied. The cut never splits a
+/// multi-byte character.
+fn bounded_head(snippet: String, bound: usize) -> String {
+    let mut snippet = snippet;
+    let mut end = bound.min(snippet.len());
+    while !snippet.is_char_boundary(end) {
+        end -= 1;
+    }
+    snippet.truncate(end);
+    snippet
 }
 
 #[async_trait]
@@ -820,5 +952,237 @@ fn map_search_result_to_snippet(result: MemorySearchResult) -> MemoryServiceCont
         project_id: result.path.project_id().map(ToString::to_string),
         relative_path: result.path.relative_path().to_string(),
         text: result.snippet,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MARKER: &str = "IRONCLAW_STRESS_READBACK";
+    const MIB: usize = 1 << 20;
+    /// Own read-back token, as a scripted chunk embeds it: the marker with
+    /// the `_<user>__<op>` identity suffix immediately adjacent.
+    const OWN_TOKEN: &str = "IRONCLAW_STRESS_READBACK_u0__1";
+    /// Same-user contender token just past the old 8192-byte head cut.
+    const CONTENDER_AFTER_CAP: &str = "IRONCLAW_STRESS_READBACK_u0__2";
+    /// Same-user contender token at the document's middle.
+    const CONTENDER_MIDDLE: &str = "IRONCLAW_STRESS_READBACK_u0__3";
+    /// Same-user contender token at the document's tail.
+    const CONTENDER_TAIL: &str = "IRONCLAW_STRESS_READBACK_u0__4";
+
+    /// A 1 MiB ASCII body with `MARKER` starting at `marker_at` (or absent).
+    fn mib_body(marker_at: Option<usize>) -> String {
+        let mut body = vec![b'a'; MIB];
+        if let Some(at) = marker_at {
+            body[at..at + MARKER.len()].copy_from_slice(MARKER.as_bytes());
+        }
+        String::from_utf8(body).expect("ASCII body is valid UTF-8")
+    }
+
+    /// A 1 MiB ASCII body with each `(position, text)` overlay written over
+    /// the `a` padding — e.g. full read-back identity tokens at chosen
+    /// offsets, mimicking interleaved scripted chunk content.
+    fn mib_body_with(overlays: &[(usize, &str)]) -> String {
+        let mut body = vec![b'a'; MIB];
+        for &(at, text) in overlays {
+            body[at..at + text.len()].copy_from_slice(text.as_bytes());
+        }
+        String::from_utf8(body).expect("ASCII body is valid UTF-8")
+    }
+
+    #[test]
+    fn small_snippet_is_returned_unchanged() {
+        let snippet = "a tiny memory note".to_string();
+        assert_eq!(bound_search_snippet(snippet.clone(), MARKER), snippet);
+    }
+
+    #[test]
+    fn empty_snippet_is_returned_unchanged() {
+        assert_eq!(bound_search_snippet(String::new(), MARKER), String::new());
+    }
+
+    #[test]
+    fn snippet_exactly_at_bound_is_returned_unchanged() {
+        let snippet = "a".repeat(MAX_SEARCH_SNIPPET_BYTES);
+        let bounded = bound_search_snippet(snippet.clone(), MARKER);
+        assert_eq!(bounded, snippet);
+    }
+
+    #[test]
+    fn snippet_one_byte_over_bound_is_cut_to_exact_cap() {
+        // No exact literal query occurrence, so the fallback head lands
+        // exactly on the cap: an ASCII body one byte over the bound
+        // truncates to precisely MAX_SEARCH_SNIPPET_BYTES bytes.
+        let body = "a".repeat(MAX_SEARCH_SNIPPET_BYTES + 1);
+        let bounded = bound_search_snippet(body, MARKER);
+        assert_eq!(bounded, "a".repeat(MAX_SEARCH_SNIPPET_BYTES));
+        assert_eq!(bounded.len(), MAX_SEARCH_SNIPPET_BYTES);
+    }
+
+    #[test]
+    fn oversized_body_with_exact_literal_query_retains_head_marker() {
+        // The query occurs literally near the start, so the excerpt window
+        // starts at the snippet's head and the marker survives verbatim.
+        let body = mib_body(Some(10));
+        let bounded = bound_search_snippet(body.clone(), MARKER);
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert!(bounded.starts_with(&format!("{}a{MARKER}", "a".repeat(9))));
+        assert!(bounded.contains(MARKER));
+        assert_eq!(bound_search_snippet(body.clone(), MARKER), bounded);
+    }
+
+    #[test]
+    fn no_exact_occurrence_falls_back_to_bounded_head() {
+        // The backend may stem or otherwise normalize a match this provider
+        // cannot reproduce literally. The preview is then an honest bounded
+        // head — never positioned excerpts — and a marker beyond the cap
+        // stays invisible instead of being falsely claimed as a match.
+        let body = mib_body(Some(MIB / 2));
+        let bounded = bound_search_snippet(body, "nonexistent");
+        assert_eq!(bounded.len(), MAX_SEARCH_SNIPPET_BYTES);
+        assert!(!bounded.contains(MARKER));
+    }
+
+    #[test]
+    fn exact_literal_occurrence_beyond_head_is_retained() {
+        // With an exact literal query match the preview positions a window
+        // around it, so a marker at the body's middle — beyond the old head
+        // cut — is retained: the provider never hides a match it can show.
+        let body = mib_body(Some(MIB / 2));
+        let bounded = bound_search_snippet(body.clone(), MARKER);
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert!(bounded.contains(MARKER));
+        assert_eq!(bound_search_snippet(body, MARKER), bounded);
+    }
+
+    #[test]
+    fn matching_is_exact_literal_not_case_folded() {
+        // A lowercase variant is NOT an exact literal match of the uppercase
+        // query: no case folding, so the preview falls back to the head and
+        // does not position windows it cannot substantiate.
+        let body = mib_body(Some(MIB / 2)).replace(MARKER, "ironclaw_stress_readback");
+        let bounded = bound_search_snippet(body, MARKER);
+        assert_eq!(bounded.len(), MAX_SEARCH_SNIPPET_BYTES);
+        assert!(!bounded.contains(MARKER));
+    }
+
+    #[test]
+    fn oversized_1mib_interleaving_retains_all_identity_tokens() {
+        // Phase 1B hot-writer structure: this operation's token at the
+        // head, same-user contender tokens just past the old head cut, at
+        // the middle, and at the tail. The bounded preview must expose
+        // every identity, so the scripted classifier sees own + same-user
+        // (contended) instead of only the head's own token (false
+        // confirmed).
+        let body = mib_body_with(&[
+            (100, OWN_TOKEN),
+            (MAX_SEARCH_SNIPPET_BYTES + 64, CONTENDER_AFTER_CAP),
+            (MIB / 2, CONTENDER_MIDDLE),
+            (MIB - 256, CONTENDER_TAIL),
+        ]);
+        let bounded = bound_search_snippet(body.clone(), MARKER);
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert!(
+            std::str::from_utf8(bounded.as_bytes()).is_ok(),
+            "excerpts must stay valid UTF-8"
+        );
+        for token in [
+            OWN_TOKEN,
+            CONTENDER_AFTER_CAP,
+            CONTENDER_MIDDLE,
+            CONTENDER_TAIL,
+        ] {
+            assert!(bounded.contains(token), "missing {token} in {bounded:?}");
+        }
+        assert_eq!(
+            bound_search_snippet(body, MARKER),
+            bounded,
+            "excerpting must be deterministic"
+        );
+    }
+
+    #[test]
+    fn many_occurrences_stop_at_cap_with_complete_prefix() {
+        // ~200 occurrences in 1 MiB: far more than the cap can hold, so the
+        // excerpt list stops at the cap with the leading excerpts intact —
+        // never a full dump, never a dangling delimiter.
+        let mut overlays = Vec::new();
+        for i in 0..200 {
+            overlays.push((i * (MIB / 200), MARKER));
+        }
+        let body = mib_body_with(&overlays);
+        let bounded = bound_search_snippet(body.clone(), MARKER);
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert!(bounded.contains(MARKER));
+        assert!(
+            bounded.matches(EXCERPT_DELIMITER).count() >= 2,
+            "several excerpts must have been joined before the cap"
+        );
+        assert!(
+            !bounded.ends_with(EXCERPT_DELIMITER),
+            "no trailing delimiter"
+        );
+        assert_eq!(bound_search_snippet(body, MARKER), bounded);
+    }
+
+    #[test]
+    fn multibyte_excerpt_windows_never_split_chars() {
+        // Three-byte chars around the occurrence: the pre-window start
+        // (position - 128, and 128 % 3 == 2) and the post-window end both
+        // round to whole characters, so the excerpt stays valid UTF-8 and
+        // the identity token survives.
+        let mut body = String::new();
+        body.push_str(&"€".repeat(4000));
+        body.push_str(OWN_TOKEN);
+        body.push_str(&"€".repeat(4000));
+        let bounded = bound_search_snippet(body, MARKER);
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        assert!(bounded.contains(OWN_TOKEN));
+    }
+
+    #[test]
+    fn empty_query_keeps_bounded_head() {
+        // The empty query matches everywhere; excerpting would degenerate to
+        // the whole snippet, so the preview stays a plain head — the marker
+        // near the start survives only because it is inside the head.
+        let body = mib_body(Some(10));
+        let bounded = bound_search_snippet(body.clone(), "");
+        assert_eq!(bounded.len(), MAX_SEARCH_SNIPPET_BYTES);
+        assert_eq!(bounded, &body[..MAX_SEARCH_SNIPPET_BYTES]);
+    }
+
+    #[test]
+    fn query_longer_than_cap_falls_back_to_head() {
+        // A single excerpt cannot fit the query plus its context, so the
+        // excerpt builder yields nothing and the preview stays an honest
+        // head rather than a truncated query fragment.
+        let body = mib_body(Some(0));
+        let query = "a".repeat(MAX_SEARCH_SNIPPET_BYTES + 1);
+        let bounded = bound_search_snippet(body.clone(), &query);
+        assert_eq!(bounded.len(), MAX_SEARCH_SNIPPET_BYTES);
+        assert_eq!(bounded, &body[..MAX_SEARCH_SNIPPET_BYTES]);
+    }
+
+    #[test]
+    fn multibyte_head_cut_never_splits_chars() {
+        // Three-byte chars: the 8192-byte cut lands mid-character (8192 % 3
+        // == 2) and must round down to a whole number of chars. No exact
+        // literal occurrence, so this exercises the head fallback.
+        let body = "€".repeat(2731);
+        assert!(body.len() > MAX_SEARCH_SNIPPET_BYTES);
+        let bounded = bound_search_snippet(body.clone(), MARKER);
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert_eq!(bounded, "€".repeat(MAX_SEARCH_SNIPPET_BYTES / 3));
+    }
+
+    #[test]
+    fn truncated_preview_is_deterministic() {
+        let body = mib_body(Some(10));
+        assert_eq!(
+            bound_search_snippet(body.clone(), MARKER),
+            bound_search_snippet(body, MARKER)
+        );
     }
 }
