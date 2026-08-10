@@ -708,18 +708,23 @@ mod tests {
 
         let sidebar_nav = source_text("components/sidebar-nav.tsx");
         assert!(sidebar_nav.contains("isAdmin = false"));
-        assert!(sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
+        assert!(sidebar_nav.contains("subRoute.id === \"users\""));
+        assert!(!sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
 
         let settings_page = source_text("pages/settings/settings-page.tsx");
         assert!(settings_page.contains("isAdmin = false"));
+        assert!(
+            settings_page.contains("const defaultTab = isAdmin ? \"inference\" : \"language\"")
+        );
         assert!(settings_page.contains("const defaultTabIsVisible = tabContentHas(defaultTab)"));
         assert!(settings_page.contains("const redirectTab = defaultTabIsVisible"));
-        assert!(settings_page.contains("isOperatorTab(tab)"));
+        assert!(!settings_page.contains("isOperatorTab(tab)"));
 
         let settings_tabs = source_text("pages/settings/components/settings-tabs.tsx");
         assert!(settings_tabs.contains("isAdmin = false"));
         assert!(!settings_tabs.contains("isAdmin = true"));
-        assert!(settings_tabs.contains("tab.id !== \"inference\""));
+        assert!(settings_tabs.contains("tab.id !== \"users\""));
+        assert!(!settings_tabs.contains("tab.id !== \"inference\""));
 
         let layout = source_text("layout/gateway-layout.tsx");
         assert!(layout.contains("enabled: isAdmin"));
