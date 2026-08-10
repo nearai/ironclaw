@@ -42,6 +42,7 @@ pub mod channel_pairing;
 pub mod channel_shared_admission;
 pub mod channel_triggered_delivery;
 pub mod deployment_channels;
+pub mod device_link_driver;
 pub mod egress;
 pub mod entrypoint;
 pub mod extension_activation_credentials;
@@ -62,6 +63,7 @@ pub mod install_policy;
 pub mod lifecycle;
 pub mod lifecycle_restore;
 pub mod lifecycle_vocabulary;
+pub mod linked_session_custody;
 pub mod loaders;
 pub mod mcp;
 pub mod mcp_catalog_safety;
@@ -109,8 +111,8 @@ pub use activation_credentials::{
     missing_activation_credentials_error,
 };
 pub use active::{
-    ActiveExtension, ActiveSnapshot, BoundExtension, Generation, ResolvedToolBinding,
-    SnapshotConflict,
+    ActiveExtension, ActiveSnapshot, BoundExtension, Generation, ResolvedDeviceLinkBinding,
+    ResolvedToolBinding, SnapshotConflict,
 };
 pub use active_publication::{ActiveExtensionPublisher, extension_trust_policy_input};
 pub use admin_configuration_service::{
@@ -159,8 +161,12 @@ pub use channel_lifecycle::{
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,
 };
+pub use device_link_driver::{
+    DeviceLinkLimits, DeviceLinkLimitsError, DeviceLinkRequest, SnapshotDeviceLinkDriver,
+};
 pub use entrypoint::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, check_binding,
+    declared_device_link_recipe,
 };
 pub use extension_bundle::{
     ExtensionBundleError, MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
@@ -207,6 +213,10 @@ pub use lifecycle_restore::{
     restore_extension_lifecycle_state,
 };
 pub use lifecycle_vocabulary::ActiveExtensionCapability;
+pub use linked_session_custody::{
+    LinkedSessionKey, LinkedSessionMaterialStore, LinkedSessionStore, StoredLinkedSession,
+    UnavailableLinkedSessionMaterial,
+};
 pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
 pub use mcp::{RegistryMcpEgressPlanner, hosted_http_mcp_runtime};
 pub use mcp_catalog_safety::{

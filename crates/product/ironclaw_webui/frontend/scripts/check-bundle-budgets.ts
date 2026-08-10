@@ -61,7 +61,32 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //    route-local impls; Vite emits its ~0.3 KB gzip helper as a shared chunk
 //    (Chat/Settings/Extensions all consume it).
 // Re-measured on the MERGED tree with `vite build` + this check.
-const CHAT_GZIP_BUDGET = 218_000;
+// The Telegram device-link card then added a multi-step link flow to /chat.
+// Everything deferrable was deferred FIRST, and measured at each step:
+//  - `auth-device-link-card.tsx` and the `device-link-panel` /
+//    `device-link-api` modules behind it load through `React.lazy` from
+//    `chat.tsx` (the inspector-panel pattern), so the card, its step machine,
+//    its polling, and its input forms emit as their own chunks and cost the
+//    initial route nothing. Measured: 220.5 KB eager -> 219.5 KB.
+// What stays eager, and why it cannot move:
+//  - `link-payload-panel.tsx` — the extracted QR/countdown/copy/renew
+//    presentation. It is not new weight so much as relocated weight: it
+//    replaces the identical implementation that already shipped inside the
+//    eager `pairing-web-code-panel.tsx`, and it is now shared with the lazy
+//    device-link chunk, so Vite hoists it into a shared chunk the eager
+//    pairing panel pulls anyway. Keeping a second copy to save the hoist is
+//    precisely the drift the extraction exists to prevent.
+//  - `lib/device-link-frame.ts` — the frame normalizer. The gate selector
+//    (`gates.ts`, eager) has to normalize a device-link gate to decide which
+//    card to render at all, so it cannot sit behind the lazy boundary; a
+//    second eager normalizer would let a polled frame and a gate frame
+//    disagree about the same wire object.
+//  - ~31 `deviceLink.*` keys in `en.ts`, which `i18n.tsx` loads eagerly as the
+//    fallback pack on every page. Measured at 0.5 KB gzip; the other ten
+//    locale packs stay lazy per-locale imports and cost nothing here.
+// Measured /chat closure is 219.5 KB gzip; 221.0 KB retains about 1.5 KB of
+// explicit headroom.
+const CHAT_GZIP_BUDGET = 221_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

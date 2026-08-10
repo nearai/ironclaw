@@ -635,7 +635,29 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // flag. Contract vocabulary only — the fetch impl lives in the slack
         // package, the flag is consumed by the channel workflow. Count read from
         // this test's failure on the rebased base.
-        ("ironclaw_extension_contracts", 7_851),
+        // 7_851 -> 9_359 (2026-08-10, telegram-linked-device PR 1): the
+        // device-link membrane. Two new modules — `linked_session` (the
+        // host-implemented custody port plus the value types its signature
+        // names: zeroizing `SessionBytes`, the CAS `LinkedSessionVersion`, the
+        // opaque `LinkedAccountRef`/`LinkedAccountGrant`) and `device_link`
+        // (`DeviceLinkAdapter` and its step/input/error vocabulary) — plus the
+        // `VendorAuthRecipe::DeviceLink` display-metadata variant and the
+        // `DeviceLinkPromptView` projection.
+        //
+        // Every type here is forced onto this side of the membrane: the
+        // implementing package's `BoundaryRule` forbids `ironclaw_auth`, so a
+        // port declared in contracts cannot name a domain type in its
+        // signature. Nothing executes — the step machine and revision CAS live
+        // in `ironclaw_auth`, the driver glue in `ironclaw_extension_host`, and
+        // every protocol mechanic in the extension package.
+        //
+        // Roughly a third of the delta is the inline `#[cfg(test)]` modules
+        // this ratchet also counts, in `recipe.rs` and `auth_prompt.rs`. The
+        // two NEW modules do not pay that: their test modules were written as
+        // `device_link/tests.rs` and `linked_session/tests.rs` siblings, which
+        // `production_rust_files` excludes — the same split #7157 made for
+        // `runtime_context`. Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 9_359),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -664,7 +686,20 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        ("ironclaw_host_api", 18_974),
+        // 18_974 -> 19_431 (2026-08-10, telegram-linked-device PR 1): the
+        // `send_message.output` schema graduation (design §6.2) — a NEW `.v2`
+        // schema file carrying the `sent_unverified` evidence branch, the
+        // version-plural `StandardOpContract` (`StandardSchemaVersion`,
+        // `PublishedSchema`, `output_schema_for`) that keeps `.v1` resolving
+        // forever, and `RuntimeCredentialAccountSetup::DeviceLink`. Declaration
+        // + version-lookup only: schema *enforcement* stays in
+        // ironclaw_host_runtime's `standard_op_output`, and the device-link flow
+        // itself lives in ironclaw_auth and the telegram package. About two
+        // thirds of the delta is the inline `#[cfg(test)]` module this ratchet
+        // also counts — the superset property (`.v2` accepts every `.v1`-valid
+        // output) has to be pinned because the runtime validator is keyed by op,
+        // not by version. Count read from this test's own failure message.
+        ("ironclaw_host_api", 19_431),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -731,7 +766,20 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // thread, carried through the wire contract), net of the ephemeral-per-ping
         // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
         // retired). Declaration only. Count read from failure.
-        ("ironclaw_product_contracts", 15_909),
+        // 15_909 -> 15_934 (2026-08-10, telegram-linked-device PR 2 — the
+        // exhaustive-match fallout of PR 1's three new enum variants): the
+        // `LifecycleExtensionCredentialSetup::DeviceLink` and
+        // `RebornExtensionCredentialSetup::DeviceLink` projection variants, and
+        // boxing `ProductOutboundPayload::AuthPrompt`. The two variants are the
+        // connect affordance a device-link credential projects onto — folding
+        // them onto `ManualToken` would render a paste form for a secret that
+        // does not exist. The `Box` is forced: PR 1's `device_link` frame took
+        // `AuthPromptView` to 664 bytes, 320 over the next-largest payload, and
+        // `clippy::large_enum_variant` denies at `-D warnings`; `Box` is
+        // transparent to serde so no wire shape moved. Declarations only — the
+        // device-link flow lives in ironclaw_auth and the telegram package.
+        // Count read from this test's own failure message.
+        ("ironclaw_product_contracts", 15_934),
         ("ironclaw_prompt_envelope", 832),
     ];
 

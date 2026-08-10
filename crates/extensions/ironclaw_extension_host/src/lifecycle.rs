@@ -25,6 +25,7 @@ use crate::active::{
     ActiveExtension, ActiveSnapshot, BoundExtension, Generation, SnapshotConflict,
 };
 use crate::entrypoint::{BindError, check_binding};
+use crate::linked_session_custody::LinkedSessionStore;
 use crate::loaders::{ExtensionLoader, LoadContext};
 use crate::store::{InstallationRecord, InstallationRecordStore, StoreError};
 use ironclaw_extension_contracts::state::InstallationState;
@@ -75,6 +76,11 @@ pub struct ExtensionHostDeps {
     pub reserved_ingress_routes: BTreeSet<String>,
     /// Bounded deadline for adapter hooks and drains.
     pub hook_deadline: Duration,
+    /// Linked-account session custody. Bind hands each extension a factory
+    /// scoped to that extension; a deployment with no custody wired supplies
+    /// [`crate::LinkedSessionStore::unavailable`], which fails closed rather
+    /// than handing out a handle that silently stores nothing.
+    pub linked_sessions: Arc<LinkedSessionStore>,
 }
 
 /// The generic extension lifecycle host.
@@ -357,6 +363,7 @@ impl ExtensionHost {
             installation_id: record.installation_id.clone(),
             resolved: Arc::clone(&resolved),
             config: record.config.clone(),
+            linked_sessions: self.deps.linked_sessions.custody_for(resolved.id.clone()),
         })?;
         check_binding(&resolved, &bindings)?;
         for tool in &resolved.tools {
@@ -401,6 +408,8 @@ impl ExtensionHost {
             extension,
             tools: bindings.tools,
             channel: bindings.channel,
+            device_link: bindings.device_link,
+            config: Arc::new(record.config.iter().cloned().collect()),
         })
     }
 

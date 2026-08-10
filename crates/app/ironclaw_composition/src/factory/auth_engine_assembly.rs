@@ -214,14 +214,32 @@ fn register_vendor_client_config(
         );
         return;
     };
-    let ironclaw_extension_contracts::recipe::VendorAuthRecipe::Oauth2Code(recipe) =
-        &resolved.recipe
-    else {
-        tracing::warn!(
-            vendor = config.vendor,
-            "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
-        );
-        return;
+    // Matched exhaustively rather than with a `let ... else`, so a new auth
+    // method has to state whether deployment-configured client material means
+    // anything to it. `device_link` is the case that proves the point: it is
+    // the one method with no client-credential concept at all — the recipe is
+    // display metadata and the handshake runs inside the extension's adapter —
+    // so it is a quiet, expected no-op, not the anomaly the `warn!` describes.
+    // Left on the fallthrough it would emit "recipe is not oauth2_code" at
+    // every boot of a deployment that legitimately configured a device-link
+    // vendor.
+    use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+    let recipe = match &resolved.recipe {
+        VendorAuthRecipe::Oauth2Code(recipe) => recipe,
+        VendorAuthRecipe::DeviceLink(_) => {
+            tracing::debug!(
+                vendor = config.vendor,
+                "vendor recipe is device_link; it holds no client credentials, nothing to wire"
+            );
+            return;
+        }
+        VendorAuthRecipe::ApiKey(_) => {
+            tracing::warn!(
+                vendor = config.vendor,
+                "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
+            );
+            return;
+        }
     };
     let Some(handles) = &recipe.client_credentials else {
         tracing::debug!(

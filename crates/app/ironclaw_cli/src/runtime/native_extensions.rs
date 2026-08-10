@@ -94,6 +94,9 @@ impl ExtensionEntrypoint for TelegramExtensionEntrypoint {
         Ok(ExtensionBindings {
             tools: None,
             channel: Some(Arc::new(TelegramChannelAdapter::default())),
+            // The linked-device adapter lands with the package's linked tree;
+            // the bot channel binds no auth surface.
+            device_link: None,
         })
     }
 }

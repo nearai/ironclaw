@@ -52,6 +52,7 @@ async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
         reserved_capability_ids: Default::default(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
     };
     let host = ExtensionHost::new(deps).await;
     Harness {
@@ -82,6 +83,7 @@ fn tool_and_channel_bindings(channel: Arc<FakeChannelAdapter>) -> ExtensionBindi
                 as Arc<dyn ToolAdapter>,
         ),
         channel: Some(channel as Arc<dyn ChannelAdapter>),
+        device_link: None,
     }
 }
 
@@ -116,6 +118,7 @@ async fn hosted_mcp_connection_template_alone_fails_activation() {
                 ironclaw_extension_host::test_support::FakeToolAdapter,
             )),
             channel: None,
+            device_link: None,
         },
         channel,
     )
@@ -403,6 +406,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         ExtensionBindings {
             tools: Some(Arc::new(AuthGatingAdapter)),
             channel: Some(Arc::clone(&channel) as Arc<dyn ChannelAdapter>),
+            device_link: None,
         },
         channel,
     )
@@ -474,6 +478,7 @@ async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
         reserved_capability_ids: reserved_capability_ids.clone(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
     };
     let host = ExtensionHost::new(deps).await;
 

@@ -707,6 +707,7 @@ async fn lifecycle_dispatch_fence_failure_stays_retryable() {
         pkce_verifier_hash: None,
         authorization_code_hash: None,
         error: None,
+        step_state: None,
         continuation_emitted_at: None,
         created_at: now,
         updated_at: now,

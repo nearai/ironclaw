@@ -841,6 +841,7 @@ async fn slack_test_extension_host_with_manifest_commands(
             Ok(ExtensionBindings {
                 tools: Some(Arc::new(FakeToolAdapter)),
                 channel: Some(Arc::new(ironclaw_slack_extension::SlackChannelAdapter)),
+                device_link: None,
             })
         }
     }
@@ -881,6 +882,7 @@ async fn slack_test_extension_host_with_manifest_commands(
             reserved_capability_ids: Default::default(),
             reserved_ingress_routes: Default::default(),
             hook_deadline: Duration::from_secs(5),
+            linked_sessions: crate::LinkedSessionStore::unavailable(),
         })
         .await,
     );

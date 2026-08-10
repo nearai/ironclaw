@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
 use ironclaw_host_api::ids::{
     AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
 };
@@ -53,6 +54,18 @@ pub struct CredentialAccount {
     pub scopes: Vec<ProviderScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_identity: Option<OAuthProviderIdentity>,
+    /// How many times a linked-device session has been established against
+    /// this account. `0` for every account that is not a linked device.
+    ///
+    /// **Part of the identity of a live session, not decoration.** A user id
+    /// never changes across unlink/relink, so anything caching a session
+    /// (a pooled vendor client, an opened custody handle) has to key on this
+    /// too — bumping it is what invalidates the old credential's readers.
+    ///
+    /// `#[serde(default)]` because this is a persisted record: rows written
+    /// before linked devices existed carry no such key and must rehydrate.
+    #[serde(default)]
+    pub link_revision: u64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -79,6 +92,7 @@ impl fmt::Debug for CredentialAccount {
             )
             .field("scopes", &self.scopes)
             .field("provider_identity", &self.provider_identity)
+            .field("link_revision", &self.link_revision)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -486,6 +500,59 @@ pub enum CredentialAccountMutation {
     Update(CredentialAccountUpdate),
 }
 
+/// Addresses the opaque session material of exactly one linked account, at
+/// exactly one link revision.
+///
+/// The revision is part of the address, not a hint: a request presenting a
+/// stale one is refused ([`AuthProductError::LinkRevisionStale`]) rather than
+/// served, so a caller holding a handle from before an unlink cannot read or
+/// clobber the credential that replaced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaqueMaterialRequest {
+    pub scope: AuthProductScope,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+    pub link_revision: u64,
+}
+
+/// A loaded blob and the token to present on the next write.
+///
+/// Not `PartialEq`, not `Clone`-compared, and never `Debug`-printed in full:
+/// [`SessionBytes`] redacts to a length. The bytes are a full account
+/// credential in a vendor-private format that **this crate deliberately
+/// cannot read** — see [`CredentialAccountService::store_opaque_material`].
+#[derive(Debug)]
+pub struct OpaqueMaterialSnapshot {
+    pub material: SessionBytes,
+    pub version: LinkedSessionVersion,
+}
+
+/// A compare-and-swap write of opaque session material.
+#[derive(Debug)]
+pub struct OpaqueMaterialWrite {
+    pub target: OpaqueMaterialRequest,
+    /// The version the caller loaded. [`LinkedSessionVersion::absent`] is the
+    /// only value a genuine first write may present.
+    pub expected: LinkedSessionVersion,
+    pub material: SessionBytes,
+}
+
+/// What a compare-and-swap write did.
+#[derive(Debug)]
+pub enum OpaqueMaterialWriteOutcome {
+    /// The write applied; `version` is the token for the next one.
+    Stored { version: LinkedSessionVersion },
+    /// The write lost: someone else stored newer material.
+    ///
+    /// **This is the whole point of the method.** `SecretStorePort::put` is
+    /// last-writer-wins, and a rotating vendor auth key clobbered by a
+    /// concurrent write leaves a session the vendor rejects — a silently dead
+    /// link. Returning the current version lets the owner of the format
+    /// reload and merge; retrying the write unconditionally is exactly the
+    /// bug this exists to prevent.
+    Conflict { current: LinkedSessionVersion },
+}
+
 #[async_trait]
 pub trait CredentialAccountService: Send + Sync {
     async fn create_account(
@@ -529,6 +596,60 @@ pub trait CredentialAccountService: Send + Sync {
         &self,
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError>;
+
+    /// Load the opaque linked-device session material bound to an account.
+    ///
+    /// `Ok(None)` means "nothing stored yet"; a stale `link_revision` is an
+    /// error, not an absence, because the two demand different recoveries.
+    ///
+    /// Defaulted and fail-closed: a credential service with no linked-device
+    /// custody keeps compiling and refuses the call by name.
+    async fn load_opaque_material(
+        &self,
+        _request: OpaqueMaterialRequest,
+    ) -> Result<Option<OpaqueMaterialSnapshot>, AuthProductError> {
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "load_opaque_material",
+        })
+    }
+
+    /// Compare-and-swap the opaque linked-device session material.
+    ///
+    /// **This crate owns conflict *detection* and nothing else.** The blob is
+    /// opaque bytes here by design: merging two versions of a vendor session
+    /// (union the peer cache, take the newest cursor, never replace a live
+    /// auth key) requires reading a vendor-private structure, and the crate
+    /// that may read it is the extension package — not this one, which may not
+    /// name a vendor at all. So a lost CAS returns
+    /// [`OpaqueMaterialWriteOutcome::Conflict`] with the current version and
+    /// stops; the semantic merge, and its tests, live package-side.
+    ///
+    /// Implementations must not last-writer-wins, and must not inspect,
+    /// parse, log, or embed `material` in an error.
+    async fn store_opaque_material(
+        &self,
+        _write: OpaqueMaterialWrite,
+    ) -> Result<OpaqueMaterialWriteOutcome, AuthProductError> {
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "store_opaque_material",
+        })
+    }
+
+    /// Advance an account's `link_revision`, returning the updated record.
+    ///
+    /// Called once per (re)link, after custody is durable. The bump is what
+    /// invalidates every handle and cached client bound to the previous
+    /// revision, so it must be a single durable write, never a read-then-set
+    /// from a caller-supplied value.
+    async fn bump_link_revision(
+        &self,
+        _scope: &AuthProductScope,
+        _account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "bump_link_revision",
+        })
+    }
 }
 
 /// Stable credential-account owner fields used by read models that need to
@@ -1003,6 +1124,31 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
         self.release_refresh_lock(initial_account.id);
         result
     }
+
+    // Linked-device custody is not a provider conversation: there is no token
+    // to exchange and no refresh to serialize, so this decorator adds nothing
+    // and must not silently swallow the capability of the service it wraps.
+    async fn load_opaque_material(
+        &self,
+        request: OpaqueMaterialRequest,
+    ) -> Result<Option<OpaqueMaterialSnapshot>, AuthProductError> {
+        self.accounts.load_opaque_material(request).await
+    }
+
+    async fn store_opaque_material(
+        &self,
+        write: OpaqueMaterialWrite,
+    ) -> Result<OpaqueMaterialWriteOutcome, AuthProductError> {
+        self.accounts.store_opaque_material(write).await
+    }
+
+    async fn bump_link_revision(
+        &self,
+        scope: &AuthProductScope,
+        account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.accounts.bump_link_revision(scope, account_id).await
+    }
 }
 
 fn account_is_authorized_for_requester(
@@ -1108,9 +1254,31 @@ mod tests {
             refresh_secret: None,
             scopes: vec![ProviderScope::new("read").unwrap()],
             provider_identity: None,
+            link_revision: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    /// `link_revision` is additive on a **persisted** record: a row written
+    /// before linked devices existed carries no such key and must rehydrate to
+    /// `0` rather than failing the store open.
+    #[test]
+    fn an_account_row_written_without_link_revision_rehydrates_at_zero() {
+        let account = make_account(AuthProductScope::new(
+            owner_resource(InvocationId::new()),
+            AuthSurface::Web,
+        ));
+        let mut wire = serde_json::to_value(&account).expect("serialize");
+        let object = wire.as_object_mut().expect("account is a JSON object");
+        assert!(
+            object.remove("link_revision").is_some(),
+            "the field must be written; only its ABSENCE from legacy rows is defaulted"
+        );
+
+        let decoded: CredentialAccount =
+            serde_json::from_value(wire).expect("legacy row rehydrates");
+        assert_eq!(decoded.link_revision, 0);
     }
 
     /// Build a base ResourceScope for a known owner with a given invocation_id.

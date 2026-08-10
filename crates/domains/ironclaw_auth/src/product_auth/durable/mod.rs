@@ -955,6 +955,9 @@ where
             refresh_secret: request.refresh_secret,
             scopes: request.scopes,
             provider_identity,
+            // A newly minted account has never been linked as a device; the
+            // revision is advanced by `bump_link_revision`, never set here.
+            link_revision: 0,
             created_at: now,
             updated_at: now,
         };

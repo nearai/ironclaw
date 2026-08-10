@@ -811,6 +811,7 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
                 fallback_egress: Arc::clone(&self.fallback_egress),
             })),
             channel: Some(Arc::new(AcmeFixtureChannelAdapter)),
+            device_link: None,
         })
     }
 }
@@ -1743,6 +1744,7 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
             channel: Some(Arc::new(
                 ironclaw_telegram_extension::TelegramChannelAdapter::default(),
             )),
+            device_link: None,
         })
     }
 }

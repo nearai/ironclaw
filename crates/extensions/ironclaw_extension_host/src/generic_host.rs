@@ -48,8 +48,8 @@ use ironclaw_resources::ResourceGovernor;
 use crate::{
     BindError, ChannelConfigError, ChannelConfigService, DrainController, EgressFactory,
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    HookError, InstallationRecord, LoadContext, LoadedExtension, NativeExtensionFactory,
-    RehydratedInstallationRecordStore, SnapshotToolResolver,
+    HookError, InstallationRecord, LinkedSessionStore, LoadContext, LoadedExtension,
+    NativeExtensionFactory, RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 
 /// The composed generic host plus the resolver handle composition injects
@@ -212,6 +212,14 @@ pub async fn build_generic_extension_host(
             reserved_capability_ids: assembly.reserved_capability_ids,
             reserved_ingress_routes: assembly.reserved_ingress_routes,
             hook_deadline: assembly.hook_deadline,
+            // TODO(design): composition wires the credential-service-backed
+            // custody store (PLAN PR 5, "composition wiring"). Until it does,
+            // every deployment gets the fail-closed store: an extension can
+            // hold a handle and will be told custody is unavailable, which is
+            // the only honest answer while no linked-account material store
+            // exists. Silently handing out a handle that stores nothing would
+            // be the alternative, and that loses a session key.
+            linked_sessions: LinkedSessionStore::unavailable(),
         })
         .await,
     );
@@ -576,6 +584,11 @@ impl ExtensionEntrypoint for LaneEntrypoint {
         Ok(ExtensionBindings {
             tools: self.adapter.clone(),
             channel: self.channel.clone(),
+            // A runtime lane cannot carry a device-link handshake: the login is
+            // bound to a live connection the package owns across calls, which
+            // is exactly what a per-invocation lane does not have. A
+            // device-link extension binds through a native entrypoint.
+            device_link: None,
         })
     }
 }
@@ -599,6 +612,10 @@ impl ExtensionEntrypoint for SettlingEntrypoint {
                 }) as Arc<dyn ToolAdapter>
             }),
             channel: bindings.channel,
+            // Passed through undecorated: the settle legs this wrapper adds are
+            // resource reservations on a capability dispatch, and a device-link
+            // call is neither.
+            device_link: bindings.device_link,
         })
     }
 }
@@ -811,6 +828,7 @@ input_schema_ref = "schemas/echo.input.json"
                 bindings: ExtensionBindings {
                     tools: Some(Arc::new(FakeToolAdapter)),
                     channel: None,
+                    device_link: None,
                 },
             }))
         }

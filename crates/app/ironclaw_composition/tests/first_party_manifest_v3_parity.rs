@@ -58,6 +58,7 @@ fn setup_kind(setup: &RuntimeCredentialAccountSetup) -> &'static str {
         RuntimeCredentialAccountSetup::OAuth { .. } => "oauth",
         RuntimeCredentialAccountSetup::Retired => "retired",
         RuntimeCredentialAccountSetup::Pairing => "pairing",
+        RuntimeCredentialAccountSetup::DeviceLink => "device_link",
     }
 }
 
@@ -185,13 +186,19 @@ fn assert_static_projection_parity(dir: &str) {
         assert_eq!(a.visibility, b.visibility, "{dir}/{id}: visibility");
         // A `standard_op`-bound tool's schema refs are host-synthesized
         // (standardized messaging framework, task 9: `standard:messaging/<op>.
-        // {input,output}.v1`), replacing the package-authored refs the frozen
-        // v2 baseline recorded — an intentional divergence from the v2->v3
-        // rewrite this suite otherwise pins byte-for-byte, not a projection
-        // bug. Assert the synthesized shape instead of baseline equality;
-        // every other declared field (effects, permission, visibility,
-        // prompt_doc_ref, credentials) still must match the v2 baseline
-        // exactly, same as any other tool.
+        // {input,output}.<version>`), replacing the package-authored refs the
+        // frozen v2 baseline recorded — an intentional divergence from the
+        // v2->v3 rewrite this suite otherwise pins byte-for-byte, not a
+        // projection bug. Assert the synthesized shape instead of baseline
+        // equality; every other declared field (effects, permission,
+        // visibility, prompt_doc_ref, credentials) still must match the v2
+        // baseline exactly, same as any other tool.
+        //
+        // The output version is read from the op's own contract, not spelled
+        // `.v1`: `send_message` graduated to `.output.v2` (the
+        // `sent_unverified` evidence branch), and hardcoding a version here
+        // would pin the ratchet to whichever ops had graduated the day it was
+        // written.
         match b.standard_op {
             Some(op) => {
                 assert_eq!(
@@ -199,11 +206,22 @@ fn assert_static_projection_parity(dir: &str) {
                     format!("standard:messaging/{}.input.v1", op.op_name()),
                     "{dir}/{id}: standard_op input_schema_ref must be host-synthesized"
                 );
+                let output_version = op
+                    .contract()
+                    .unwrap_or_else(|| panic!("{dir}/{id}: bound to a reserved standard op"))
+                    .output_schema_version;
                 assert_eq!(
                     b.output_schema_ref
                         .as_ref()
                         .map(|schema_ref| schema_ref.as_str()),
-                    Some(format!("standard:messaging/{}.output.v1", op.op_name()).as_str()),
+                    Some(
+                        format!(
+                            "standard:messaging/{}.output.{}",
+                            op.op_name(),
+                            output_version.as_str()
+                        )
+                        .as_str()
+                    ),
                     "{dir}/{id}: standard_op output_schema_ref must be host-synthesized"
                 );
             }

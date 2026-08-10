@@ -58,6 +58,7 @@ pub fn lifecycle_credential_setup(
             }
         }
         RuntimeCredentialAccountSetup::Pairing => LifecycleExtensionCredentialSetup::Pairing,
+        RuntimeCredentialAccountSetup::DeviceLink => LifecycleExtensionCredentialSetup::DeviceLink,
         // Retired kinds exist only in legacy persisted records, never in live
         // manifests, so this arm is unreachable from the manifest-projection
         // path; fold to the default manual shape rather than inventing a
@@ -167,6 +168,9 @@ fn normalized_runtime_credential_setup(
         },
         RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
         RuntimeCredentialAccountSetup::Pairing => RuntimeCredentialAccountSetup::Pairing,
+        // No scopes to normalize — a device link carries the account's own
+        // authority, so the recipe declares an empty scope ceiling.
+        RuntimeCredentialAccountSetup::DeviceLink => RuntimeCredentialAccountSetup::DeviceLink,
         RuntimeCredentialAccountSetup::Retired => RuntimeCredentialAccountSetup::Retired,
     }
 }

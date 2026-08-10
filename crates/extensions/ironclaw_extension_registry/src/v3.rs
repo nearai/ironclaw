@@ -695,12 +695,7 @@ pub(crate) fn parse_v3(
     let auth = recipes
         .into_iter()
         .map(|(vendor, recipe)| {
-            let setup = match &recipe {
-                VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
-                    scopes: oauth.scopes.clone(),
-                },
-                VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
-            };
+            let setup = account_setup_for_recipe(&recipe);
             ResolvedAuthSurface {
                 vendor,
                 setup,
@@ -864,6 +859,27 @@ fn derived_host_ports(effects: &[EffectKind], sandboxed_runtime: bool) -> Vec<St
     }
 }
 
+/// Project a declared auth recipe onto the credential-account setup a runtime
+/// credential requirement carries.
+///
+/// One function, two call sites (the per-credential requirement and the
+/// per-vendor resolved auth surface) precisely because they must never
+/// disagree: a vendor whose surface says `oauth` while its credentials say
+/// `manual_token` produces a connect affordance that services a challenge the
+/// engine cannot mint.
+fn account_setup_for_recipe(recipe: &VendorAuthRecipe) -> RuntimeCredentialAccountSetup {
+    match recipe {
+        VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
+            scopes: oauth.scopes.clone(),
+        },
+        VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
+        // Display metadata only — the recipe declares no scopes and no
+        // endpoints, so there is nothing to carry onto the setup. Satisfaction
+        // is the stored session the device link produces.
+        VendorAuthRecipe::DeviceLink(_) => RuntimeCredentialAccountSetup::DeviceLink,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, private normalization helper pending a CredentialContext bundle if it grows, extension-runtime P2
 fn credential_from_v3(
     handle: &str,
@@ -886,12 +902,7 @@ fn credential_from_v3(
             vendor: vendor.as_str().to_string(),
         });
     };
-    let setup = match recipe {
-        VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
-            scopes: oauth.scopes.clone(),
-        },
-        VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
-    };
+    let setup = account_setup_for_recipe(recipe);
     referenced_vendors.insert(vendor.clone(), ());
     Ok(RawRuntimeCredentialV2 {
         handle: handle.to_string(),

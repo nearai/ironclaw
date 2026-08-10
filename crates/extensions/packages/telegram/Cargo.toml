@@ -15,6 +15,7 @@ layer = "products"
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 # Production deps only. `tracing` is here for one purpose: the attachment
 # transfer path must retain the cause of a provider parse failure server-side
@@ -38,6 +39,40 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+
+# --- Linked-device (MTProto) session half -------------------------------
+#
+# EXACT pins, deliberately: `=0.10.0` is a **security control**, not API
+# hygiene. The design's DC-address validation is airtight only because
+# 0.10.0's `update_config` parses Telegram's server-pushed DC list and then
+# discards it without calling `set_dc_option` — so every address the dialer
+# can reach comes from the compiled-in table or from a value we wrote, and
+# `Session::dc_option` (our `IronclawSession`) gates 100% of dials. Upstream
+# commit `5f94e83` ("Fix update_config did not set_dc_option") lands after
+# this release; adopting it starts flowing server-pushed addresses into the
+# session, and the validation seam must be re-verified before the pin moves.
+# See docs/internal/design/telegram-linked-device/PROPOSAL.md §3.4.
+grammers-client = "=0.10.0"
+# `default-features = false` is load-bearing: grammers-session's default
+# feature is `sqlite-storage`, which pulls `libsql` into this package for a
+# storage backend we never use (custody is `LinkedSessionPort`). Both
+# grammers-client and grammers-mtsender already disable it; matching them
+# keeps a database driver out of a channel package. `serde` supplies the
+# `PeerInfo`/`UpdatesState` derives the session blob codec needs.
+grammers-session = { version = "=0.10.0", default-features = false, features = [
+    "serde",
+] }
+grammers-tl-types = "=0.10.0"
+# The device-link flow receives login codes and account passwords as
+# `SecretString`; reading one is a single greppable `expose_secret()`.
+secrecy = "0.10"
+# The session blob carries 256-byte MTProto auth keys through an intermediate
+# base64 string on decode; that buffer is wiped rather than left in the heap.
+zeroize = "1"
+# Production `tokio` is new for this package (it was dev-only). The MTProto
+# sender runner is a spawned task — `rt` is the floor, `sync`/`time`/`macros`
+# carry the pool's locks, timers, and the per-link gate.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 # Property testing for the ingress boundary (#6524 workstream 9) — arrived

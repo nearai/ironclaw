@@ -485,6 +485,7 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
             expires_at: None,
             connection: None,
             pairing: None,
+            device_link: None,
         })
     }
 }

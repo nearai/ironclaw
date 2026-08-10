@@ -21,8 +21,10 @@
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::{
-    AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, PairingPromptView,
+    AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, DeviceLinkPromptView,
+    PairingPromptView,
 };
+use ironclaw_extension_contracts::device_link::DeviceLinkStep;
 use ironclaw_host_api::product_adapter_error::{ProductAdapterError, RedactedString};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
@@ -40,6 +42,7 @@ use crate::flow::{AuthChallenge, AuthFlowOwnerScope, TurnGateAuthFlowQuery};
 use crate::ids::{
     AuthGateRef, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl, TurnRunRef,
 };
+use crate::product_auth::device_link::DEVICE_LINK_POLL_INTERVAL_MILLIS;
 
 /// Map a manifest display string onto the projection's optional field: a blank
 /// value means the affordance does not exist, which is `None` on the wire. The
@@ -76,6 +79,11 @@ pub struct AuthChallengeView {
     pub authorization_url: Option<OAuthAuthorizationUrl>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pairing: Option<PairingAuthChallengeView>,
+    /// The device-link frame, when the flow is carrying one. Populated only
+    /// from a durable flow record: a credential *requirement* knows a link is
+    /// needed but nothing about an in-progress one, so it can set the
+    /// challenge kind and never this.
+    pub device_link: Option<DeviceLinkPromptView>,
 }
 
 impl AuthChallengeView {
@@ -90,6 +98,7 @@ impl AuthChallengeView {
         view.account_label = self.account_label.map(|label| label.as_str().to_string());
         view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
         view.expires_at = self.expires_at;
+        view.device_link = self.device_link;
         if let Some(pairing) = self.pairing {
             let connection = pairing.connection;
             // These are `Option` because the field may be genuinely ABSENT, and
@@ -242,6 +251,7 @@ pub async fn auth_prompt_view_for_blocked_auth(
         expires_at: None,
         connection: None,
         pairing: None,
+        device_link: None,
     };
     Ok(match challenge {
         Some(c) => c.enrich(base_view),
@@ -273,6 +283,17 @@ fn auth_prompt_from_credential_requirement(
         // onto the "unsupported challenge" fallback card.
         RuntimeCredentialAccountSetup::Pairing => {
             view.challenge_kind = Some(AuthPromptChallengeKind::Pairing);
+        }
+        // A device link IS a serviceable challenge, but only on a surface that
+        // can render a multi-step card — the frame itself (`device_link`) is
+        // populated by the auth engine's flow projection, never from a
+        // credential requirement, which knows nothing about an in-progress
+        // flow. Setting the kind here is what lets a caller route to the
+        // device-link card instead of the "unsupported challenge" fallback;
+        // the frame stays `None` until a flow exists.
+        RuntimeCredentialAccountSetup::DeviceLink => {
+            view.challenge_kind = Some(AuthPromptChallengeKind::DeviceLink);
+            view.account_label = Some(provider.clone());
         }
     }
     view.provider = Some(provider);
@@ -390,6 +411,7 @@ fn auth_challenge_to_view(
             expires_at: Some(*expires_at),
             // Product-auth OAuth relay: no channel-connection context.
             pairing: None,
+            device_link: None,
         },
         AuthChallenge::ManualTokenRequired {
             provider,
@@ -403,6 +425,28 @@ fn auth_challenge_to_view(
             authorization_url: None,
             expires_at: Some(*expires_at),
             pairing: None,
+            device_link: None,
+        },
+        AuthChallenge::DeviceLinkStep {
+            display_name,
+            step,
+            revision,
+            expires_at,
+            ..
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::DeviceLink,
+            provider: provider.clone(),
+            account_label: completed_account_label(step),
+            authorization_url: None,
+            expires_at: Some(*expires_at),
+            pairing: None,
+            device_link: Some(device_link_prompt_view(
+                provider,
+                display_name,
+                step,
+                *revision,
+                *expires_at,
+            )),
         },
         AuthChallenge::AccountSelectionRequired { .. }
         | AuthChallenge::ReauthorizeRequired { .. }
@@ -413,8 +457,81 @@ fn auth_challenge_to_view(
             authorization_url: None,
             expires_at: None,
             pairing: None,
+            device_link: None,
         },
     }
+}
+
+/// The label a completed link resolved to, so the generic `account_label`
+/// field carries it for surfaces that render nothing else.
+fn completed_account_label(step: &DeviceLinkStep) -> Option<CredentialAccountLabel> {
+    match step {
+        DeviceLinkStep::Completed { account_label, .. } => {
+            CredentialAccountLabel::new(account_label.clone()).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Project one durable device-link frame into the card's view.
+///
+/// Every string here is host-authored or already-validated step text; the
+/// vendor cannot push copy through this function, and the payload is read
+/// through the single `expose` accessor so the render site stays greppable.
+fn device_link_prompt_view(
+    provider: &AuthProviderId,
+    display_name: &str,
+    step: &DeviceLinkStep,
+    revision: u64,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> DeviceLinkPromptView {
+    let mut view = DeviceLinkPromptView {
+        provider: provider.as_str().to_string(),
+        display_name: display_name.to_string(),
+        step: step.kind(),
+        instructions: String::new(),
+        qr_payload: None,
+        code: None,
+        secret_label: None,
+        expires_at,
+        revision,
+        poll_interval_ms: DEVICE_LINK_POLL_INTERVAL_MILLIS,
+        retry_after_ms: None,
+        error_code: None,
+    };
+    match step {
+        DeviceLinkStep::Display { payload, .. } => {
+            view.instructions =
+                format!("Open {display_name} on your device and scan or open this to link it.");
+            view.qr_payload = Some(payload.expose().to_string());
+        }
+        DeviceLinkStep::AwaitingVendor { retry_in } => {
+            view.instructions = format!("Waiting for {display_name} to confirm the link.");
+            view.retry_after_ms = Some(u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX));
+        }
+        DeviceLinkStep::InputRequired { label, hint, .. } => {
+            view.instructions = hint
+                .clone()
+                .unwrap_or_else(|| format!("{display_name} needs one more value to finish."));
+            view.secret_label = Some(label.clone());
+        }
+        DeviceLinkStep::Completed {
+            vendor_user_ref, ..
+        } => {
+            // Showing the resolved identity is the ONLY control that makes a
+            // substituted login visible (PROPOSAL §3.2) — never drop it.
+            view.instructions = format!("Linked to {display_name} as {vendor_user_ref}.");
+        }
+        DeviceLinkStep::Failed { code, restartable } => {
+            view.instructions = if *restartable {
+                format!("Linking {display_name} did not finish. You can try again.")
+            } else {
+                format!("Linking {display_name} cannot be completed for this account.")
+            };
+            view.error_code = Some(*code);
+        }
+    }
+    view
 }
 
 #[cfg(test)]
@@ -447,6 +564,7 @@ mod tests {
             expires_at: None,
             connection: None,
             pairing: None,
+            device_link: None,
         }
     }
 
@@ -494,6 +612,7 @@ mod tests {
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            device_link: None,
             pairing: Some(PairingAuthChallengeView {
                 code: "ABCD2345".to_string(),
                 deep_link: Some("https://acme.test/pair?start=ABCD2345".to_string()),
@@ -538,6 +657,7 @@ mod tests {
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            device_link: None,
             pairing: Some(PairingAuthChallengeView {
                 code: "ABCD2345".to_string(),
                 deep_link: Some("   ".to_string()),

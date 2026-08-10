@@ -2305,6 +2305,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
         refresh_secret: None,
         scopes: vec![],
         provider_identity: None,
+        link_revision: 0,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3680,6 +3681,7 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
         refresh_secret: None,
         scopes: vec![],
         provider_identity: None,
+        link_revision: 0,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

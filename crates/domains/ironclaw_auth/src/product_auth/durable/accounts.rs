@@ -245,6 +245,47 @@ where
     ) -> Result<CredentialRefreshReport, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
     }
+
+    /// One durable compare-and-swap on the account record. Never a
+    /// caller-supplied value: the bump is what invalidates every handle and
+    /// pooled client bound to the previous revision, so a caller that could
+    /// *set* it could also replay one.
+    async fn bump_link_revision(
+        &self,
+        scope: &crate::AuthProductScope,
+        account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let (mut account, version) = self
+            .read_account(scope, account_id)
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        account.link_revision = account.link_revision.saturating_add(1);
+        account.updated_at = Utc::now();
+        self.write_account(&account, CasExpectation::Version(version))
+            .await?;
+        Ok(account)
+    }
+
+    // TODO(design): `load_opaque_material` / `store_opaque_material` are
+    // deliberately NOT implemented here yet, so this store inherits the
+    // trait's fail-closed default (`UnsupportedOperation`) rather than a
+    // silently last-writer-wins one.
+    //
+    // BLOCKED ON: the compare-and-swap write path is a `ironclaw_secrets`
+    // change, not an auth one — `SecretStorePort::put` is `CasExpectation::Any`
+    // today, and a rotating vendor auth key clobbered by a concurrent write is
+    // a silently dead link. The substrate needs a CAS-bearing put (a new port
+    // method plus its implementation) before this store can honour the
+    // contract; see the telegram-linked-device PROPOSAL §5.1 and §8.15.
+    //
+    // Until then the behaviour is exercised through the in-memory fake, which
+    // models the CAS, the revision gate and the conflict-returns-current-
+    // version rule in full.
 }
 
 #[async_trait]

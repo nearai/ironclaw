@@ -377,7 +377,14 @@ impl AuthEngine {
                 resolved.token_exchange_resource,
                 resolved.protected_resource_metadata_url,
             )),
-            VendorAuthRecipe::ApiKey(_) => Err(AuthProductError::MalformedConfig),
+            // Neither is an OAuth authorization-code recipe. `device_link`
+            // additionally has no engine-executable half at all — its
+            // mechanics live behind the extension's `DeviceLinkAdapter` — so
+            // asking this resolver for one is a configuration error, not a
+            // vendor failure.
+            VendorAuthRecipe::ApiKey(_) | VendorAuthRecipe::DeviceLink(_) => {
+                Err(AuthProductError::MalformedConfig)
+            }
         }
     }
 

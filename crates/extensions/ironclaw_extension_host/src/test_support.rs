@@ -5,8 +5,9 @@
 //! feature-gated seam) so the acme fixture and the state-machine contract
 //! tests share one construction path.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,6 +15,11 @@ use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
+use ironclaw_extension_contracts::device_link::{
+    DeviceLinkAdapter, DeviceLinkContext, DeviceLinkError, DeviceLinkFlowId, DeviceLinkInput,
+    DeviceLinkInputKind, DeviceLinkMode, DeviceLinkStep,
+};
+use ironclaw_extension_contracts::linked_session::LinkedAccountGrant;
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
@@ -24,6 +30,7 @@ use ironclaw_extension_registry::{
 use ironclaw_host_api::host_port::{
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
 };
+use ironclaw_host_api::ids::{ExtensionId, UserId};
 
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};
 use crate::lifecycle::{DrainController, EgressFactory, HookError};
@@ -153,6 +160,47 @@ host = "api.acme.example"
 methods = ["post"]
 "#;
 
+const DEVICE_LINK_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-link"
+name = "Acme Link"
+version = "0.1.0"
+description = "fixture: channel + device-link auth"
+trust = "third_party"
+
+[runtime]
+kind = "first_party"
+service = "acme-link"
+
+[[tools]]
+id = "acme-link.whoami"
+description = "Report the linked account."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acme-link/whoami.input.v1.json"
+
+[[tools.credentials]]
+handle = "acme_link_session"
+vendor = "acme-link"
+scopes = ["session"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[channel]
+id = "messages"
+display_name = "Acme link messages"
+inbound = false
+outbound = true
+conversation_model = "continuous"
+
+[auth.acme-link]
+method = "device_link"
+display_name = "Acme personal account"
+default_mode_label = "Scan a code"
+instructions = "Open Acme on your phone and scan the code."
+"#;
+
 const TOOL_AND_CHANNEL_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "acme"
@@ -275,6 +323,13 @@ pub fn outbound_only_channel_manifest() -> ResolvedExtensionManifest {
 /// A tool + channel + auth resolved manifest.
 pub fn tool_and_channel_manifest() -> ResolvedExtensionManifest {
     resolve(TOOL_AND_CHANNEL_MANIFEST)
+}
+
+/// A channel + `device_link` auth resolved manifest — the one auth shape whose
+/// mechanics an extension binds rather than declares. Its recipe declares no
+/// alternate mode, so the host-side mode check has something to refuse.
+pub fn device_link_channel_manifest() -> ResolvedExtensionManifest {
+    resolve(DEVICE_LINK_CHANNEL_MANIFEST)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -407,6 +462,132 @@ impl ChannelAdapter for FakeChannelAdapter {
         _egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         Ok(DeliveryReport { parts: Vec::new() })
+    }
+}
+
+/// Which adapter method a [`FakeDeviceLinkAdapter`] call recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeDeviceLinkCallKind {
+    Begin(DeviceLinkMode),
+    Poll,
+    SubmitInput(DeviceLinkInputKind),
+    Cancel,
+    Revoke,
+}
+
+/// One recorded device-link adapter call, with everything the host scoped it
+/// to. Secrets are deliberately not recorded — only the input's kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeDeviceLinkCall {
+    pub kind: FakeDeviceLinkCallKind,
+    pub flow_id: DeviceLinkFlowId,
+    pub extension_id: ExtensionId,
+    pub user_id: UserId,
+    pub account: Option<LinkedAccountGrant>,
+    /// Whether the pre-scoped custody handle answered a `load`. Proves the
+    /// host wired a usable handle without the adapter naming an account.
+    pub session_loaded: bool,
+}
+
+/// A scripted [`DeviceLinkAdapter`] that records every call and never speaks a
+/// vendor protocol.
+///
+/// Deliberately *not* self-limiting: it answers as fast as it is asked, so a
+/// test that sees a poll floor or a TTL observed is seeing host enforcement.
+#[derive(Default)]
+pub struct FakeDeviceLinkAdapter {
+    pub calls: Arc<Mutex<Vec<FakeDeviceLinkCall>>>,
+    /// Steps handed out in order; exhausted scripts answer `AwaitingVendor`.
+    pub steps: Arc<Mutex<VecDeque<DeviceLinkStep>>>,
+    /// When set, every call fails with this error instead.
+    pub fail_with: Arc<Mutex<Option<DeviceLinkError>>>,
+}
+
+impl FakeDeviceLinkAdapter {
+    /// A fake whose calls answer `steps` in order.
+    pub fn scripted(steps: impl IntoIterator<Item = DeviceLinkStep>) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            steps: Arc::new(Mutex::new(steps.into_iter().collect())),
+            fail_with: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn recorded(&self) -> Vec<FakeDeviceLinkCall> {
+        self.calls.lock().expect("fake device-link calls").clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.calls.lock().expect("fake device-link calls").len()
+    }
+
+    async fn record(
+        &self,
+        kind: FakeDeviceLinkCallKind,
+        ctx: &DeviceLinkContext<'_>,
+    ) -> Result<DeviceLinkStep, DeviceLinkError> {
+        let session_loaded = ctx.session.load().await.is_ok();
+        self.calls
+            .lock()
+            .expect("fake device-link calls")
+            .push(FakeDeviceLinkCall {
+                kind,
+                flow_id: ctx.flow_id.clone(),
+                extension_id: ctx.extension_id.clone(),
+                user_id: ctx.user_id.clone(),
+                account: ctx.account.cloned(),
+                session_loaded,
+            });
+        if let Some(error) = self
+            .fail_with
+            .lock()
+            .expect("fake device-link failure")
+            .clone()
+        {
+            return Err(error);
+        }
+        Ok(self
+            .steps
+            .lock()
+            .expect("fake device-link steps")
+            .pop_front()
+            .unwrap_or(DeviceLinkStep::AwaitingVendor {
+                retry_in: Duration::from_millis(1),
+            }))
+    }
+}
+
+#[async_trait]
+impl DeviceLinkAdapter for FakeDeviceLinkAdapter {
+    async fn begin(
+        &self,
+        ctx: &DeviceLinkContext<'_>,
+        mode: DeviceLinkMode,
+    ) -> Result<DeviceLinkStep, DeviceLinkError> {
+        self.record(FakeDeviceLinkCallKind::Begin(mode), ctx).await
+    }
+
+    async fn poll(&self, ctx: &DeviceLinkContext<'_>) -> Result<DeviceLinkStep, DeviceLinkError> {
+        self.record(FakeDeviceLinkCallKind::Poll, ctx).await
+    }
+
+    async fn submit_input(
+        &self,
+        ctx: &DeviceLinkContext<'_>,
+        input: DeviceLinkInput,
+    ) -> Result<DeviceLinkStep, DeviceLinkError> {
+        self.record(FakeDeviceLinkCallKind::SubmitInput(input.kind()), ctx)
+            .await
+    }
+
+    async fn cancel(&self, ctx: &DeviceLinkContext<'_>) -> Result<(), DeviceLinkError> {
+        self.record(FakeDeviceLinkCallKind::Cancel, ctx).await?;
+        Ok(())
+    }
+
+    async fn revoke(&self, ctx: &DeviceLinkContext<'_>) -> Result<(), DeviceLinkError> {
+        self.record(FakeDeviceLinkCallKind::Revoke, ctx).await?;
+        Ok(())
     }
 }
 
