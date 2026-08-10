@@ -52,7 +52,6 @@ async fn extension_capability_missing_from_builtin_policy_gets_one_shot_lease_te
         WorkspaceMountPolicy::Shared(MountView::default()),
         MountView::default(),
         MountView::default(),
-        MountView::default(),
         source,
     );
     let request_id = ApprovalRequestId::new();
@@ -125,7 +124,6 @@ async fn extension_spawn_capability_uses_extension_surface_terms_before_default_
         WorkspaceMountPolicy::Shared(MountView::default()),
         MountView::default(),
         MountView::default(),
-        MountView::default(),
         source,
     );
     let request_id = ApprovalRequestId::new();
@@ -179,7 +177,6 @@ async fn active_extension_capability_allows_persistent_approval_when_manifest_al
         WorkspaceMountPolicy::Shared(MountView::default()),
         MountView::default(),
         MountView::default(),
-        MountView::default(),
         source,
     );
     let gate = approval_gate_record(
@@ -220,7 +217,6 @@ async fn active_extension_capability_allows_persistent_approval_when_manifest_as
         WorkspaceMountPolicy::Shared(MountView::default()),
         MountView::default(),
         MountView::default(),
-        MountView::default(),
         source,
     );
     let gate = approval_gate_record(
@@ -257,7 +253,6 @@ async fn notification_channels_set_allows_persistent_approval() {
         Arc::new(builtin_capability_policy().expect("policy parses")),
         Arc::new(ExtensionRegistry::new()),
         WorkspaceMountPolicy::Shared(MountView::default()),
-        MountView::default(),
         MountView::default(),
         MountView::default(),
         ExtensionCapabilitySurfaceSource::default(),
@@ -300,7 +295,6 @@ async fn active_extension_capability_rejects_persistent_approval_when_manifest_d
         WorkspaceMountPolicy::Shared(MountView::default()),
         MountView::default(),
         MountView::default(),
-        MountView::default(),
         source,
     );
     let gate = approval_gate_record(
@@ -335,7 +329,6 @@ async fn per_caller_workspace_policy_leases_only_the_gates_own_subtree() {
         Arc::new(builtin_capability_policy().expect("policy parses")),
         Arc::new(ExtensionRegistry::new()),
         WorkspaceMountPolicy::PerCaller,
-        MountView::default(),
         MountView::default(),
         MountView::default(),
         ExtensionCapabilitySurfaceSource::default(),

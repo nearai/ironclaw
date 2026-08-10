@@ -37,7 +37,7 @@ pub(super) async fn set_notification_channels(
         let outbound_id = notification_channel_target_id_from_reborn(reborn_id)?;
         let entry = service
             .targets
-            .resolve_outbound_delivery_target(&scope, &outbound_id)
+            .resolve_notification_target(&scope, &outbound_id)
             .await
             .map_err(map_outbound_repository_error)?
             .ok_or_else(notification_channel_not_found)?;

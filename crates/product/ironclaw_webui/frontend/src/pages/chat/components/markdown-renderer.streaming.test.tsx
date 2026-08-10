@@ -11,6 +11,7 @@ vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
 vi.mock("streamdown", async () => {
   const { createElement } = await import("react");
   return {
+    defaultRemarkPlugins: {},
     Streamdown: ({ children, isAnimating, mode }) =>
       createElement(
         "div",

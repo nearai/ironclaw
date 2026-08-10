@@ -28,7 +28,15 @@ impl DeploymentChannelBinding {
         let Some(channel) = resolved.channel.as_ref() else {
             return Err(DeploymentChannelRegistryError::MissingChannel { extension_id });
         };
-        if !channel.inbound || channel.ingress.is_none() {
+        // An inbound channel is only mountable with its ingress declared. An
+        // outbound-only channel (web push) is a legitimate deployment binding
+        // with nothing to mount — delivery resolution still needs its adapter
+        // + egress declarations, and `resolve_channel_ingress` already guards
+        // the inbound/ingress pair at lookup.
+        if channel.inbound && channel.ingress.is_none() {
+            return Err(DeploymentChannelRegistryError::MissingInboundIngress { extension_id });
+        }
+        if !channel.inbound && !channel.outbound {
             return Err(DeploymentChannelRegistryError::MissingInboundIngress { extension_id });
         }
         Ok(Self {
@@ -118,6 +126,28 @@ mod tests {
             registry
                 .resolve_channel_ingress("acme-chat", "wrong")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn outbound_only_channel_binds_without_ingress_and_never_resolves_ingress() {
+        let manifest = Arc::new(crate::test_support::outbound_only_channel_manifest());
+        let registry = DeploymentChannelRegistry::try_new([DeploymentChannelBinding::new(
+            Arc::clone(&manifest),
+            Arc::new(crate::test_support::FakeChannelAdapter::default()),
+        )
+        .expect("an outbound-only channel is a legitimate deployment binding")])
+        .expect("deployment registry validates");
+
+        let binding = registry
+            .extension("acme-push")
+            .expect("outbound-only binding resolves for delivery");
+        assert_eq!(binding.resolved.id, manifest.id);
+        assert!(
+            registry
+                .resolve_channel_ingress("acme-push", "events")
+                .is_none(),
+            "an outbound-only channel mounts no ingress route"
         );
     }
 

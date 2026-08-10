@@ -621,7 +621,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ActivePreferenceTargetCodecs` port beside its sibling
         // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
         // no logic. Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 7_748),
+        // 7_748 -> 7_752 (2026-08-08, web-push channel): +4 lines for the
+        // `VapidAuthorization` arm in the channel egress injection validator
+        // — schema vocabulary only; signing lives in ironclaw_host_runtime.
+        // 7_752 -> 7_758 (2026-08-09, notifications capability): +6 lines for the
+        // `ChannelDescriptor.notifications` field + its doc — a manifest capability
+        // declaration only; notification delivery gating lives in
+        // ironclaw_outbound (DeliveryTargetCapabilities) and product resolution.
+        ("ironclaw_extension_contracts", 7_758),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -636,7 +643,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // sandbox transport now exposes graceful lifecycle release. This is
         // contract vocabulary; execution and provider cleanup remain in the
         // sandbox runtime lane.
-        ("ironclaw_host_api", 18_799),
+        // Raised 18_799 -> 18_832 by the web-push channel: the
+        // `RuntimeCredentialTarget::VapidAuthorization` injection kind and the
+        // `VapidCredentialMaterialV1` material schema (RFC 8292 vocabulary,
+        // declarations only); ES256 signing stays at the host egress
+        // credential chokepoint in ironclaw_host_runtime.
+        // 18_832 -> 18_922 (web-push review): `VapidCredentialMaterialV1` gained
+        // a redacting `Debug`, a `validate_shape` fallible shape check, and a
+        // dependency-free base64url decode helper — all declaration/validation
+        // on the type's own shape, no execution.
+        ("ironclaw_host_api", 18_922),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -680,7 +696,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // growth is the three admin scrape request DTOs and the wire
         // `RebornListThreadsResponse` reuse — declarations only; authorization,
         // audit, and artifact building stay in ironclaw_assistant.
-        ("ironclaw_product_contracts", 15_800),
+        // Raised 15_800 -> 15_840 by the web-push channel: the browser
+        // enrollment wire DTO family (`RebornWebPush*` status/subscribe/
+        // unsubscribe shapes) — declarations only; validation and storage stay
+        // in ironclaw_web_push and ironclaw_assistant.
+        // 15_840 -> 15_879: the web_push descriptor module (the status view +
+        // subscribe/unsubscribe command descriptors) joined per the
+        // transport/product boundary — new feature descriptors are declared
+        // here, not added to the frozen webui→assistant residue.
+        // 15_879 -> 15_885 (review): the `endpoint_digest` field + its doc on
+        // `RebornWebPushSubscriptionInfo` for account-scoped enrollment
+        // correlation.
+        ("ironclaw_product_contracts", 15_885),
         ("ironclaw_prompt_envelope", 832),
     ];
 
@@ -1446,8 +1473,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_webui",
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
+            // The web-push channel package (adapter/codec/target provider) and
+            // its domain crate: the binary constructs the adapter around the
+            // late-bound `WebPushRuntimeSlot` (a domain type) and hands the
+            // slot to composition, which installs storage at assembly.
+            "ironclaw_web_push",
+            "ironclaw_web_push_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_push (the domain type behind the web-push binding's late-bound runtime slot). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,

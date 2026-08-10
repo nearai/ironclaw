@@ -528,6 +528,24 @@ fn apply_credential_injection(
                     reason: "credential injection body did not re-serialize".to_string(),
                 })?;
         }
+        RuntimeCredentialTarget::VapidAuthorization => {
+            let now_unix_seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "system clock is before the Unix epoch".to_string(),
+                })?;
+            let url = parsed_request_url(&request.url, parsed_url)?;
+            let header_value =
+                super::vapid::vapid_authorization_header(value, url, now_unix_seconds).map_err(
+                    |error| RuntimeHttpEgressError::Credential {
+                        reason: error.sanitized_reason().to_string(),
+                    },
+                )?;
+            request
+                .headers
+                .push(("authorization".to_string(), header_value));
+        }
     }
     Ok(())
 }

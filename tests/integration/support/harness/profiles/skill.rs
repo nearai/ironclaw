@@ -57,6 +57,20 @@ pub(crate) async fn skill_management_tools() -> HarnessResult<HostRuntimeCapabil
 /// a system-scoped skill by `RebornIntegrationGroup::skill_activation_tools`.
 /// Mirrors `skill_management_tools`/`project_tools`.
 pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult<ToolsProfile> {
+    skill_activation_tools_profile_with_user_skills(tenant, None, &[])
+}
+
+/// [`skill_activation_tools_profile`], plus USER-scoped skills seeded before the runtime boots.
+///
+/// A test cannot seed these itself after `build()`: skills are read from the database tree and the
+/// host-disk store is migrated into it once at boot, so a later write is never picked up. `actor`
+/// is the group's resolved `canonical_binding.actor_user_id` — an opaque hash, so it has to be
+/// passed in rather than derived from the profile's owner string.
+pub(crate) fn skill_activation_tools_profile_with_user_skills(
+    tenant: &TenantId,
+    actor: Option<ironclaw_host_api::ids::UserId>,
+    user_skills: &[(&str, &str, &str, bool)],
+) -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![CapabilityId::new(
             ironclaw_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
@@ -86,7 +100,8 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
             "duplicate",
             "a system-scoped skill",
             "SYSTEM_DUPLICATE_SKILL_SENTINEL",
-        ),
+        )
+        .with_user_skill_fixtures(actor, user_skills),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
@@ -101,4 +116,15 @@ pub(crate) async fn skill_activation_tools(
     tenant: &TenantId,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
     skill_activation_tools_profile(tenant)?.build().await
+}
+
+/// See [`skill_activation_tools_profile_with_user_skills`].
+pub(crate) async fn skill_activation_tools_with_user_skills(
+    tenant: &TenantId,
+    actor: ironclaw_host_api::ids::UserId,
+    user_skills: &[(&str, &str, &str, bool)],
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    skill_activation_tools_profile_with_user_skills(tenant, Some(actor), user_skills)?
+        .build()
+        .await
 }

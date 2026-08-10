@@ -2,6 +2,7 @@
 import { useOutletContext } from "react-router";
 import React from "react";
 import { ConfirmDialog } from "../../design-system/confirm-dialog";
+import { SelectMenu } from "../../design-system/select-menu";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -102,20 +103,6 @@ function LogEntry({ entry }) {
   );
 }
 
-function ToolbarSelect({ value, onChange, options, labelKey, t }) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.currentTarget.value)}
-      className="v2-select h-8 min-w-0 rounded-[8px] px-2.5 py-0 text-xs"
-    >
-      {options.map(
-        (opt) => (<option key={opt} value={opt}>{t(labelKey(opt))}</option>)
-      )}
-    </select>
-  );
-}
-
 function ScopeChip({ label, value, scopeKey }) {
   return (
     <span
@@ -178,6 +165,14 @@ export function LogsPage() {
 
   const hasEntries = entries.length > 0;
   const activeScope = scope?.active || [];
+  const levelOptions = LEVELS.map((level) => ({
+    value: level,
+    label: t(level === "all" ? "logs.levelAll" : `logs.level.${level}`),
+  }));
+  const serverLevelOptions = SERVER_LEVELS.map((level) => ({
+    value: level,
+    label: t(`logs.level.${level}`),
+  }));
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -186,12 +181,14 @@ export function LogsPage() {
         className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-2"
       >
         {/* Level filter */}
-        <ToolbarSelect
+        <SelectMenu
           value={levelFilter}
           onChange={setLevelFilter}
-          options={LEVELS}
-          labelKey={(opt) => (opt === "all" ? "logs.levelAll" : `logs.level.${opt}`)}
-          t={t}
+          options={levelOptions}
+          size="sm"
+          align="left"
+          ariaLabel={t("logs.levelAll")}
+          data-testid="logs-level-filter"
         />
 
         {/* Target filter */}
@@ -266,12 +263,14 @@ export function LogsPage() {
         (
           <div className="flex w-full items-center gap-2 border-t border-[var(--v2-panel-border)] pt-2 text-xs text-[var(--v2-text-muted)]">
             <span>{t("logs.serverLevel")}</span>
-            <ToolbarSelect
+            <SelectMenu
               value={serverLevel}
               onChange={changeServerLevel}
-              options={SERVER_LEVELS}
-              labelKey={(opt) => `logs.level.${opt}`}
-              t={t}
+              options={serverLevelOptions}
+              size="sm"
+              align="left"
+              ariaLabel={t("logs.serverLevel")}
+              data-testid="logs-server-level"
             />
             <span className="ml-auto tabular-nums">
               {t("logs.entryCount", { count: totalCount })}

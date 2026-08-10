@@ -31,7 +31,6 @@ pub(crate) trait ApprovalHarness {
     /// `None` under a per-caller workspace policy: this harness mints lease
     /// terms from a fixed view, which only a shared-workspace deployment has.
     fn workspace_mounts(&self) -> Option<&MountView>;
-    fn skill_mounts(&self) -> Option<&MountView>;
     fn memory_mounts(&self) -> Option<&MountView>;
     fn system_extensions_lifecycle_mounts(&self) -> Option<&MountView>;
     fn auto_approve_settings(&self) -> Option<&Arc<ComposedAutoApproveSettingStore>>;
@@ -58,10 +57,6 @@ impl ApprovalHarness for RebornRuntimeStores {
 
     fn workspace_mounts(&self) -> Option<&MountView> {
         crate::factory::test_support::shared_workspace_view(&self.workspace_mounts)
-    }
-
-    fn skill_mounts(&self) -> Option<&MountView> {
-        Some(&self.skill_mounts)
     }
 
     fn memory_mounts(&self) -> Option<&MountView> {
@@ -130,9 +125,13 @@ pub(crate) async fn invoke_with_standalone_approval(
     let workspace_mounts = runtime
         .workspace_mounts()
         .expect("standalone runtime workspace mounts"); // safety: test-only helper in #[cfg(test)] module.
-    let skill_mounts = runtime
-        .skill_mounts()
-        .expect("standalone runtime skill mounts"); // safety: test-only helper in #[cfg(test)] module.
+    // Derived from the invocation's own scope, exactly as `PolicyApprovalLeaseTermsProvider::
+    // skill_mounts_for` does in production. Reading a pre-built, scope-free view off the runtime is
+    // what let this harness assert lease terms over `/projects/skills` while every skill capability
+    // wrote to `/tenants/<t>/users/<u>/skills`.
+    let skill_mounts =
+        crate::runtime_mounts::db_backed_skill_management_mount_view(&context.resource_scope)
+            .expect("standalone skill mounts scope"); // safety: test-only helper in #[cfg(test)] module.
     let memory_mounts = runtime
         .memory_mounts()
         .expect("standalone runtime memory mounts"); // safety: test-only helper in #[cfg(test)] module.
@@ -168,7 +167,7 @@ pub(crate) async fn invoke_with_standalone_approval(
             let approval = match capability_policy.lease_approval_for(
                 policy_action,
                 workspace_mounts,
-                skill_mounts,
+                &skill_mounts,
                 memory_mounts,
                 system_extensions_lifecycle_mounts,
             ) {

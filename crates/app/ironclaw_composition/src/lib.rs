@@ -402,6 +402,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/secrets",
     "/authorization",
     "/outbound",
+    "/web-push",
     "/run-state",
     "/checkpoint-state",
     "/approvals",

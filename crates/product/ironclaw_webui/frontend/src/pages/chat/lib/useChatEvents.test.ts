@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 import {
   isTerminalToolStatus,
+  messagesFromTimeline,
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages";
@@ -44,6 +45,8 @@ const ENGLISH_FAILURE_COPY = {
   "chat.failure.connectionLost":
     "Connection to the server was lost. Please reconnect and try again.",
   "chat.failure.run": "The run failed before producing a reply.",
+  "chat.failure.noProgress":
+    "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
   "chat.failure.runCategory": "The run failed: {detail}.",
   "chat.failure.recoveryRequired":
     "The run is awaiting recovery — backend reported `recovery_required`.",
@@ -1687,6 +1690,10 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
     harness.messages[0].content,
     "The run failed because the execution driver rejected the request.",
   );
+  // #7369 — the failed run's id must land on the error message itself so the
+  // WebUI can offer the same run-artifact/trace download a completed reply
+  // gets; without it there is no way to capture a trace for a failed run.
+  assert.equal(harness.messages[0].turnRunId, "run-failed-1");
 });
 
 test("useChatEvents: restored run and stream failures use the selected language", () => {
@@ -1825,6 +1832,7 @@ test("useChatEvents: repeated failed projection updates existing error content",
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-failed-update");
   assert.equal(harness.messages[0].content, "driver_protocol_violation");
+  assert.equal(harness.messages[0].turnRunId, "run-failed-update");
 });
 
 test("useChatEvents: typed failed event appends visible error", () => {
@@ -1935,6 +1943,11 @@ test("useChatEvents: adjacent duplicate run failures collapse across unknown and
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-known-failure");
   assert.equal(harness.messages[0].content, failureCategory);
+  // #7369 — promoting an unknown-run failure bubble to its now-known run id
+  // must also backfill `turnRunId`, or the trace-download action stays
+  // permanently unavailable for a run that only resolved its id after the
+  // bubble was first created.
+  assert.equal(harness.messages[0].turnRunId, "run-known-failure");
 
   harness.replaceMessages([
     ...harness.messages,
@@ -1960,6 +1973,7 @@ test("useChatEvents: adjacent duplicate run failures collapse across unknown and
   assert.equal(harness.messages.length, 3);
   assert.equal(harness.messages[2].id, "err-run-next-failure");
   assert.equal(harness.messages[2].content, failureCategory);
+  assert.equal(harness.messages[2].turnRunId, "run-next-failure");
 });
 
 test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
@@ -2676,6 +2690,145 @@ test("useChatEvents: terminal failure settles the run as not successful", () => 
   // A failed run still settles so the timeline reload recovers tool
   // input/output previews for tools that ran before it terminated.
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+});
+
+function assertNoProgressFailureClearsDraft(terminalStatus) {
+  const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            text: {
+              id: "text:run-1:1",
+              run_id: "run-1",
+              body: "I will inspect the available tools.",
+            },
+          },
+          {
+            text: {
+              id: "text:run-1:2",
+              run_id: "run-1",
+              body: "Let me check what capabilities are available to provide more useful",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-1",
+              status: terminalStatus,
+              failure_category: "no_progress_detected",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.role),
+    ["assistant", "error"],
+    "a terminal failure must not leave an unfinished assistant draft presented as a reply",
+  );
+  assert.equal(harness.messages[0].content, "I will inspect the available tools.");
+  assert.equal(harness.messages[0].isStreaming, false);
+  assert.equal(harness.messages[1].id, "err-run-1");
+  assert.equal(
+    harness.messages[1].content,
+    "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            text: {
+              id: "text:run-1:2",
+              run_id: "run-1",
+              body: "a late replay of the unfinished draft",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.role),
+    ["assistant", "error"],
+    "a late projection must not restore the unfinished draft after failure",
+  );
+}
+
+for (const terminalStatus of ["failed", "recovery_required"]) {
+  test(`useChatEvents: no-progress ${terminalStatus} replaces an unfinished assistant draft`, () => {
+    assertNoProgressFailureClearsDraft(terminalStatus);
+  });
+}
+
+test("useChatEvents: run failure preserves completed durable timeline phases", () => {
+  const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
+  const durableMessages = messagesFromTimeline([
+    {
+      message_id: "tool-result-1",
+      kind: "tool_result",
+      status: "finalized",
+      content: "The tool completed before the run failed.",
+      turn_run_id: "run-1",
+    },
+  ]);
+  harness.replaceMessages([
+    ...durableMessages,
+    {
+      id: "text-run-1:draft",
+      role: "assistant",
+      content: "Let me check what capabilities are available to provide more useful",
+      turnRunId: "run-1",
+      isFinalReply: false,
+      isStreaming: true,
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-1",
+              status: "failed",
+              failure_category: "no_progress_detected",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-tool-result-1", "err-run-1"],
+    "a failure must remove only the live draft, not a completed durable phase",
+  );
+  assert.equal(
+    harness.messages[0].content,
+    "The tool completed before the run failed.",
+  );
 });
 
 test("useChatEvents: terminal cancellation settles the run as not successful", () => {

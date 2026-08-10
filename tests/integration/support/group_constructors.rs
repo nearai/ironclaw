@@ -123,6 +123,17 @@ impl RebornIntegrationGroup {
         Self::builder().extension_delivery_with_gated_write().await
     }
 
+    /// [`Self::extension_delivery_with_gated_write`] PLUS the complete
+    /// web-push channel: deployment binding (adapter + codec + catalog
+    /// provider) around one late-bound runtime slot, the slot on the
+    /// composition input (so `assemble_web_push` installs the subscription
+    /// store and seeds the VAPID credential), the bundled manifest, and a
+    /// vendor router answering push-service POSTs with `201` (`410` for the
+    /// reserved dead-subscription token).
+    pub async fn extension_delivery_with_web_push() -> HarnessResult<Self> {
+        Self::builder().extension_delivery_with_web_push().await
+    }
+
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
     /// backend configured at composition time. Proves the
     /// provider-instance readiness check does not false-positive once an
@@ -221,6 +232,19 @@ impl RebornIntegrationGroup {
     /// enabled.
     pub async fn skill_activation_tools() -> HarnessResult<Self> {
         Self::builder().skill_activation_tools().await
+    }
+
+    /// [`Self::skill_activation_tools`] with USER-scoped skills already in the store.
+    ///
+    /// Seeding after the group is built does not work: skills are read from the database tree and
+    /// the host-disk store is migrated into it at boot, so a later write is invisible to the run.
+    /// Each entry is `(name, description, prompt, installed)`.
+    pub async fn skill_activation_tools_with_user_skills(
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<Self> {
+        Self::builder()
+            .skill_activation_tools_with_user_skills(user_skills)
+            .await
     }
 
     /// C-MULTIUSER: core built-in tools (memory/http/shell/…) with **per-actor
@@ -574,6 +598,36 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
+    /// Build a delivery group with the web-push channel wired. See
+    /// [`RebornIntegrationGroup::extension_delivery_with_web_push`].
+    pub async fn extension_delivery_with_web_push(
+        mut self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let (web_push_profile, _web_push_slot) = super::super::harness::profiles::extension::extension_delivery_with_web_push_tools_profile()?;
+        let host_runtime = build_group_capability_with_base(web_push_profile, &base)
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime.reborn_services_for_test().ok_or(
+                    "extension_delivery_with_web_push harness is missing its RebornServices bundle",
+                )?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
     /// Build a visibility-probe group. See
     /// [`RebornIntegrationGroup::extension_visibility_probe`].
     pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
@@ -696,15 +750,28 @@ impl RebornIntegrationGroupBuilder {
     /// pre-seeds the system fixtures before runtime construction so the warmed
     /// system-skill descriptor cache sees them.
     pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        self.skill_activation_tools_with_user_skills(&[]).await
+    }
+
+    /// See [`RebornIntegrationGroup::skill_activation_tools_with_user_skills`].
+    pub async fn skill_activation_tools_with_user_skills(
+        self,
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
         // above) rather than a separately hardcoded literal, so the E-SKILL
         // skill context source is built for the same tenant the turn runs
         // under — see `HostRuntimeCapabilityHarness::skill_activation_tools`.
-        let host_runtime = super::super::harness::profiles::skill::skill_activation_tools(
-            &base.canonical_binding.tenant_id,
-        )
-        .await?;
+        // Both ids come from the group's ALREADY-resolved binding, so the fixtures land under the
+        // same (tenant, actor) the turn runs as -- the only pair whose `/skills` mount it reads.
+        let host_runtime =
+            super::super::harness::profiles::skill::skill_activation_tools_with_user_skills(
+                &base.canonical_binding.tenant_id,
+                base.canonical_binding.actor_user_id.clone(),
+                user_skills,
+            )
+            .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
