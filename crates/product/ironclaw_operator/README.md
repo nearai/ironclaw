@@ -2,7 +2,8 @@
 
 The deployment-operator control plane: LLM provider administration (registry
 write side, operator-scoped keys, active provider+model selection, catalog
-overlay, live reload, NEAR AI / OpenAI Codex logins), the operator log ring,
+overlay, tenant policy, user-scoped model preferences, live reload, and NEAR AI
+/ OpenAI Codex logins), the operator log ring,
 and OS service lifecycle. A different kind of "operator" than an installed
 extension's own management surface — this is the person running the
 deployment, not a channel. It implements ports declared in

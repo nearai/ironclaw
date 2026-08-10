@@ -20,8 +20,8 @@ use ironclaw_product_contracts::surface::{
 use super::{ProductCapabilityInvoker, RebornServices};
 
 use ironclaw_product_contracts::operator_llm::{
-    LlmConfigSnapshot, SetActiveLlmRequest, SetUserModelPolicyRequest, UpsertLlmProviderRequest,
-    UserModelCatalog,
+    LlmConfigSnapshot, SetActiveLlmRequest, SetUserModelPolicyRequest,
+    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -119,6 +119,24 @@ where
         Ok(())
     }
 
+    pub(super) async fn invoke_user_model_preference_set(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: serde_json::Value,
+    ) -> Result<(), ProductSurfaceError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        let request: SetUserModelPreferenceRequest =
+            serde_json::from_value(input).map_err(|_| llm_config_input_error("input"))?;
+        service
+            .set_user_model_preference(caller, request)
+            .await
+            .map_err(ProductSurfaceError::from)?;
+        Ok(())
+    }
+
     pub(super) async fn build_llm_config_view(
         &self,
         caller: ProductSurfaceCaller,
@@ -142,6 +160,19 @@ where
         };
         service
             .user_model_catalog(caller)
+            .await
+            .map_err(ProductSurfaceError::from)
+    }
+
+    pub(super) async fn build_user_model_preference_view(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, ProductSurfaceError> {
+        let Some(service) = self.llm_config.as_ref() else {
+            return Ok(UserModelPreference { model: None });
+        };
+        service
+            .user_model_preference(caller)
             .await
             .map_err(ProductSurfaceError::from)
     }

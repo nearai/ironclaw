@@ -415,6 +415,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/engine",
     "/skills",
     "/workspace",
+    "/llm-preferences",
 ];
 
 /// The canonical global `/system` subroots, each exposed as its own read-only

@@ -735,7 +735,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // growth is limited to the policy persistence port, user-safe DTOs,
         // and transport-consumed descriptors; validation, storage, and request
         // enforcement stay in owning crates.
-        ("ironclaw_product_contracts", 16_024),
+        // Raised 16_024 -> 16_089 by #7420 (per-user model preference): the
+        // growth is limited to the caller-scoped persistence port, request/view
+        // DTOs, and transport descriptors; validation, storage, and resolution
+        // precedence remain in operator/product owners.
+        ("ironclaw_product_contracts", 16_089),
         ("ironclaw_prompt_envelope", 832),
     ];
 

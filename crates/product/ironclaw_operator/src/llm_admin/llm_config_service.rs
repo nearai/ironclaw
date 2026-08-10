@@ -33,7 +33,9 @@ use ironclaw_product_contracts::operator_llm::{
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     ModelSelectionPolicy, ModelSelectionPolicyStore, ModelSelectionPolicyStoreError,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    SetActiveLlmRequest, SetUserModelPolicyRequest, UpsertLlmProviderRequest, UserModelCatalog,
+    SetActiveLlmRequest, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
+    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference, UserModelPreferenceStore,
+    UserModelPreferenceStoreError,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -199,6 +201,7 @@ pub struct RebornLlmConfigService {
     repo: ProviderRepo,
     keys: LlmKeyStore,
     model_policy_store: Option<Arc<dyn ModelSelectionPolicyStore>>,
+    user_model_preference_store: Option<Arc<dyn UserModelPreferenceStore>>,
     reload: Option<Arc<dyn LlmReloadTrigger>>,
     /// The runtime's NEAR AI session manager — the same instance the live
     /// provider reads its token from, so a completed login takes effect on
@@ -216,6 +219,7 @@ impl RebornLlmConfigService {
             repo,
             keys,
             model_policy_store: None,
+            user_model_preference_store: None,
             reload: None,
             nearai_session: None,
             nearai_login_states: Arc::new(NearAiLoginStateStore::new()),
@@ -226,6 +230,15 @@ impl RebornLlmConfigService {
     /// Attach tenant-scoped persistence for user-selectable model policy.
     pub fn with_model_policy_store(mut self, store: Arc<dyn ModelSelectionPolicyStore>) -> Self {
         self.model_policy_store = Some(store);
+        self
+    }
+
+    /// Attach caller-scoped persistence for user model preferences.
+    pub fn with_user_model_preference_store(
+        mut self,
+        store: Arc<dyn UserModelPreferenceStore>,
+    ) -> Self {
+        self.user_model_preference_store = Some(store);
         self
     }
 
@@ -349,6 +362,38 @@ impl RebornLlmConfigService {
             .read(caller)
             .await
             .map_err(map_model_policy_store_error)
+    }
+
+    async fn read_user_model_preference(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let Some(store) = self.user_model_preference_store.as_ref() else {
+            return Ok(UserModelPreference { model: None });
+        };
+        store
+            .read(caller)
+            .await
+            .map(|preference| preference.unwrap_or(UserModelPreference { model: None }))
+            .map_err(map_user_model_preference_store_error)
+    }
+
+    async fn active_model_policy(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<Option<ModelSelectionPolicy>, LlmConfigServiceError> {
+        let Some(policy) = self.read_model_policy(caller).await? else {
+            return Ok(None);
+        };
+        let snapshot = self.build_provider_snapshot().await?;
+        Ok(policy
+            .provider_id
+            .eq(snapshot
+                .active
+                .as_ref()
+                .map(|active| active.provider_id.as_str())
+                .unwrap_or_default())
+            .then_some(policy))
     }
 
     async fn build_snapshot(
@@ -821,6 +866,48 @@ impl LlmConfigService for RebornLlmConfigService {
         Ok(catalog_from_policy(policy))
     }
 
+    async fn user_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        self.read_user_model_preference(&caller).await
+    }
+
+    async fn set_user_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let store = self
+            .user_model_preference_store
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+        let policy = self
+            .active_model_policy(&caller)
+            .await?
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+        let model = match request.model {
+            Some(model) => {
+                let model = validated_model_id("model", &model)?;
+                if !policy
+                    .allowed_models
+                    .iter()
+                    .any(|allowed| allowed == &model)
+                {
+                    return Err(invalid_model("model is not allowed for this workspace"));
+                }
+                Some(model)
+            }
+            None => None,
+        };
+        let preference = UserModelPreference { model };
+        store
+            .write(&caller, &preference)
+            .await
+            .map_err(map_user_model_preference_store_error)?;
+        Ok(preference)
+    }
+
     async fn resolve_user_model(
         &self,
         caller: ProductSurfaceCaller,
@@ -842,7 +929,14 @@ impl LlmConfigService for RebornLlmConfigService {
             };
         }
 
-        let selected = requested_model.unwrap_or_else(|| policy.workspace_default.clone());
+        let preference = if requested_model.is_none() {
+            self.read_user_model_preference(&caller).await?.model
+        } else {
+            None
+        };
+        let selected = requested_model
+            .or(preference)
+            .unwrap_or_else(|| policy.workspace_default.clone());
         if !policy.allowed_models.iter().any(|model| model == &selected) {
             return Err(invalid_model("model is not allowed for this workspace"));
         }
@@ -1502,6 +1596,15 @@ fn map_model_policy_store_error(error: ModelSelectionPolicyStoreError) -> LlmCon
     }
 }
 
+fn map_user_model_preference_store_error(
+    error: UserModelPreferenceStoreError,
+) -> LlmConfigServiceError {
+    match error {
+        UserModelPreferenceStoreError::Unavailable => LlmConfigServiceError::Unavailable,
+        UserModelPreferenceStoreError::InvalidData => LlmConfigServiceError::Internal,
+    }
+}
+
 fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceError {
     use crate::RebornProviderAdminError as E;
     match error {
@@ -1523,12 +1626,12 @@ mod tests {
     use ironclaw_config::{RebornHome, RebornProfile};
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
-    use ironclaw_product_contracts::test_support::fakes::{
-        FakeOperatorSecretValueStore, OperatorSecretValueOp,
-    };
     use ironclaw_product_contracts::operator_llm::{
         SetUserModelPreferenceRequest, UserModelPreference, UserModelPreferenceStore,
         UserModelPreferenceStoreError,
+    };
+    use ironclaw_product_contracts::test_support::fakes::{
+        FakeOperatorSecretValueStore, OperatorSecretValueOp,
     };
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
@@ -1637,16 +1740,13 @@ mod tests {
             caller: &ProductSurfaceCaller,
             preference: &UserModelPreference,
         ) -> Result<(), UserModelPreferenceStoreError> {
-            self.preferences
-                .lock()
-                .expect("preference lock")
-                .insert(
-                    (
-                        caller.tenant_id.as_str().to_string(),
-                        caller.user_id.as_str().to_string(),
-                    ),
-                    preference.clone(),
-                );
+            self.preferences.lock().expect("preference lock").insert(
+                (
+                    caller.tenant_id.as_str().to_string(),
+                    caller.user_id.as_str().to_string(),
+                ),
+                preference.clone(),
+            );
             Ok(())
         }
     }
@@ -1696,9 +1796,9 @@ mod tests {
             .expect("persist active provider");
         let service = RebornLlmConfigService::new(boot, key_store())
             .with_model_policy_store(Arc::new(InMemoryModelPolicyStore::default()))
-            .with_user_model_preference_store(Arc::new(
-                InMemoryUserModelPreferenceStore::default(),
-            ));
+            .with_user_model_preference_store(
+                Arc::new(InMemoryUserModelPreferenceStore::default()),
+            );
         (temp, service)
     }
 
@@ -1852,10 +1952,7 @@ mod tests {
             Some("model-a".to_string()),
         );
         service
-            .set_user_model_preference(
-                user.clone(),
-                SetUserModelPreferenceRequest { model: None },
-            )
+            .set_user_model_preference(user.clone(), SetUserModelPreferenceRequest { model: None })
             .await
             .expect("reset preference");
         assert_eq!(

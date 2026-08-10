@@ -22,10 +22,11 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LlmConfigService,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
-    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
-    UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+    LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID, LlmConfigService, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
+    USER_MODEL_PREFERENCE_VIEW, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -4139,6 +4140,11 @@ where
             id if id == USER_MODEL_CATALOG_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_user_model_catalog_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == USER_MODEL_PREFERENCE_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_preference_view(caller).await?;
                 views::view_page(response)
             }
             id if id == THREADS_VIEW.id => {

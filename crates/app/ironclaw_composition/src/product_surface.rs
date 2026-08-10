@@ -312,8 +312,13 @@ pub(crate) fn build_llm_config_service(
     let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
         Arc::clone(&runtime.scoped_filesystem),
     ));
+    let user_model_preference_store =
+        Arc::new(ironclaw_operator::FilesystemUserModelPreferenceStore::new(
+            Arc::clone(&runtime.scoped_filesystem),
+        ));
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys)
-        .with_model_policy_store(model_policy_store);
+        .with_model_policy_store(model_policy_store)
+        .with_user_model_preference_store(user_model_preference_store);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);
     }

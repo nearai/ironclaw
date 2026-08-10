@@ -344,6 +344,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderDelete,
     LlmActiveSet,
     LlmUserModelPolicySet,
+    LlmUserModelPreferenceSet,
     ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
@@ -373,6 +374,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
             LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID => Some(Self::LlmUserModelPolicySet),
+            LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID => Some(Self::LlmUserModelPreferenceSet),
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
@@ -403,6 +405,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
             Self::LlmUserModelPolicySet => "user model policy updated",
+            Self::LlmUserModelPreferenceSet => "user model preference updated",
             Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
@@ -445,6 +448,11 @@ impl ProductCapabilityHandler {
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
             Self::LlmUserModelPolicySet => {
                 services.invoke_user_model_policy_set(caller, input).await
+            }
+            Self::LlmUserModelPreferenceSet => {
+                services
+                    .invoke_user_model_preference_set(caller, input)
+                    .await
             }
             Self::ExtensionRegisterHostedMcp => {
                 let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
@@ -637,6 +645,7 @@ mod tests {
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
             LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+            LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,

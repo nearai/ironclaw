@@ -121,10 +121,11 @@ use ironclaw_product_contracts::ironhub::{
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_llm::{
-    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, USER_MODEL_CATALOG_VIEW,
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
+    USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView, ProductOutboundEnvelope,
@@ -962,6 +963,13 @@ impl StubServices {
                     models: vec!["model-a".to_string(), "model-b".to_string()],
                 })
                 .expect("user model catalog payload"),
+                next_cursor: None,
+            }),
+            id if id == USER_MODEL_PREFERENCE_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(UserModelPreference {
+                    model: Some("model-b".to_string()),
+                })
+                .expect("user model preference payload"),
                 next_cursor: None,
             }),
             id if id == THREADS_VIEW.id => {
@@ -6611,6 +6619,65 @@ async fn user_model_catalog_does_not_require_operator_capability() {
         services.view_queries.lock().expect("lock").as_slice()[0].view_id,
         USER_MODEL_CATALOG_VIEW.id
     );
+}
+
+#[tokio::test]
+async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    assert_eq!(
+        read_json(get_response).await,
+        serde_json::json!({ "model": "model-b" })
+    );
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let put_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"model-a"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert_eq!(
+        view_ids,
+        vec![
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+        ]
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "model": "model-a" }));
 }
 
 #[tokio::test]

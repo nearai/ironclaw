@@ -36,8 +36,16 @@ use crate::views::RebornViewDescriptor;
 pub const LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID: &str = "builtin.llm_user_model_policy_set";
 pub const LLM_USER_MODEL_POLICY_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID);
+pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID: &str =
+    "builtin.llm_user_model_preference_set";
+pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID);
 pub const USER_MODEL_CATALOG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "user_model_catalog",
+    paginated: false,
+};
+pub const USER_MODEL_PREFERENCE_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "user_model_preference",
     paginated: false,
 };
 
@@ -131,10 +139,31 @@ pub trait LlmConfigService: Send + Sync {
         Err(LlmConfigServiceError::Unavailable)
     }
 
+    /// Return the caller's durable model preference.
+    ///
+    /// `model: None` means the user follows the workspace default. The default
+    /// keeps deployments without a preference store backward compatible.
+    async fn user_model_preference(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Ok(UserModelPreference { model: None })
+    }
+
+    /// Replace the caller's durable model preference.
+    async fn set_user_model_preference(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
     /// Resolve an optional user-requested model through the tenant policy.
     ///
-    /// A configured policy returns either the validated requested model or its
-    /// workspace default. An unconfigured policy preserves the legacy hint.
+    /// A configured policy resolves explicit request, user preference, then
+    /// workspace default, validating the selected model against the policy.
+    /// An unconfigured policy preserves the legacy explicit hint.
     async fn resolve_user_model(
         &self,
         _caller: ProductSurfaceCaller,
@@ -530,6 +559,20 @@ pub struct SetUserModelPolicyRequest {
     pub allowed_models: Vec<String>,
 }
 
+/// Caller-scoped model preference. `None` follows the workspace default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserModelPreference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// User request replacing their caller-scoped model preference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetUserModelPreferenceRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// Persistence port for tenant-scoped model policies.
 ///
 /// The filesystem-backed implementation belongs to composition, which owns
@@ -552,6 +595,28 @@ pub trait ModelSelectionPolicyStore: Send + Sync {
 /// Opaque store failure; backend details remain on the implementing side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSelectionPolicyStoreError {
+    Unavailable,
+    InvalidData,
+}
+
+/// Persistence port for caller-scoped model preferences.
+#[async_trait]
+pub trait UserModelPreferenceStore: Send + Sync {
+    async fn read(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<Option<UserModelPreference>, UserModelPreferenceStoreError>;
+
+    async fn write(
+        &self,
+        caller: &ProductSurfaceCaller,
+        preference: &UserModelPreference,
+    ) -> Result<(), UserModelPreferenceStoreError>;
+}
+
+/// Opaque preference-store failure; backend details remain private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserModelPreferenceStoreError {
     Unavailable,
     InvalidData,
 }
