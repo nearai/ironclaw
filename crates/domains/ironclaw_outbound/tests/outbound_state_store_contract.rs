@@ -885,7 +885,7 @@ async fn record_delivery_attempt_reopen_gate_requires_vendor_egress_not_attempte
             .record_delivery_attempt(base)
             .await
             .expect("record call must not error");
-        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
         assert_eq!(attempts.len(), 1);
         assert_eq!(
             attempts[0].status,
@@ -893,6 +893,43 @@ async fn record_delivery_attempt_reopen_gate_requires_vendor_egress_not_attempte
             "a modern row with vendor_egress: Some(NotAttempted) must reopen"
         );
         assert_eq!(attempts[0].failure_kind, None);
+    }
+
+    // Post-egress shape with a reopen-permitted kind: `Some(Attempted)` must
+    // block reopen on its own, independent of `permits_reopen()`. This is
+    // the shape a future writer would produce if it settled
+    // `TransportUnavailable` after `adapter.deliver` — exactly the class of
+    // bug the provenance gate exists to catch.
+    {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(backend);
+        let delivery_id = OutboundDeliveryId::new();
+        let base =
+            prepared_delivery_attempt(delivery_id, scope.clone(), "reply-post-egress-provenance");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+        seeded.vendor_egress = Some(VendorEgressProvenance::Attempted);
+        store
+            .record_delivery_attempt(seeded)
+            .await
+            .expect("seed failed row");
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error for a no-op");
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            OutboundDeliveryStatus::Failed,
+            "Some(Attempted) must block reopen even for a permits_reopen kind"
+        );
+        assert_eq!(
+            attempts[0].vendor_egress,
+            Some(VendorEgressProvenance::Attempted)
+        );
     }
 }
 
@@ -2521,6 +2558,25 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
         .await;
     assert!(matches!(
         failed_without_failure,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    // A `Failed` write must carry `vendor_egress` provenance: omitting it
+    // would silently strip provenance from the durable row, and
+    // `attempt_reopens_stale_failure` treats a provenance-less row as legacy
+    // and refuses to reopen it forever.
+    let failed_without_vendor_egress = store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Failed,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+            vendor_egress: None,
+        })
+        .await;
+    assert!(matches!(
+        failed_without_vendor_egress,
         Err(OutboundError::InvalidRequest { .. })
     ));
 
