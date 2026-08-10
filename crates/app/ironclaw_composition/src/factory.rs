@@ -716,6 +716,47 @@ pub(super) use with_shared_host_runtime_wiring;
 /// here, at build time, from declarative connection config — construction no
 /// longer performs database I/O. The `Prebuilt` arm is the caller-supplied
 /// test escape hatch and is preferred verbatim when present.
+/// Connections the process journal opens for itself.
+///
+/// The journal issues one heartbeat per running turn plus its group-commit
+/// flusher's writes, and nothing else uses this pool — which is exactly why two
+/// connections are enough. The point is not capacity, it is that a heartbeat
+/// never waits behind event-store, trigger, or result-read traffic.
+const PROCESS_JOURNAL_POOL_MAX_SIZE: usize = 2;
+
+/// The pools a PostgreSQL deployment runs on: the shared data plane, and a small
+/// dedicated one for the process journal.
+pub(crate) struct PostgresPools {
+    pub(crate) data_plane: deadpool_postgres::Pool,
+    /// `None` when the caller handed in an already-opened pool and there is no
+    /// connection config to open a second one from; the journal then shares the
+    /// data-plane pool, as it always did.
+    pub(crate) process_journal: Option<deadpool_postgres::Pool>,
+}
+
+fn open_postgres_pools_from_source(
+    source: PostgresPoolSource,
+) -> Result<PostgresPools, RebornBuildError> {
+    match source {
+        PostgresPoolSource::Prebuilt(pool) => Ok(PostgresPools {
+            data_plane: pool,
+            process_journal: None,
+        }),
+        PostgresPoolSource::Config(connection) => {
+            let process_journal = ironclaw_event_store::open_postgres_pool_with_tls_options(
+                connection.url.clone(),
+                PROCESS_JOURNAL_POOL_MAX_SIZE,
+                connection.tls_options,
+            )?
+            .into_driver();
+            Ok(PostgresPools {
+                data_plane: open_postgres_pool_from_source(PostgresPoolSource::Config(connection))?,
+                process_journal: Some(process_journal),
+            })
+        }
+    }
+}
+
 fn open_postgres_pool_from_source(
     source: PostgresPoolSource,
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {

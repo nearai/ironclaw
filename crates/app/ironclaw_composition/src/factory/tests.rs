@@ -1524,6 +1524,73 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     assert_eq!(scope.agent_id, Some(identity.agent_id));
 }
 
+/// The process journal must reach the same rows over a different connection.
+/// If the mount set drifted, a deployment's journal would silently move and every
+/// in-flight run would become invisible; if the handle were shared, the heartbeat
+/// would go back to queueing behind data-plane traffic.
+#[tokio::test]
+async fn process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_root() {
+    let data_plane_backend = Arc::new(InMemoryBackend::new());
+    let journal_backend = Arc::new(InMemoryBackend::new());
+    let data_plane = crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(
+        &data_plane_backend,
+    ))
+    .expect("data-plane composite");
+    let journal =
+        crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(&journal_backend))
+            .expect("journal composite");
+
+    let journal_roots: Vec<String> = journal
+        .mounts()
+        .await
+        .expect("journal mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    let data_plane_roots: Vec<String> = data_plane
+        .mounts()
+        .await
+        .expect("data-plane mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        journal_roots, data_plane_roots,
+        "the journal must resolve the same virtual roots, or its rows move"
+    );
+    assert!(
+        journal_roots.iter().any(|root| root == "/tenants"),
+        "process rows live under /tenants; got {journal_roots:?}"
+    );
+    assert!(
+        !Arc::ptr_eq(&data_plane, &journal),
+        "the journal must not be handed the data-plane filesystem"
+    );
+
+    // Both handles resolve a process-row path; in production they address the
+    // same database rows over different connection pools.
+    let path =
+        ironclaw_host_api::path::VirtualPath::new("/tenants/probe/processes").expect("probe path");
+    for (label, filesystem) in [("journal", &journal), ("data plane", &data_plane)] {
+        filesystem
+            .put(
+                &path,
+                ironclaw_filesystem::Entry::bytes(b"probe".to_vec()),
+                ironclaw_filesystem::CasExpectation::Any,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} handle must serve process-row paths: {error}"));
+        assert!(
+            filesystem
+                .get(&path)
+                .await
+                .unwrap_or_else(|error| panic!("{label} read: {error}"))
+                .is_some(),
+            "{label} handle must read back its own write"
+        );
+    }
+}
+
 #[tokio::test]
 async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
     let filesystem =
