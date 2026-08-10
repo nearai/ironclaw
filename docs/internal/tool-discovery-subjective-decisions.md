@@ -366,3 +366,31 @@ construction site.
 **Alternative considered:** Retain the fluent `.with_mode(...)` override and
 document the default. Rejected because the unsafe intermediate value remains a
 valid production object and documentation cannot enforce the call sequence.
+
+## D20 — Keep `namespaces` as the default after corrected 100-tool comparison
+
+**Decision:** Keep unpinned `namespaces` as the production default and retain
+`bridged` as an explicit, deployment-reviewed optimization.
+
+**Evidence:** The corrected v2 runner executed 56 exact-head observations at
+commit `1a674e7724`: two arms, seven task classes, and one cold plus three warm
+repetitions against the 100-tool semantic catalog. `namespaces` completed 26/28
+(92.9%) with a 21.6s overall median; `bridged` completed 24/28 (85.7%) with a
+14.6s median. Both had zero forbidden-tool attempts. The simple calendar and
+upload tasks were materially faster with pins, but the two-step Gmail-to-calendar
+workflow completed 2/4 under `namespaces` and 0/4 under `bridged`. One bridged
+workflow also invoked the pinned calendar-list tool before attempting creation.
+Several unrelated task/arm groups hit the provider's roughly 187s tail, so the
+latency difference is directional rather than a clean causal estimate.
+
+**Why:** Pins buy latency by spending standing context and steering attention
+toward selected primitives. That is valuable for a known narrow workflow, but
+the stricter argument-and-order scorer confirms the same end-to-end correctness
+risk seen in the earlier 500-tool exploratory run. The default should optimize
+for task completion; deployments may opt into pins after validating their own
+workflow mix.
+
+**Alternative considered:** Select `bridged` because its overall median was
+7.0s lower. Rejected because the completion gate failed and the median mixes
+very different provider-tail behavior across task classes. A latency win does
+not compensate for a lower end-to-end success rate.

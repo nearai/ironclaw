@@ -135,8 +135,9 @@ per-task observations so a broad score cannot hide a failed capability.
 
 `failure`, when present, uses a stable category such as `retrieval_miss`,
 `invalid_arguments`, `authorization_denied`, `approval_blocked`,
-`provider_error`, or `task_incomplete`. Raw prompts, user content, credentials,
-and tool arguments are not benchmark dimensions and must not be logged.
+`provider_error`, or `task_incomplete`. The local synthetic fixture validates
+task-owned argument fields, but raw prompts, user content, credentials, and tool
+arguments are not retained in aggregate benchmark observations.
 
 ## Required scenarios
 
