@@ -621,7 +621,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ActivePreferenceTargetCodecs` port beside its sibling
         // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
         // no logic. Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 7_748),
+        // 7_748 -> 7_759 by #7076 (RFC 7617 Basic credential target): the
+        // channel-descriptor vocabulary for the Basic injection target is
+        // declarations only; enforcement stays in host_runtime. Count read
+        // from this test's own failure message after merging main.
+        ("ironclaw_extension_contracts", 7_759),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -636,7 +640,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // sandbox transport now exposes graceful lifecycle release. This is
         // contract vocabulary; execution and provider cleanup remain in the
         // sandbox runtime lane.
-        ("ironclaw_host_api", 18_799),
+        // 18_799 -> 18_819 by #7076 (RFC 7617 Basic credential target): the
+        // `RuntimeCredentialTarget::Basic` declaration, its username
+        // validation, and wire-format round-trip coverage are contract
+        // vocabulary; composition, injection, and enforcement stay in
+        // host_runtime. Count read from this test's own failure message
+        // after merging main.
+        ("ironclaw_host_api", 18_819),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

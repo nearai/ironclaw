@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
@@ -28,9 +29,10 @@ use ironclaw_extension_host::ExtensionLifecycleManager;
 use super::catalog::{
     CatalogOrigin, IronHubManifestSource, catalog, classify, classify_gate_and_digest,
     compact_skill_summary, compact_tool_summary, entry_matches, invalid,
-    network_policy_for_url_from_origin, sha256_hex, skill_summary, tool_summary,
-    validate_artifact_for_origin, validate_artifact_url, validate_hub_name, validate_manifest,
-    validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest,
+    network_policy_for_url_from_origin, sha256_hex, skill_file_byte_cap, skill_summary,
+    tool_summary, validate_artifact_for_origin, validate_artifact_url, validate_hub_name,
+    validate_manifest, validate_private_manifest, validate_private_manifest_origin,
+    verify_signed_manifest,
 };
 use super::link_service::{IronhubLinkStateError, IronhubLinkStateStore};
 use super::model::{
@@ -48,6 +50,8 @@ struct CachedManifest {
 
 static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+const MAX_SKILL_FILE_DOWNLOAD_CONCURRENCY: usize = 8;
 
 pub trait RebornIronHubRuntime {
     fn ironhub_skill_management(&self) -> Arc<ScopedSkillManagementPort>;
@@ -307,8 +311,28 @@ impl IronHubService {
                     .as_ref()
                     .map(CatalogOrigin::redacted_source_url)
                     .unwrap_or_else(|| entry.skill_md.url.clone());
+                let private_origin_ref = private_origin.as_ref();
+                let files = stream::iter(entry.files.iter().cloned())
+                    .map(|file| async move {
+                        self.download_verified(
+                            &file.artifact,
+                            skill_file_byte_cap(),
+                            private_origin_ref,
+                        )
+                        .await
+                        .map(|contents| (file.path, contents))
+                    })
+                    .buffered(MAX_SKILL_FILE_DOWNLOAD_CONCURRENCY)
+                    .try_collect::<Vec<_>>()
+                    .await?;
                 let installed = self
-                    .install_skill(entry.name.as_str(), &content, &source_url, options.force)
+                    .install_skill(
+                        entry.name.as_str(),
+                        &content,
+                        &files,
+                        &source_url,
+                        options.force,
+                    )
                     .await?;
                 LifecycleProductResponse {
                     package_ref: Some(
@@ -430,12 +454,26 @@ impl IronHubService {
         &self,
         name: &str,
         content: &str,
+        files: &[(String, Vec<u8>)],
         source_url: &str,
         force: bool,
     ) -> Result<ironclaw_skills::SkillInstallResult, IronHubCommandError> {
+        let bundle: Vec<ironclaw_skills::SkillInstallFile<'_>> = files
+            .iter()
+            .map(|(path, contents)| ironclaw_skills::SkillInstallFile {
+                relative_path: path.as_str(),
+                contents: contents.as_slice(),
+            })
+            .collect();
         let first = self
             .skill_management
-            .install_from_url_for_scope(self.scope.clone(), Some(name), content, source_url)
+            .install_from_url_for_scope(
+                self.scope.clone(),
+                Some(name),
+                content,
+                &bundle,
+                source_url,
+            )
             .await;
         let Err(error) = first else {
             return first.map_err(skill_install_error);
@@ -454,7 +492,13 @@ impl IronHubService {
             .map_err(skill_install_error)?;
         match self
             .skill_management
-            .install_from_url_for_scope(self.scope.clone(), Some(name), content, source_url)
+            .install_from_url_for_scope(
+                self.scope.clone(),
+                Some(name),
+                content,
+                &bundle,
+                source_url,
+            )
             .await
         {
             Ok(result) => Ok(result),
