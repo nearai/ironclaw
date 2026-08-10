@@ -13,26 +13,40 @@ import { channelSetupError } from "./channel-setup-api";
 // straight to `submitDeviceLinkInput` and never retained: the host takes
 // custody of the resulting session, and the browser never sees it.
 //
-// These call the EXISTING generic product-auth routes. A device link is an
-// `AuthFlowRecord` like any other, and `flow_status(scope, flow_id)` is generic
-// over flows — the route is merely *named* `oauth/...` for historical reasons.
-// PROPOSAL §8.12 is explicit that the backend work is "additive flow-status
-// fields (step, revision, display, retry-after); route input submission to the
-// driver" — i.e. EXTEND these, never a parallel `/device-link` namespace.
+// Route shape, and why it is a mix.
 //
-// TODO(backend): the status route must carry the additive device-link frame,
-// and secret submission must route to the device-link driver. Both are small
-// extensions of the handlers already mounted in
-// `crates/product/ironclaw_webui/src/product_auth/mod.rs`.
+// STATUS is genuinely shared: a device link IS an `AuthFlowRecord`, and
+// `flow_status(scope, flow_id)` fetches the record and returns its status with
+// no OAuth-specific logic. PROPOSAL §8.12 asks for "additive flow-status
+// fields" on exactly this response — so polling extends the existing route.
+// NAMING WART: that route is spelled `oauth/flow/...` for historical reasons
+// even though the object it serves is generic. Renaming it to
+// `/product-auth/flow/{flow_id}/status` (keeping the old spelling as an alias
+// for shipped OAuth clients) is the right follow-up; it is a route-descriptor
+// change, not part of this feature.
+//
+// START, INPUT and CANCEL are NOT shared, because the operations differ:
+//   - start takes a link MODE (QR vs phone); OAuth start builds an authorize URL.
+//   - input carries a typed kind (identifier | code | password) plus the step
+//     REVISION it was typed against; manual-token submit is "paste an API key".
+//   - cancel must ask the vendor to log the device out, or an accepted-but-
+//     abandoned link leaves an orphan authorization on the user's account
+//     (PROPOSAL §4.3). Nothing existing does that.
+//
+// TODO(backend): the three device-link routes below must be added to
+// `crates/product/ironclaw_webui/src/product_auth/mod.rs` and dispatched to
+// `DeviceLinkFlowDriver`. They are work this feature owes, NOT a dependency on
+// another branch — an earlier revision of this file claimed the latter.
 // The generic flow-status route (shared with OAuth — same record type).
 export function deviceLinkStatusPath(flowId) {
   return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status`;
 }
 
-// Start rides the extension auth-start route; input rides the generic
-// secret-submit route. Neither is device-link specific.
-const START_PATH = "/api/reborn/product-auth/extension/oauth/start";
-const INPUT_PATH = "/api/reborn/product-auth/manual-token/secret/submit";
+// Device-link specific — see the header. Not yet mounted; TODO(backend).
+const DEVICE_LINK_BASE = "/api/reborn/product-auth/device-link";
+const START_PATH = `${DEVICE_LINK_BASE}/start`;
+const INPUT_PATH = `${DEVICE_LINK_BASE}/input`;
+const CANCEL_PATH = `${DEVICE_LINK_BASE}/cancel`;
 
 // -> { flow_id, status, device_link }
 //
@@ -105,10 +119,10 @@ export function submitDeviceLinkInput({
 // -> { flow_id, status }; abandons the flow so the vendor side is logged out
 // rather than left as an orphan authorization (PROPOSAL §4.3).
 export function cancelDeviceLink({ flowId, invocationId, signal } = {}) {
-  return apiFetch(`/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/reconcile`, {
+  return apiFetch(CANCEL_PATH, {
     method: "POST",
     signal,
-    body: JSON.stringify({ invocation_id: invocationId, cancel: true }),
+    body: JSON.stringify({ flow_id: flowId, invocation_id: invocationId }),
   });
 }
 
