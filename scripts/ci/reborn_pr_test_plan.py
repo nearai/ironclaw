@@ -77,6 +77,9 @@ IGNORED_PREFIXES = (
     "docs/",
     "openwiki/",
     ".claude/",
+    # IronLoop reads this repository configuration and optional role guidance;
+    # no Reborn crate or test lane consumes it.
+    ".ironloop/",
     ".github/ISSUE_TEMPLATE/",
     # `ISSUE_TEMPLATE/`'s exact sibling: a GitHub UI template that changes no
     # crate, test, or runtime surface (`classify-test-scope.sh` already pairs
