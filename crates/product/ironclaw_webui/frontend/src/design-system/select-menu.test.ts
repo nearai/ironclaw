@@ -349,6 +349,11 @@ test("SelectMenu search input owns and handles filtered keyboard navigation", ()
   assert.match(searchInputProps["aria-controls"], /-listbox$/);
   assert.match(searchInputProps["aria-activedescendant"], /-option-0$/);
 
+  const tab = keyEvent("Tab");
+  searchInputProps.onKeyDown(tab);
+  assert.equal(tab.preventDefaultCalls, 0);
+  assert.equal(firstValueAfter(harness.render(props), "aria-expanded="), "true");
+
   const space = keyEvent(" ");
   searchInputProps.onKeyDown(space);
   assert.equal(space.preventDefaultCalls, 0);

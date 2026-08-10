@@ -308,7 +308,13 @@ export function SelectMenu({
   };
 
   const handleSearchKeyDown = (event) => {
-    if (event.key !== " ") handleKeyDown(event);
+    if (event.key !== " " && event.key !== "Tab") handleKeyDown(event);
+  };
+
+  const handleRootBlur = (event) => {
+    if (open && !event.currentTarget.contains(event.relatedTarget)) {
+      closeMenu({ restoreFocus: false });
+    }
   };
 
   return (
@@ -319,6 +325,7 @@ export function SelectMenu({
         className
       )}
       {...rootPassthroughProps}
+      onBlur={handleRootBlur}
     >
       <button
         ref={buttonRef}
