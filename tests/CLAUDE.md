@@ -125,7 +125,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
-| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's — through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
+| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 

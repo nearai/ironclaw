@@ -100,6 +100,13 @@ fn texts(snippets: &[MemoryServiceContextSnippet]) -> Vec<&str> {
 /// Contract: content written in the base scope is retrievable there and
 /// invisible to every scope differing on exactly one of
 /// tenant/user/agent/project.
+///
+/// The thread axis is deliberately NOT an isolation axis for durable memory
+/// (#7294): general memory written while one conversation is active is
+/// user-scoped, so the same user's other conversations — and thread-less
+/// (e.g. trigger-fired) invocations — retrieve it BY DESIGN. Recall across
+/// conversations is not a leak; how recalled memory is framed to the model
+/// is the host's prompt-assembly concern, not a provider scoping concern.
 pub async fn scope_isolation_across_tenant_user_agent_project<S, F, Seed>(factory: F, seed: Seed)
 where
     S: MemoryService,
@@ -108,9 +115,11 @@ where
 {
     let service = factory();
     let base = base_scope();
+    // Seed while a conversation is ACTIVE: the durable write must not be
+    // silently keyed to the active thread.
     seed(
         &service,
-        invocation(base.clone()),
+        invocation(with_thread(base.clone(), "thread-isolation-writer")),
         write_request("notes/isolation.md", "contract isolation marker kestrel"),
     )
     .await;
@@ -123,6 +132,25 @@ where
         own.iter().any(|snippet| snippet.text.contains("kestrel")),
         "the writing scope must retrieve its own content (got {:?})",
         texts(&own)
+    );
+
+    // Same four-axis scope, DIFFERENT conversation: durable memory crosses
+    // threads by design — a "fix" that thread-scopes the long-term lane would
+    // silently amnesia every new conversation (#7294 by-design half).
+    let other_thread = service
+        .read_long_term(
+            invocation(with_thread(base.clone(), "thread-isolation-reader")),
+            context_request("kestrel"),
+        )
+        .await
+        .expect("cross-thread retrieval must succeed");
+    assert!(
+        other_thread
+            .iter()
+            .any(|snippet| snippet.text.contains("kestrel")),
+        "durable memory is user-scoped, not thread-scoped: another conversation \
+         of the same scope must still retrieve it (got {:?})",
+        texts(&other_thread)
     );
 
     let mut other_tenant = base.clone();
@@ -239,6 +267,13 @@ where
 /// Contract (F5): a provider declaring `record_interaction` really records —
 /// the response reports `recorded: true` and the exchange is retrievable
 /// from the short-term lane of the SAME thread (and only that thread).
+///
+/// Cross-conversation containment (#7294 leak hypothesis): a recorded
+/// conversation transcript is per-thread scratch, so it must be invisible to
+/// EVERY retrieval lane of any other invocation — another thread's short-term
+/// lane, another thread's long-term lane, and a thread-less (e.g.
+/// trigger-fired) invocation's long-term lane. Only the durable memory the
+/// model explicitly writes may cross conversations; raw transcripts never do.
 pub async fn record_interaction_round_trips_into_retrieval<S, F>(factory: F)
 where
     S: MemoryService,
@@ -301,6 +336,41 @@ where
             .all(|snippet| !snippet.text.contains("merlin")),
         "another thread's short-term lane must not see the recording (got {:?})",
         texts(&other_thread)
+    );
+
+    // #7294: the transcript must not resurface through the DURABLE lane of a
+    // different conversation either — the long-term lane is the one that
+    // crosses threads by design, so an unexcluded transcript there is exactly
+    // the "agent remembers another conversation's routine" leak.
+    let other_thread_long_term = service
+        .read_long_term(
+            invocation(with_thread(base_scope(), "thread-unrelated")),
+            context_request("merlin"),
+        )
+        .await
+        .expect("other-thread long-term retrieval must succeed");
+    assert!(
+        other_thread_long_term
+            .iter()
+            .all(|snippet| !snippet.text.contains("merlin")),
+        "another thread's long-term lane must not surface a recorded \
+         conversation transcript (got {:?})",
+        texts(&other_thread_long_term)
+    );
+
+    // Thread-less invocation (the trigger-fired / no-active-conversation
+    // shape): the durable lane still must not surface any thread's transcript.
+    let thread_less_long_term = service
+        .read_long_term(invocation(base_scope()), context_request("merlin"))
+        .await
+        .expect("thread-less long-term retrieval must succeed");
+    assert!(
+        thread_less_long_term
+            .iter()
+            .all(|snippet| !snippet.text.contains("merlin")),
+        "a thread-less invocation's long-term lane must not surface a recorded \
+         conversation transcript (got {:?})",
+        texts(&thread_less_long_term)
     );
 }
 

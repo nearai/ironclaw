@@ -561,6 +561,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             first.messages[6].content_ref.as_str().to_string(),
             first.messages[7].content_ref.as_str().to_string(),
             first.messages[8].content_ref.as_str().to_string(),
+            first.messages[9].content_ref.as_str().to_string(),
             "msg:user-message".to_string(),
         ]
     );
@@ -594,20 +595,28 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             .as_str()
             .starts_with("msg:snippet.skill.alpha.")
     );
+    // The memory section opens with the recall-framing guidance (#7294),
+    // ahead of the memory snippets it frames.
     assert!(
         first.messages[6]
             .content_ref
             .as_str()
-            .starts_with("msg:memory.memory.project-summary.")
+            .starts_with("msg:memory-guidance.memory-recall-framing.")
     );
     assert!(
         first.messages[7]
             .content_ref
             .as_str()
-            .starts_with("msg:safety.safety.prompt-write.")
+            .starts_with("msg:memory.memory.project-summary.")
     );
     assert!(
         first.messages[8]
+            .content_ref
+            .as_str()
+            .starts_with("msg:safety.safety.prompt-write.")
+    );
+    assert!(
+        first.messages[9]
             .content_ref
             .as_str()
             .starts_with("msg:surface.surface-v1.")
@@ -1695,10 +1704,13 @@ async fn instruction_bundle_preserves_memory_snippet_insertion_order() {
         })
         .unwrap();
 
+    // Skip the memory recall-framing header (#7294) — this test pins the
+    // ordering of the snippets themselves.
     let model_contents: Vec<&str> = bundle
         .materialized_messages
         .iter()
         .map(|message| message.model_content.as_str())
+        .filter(|content| !content.starts_with("Recalled memory notice:"))
         .collect();
     assert_eq!(
         model_contents,
