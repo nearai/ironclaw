@@ -2848,7 +2848,15 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // the deferred JS/e2e scaffold.
     let body = served_bundled_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
-    let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
+    // End the provider segment on the next literal from the i18n module itself
+    // (the `AVAILABLE_LANGUAGES` table that follows the provider) rather than on
+    // an unrelated vendor symbol. `served_bundled_javascript` concatenates every
+    // chunk, so a marker owned by another module made this segment's extent a
+    // function of Rollup's chunk boundaries: a split that merely moved
+    // react-query into the entry chunk deleted the end marker and failed this
+    // i18n guard with no i18n change. String literals survive minification, so
+    // this stays a stable same-module delimiter.
+    let provider_segment = bundle_segment(&body, "createContext({lang:", "Português (Brasil)");
 
     assert!(
         provider_segment.contains(".useState(()=>")

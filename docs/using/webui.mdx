@@ -136,9 +136,11 @@ The panel shows three views:
 
 - **Prompt** — the bounded prompt assembled by the host, including components,
   active skills, model selection, and estimated context use.
-- **Activity** — ordered model and tool lifecycle events. Previous and next
-  buttons navigate runs observed for this thread during the browser session.
-- **Stats** — available token, latency, model-call, and tool-call totals.
+- **Activity** — ordered model and tool lifecycle events. Previous, next, and
+  latest buttons navigate runs observed for this thread during the browser
+  session.
+- **Stats** — available token, latency, model-call, and tool-call totals, plus
+  browser-observed stream state, reconnects, update count, and last update.
 
 Expand a completed or failed tool activity to fetch its sanitized arguments
 and output from the dedicated operator endpoint. Tool output is limited to 50
@@ -154,8 +156,11 @@ the process restarted or bounded in-memory evidence was evicted. A temporary
 cursor or refreshes the bounded snapshot when retained history is no longer
 available.
 
-Remove `debug=true` to return to the ordinary chat layout. The inspector is
-diagnostic only: opening, closing, or navigating it never changes a run.
+The opt-in is remembered for the browser tab, so it survives route changes and
+reloads. Use `?debug=false` to clear it and return to the ordinary chat layout
+— simply dropping `debug=true` from the URL leaves the stored opt-in in place.
+The inspector is diagnostic only: opening, closing, or navigating it never
+changes a run.
 
 <Note>
 Projects, Jobs, Routines, Missions, and Logs have pages in the interface but are not yet

@@ -79,12 +79,15 @@ alone constructs authenticated-caller evidence.
 
 ### Web Debug Inspector
 
-Operators can append `?debug=true` to a chat URL to open the opt-in inspector.
+Operators can append `?debug=true` to a chat URL to enable the inspector for
+the current browser tab; `?debug=false` disables it. The opt-in survives route
+changes and reloads in that tab.
 It shows the bounded host-resolved prompt, an ordered activity timeline with
 session-local turn navigation, aggregate model/tool statistics, and verbose
 tool details fetched on demand. The panel is a desktop sidebar, a tablet
-overlay, and hidden on mobile; closing it and selecting a tab persist only for
-the current browser session.
+overlay, and hidden on mobile. Its header icon toggles presentation without
+stopping diagnostic observation; panel visibility and the selected tab persist
+only for the current browser session.
 
 The four inspector routes live below
 `/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}`. They
