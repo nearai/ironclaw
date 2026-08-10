@@ -661,16 +661,37 @@ pub const PROFILE_SET_CAPABILITY_ID: &str = "ironclaw.memory.profile_set";
 /// search covered internal persistent memory only.
 pub const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
 
+/// Maximum raw UTF-8 content bytes retained for one conventional search tool
+/// result before JSON encoding.
+///
+/// Conventional search tool results are previews, not full documents. The
+/// shared output boundary keeps every provider's model-visible raw result
+/// content within the same budget without changing the raw responses providers
+/// return to other consumers.
+const MAX_SEARCH_RESULT_CONTENT_BYTES: usize = 8 * 1024;
+
+/// Preceding context bytes kept around each exact-literal query occurrence in
+/// a bounded conventional search tool result.
+const SEARCH_EXCERPT_PRE_BYTES: usize = 128;
+/// Following context bytes kept around each exact-literal query occurrence in
+/// a bounded conventional search tool result. Together with the preceding
+/// window this carries the matching sentence or record in typical memory
+/// documents without allowing one match to consume the entire result budget.
+const SEARCH_EXCERPT_POST_BYTES: usize = 256;
+/// Separator between consecutive excerpts. The ellipsis is Unicode (three
+/// UTF-8 bytes) and signals that bytes were elided between the excerpts.
+const SEARCH_EXCERPT_DELIMITER: &str = "\n…\n";
+
 /// Wire output for a search tool response. Shared by every provider declaring
-/// the conventional search tool so the model-visible shape cannot drift
-/// between backends.
+/// the conventional search tool so the model-visible shape and per-result raw
+/// content bound cannot drift between backends.
 pub fn search_response_output(response: MemoryServiceSearchResponse) -> Value {
-    let results = response
-        .results
+    let MemoryServiceSearchResponse { query, results } = response;
+    let results = results
         .into_iter()
         .map(|result| {
             json!({
-                "content": result.content,
+                "content": bound_search_result_content(result.content, &query),
                 "score": result.score,
                 "path": result.path,
                 "is_hybrid_match": result.is_hybrid_match,
@@ -679,12 +700,138 @@ pub fn search_response_output(response: MemoryServiceSearchResponse) -> Value {
         .collect::<Vec<_>>();
     let result_count = results.len();
     json!({
-        "query": response.query,
+        "query": query,
         "results": results,
         "result_count": result_count,
         "search_scope": MEMORY_SEARCH_SCOPE,
         "external_services_searched": false,
     })
+}
+
+/// Bound one conventional search tool result's content to
+/// [`MAX_SEARCH_RESULT_CONTENT_BYTES`] UTF-8 bytes.
+///
+/// Short content is returned unchanged — zero allocation, byte-for-byte
+/// identical. Oversized content is reduced deterministically:
+///
+/// - When the exact literal query occurs in the content, the preview contains
+///   excerpts around successive non-overlapping occurrences. Each excerpt
+///   keeps [`SEARCH_EXCERPT_PRE_BYTES`] preceding and
+///   [`SEARCH_EXCERPT_POST_BYTES`] following bytes, and excerpts are joined by
+///   an ellipsis delimiter. A window fully covered by the previous excerpt is
+///   skipped, and accumulation stops at the cap. Repeated matches therefore
+///   retain useful context from across a large document without returning the
+///   whole body.
+/// - When the exact literal query does not occur (a provider may stem or
+///   otherwise normalize matches the output helper cannot reproduce), the
+///   preview falls back to a plain bounded head. Matching is byte-exact on the
+///   raw query — no case folding, stemming, or token heuristics — so a provider
+///   match the literal query cannot reproduce is honestly shown as a head,
+///   never as positioned excerpts.
+///
+/// Truncation never splits a multi-byte character, and the result is
+/// deterministic.
+fn bound_search_result_content(content: String, query: &str) -> String {
+    if content.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES {
+        return content;
+    }
+    if query.is_empty() {
+        // The empty query matches everywhere; excerpting would degenerate to
+        // the whole content. Keep the plain head.
+        return bounded_search_head(content, MAX_SEARCH_RESULT_CONTENT_BYTES);
+    }
+    bounded_search_excerpts(&content, query)
+        .unwrap_or_else(|| bounded_search_head(content, MAX_SEARCH_RESULT_CONTENT_BYTES))
+}
+
+/// Join bounded excerpts around successive non-overlapping exact-literal
+/// occurrences of `query` in `content`, stopping at
+/// [`MAX_SEARCH_RESULT_CONTENT_BYTES`]. Each excerpt
+/// keeps up to [`SEARCH_EXCERPT_PRE_BYTES`] before the match and
+/// [`SEARCH_EXCERPT_POST_BYTES`] after it, reducing that context when the exact
+/// query would otherwise exceed the remaining budget. Endpoints are rounded to
+/// UTF-8 character boundaries. Overlapping or touching windows are joined
+/// directly; separated windows use [`SEARCH_EXCERPT_DELIMITER`]. The scan is a
+/// single left-to-right pass (no occurrence list is materialized), and it stops
+/// as soon as the cap is reached. Returns `None` when no exact occurrence can
+/// fit, so the caller falls back to the bounded head.
+fn bounded_search_excerpts(content: &str, query: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut search_from = 0usize;
+    let mut previous_end = 0usize;
+    while let Some(relative) = content[search_from..].find(query) {
+        let position = search_from + relative;
+        let query_end = position + query.len();
+        let mut desired_start = position.saturating_sub(SEARCH_EXCERPT_PRE_BYTES);
+        while desired_start < position && !content.is_char_boundary(desired_start) {
+            desired_start += 1;
+        }
+        let mut desired_end = (query_end + SEARCH_EXCERPT_POST_BYTES).min(content.len());
+        while !content.is_char_boundary(desired_end) {
+            desired_end -= 1;
+        }
+        if desired_start < previous_end && desired_end <= previous_end {
+            // Fully covered by the previous excerpt; the query context
+            // is already present.
+            search_from = query_end;
+            continue;
+        }
+
+        let contiguous = !out.is_empty() && desired_start <= previous_end;
+        let delimiter_len = if out.is_empty() || contiguous {
+            0
+        } else {
+            SEARCH_EXCERPT_DELIMITER.len()
+        };
+        let Some(available) = MAX_SEARCH_RESULT_CONTENT_BYTES
+            .checked_sub(out.len())
+            .and_then(|remaining| remaining.checked_sub(delimiter_len))
+        else {
+            break;
+        };
+        let mut start = if contiguous {
+            previous_end
+        } else {
+            let Some(max_pre) = available.checked_sub(query.len()) else {
+                break;
+            };
+            desired_start.max(position.saturating_sub(max_pre))
+        };
+        while start < position && !content.is_char_boundary(start) {
+            start += 1;
+        }
+        if query_end.saturating_sub(start) > available {
+            break;
+        }
+
+        let mut end = desired_end.min(start + available);
+        while end > query_end && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        if delimiter_len > 0 {
+            out.push_str(SEARCH_EXCERPT_DELIMITER);
+        }
+        out.push_str(&content[start..end]);
+        previous_end = end;
+        search_from = query_end;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Cut `content` to a UTF-8-safe head of at most `bound` bytes, truncating in
+/// place so oversized content is not copied. The cut never splits a multi-byte
+/// character.
+fn bounded_search_head(content: String, bound: usize) -> String {
+    let mut content = content;
+    let mut end = bound.min(content.len());
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content.truncate(end);
+    content
 }
 
 /// Wire output for a write tool response. Exhaustive over
@@ -824,6 +971,32 @@ mod tests {
     use super::*;
     use ironclaw_host_api::resource::ResourceScope;
 
+    const QUERY: &str = "needle";
+    const MIB: usize = 1 << 20;
+    const HEAD_MATCH: &str = "needle-alpha-record";
+    const MATCH_AFTER_CAP: &str = "needle-beta-record";
+    const MATCH_MIDDLE: &str = "needle-gamma-record";
+    const MATCH_TAIL: &str = "needle-delta-record";
+
+    /// A 1 MiB ASCII body with `QUERY` starting at `query_at` (or absent).
+    fn mib_body(query_at: Option<usize>) -> String {
+        let mut body = vec![b'a'; MIB];
+        if let Some(at) = query_at {
+            body[at..at + QUERY.len()].copy_from_slice(QUERY.as_bytes());
+        }
+        String::from_utf8(body).expect("ASCII body is valid UTF-8")
+    }
+
+    /// A 1 MiB ASCII body with each `(position, text)` overlay written over
+    /// the `a` padding.
+    fn mib_body_with(overlays: &[(usize, &str)]) -> String {
+        let mut body = vec![b'a'; MIB];
+        for &(at, text) in overlays {
+            body[at..at + text.len()].copy_from_slice(text.as_bytes());
+        }
+        String::from_utf8(body).expect("ASCII body is valid UTF-8")
+    }
+
     /// A provider that overrides NOTHING — every `MemoryService` method (including
     /// `record_interaction`) is inherited from the trait default.
     struct NonRecordingProvider;
@@ -944,5 +1117,251 @@ mod tests {
         let request =
             MemoryServiceWriteRequest::from_tool_input(&input).expect("default target is in-scope");
         assert_eq!(request.target, "daily_log");
+    }
+
+    #[test]
+    fn search_output_bounds_oversized_content_around_exact_query() {
+        const QUERY: &str = "needle";
+        const RESULT_BOUND: usize = 8 * 1024;
+        let position = RESULT_BOUND + 512;
+        let mut oversized = "a".repeat(position + QUERY.len() + RESULT_BOUND);
+        oversized.replace_range(position..position + QUERY.len(), QUERY);
+
+        let output = search_response_output(MemoryServiceSearchResponse {
+            query: QUERY.to_string(),
+            results: vec![MemoryServiceSearchResult {
+                content: oversized,
+                score: 1.0,
+                path: "oversized.md".to_string(),
+                is_hybrid_match: false,
+            }],
+        });
+        let content = output["results"][0]["content"]
+            .as_str()
+            .expect("search result content is a string");
+
+        assert!(content.len() <= RESULT_BOUND);
+        assert!(content.contains(QUERY));
+    }
+
+    #[test]
+    fn small_snippet_is_returned_unchanged() {
+        let snippet = "a tiny memory note".to_string();
+        assert_eq!(bound_search_result_content(snippet.clone(), QUERY), snippet);
+    }
+
+    #[test]
+    fn empty_snippet_is_returned_unchanged() {
+        assert_eq!(
+            bound_search_result_content(String::new(), QUERY),
+            String::new()
+        );
+    }
+
+    #[test]
+    fn snippet_exactly_at_bound_is_returned_unchanged() {
+        let snippet = "a".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES);
+        let bounded = bound_search_result_content(snippet.clone(), QUERY);
+        assert_eq!(bounded, snippet);
+    }
+
+    #[test]
+    fn snippet_one_byte_over_bound_is_cut_to_exact_cap() {
+        // No exact literal query occurrence, so the fallback head lands
+        // exactly on the cap: an ASCII body one byte over the bound
+        // truncates to precisely MAX_SEARCH_RESULT_CONTENT_BYTES bytes.
+        let body = "a".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES + 1);
+        let bounded = bound_search_result_content(body, QUERY);
+        assert_eq!(bounded, "a".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES));
+        assert_eq!(bounded.len(), MAX_SEARCH_RESULT_CONTENT_BYTES);
+    }
+
+    #[test]
+    fn oversized_body_with_exact_literal_query_retains_head_match() {
+        // The query occurs literally near the start, so the excerpt window
+        // starts at the snippet's head and the match survives verbatim.
+        let body = mib_body(Some(10));
+        let bounded = bound_search_result_content(body.clone(), QUERY);
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(bounded.starts_with(&format!("{}{}", "a".repeat(10), QUERY)));
+        assert!(bounded.contains(QUERY));
+        assert_eq!(bound_search_result_content(body.clone(), QUERY), bounded);
+    }
+
+    #[test]
+    fn no_exact_occurrence_falls_back_to_bounded_head() {
+        // The backend may stem or otherwise normalize a match this provider
+        // cannot reproduce literally. The preview is then an honest bounded
+        // head — never positioned excerpts — and a query occurrence beyond
+        // the cap stays invisible instead of being falsely claimed as a match.
+        let body = mib_body(Some(MIB / 2));
+        let bounded = bound_search_result_content(body, "nonexistent");
+        assert_eq!(bounded.len(), MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(!bounded.contains(QUERY));
+    }
+
+    #[test]
+    fn exact_literal_occurrence_beyond_head_is_retained() {
+        // With an exact literal query match the preview positions a window
+        // around it, so an occurrence in the body's middle — beyond a plain
+        // head cut — is retained.
+        let body = mib_body(Some(MIB / 2));
+        let bounded = bound_search_result_content(body.clone(), QUERY);
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(bounded.contains(QUERY));
+        assert_eq!(bound_search_result_content(body, QUERY), bounded);
+    }
+
+    #[test]
+    fn exact_query_near_cap_keeps_the_full_match_beyond_head() {
+        let query = format!("q{}z", "x".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES - 66));
+        let position = MAX_SEARCH_RESULT_CONTENT_BYTES + 128;
+        let mut body = "a".repeat(position + query.len() + 512);
+        body.replace_range(position..position + query.len(), &query);
+
+        let bounded = bound_search_result_content(body, &query);
+
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(bounded.contains(&query));
+    }
+
+    #[test]
+    fn overlapping_excerpt_windows_preserve_contiguous_source() {
+        let first = 4_000;
+        let second = 4_100;
+        let mut body = "a".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES + 1_000);
+        body.replace_range(first..first + QUERY.len(), QUERY);
+        body.replace_range(second..second + QUERY.len(), QUERY);
+        let expected = body
+            [first - SEARCH_EXCERPT_PRE_BYTES..second + QUERY.len() + SEARCH_EXCERPT_POST_BYTES]
+            .to_string();
+
+        let bounded = bound_search_result_content(body, QUERY);
+
+        assert_eq!(bounded, expected);
+        assert!(!bounded.contains(SEARCH_EXCERPT_DELIMITER));
+    }
+
+    #[test]
+    fn matching_is_exact_literal_not_case_folded() {
+        // An uppercase variant is NOT an exact literal match of the lowercase
+        // query: no case folding, so the preview falls back to the head and
+        // does not position windows it cannot substantiate.
+        let body = mib_body(Some(MIB / 2)).replace(QUERY, "NEEDLE");
+        let bounded = bound_search_result_content(body, QUERY);
+        assert_eq!(bounded.len(), MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(!bounded.contains(QUERY));
+    }
+
+    #[test]
+    fn oversized_1mib_multiple_matches_retain_each_query_context() {
+        // Matches near the head, just beyond the result cap, in the middle,
+        // and near the tail must all remain visible when their combined
+        // excerpts fit. Returning only the head would hide three valid
+        // matches from the caller.
+        let body = mib_body_with(&[
+            (100, HEAD_MATCH),
+            (MAX_SEARCH_RESULT_CONTENT_BYTES + 64, MATCH_AFTER_CAP),
+            (MIB / 2, MATCH_MIDDLE),
+            (MIB - 256, MATCH_TAIL),
+        ]);
+        let bounded = bound_search_result_content(body.clone(), QUERY);
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(
+            std::str::from_utf8(bounded.as_bytes()).is_ok(),
+            "excerpts must stay valid UTF-8"
+        );
+        for token in [HEAD_MATCH, MATCH_AFTER_CAP, MATCH_MIDDLE, MATCH_TAIL] {
+            assert!(bounded.contains(token), "missing {token} in {bounded:?}");
+        }
+        assert_eq!(
+            bound_search_result_content(body, QUERY),
+            bounded,
+            "excerpting must be deterministic"
+        );
+    }
+
+    #[test]
+    fn many_occurrences_stop_at_cap_with_complete_prefix() {
+        // ~200 occurrences in 1 MiB: far more than the cap can hold, so the
+        // excerpt list stops at the cap with the leading excerpts intact —
+        // never a full dump, never a dangling delimiter.
+        let mut overlays = Vec::new();
+        for i in 0..200 {
+            overlays.push((i * (MIB / 200), QUERY));
+        }
+        let body = mib_body_with(&overlays);
+        let bounded = bound_search_result_content(body.clone(), QUERY);
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(bounded.contains(QUERY));
+        assert!(
+            bounded.matches(SEARCH_EXCERPT_DELIMITER).count() >= 2,
+            "several excerpts must have been joined before the cap"
+        );
+        assert!(
+            !bounded.ends_with(SEARCH_EXCERPT_DELIMITER),
+            "no trailing delimiter"
+        );
+        assert_eq!(bound_search_result_content(body, QUERY), bounded);
+    }
+
+    #[test]
+    fn multibyte_excerpt_windows_never_split_chars() {
+        // Three-byte chars around the occurrence: the pre-window start
+        // (position - 128, and 128 % 3 == 2) and the post-window end both
+        // round to whole characters, so the excerpt stays valid UTF-8 and
+        // the matching record survives.
+        let mut body = String::new();
+        body.push_str(&"€".repeat(4000));
+        body.push_str(HEAD_MATCH);
+        body.push_str(&"€".repeat(4000));
+        let bounded = bound_search_result_content(body, QUERY);
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        assert!(bounded.contains(HEAD_MATCH));
+    }
+
+    #[test]
+    fn empty_query_keeps_bounded_head() {
+        // The empty query matches everywhere; excerpting would degenerate to
+        // the whole snippet, so the preview stays a plain head — the query
+        // near the start survives only because it is inside the head.
+        let body = mib_body(Some(10));
+        let bounded = bound_search_result_content(body.clone(), "");
+        assert_eq!(bounded.len(), MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert_eq!(bounded, &body[..MAX_SEARCH_RESULT_CONTENT_BYTES]);
+    }
+
+    #[test]
+    fn query_longer_than_cap_falls_back_to_head() {
+        // A single excerpt cannot fit the query plus its context, so the
+        // excerpt builder yields nothing and the preview stays an honest
+        // head rather than a truncated query fragment.
+        let body = mib_body(Some(0));
+        let query = "a".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES + 1);
+        let bounded = bound_search_result_content(body.clone(), &query);
+        assert_eq!(bounded.len(), MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert_eq!(bounded, &body[..MAX_SEARCH_RESULT_CONTENT_BYTES]);
+    }
+
+    #[test]
+    fn multibyte_head_cut_never_splits_chars() {
+        // Three-byte chars: the 8192-byte cut lands mid-character (8192 % 3
+        // == 2) and must round down to a whole number of chars. No exact
+        // literal occurrence, so this exercises the head fallback.
+        let body = "€".repeat(2731);
+        assert!(body.len() > MAX_SEARCH_RESULT_CONTENT_BYTES);
+        let bounded = bound_search_result_content(body.clone(), QUERY);
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert_eq!(bounded, "€".repeat(MAX_SEARCH_RESULT_CONTENT_BYTES / 3));
+    }
+
+    #[test]
+    fn truncated_preview_is_deterministic() {
+        let body = mib_body(Some(10));
+        assert_eq!(
+            bound_search_result_content(body.clone(), QUERY),
+            bound_search_result_content(body, QUERY)
+        );
     }
 }

@@ -102,7 +102,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
 }
 
 #[tokio::test]
-async fn native_search_bounds_oversized_results_around_exact_query() {
+async fn native_search_preserves_oversized_provider_result() {
     const QUERY: &str = "needle";
     const RESULT_BOUND: usize = 8 * 1024;
     let position = RESULT_BOUND + 512;
@@ -131,8 +131,7 @@ async fn native_search_bounds_oversized_results_around_exact_query() {
         .expect("search through native memory service");
 
     assert_eq!(response.results.len(), 1);
-    assert!(response.results[0].content.len() <= RESULT_BOUND);
-    assert!(response.results[0].content.contains(QUERY));
+    assert_eq!(response.results[0].content, oversized);
 }
 
 #[tokio::test]
