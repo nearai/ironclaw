@@ -35,7 +35,6 @@ fn build_approval_interaction_service_with_parts(
                 Arc::clone(&parts.builtin_capability_policy),
                 Arc::clone(&parts.extension_registry),
                 parts.workspace_mounts.clone(),
-                parts.skill_mounts.clone(),
                 parts.memory_mounts.clone(),
                 parts.system_extensions_lifecycle_mounts.clone(),
                 ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource::new(

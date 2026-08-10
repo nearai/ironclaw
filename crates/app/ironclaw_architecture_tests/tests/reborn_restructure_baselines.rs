@@ -125,10 +125,11 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// observed value move with this record so the increase is explicit.
 /// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
 /// delivery refactor with #7214's sandbox profile and binding assembly.
-/// Includes main's acting-user scope helper (40_811) plus the web-push
-/// channel's composition assembly; re-measured on the merged tree with
-/// `bash scripts/ci/check-composition-budget.sh --print`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_042;
+/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
+/// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
+/// this ratchet fails when the two disagree.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_509;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

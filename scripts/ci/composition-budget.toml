@@ -153,16 +153,17 @@ observed_date = "2026-08-07"
 # with `bash scripts/ci/check-composition-budget.sh`.
 # Union re-measured 40432 -> 40747 on 2026-08-07 after merging #7157's delivery
 # refactor with #7214's sandbox profile and binding assembly.
-# Raised to 40811 on main (#7377's acting-user scope helper, +64 LOC), then
-# to the value below on 2026-08-08 for the web-push channel's assembly:
-# `assemble_web_push` (subscription-store construction, runtime-slot install,
-# VAPID credential seeding + read-back, manifest-derived push-host extraction)
-# plus the binding-borne outbound-target-provider registration loop and the
-# input/plumbing fields. All of it is service-graph assembly — record grammar,
-# crypto, and protocol behavior live in ironclaw_web_push / the channel
-# package / host_runtime's egress injector. Re-measured on the merged tree with
-# `bash scripts/ci/check-composition-budget.sh`.
-loc_ceiling = 41042
+# History: 40747 -> 40811 (#7157 acting-user scope helper), then two features
+# merged on top on 2026-08-08/09, each service-graph assembly only:
+#  - web-push channel assembly (`assemble_web_push`: subscription-store
+#    construction, runtime-slot install, VAPID seeding + read-back, manifest
+#    push-host extraction, binding-borne outbound-target-provider registration).
+#  - skills stack top layer (#7171): skill-bundle staging, host-reachability
+#    root map, process-alias host-workdir wiring.
+# Re-measured on the MERGED tree (web-push + skills) with
+# `bash scripts/ci/check-composition-budget.sh` -> 41509 (base 40811 + web-push
+# assembly + #7171 skills assembly; the deltas are additive on the merged tree).
+loc_ceiling = 41509
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -173,7 +174,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41042
+loc_observed = 41509
 loc_observed_date = "2026-08-08"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
