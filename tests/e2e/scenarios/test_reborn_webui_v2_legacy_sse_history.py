@@ -7,8 +7,9 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, sse_stream, wait_for_sse_comment
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     USER_ID,
     create_thread as _create_thread,
     reborn_v2_browser,  # noqa: F401 - imported fixture
@@ -70,40 +71,7 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
     page = await context.new_page()
     timeline_requests: list[str] = []
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          window.__v2SseUrls = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              window.__v2SseUrls.push(url);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -208,10 +176,15 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
         await page.wait_for_function("() => window.__v2SseUrls.length === 2", timeout=5000)
         await page.wait_for_timeout(500)
 
-        resumed_url = await page.evaluate("() => window.__v2SseUrls[1]")
+        resumed_request = await page.evaluate("() => window.__v2SseRequests[1]")
+        resumed_url = resumed_request["url"]
+        resumed_headers = resumed_request["headers"]
         query = parse_qs(urlparse(resumed_url).query)
-        assert query.get("token") == [REBORN_V2_AUTH_TOKEN]
-        assert query.get("after_cursor") == ["cursor-42"]
+        # The bearer travels in the Authorization header, never a URL token
+        # query parameter, and the cursor resumes via the Last-Event-ID header.
+        assert "token" not in query
+        assert resumed_headers.get("authorization") == f"Bearer {REBORN_V2_AUTH_TOKEN}"
+        assert resumed_headers.get("last-event-id") == "cursor-42"
         assert len(timeline_requests) == timeline_count_before_resume, timeline_requests
         await expect(page.locator('[data-e2e-preserved="yes"]')).to_have_count(1)
     finally:
@@ -225,52 +198,7 @@ async def test_reborn_legacy_sse_error_reconnect_resumes_after_last_cursor(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          window.__v2SseUrls = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              window.__v2SseUrls.push(url);
-              queueMicrotask(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              });
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-before-error") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-          window.__failLatestV2Sse = () => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            if (typeof stream.onerror !== "function") {
-              throw new Error("EventSource has no error handler");
-            }
-            // Model a terminal EventSource failure so useSSE exercises its
-            // explicit fresh-stream fallback, rather than the browser-native
-            // reconnect watchdog path.
-            stream.readyState = 2;
-            stream.onerror(new Event("error"));
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -350,10 +278,13 @@ async def test_reborn_legacy_sse_error_reconnect_resumes_after_last_cursor(
         await page.evaluate("() => window.__failLatestV2Sse()")
         await page.wait_for_function("() => window.__v2SseUrls.length === 2", timeout=5000)
 
-        reconnected_url = await page.evaluate("() => window.__v2SseUrls[1]")
+        reconnected_request = await page.evaluate("() => window.__v2SseRequests[1]")
+        reconnected_url = reconnected_request["url"]
+        reconnected_headers = reconnected_request["headers"]
         query = parse_qs(urlparse(reconnected_url).query)
-        assert query.get("token") == [REBORN_V2_AUTH_TOKEN]
-        assert query.get("after_cursor") == ["cursor-before-error"]
+        assert "token" not in query
+        assert reconnected_headers.get("authorization") == f"Bearer {REBORN_V2_AUTH_TOKEN}"
+        assert reconnected_headers.get("last-event-id") == "cursor-before-error"
     finally:
         await context.close()
 
@@ -366,33 +297,14 @@ async def test_reborn_legacy_usage_event_does_not_render_message_badge(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
 
+    await install_fake_v2_event_stream(page)
+    # The legacy flow dispatched an unnamed "message" event carrying the typed
+    # frame; the shared fake routes by event name, so adapt the old hook.
     await page.add_init_script(
         """
         (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
           window.__emitV2MessageSse = (frame, id = "cursor-usage") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            stream.dispatchEvent(new MessageEvent("message", {
-              data: JSON.stringify(frame),
-              lastEventId: id,
-            }));
+            window.__emitV2Sse(frame.type || "message", frame, id);
           };
         })();
         """
@@ -496,38 +408,7 @@ async def test_reborn_legacy_stale_replay_timeline_refresh_dedupes_messages(
     page = await context.new_page()
     timeline_requests: list[str] = []
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-stale-replay") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -646,38 +527,7 @@ async def test_reborn_legacy_late_projection_text_dedupes_history_response(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              queueMicrotask(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              });
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-late-text") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -795,40 +645,7 @@ async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          window.__v2SseUrls = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              window.__v2SseUrls.push(url);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -930,12 +747,18 @@ async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
         await expect(thread_b_message).to_be_visible(timeout=15000)
         await page.wait_for_function("() => window.__v2SseUrls.length === 2", timeout=5000)
 
-        switched_url = await page.evaluate("() => window.__v2SseUrls[1]")
+        switched_request = await page.evaluate("() => window.__v2SseRequests[1]")
+        switched_url = switched_request["url"]
+        switched_headers = switched_request["headers"]
         parsed = urlparse(switched_url)
         query = parse_qs(parsed.query)
         assert parsed.path.endswith(f"/api/webchat/v2/threads/{THREAD_B_ID}/events")
-        assert query.get("token") == [REBORN_V2_AUTH_TOKEN]
+        # No bearer token or cursor in the URL; both travel in headers, and a
+        # fresh thread must not carry the prior thread's cursor.
+        assert "token" not in query
         assert "after_cursor" not in query
+        assert switched_headers.get("authorization") == f"Bearer {REBORN_V2_AUTH_TOKEN}"
+        assert "last-event-id" not in switched_headers
     finally:
         await context.close()
 
@@ -1019,7 +842,12 @@ async def test_reborn_legacy_excess_sse_connections_are_rate_limited(
 
 
 async def test_reborn_legacy_sse_keepalive_comments_arrive(reborn_v2_server):
-    """Port the legacy idle SSE keepalive check to Reborn's v2 event stream."""
+    """Port the legacy idle SSE keepalive check to Reborn's v2 event stream.
+
+    #6876 replaced the idle comment keepalive with a typed `keep_alive`
+    application frame (comments keep proxies open but parser packages do not
+    surface them to the browser watchdog).
+    """
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
@@ -1032,5 +860,9 @@ async def test_reborn_legacy_sse_keepalive_comments_arrive(reborn_v2_server):
         timeout=25,
     ) as response:
         assert response.status == 200, await response.text()
-        keepalive = await wait_for_sse_comment(response, timeout=22)
-        assert keepalive.startswith(":")
+        keepalive = await wait_for_sse_line(
+            response,
+            predicate=lambda line: line.startswith(":") or line == "event: keep_alive",
+            timeout=22,
+        )
+        assert keepalive.startswith(":") or keepalive == "event: keep_alive"

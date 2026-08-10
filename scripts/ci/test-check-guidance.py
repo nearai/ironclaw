@@ -137,6 +137,7 @@ class GuidanceGateTests(unittest.TestCase):
         tracked: list[str] | None = None,
         known_missing: tuple | None = (),
         alias_exceptions: dict[str, str] | None = None,
+        reincluded: tuple[str, ...] = (),
     ) -> tuple[int, str]:
         listing = self.root / "tracked-files.txt"
         listing.write_text(
@@ -151,6 +152,10 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
             mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
+            # Fixtures opt in to re-included corpora per test: the production
+            # tuple names real-repo pages, and the liveness refusal would
+            # otherwise fire on every fixture that lacks them.
+            mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", reincluded),
             mock.patch.object(
                 GATE,
                 "ALIAS_REAL_FILE_EXCEPTIONS",
@@ -541,6 +546,7 @@ class GuidanceGateTests(unittest.TestCase):
             with (
                 mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
                 mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
+                mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", ()),
                 mock.patch.object(GATE, "KNOWN_MISSING", ()),
                 mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
                 contextlib.redirect_stderr(stderr),
@@ -647,7 +653,7 @@ class GuidanceGateTests(unittest.TestCase):
             "docs/reborn/contracts/example.md",
             "Pinned by `crates/core/ironclaw_gone/tests/contract.rs`.\n",
         )
-        code, output = self.run_gate()
+        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
         self.assertEqual(code, 1)
         self.assertNotIn("2026-01-01-old-plan.md", output)
         self.assertNotIn("CHECKLIST.md", output)
@@ -663,6 +669,57 @@ class GuidanceGateTests(unittest.TestCase):
         code, output = self.run_gate()
         self.assertEqual(code, 1)
         self.assertIn("unterminated ``` fence", output)
+
+    def test_docs_unterminated_comment_refuses(self) -> None:
+        """An unterminated comment must refuse like an unterminated fence:
+        silently un-scanning the rest of the file (here, a dangling
+        reference after the typo'd closer) is the fail-open shape the gate's
+        charter forbids."""
+        self.build_fixture()
+        for name, body in (
+            (
+                "docs/typo.mdx",
+                "{/* doc-fact:example\nnever closed with */ only\n"
+                "See `crates/core/ironclaw_gone/src/lib.rs`.\n",
+            ),
+            (
+                "docs/typo2.md",
+                "Prose <!-- opened and abandoned\n"
+                "See `crates/core/ironclaw_gone/src/lib.rs`.\n",
+            ),
+        ):
+            with self.subTest(name=name):
+                self.write(name, body)
+                code, output = self.run_gate()
+                (self.root / name).unlink()
+                self.assertEqual(code, 1)
+                self.assertIn("unterminated", output)
+                self.assertIn(name, output)
+
+    def test_reincluded_corpus_links_are_repo_claims(self) -> None:
+        """The re-included corpora are never published, so their relative
+        markdown links are repo-path claims, not Mintlify site routes —
+        renaming a contract file must not leave cross-references dangling
+        with the gate green."""
+        self.build_fixture()
+        self.write("docs/reborn/contracts/kernel.md", "A real sibling.\n")
+        self.write(
+            "docs/reborn/contracts/index.md",
+            "See [kernel](kernel.md) and [renamed](renamed-away.md).\n",
+        )
+        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        self.assertEqual(code, 1)
+        self.assertNotIn("kernel.md`", output)
+        self.assertIn("renamed-away.md", output)
+
+    def test_reincluded_prefix_matching_no_pages_refuses(self) -> None:
+        """A stale re-included prefix (the corpus moved) must refuse instead
+        of silently dropping the gate's best-signal files from the scan."""
+        self.build_fixture()
+        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        self.assertEqual(code, 1)
+        self.assertIn("matched no tracked", output)
+        self.assertIn("docs/reborn/contracts/", output)
 
     def test_docs_floor_refuses_when_docs_branch_breaks(self) -> None:
         """The aggregate floors sit below the guidance-only remainder, so the
@@ -680,6 +737,7 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
             mock.patch.object(GATE, "MIN_DOCS_FILES", 5),
+            mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", ()),
             mock.patch.object(
                 GATE, "ALIAS_REAL_FILE_EXCEPTIONS", dict(self.ROOT_ALIAS_EXCEPTION)
             ),

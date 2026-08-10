@@ -82,21 +82,11 @@ async fn fetch_communication_context(
     actor: Option<TurnActor>,
 ) -> Option<CommunicationRuntimeContext> {
     let actor = actor?;
-    // Key notification-channel lookup by the run's *owner*, not the acting
-    // principal. Product inbound and trusted-trigger runs can carry an explicit
-    // thread owner (subject/creator) that differs from `actor`; the owner is who
-    // the stored notification-channel preference belongs to. Fall back to the
-    // actor when no explicit owner is set, matching `TurnScope::to_resource_scope`'s
-    // owner resolution. Without this, shared/channel inbound and trigger runs
-    // would render the actor's notification-channel state instead of the
-    // owner's, producing wrong guidance.
-    let owner_user_id = scope
-        .explicit_owner_user_id()
-        .cloned()
-        .unwrap_or_else(|| actor.user_id.clone());
+    // A run's notification-channel state is its user's (the actor).
+    let acting_user_id = actor.user_id.clone();
     let caller = ProductSurfaceCaller::new(
         scope.tenant_id.clone(),
-        owner_user_id,
+        acting_user_id,
         scope.agent_id.clone(),
         scope.project_id.clone(),
     );
@@ -533,22 +523,24 @@ mod tests {
         }
     }
 
+    /// A run's notification-channel state is its own user's (#7377): the
+    /// communication-context provider keys the preference lookup by the run's
+    /// user (its actor). Owner == actor since the ephemeral-per-ping remodel.
     #[tokio::test]
-    async fn preferences_keyed_by_explicit_owner_not_actor() {
+    async fn preferences_keyed_by_the_run_user() {
         let seen_user_id = Arc::new(std::sync::Mutex::new(None));
         let service = CaptureCallerPreferencesService {
             seen_user_id: Arc::clone(&seen_user_id),
         };
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(service));
 
-        // Scope owned by a subject/creator distinct from the acting principal
-        // (e.g. a trusted trigger or shared/channel inbound run).
+        // A normal run: owner == actor ("user-test").
         let owned_scope = TurnScope::new_with_owner(
             TenantId::new("tenant-test").unwrap(),
             Some(AgentId::new("agent-test").unwrap()),
             Some(ProjectId::new("project-test").unwrap()),
             ironclaw_host_api::ids::ThreadId::new("thread-test").unwrap(),
-            Some(UserId::new("owner-test").unwrap()),
+            Some(UserId::new("user-test").unwrap()),
         );
 
         provider
@@ -559,8 +551,8 @@ mod tests {
 
         assert_eq!(
             seen_user_id.lock().expect("lock").as_deref(),
-            Some("owner-test"),
-            "preference lookup must be keyed by the explicit run owner, not the actor",
+            Some("user-test"),
+            "preference lookup must be keyed by the run's user",
         );
     }
 
@@ -694,6 +686,7 @@ mod tests {
             Some(ironclaw_extension_contracts::channel::ChannelPresentation {
                 supports_markdown: true,
                 supports_threads: false,
+                can_reply_in_threads: false,
                 max_message_chars: Some(4096),
                 command_prefix: None,
             });
@@ -728,6 +721,7 @@ mod tests {
             Some(ironclaw_extension_contracts::channel::ChannelPresentation {
                 supports_markdown: true,
                 supports_threads: false,
+                can_reply_in_threads: false,
                 max_message_chars: Some(4096),
                 command_prefix: None,
             }),

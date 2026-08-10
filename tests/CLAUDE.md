@@ -34,7 +34,7 @@ The counts in each section header are checked-in facts, not estimates. Update th
 | Tier | Location | What is real | What is faked | Cost |
 |---|---|---|---|---|
 | **Group scenarios** (§3) | `tests/integration/group_*/scenario_*.rs` | whole Reborn turn, shared runtime + shared stores across several threads | the model, at the vendor-SDK seam | fast, offline, no setup |
-| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread | the model | fast, offline |
+| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread; one dedicated sandbox test also uses a real local Docker worker | the model | usually fast/offline; sandbox worker test runs in its Docker CI lane |
 | **Binary / parity / QA-trace** (§5) | `tests/*.rs` | composed runtime or shipping binary; recorded real-LLM traces | model responses replayed from committed traces | medium |
 | **Python E2E** (§6) | `tests/e2e/scenarios/test_*.py` | current Reborn scenarios use real `ironclaw serve`, HTTP, and Playwright; retained legacy-fixture scenarios are pending migration | LLM (mock or recorded), external SaaS (Emulate/fakes) | slow |
 
@@ -54,7 +54,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Memory & workspace | 5 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
-| Tools & tool dispatch | — | 10 | ✓ | ✓ |
+| Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
 | Durability & restart | 4 | 5 | ✓ | ✓ |
@@ -62,9 +62,9 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **54** flat integration bins (48 in
+Totals: **51** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**868** test functions).
+**102** Python scenario files (**869** test functions).
 
 ---
 
@@ -131,7 +131,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 | The user can… | Evidence |
 |---|---|
-| Share one deployment with someone else and each keep their own threads | `scenario_two_actors_own_threads.rs` |
+| Mention the bot in a shared channel and have the run act as the pinger — a second, distinct actor's run acts as itself, never the first binder (owner == actor) — while a Direct-route probe of the shared conversation is refused. Ephemeral-per-ping thread minting is pinned at the conversations tier and the channel e2e. | `scenario_shared_route_refuses_direct_reclassification.rs` |
 | Not read another user's memories (and still read their own) | `scenario_memory_isolation_across_actors.rs` |
 | Not have another user's "always allow" apply to them | `scenario_auto_approve_isolation_across_actors.rs` |
 | Not see another user's run/turn state | `scenario_turn_state_isolation_across_actors.rs` |
@@ -158,7 +158,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (54)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -181,6 +181,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
+| A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
@@ -213,6 +214,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
+| A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user` (step 8 + anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | The model sees channel setup guidance but not UI-only chrome | `channel_connection_projection.rs` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |
@@ -236,9 +238,10 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Scheduled-origin runs carry their origin into persisted state | `triggered_submit.rs` |
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
+| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-push` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_push_enrollment_and_notification_channel_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-The 54th registered bin, `delivery_user_journeys.rs`, holds the explicit
+One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |
@@ -252,6 +255,8 @@ channel-delivery journeys (two-lane model):
 | Have a conditional fire that calls no delivery tool produce zero outbound attempts | `conditional_fire_with_no_delivery_call_produces_zero_attempts` |
 | Get blocked-fire notices fanned out to every notification channel, first approve wins | `blocked_fire_fans_out_and_first_approve_wins` |
 | Keep a blocked fire app-only when the notification-channel set is empty | `empty_notification_set_keeps_blocked_fire_in_app_only` |
+| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_push_notice_to_enrolled_browser` |
+| Have a dead browser subscription (push service answers `410 Gone`) pruned after one notice attempt | `gone_push_subscription_is_pruned_after_notice_attempt` |
 
 ---
 
@@ -305,7 +310,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 869 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,141 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -331,8 +336,8 @@ entries.
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
-| Opt into the inspector, preserve its selected tab while closing, resizing, and reloading, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
-| Inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for a completed run | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
+| Opt into the inspector for the browser session, toggle it from the header icon, preserve its selected tab while closing, resizing, reloading, and reconnecting after visibility changes, explicitly disable it, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
+| Inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for completed runs, including continued diagnostic observation while the panel is closed | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
 | Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
 
@@ -340,6 +345,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Run built-in tools, parallel calls, and multi-step chains and see the result | `test_reborn_webui_v2_legacy_tool_execution.py` (9), `test_v2_engine_tool_lifecycle.py` (6), `test_tool_execution.py` |
+| Inspect safely bounded arguments and a visibly truncated 50 KiB output for a completed tool call | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_tool_turn_records_result_and_final_reply` |
 | Recover when a tool fails, a tool call is truncated, or the model loops | `test_reborn_webui_v2_legacy_tool_execution.py`, `test_agent_loop_recovery.py` (4), `test_v2_engine_error_handling.py` |
 | See the approval card with payload details, approve/deny, and see it disable while resolving | `test_reborn_webui_v2_legacy_approval.py` (8) |
 | Not send messages while a gate is pending — but keep using other threads | `test_reborn_webui_v2_legacy_approval.py::test_reborn_legacy_pending_approval_does_not_block_other_thread` |
@@ -404,6 +410,7 @@ entries.
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
+| Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |
 | Use plan mode (`/plan`, checklist, approve, status) | `test_plan_mode.py` (5) |
 | As an admin: create users, hand out one-time tokens, page the user list, set roles, suspend/activate, manage write-only secrets, delete users | `test_admin_api.py` (18) |
 | Bootstrap as the single-tenant owner with stable identity | `test_ownership_model.py` (8), `test_multi_tenant_greeting.py` |
@@ -426,7 +433,7 @@ entries.
 | Kill the process (`kill -9`) and still find their history | `test_reborn_blackbox_smoke.py` (5) |
 | Restart gracefully and keep thread history and "always approve" | `test_reborn_blackbox_smoke.py`, `test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_always_approve_survives_reborn_restart` |
 | Not be XSS'd by assistant or user content | `test_reborn_webui_v2_legacy_rendering.py` (3), `test_csp.py` (4) |
-| Upload attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (7) |
+| Upload and reselect attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (8) |
 | Have the model retried on HTTP errors and broken SSE streams, and cancel a slow inference | `test_reborn_webui_v2_streaming_run_control_api.py` |
 
 ### 6.10 Provider contracts & fixtures (Emulate-backed)

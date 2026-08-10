@@ -503,7 +503,12 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         .expect("Slack API GET target");
     assert_eq!(
         api_get.paths,
-        ["/api/files.info", "/api/files.getUploadURLExternal",]
+        [
+            "/api/files.info",
+            "/api/files.getUploadURLExternal",
+            "/api/conversations.history",
+            "/api/conversations.replies",
+        ]
     );
     assert_eq!(api_get.request_body_limit_bytes, Some(0));
     assert_eq!(api_get.response_body_limit_bytes, Some(256 * 1024));

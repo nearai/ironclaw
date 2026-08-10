@@ -244,6 +244,35 @@ where
         FirstPartySelectableSkillsRuntime::new(activation_source, execution_adapter)
     }
 
+    /// As [`Self::selectable_skill_runtime_with_setup_markers`], plus staging: an activated skill's
+    /// files are copied where a process can run them.
+    ///
+    /// `staging_filesystem` must be READ-WRITE. The `workspace_filesystem` handle beside it is the
+    /// read-only one backing setup-marker reads, and writing through it fails closed.
+    pub fn selectable_skill_runtime_with_staging<W, S>(
+        &self,
+        config: SkillActivationSelectorConfig,
+        workspace_filesystem: Arc<ScopedFilesystem<W>>,
+        staging_filesystem: Arc<ScopedFilesystem<S>>,
+        auto_activate_flag: Arc<AtomicBool>,
+    ) -> FirstPartySelectableSkillsRuntime<F>
+    where
+        W: RootFilesystem + 'static,
+        S: RootFilesystem + 'static,
+    {
+        let setup_marker_source = Arc::new(FilesystemSetupMarkerSource::new(workspace_filesystem));
+        let stager = Arc::new(crate::WorkspaceSkillBundleStager::new(staging_filesystem));
+        let activation_source = Arc::new(
+            SelectableSkillContextSource::new(Arc::clone(&self.bundle_source), config)
+                .with_auto_activate_flag(auto_activate_flag)
+                .with_setup_marker_source(setup_marker_source)
+                .with_bundle_stager(stager),
+        );
+        let execution_adapter =
+            Arc::new(SkillExecutionAdapter::new(Arc::clone(&activation_source)));
+        FirstPartySelectableSkillsRuntime::new(activation_source, execution_adapter)
+    }
+
     pub fn selectable_skill_runtime_with_setup_markers<W>(
         &self,
         config: SkillActivationSelectorConfig,

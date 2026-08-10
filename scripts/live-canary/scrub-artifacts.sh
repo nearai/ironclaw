@@ -211,7 +211,12 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
 fi
 
 patterns=(
-  'bearer[[:space:]]+[A-Za-z0-9._~+/=-]+'
+  # 16+ token-alphabet chars only: model-visible tool descriptions say things
+  # like "bearer for a static API token or PAT sent as a Bearer token", and
+  # tool_search output lands in traces — prose after "bearer" must not trip
+  # the guardrail, while real bearer credentials (JWTs, xoxb-, ya29., ghp_…)
+  # are all far longer than any English word that can follow "bearer".
+  'bearer[[:space:]]+[A-Za-z0-9._~+/=-]{16,}'
   'api[_-]?key[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'access[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'refresh[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
@@ -239,7 +244,7 @@ trap 'rm -f "${tmp_matches}" "${tmp_files}"' EXIT
 
 redact_matches() {
   sed -E \
-    -e 's/(bearer[[:space:]]+)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]{16,}/\1<REDACTED>/Ig' \
     -e 's/gh[pousr]_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_TOKEN>/g' \
     -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_PAT>/g' \
     -e 's/ya29\.[A-Za-z0-9._-]{20,}/<REDACTED_GOOGLE_TOKEN>/g' \

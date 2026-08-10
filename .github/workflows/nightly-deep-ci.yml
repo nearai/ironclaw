@@ -67,12 +67,17 @@ jobs:
     # (65 of 74 retained runs are startup_failures) because of stacked
     # violations of exactly these rules:
     # 1. The called workflow's coverage-report job declares job-level
-    #    `pull-requests: write`; the caller must grant it.
+    #    `pull-requests: write` and `actions: read`; the caller must grant
+    #    both. The `actions: read` scope arrived with #7018's changed-line
+    #    coverage gate (it fetches the base commit's merged-lcov artifact) and
+    #    is the exact omission that turned every nightly run from 2026-08-03
+    #    onward into a zero-job startup_failure.
     # 2. reborn-tests.yml references secrets.SCCACHE_*; the caller must pass
     #    secrets (`secrets: inherit`).
     permissions:
       contents: read
       pull-requests: write
+      actions: read
     secrets: inherit
     with:
       ref: ${{ github.sha }}

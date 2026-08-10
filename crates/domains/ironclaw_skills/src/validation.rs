@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
 
-use crate::types::{SkillCredentialSpec, SkillOAuthConfig};
+use crate::types::{SkillCredentialSpec, SkillManifest, SkillOAuthConfig};
 
 /// Regex for validating skill names: alphanumeric, hyphens, underscores, dots.
 static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> =
@@ -293,6 +293,132 @@ fn validate_oauth_config(credential_name: &str, oauth: &SkillOAuthConfig) -> Vec
 /// Normalize line endings to LF before hashing to ensure cross-platform consistency.
 pub fn normalize_line_endings(content: &str) -> String {
     content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Words too common to identify a skill on their own.
+///
+/// Not a general stop-word list: these are the terms that actually caused false activation in
+/// the checked-in catalog. `coding` declares `file`, `change`, `code`, `test`, `error`, `add`
+/// and `build` as keywords, and over 328 real task prompts it fires on ~220 of them -- on
+/// perfectly legitimate whole-word hits, so neither boundary matching nor a score threshold
+/// can help. The only fix is not declaring them.
+const NON_SPECIFIC_TERMS: &[&str] = &[
+    "add", "build", "change", "check", "code", "create", "data", "delete", "do", "error", "file",
+    "files", "fix", "get", "go", "help", "info", "issue", "list", "make", "name", "new", "number",
+    "open", "read", "report", "run", "set", "show", "start", "stop", "table", "task", "test",
+    "time", "update", "use", "value", "work", "write",
+];
+
+/// Longest a description may be before the listing truncates it.
+///
+/// Set to the listing's own cap (`MAX_LISTING_DESCRIPTION_CHARS`): past this point the text is
+/// silently cut and the model never sees it, so a longer description is not a style problem but
+/// dead weight. The catalog's longest is 338.
+const MAX_DESCRIPTION_CHARS: usize = 250;
+
+/// Lint a skill's routing metadata, one message per problem (empty = clean).
+///
+/// Matters more than the scorer on the measured evidence: over 328 real prompts, boundary matching
+/// cut false activations by 18% where fixing the catalog cut them by 68%. Advisory in shape so the
+/// caller decides whether a failure blocks the write.
+pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
+    let mut problems = lint_skill_routing_metadata_blocking(manifest);
+    problems.extend(lint_skill_routing_metadata_advisory(manifest));
+    problems
+}
+
+/// The subset that may REFUSE a write, because it poisons routing for *other* skills.
+///
+/// `coding` declaring `file` and `change` was selected for security audits, QA plans and commit
+/// staging; that cost lands on every later request, not on the skill that declared it. Safe to gate
+/// on: of 26 self-authored skills only 4 declare keywords or tags at all.
+pub fn lint_skill_routing_metadata_blocking(manifest: &SkillManifest) -> Vec<String> {
+    let mut problems = Vec::new();
+    let activation = &manifest.activation;
+    lint_activation_terms(activation, &mut problems);
+    problems
+}
+
+/// The subset that must only WARN, because it describes the skill's OWN quality.
+///
+/// Not hypothetical: 19 of 26 agent-authored skills fail these rules and 15 carry no description at
+/// all, so gating the write on them returns self-creation to a ~0pp effect. The self-creation
+/// measurement could not catch that -- it re-runs the use phase and never exercises the write.
+pub fn lint_skill_routing_metadata_advisory(manifest: &SkillManifest) -> Vec<String> {
+    let mut problems = Vec::new();
+    if manifest.description.trim().is_empty() {
+        problems.push(
+            "description must not be empty; it is all the model sees in the listing".to_string(),
+        );
+    } else if manifest.description.chars().count() > MAX_DESCRIPTION_CHARS {
+        problems.push(format!(
+            "description is {} chars; keep it under {MAX_DESCRIPTION_CHARS} so it survives the \
+             listing truncation and stays scannable",
+            manifest.description.chars().count()
+        ));
+    }
+    problems
+}
+
+/// Rules about declared activation TERMS, shared by the blocking pass.
+fn lint_activation_terms(
+    activation: &crate::types::ActivationCriteria,
+    problems: &mut Vec<String>,
+) {
+    for keyword in &activation.keywords {
+        let lowered = keyword.trim().to_lowercase();
+        if lowered.is_empty() {
+            problems.push("keywords must not be blank".to_string());
+            continue;
+        }
+        // A multi-word keyword is specific even when its parts are not ("tech debt"), so only
+        // flag a term whose EVERY token is non-specific.
+        let tokens: Vec<&str> = lowered
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !tokens.is_empty() && tokens.iter().all(|t| NON_SPECIFIC_TERMS.contains(t)) {
+            problems.push(format!(
+                "keyword {keyword:?} is too generic to identify this skill; it will match \
+                 unrelated requests"
+            ));
+        }
+    }
+
+    for tag in &activation.tags {
+        let lowered = tag.trim().to_lowercase();
+        if NON_SPECIFIC_TERMS.contains(&lowered.as_str()) {
+            problems.push(format!(
+                "tag {tag:?} is too generic; tags are a ranking signal and a broad one pulls \
+                 this skill into unrelated requests"
+            ));
+        }
+    }
+
+    // NO pattern rule. An earlier draft flagged unanchored wildcards and failed 25 of 32
+    // catalog skills; narrowing it to "ends in an open wildcard" still mis-flagged 3 of 4,
+    // because wildcard POSITION is not what makes a pattern promiscuous -- required literal
+    // specificity is. `(?i)(incoming|inbound) message from .+: .+` ends open yet demands
+    // "message from" and a colon, while `(?i)(tell|ask) .+ to .+` is degenerate precisely
+    // because its only literals are "tell"/"ask" and "to".
+    //
+    // I have measured harm for exactly one pattern (delegation-tracker's, 33 fires over 328
+    // prompts), which is not enough to justify a heuristic that produces false positives at
+    // that rate. That skill is fixed by hand in this PR; a general pattern lint needs more
+    // evidence than one instance, and a lint people switch off protects nothing.
+
+    for excluded in &activation.exclude_keywords {
+        if activation
+            .keywords
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(excluded))
+        {
+            problems.push(format!(
+                "{excluded:?} is both a keyword and an exclude_keyword; the veto always wins, so \
+                 the keyword can never fire"
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

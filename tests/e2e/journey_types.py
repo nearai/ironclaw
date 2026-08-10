@@ -35,6 +35,10 @@ class JourneyDeliveryTarget(StrEnum):
     WEBUI = "webui"
     SLACK = "slack"
     TELEGRAM = "telegram"
+    #: The web-push browser channel. Outbound-only, unthreaded — deliveries
+    #: address a per-browser endpoint capability URL, never a conversation
+    #: thread.
+    WEB_PUSH = "web-push"
     #: The journey ends before any reply is delivered. Ingress proofs that
     #: stop at durable turn admission use this rather than naming a target
     #: they never reach -- claiming one would make the inventory read as

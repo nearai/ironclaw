@@ -389,11 +389,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         """
         planner._webui_frontend_prefix.cache_clear()
         try:
-            with mock.patch.object(
-                planner,
-                "crate_directory",
-                return_value="crates/substrates/ironclaw_webui",
-            ) as resolver:
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    return_value="crates/substrates/ironclaw_webui",
+                ) as resolver,
+            ):
                 plan = self.plan(
                     "pull_request",
                     ["crates/substrates/ironclaw_webui/frontend/src/app.tsx"],
@@ -412,10 +415,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         "no Reborn test surface changed" for a real WebUI diff)."""
         planner._webui_frontend_prefix.cache_clear()
         try:
-            with mock.patch.object(
-                planner,
-                "crate_directory",
-                side_effect=planner.CrateTreeError("boom"),
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    side_effect=planner.CrateTreeError("boom"),
+                ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError, "cannot resolve the ironclaw_webui crate"
@@ -528,6 +534,95 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["integration_lanes"], [])
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["coverage_mode"], "none")
+
+    def test_user_sandbox_worker_change_selects_real_docker_lane(self) -> None:
+        for path in (
+            "Dockerfile.sandbox-worker",
+            "crates/lanes/ironclaw_sandbox/Cargo.toml",
+            "crates/lanes/ironclaw_sandbox/src/lib.rs",
+            "crates/app/ironclaw_cli/src/runtime/mod.rs",
+            "crates/lanes/ironclaw_sandbox/src/sandbox_process.rs",
+            "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
+            "crates/app/ironclaw_composition/src/sandbox.rs",
+            "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
+            "crates/app/ironclaw_composition/src/deployment.rs",
+            "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+            "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
+            "crates/app/ironclaw_composition/src/input.rs",
+            "crates/app/ironclaw_config/src/profile.rs",
+            "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+            "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
+            "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+            "crates/kernel/ironclaw_host_runtime/src/services.rs",
+            "crates/kernel/ironclaw_host_runtime/src/services/builder.rs",
+            "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
+            "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
+            "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+            "tests/integration/reborn_sandbox_shell_turn.rs",
+            "tests/e2e_trace_runtime_policy_serde.rs",
+            "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
+            "tests/integration/support/builder.rs",
+            "tests/integration/support/capability_backend.rs",
+            "tests/integration/support/docker_gate.rs",
+            "tests/integration/support/harness/mod.rs",
+            "tests/integration/support/harness/options.rs",
+            "tests/integration/support/harness/profiles/sandbox_shell.rs",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertNotEqual(plan["mode"], "none")
+                self.assertTrue(plan["run_sandbox_docker"])
+
+    def test_sandbox_docker_prefix_follows_crate_inventory_when_nested(self) -> None:
+        """A family-moved ironclaw_sandbox still selects the Docker lane."""
+        moved_directory = "crates/lanes-next/ironclaw_sandbox"
+        moved_metadata = metadata()
+        next(package for package in moved_metadata["packages"] if package["id"] == "alpha")[
+            "manifest_path"
+        ] = str(ROOT / moved_directory / "Cargo.toml")
+
+        with mock.patch.object(
+            planner,
+            "crate_directory",
+            return_value=moved_directory,
+        ) as resolver:
+            for relative_path in (
+                "Cargo.toml",
+                "src/lib.rs",
+                "src/sandbox_process/command.rs",
+            ):
+                with self.subTest(relative_path=relative_path):
+                    plan = planner.build_plan(
+                        event="pull_request",
+                        changed_paths=[f"{moved_directory}/{relative_path}"],
+                        metadata=moved_metadata,
+                        canonical_packages=self.canonical,
+                    )
+                    self.assertTrue(plan["run_sandbox_docker"])
+        resolver.assert_any_call("ironclaw_sandbox", planner.ROOT)
+
+    def test_sandbox_docker_paths_preserve_regular_test_inventory_selection(
+        self,
+    ) -> None:
+        integration_path = "tests/integration/reborn_sandbox_shell_turn.rs"
+        integration_inventory = planner._integration_test_lanes()
+        self.assertIn(integration_path, integration_inventory)
+
+        integration_plan = self.plan("pull_request", [integration_path])
+        self.assertTrue(integration_plan["run_sandbox_docker"])
+        self.assertEqual(
+            integration_plan["integration_lanes"],
+            [integration_inventory[integration_path]],
+        )
+
+        docker_only_path = "tests/e2e_trace_runtime_policy_serde.rs"
+        self.assertNotIn(docker_only_path, planner._root_test_partitions())
+        self.assertNotIn(docker_only_path, integration_inventory)
+
+        docker_only_plan = self.plan("pull_request", [docker_only_path])
+        self.assertTrue(docker_only_plan["run_sandbox_docker"])
+        self.assertEqual(docker_only_plan["root_partitions"], [])
+        self.assertEqual(docker_only_plan["integration_lanes"], [])
 
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
@@ -831,6 +926,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", ["Makefile"])
 
+    def test_nextest_config_widens_to_exhaustive_plan(self) -> None:
+        """`.config/nextest.toml` is runner config every test lane reads.
+
+        Regression for the provider-matrix retirement PR: deleting the dead
+        `live_tests::zizmor_scan*` overrides from `.config/nextest.toml` made
+        the fail-closed arm raise `unclassified pull-request path`, which
+        failed `Detect Reborn test scope` and skipped every downstream Reborn
+        lane. The file is read by every `Tests (Reborn)` lane, so no narrow
+        lane can exercise a change to it; it must NOT go to static control
+        (whose membership rule is "no Reborn test lane reads the file").
+        Widening to the exhaustive plan is the safe resolution — a superset
+        can never under-select.
+        """
+        plan = self.plan("pull_request", [".config/nextest.toml"])
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("nextest runner config changed", plan["reasons"][0])
+
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
 
@@ -853,6 +967,27 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["crate_buckets"], [], path)
                 self.assertEqual(plan["root_partitions"], [], path)
                 self.assertEqual(plan["integration_lanes"], [], path)
+
+    def test_ironloop_configuration_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.ironloop/**` is external IronLoop configuration, not a Reborn surface."""
+        for path in (
+            ".ironloop/config.yaml",
+            ".ironloop/implementer.md",
+            ".ironloop/reviewer.md",
+            ".ironloop/resolver.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+                paired = self.plan(
+                    "pull_request", [path, "crates/alpha/src/lib.rs"]
+                )
+                self.assertEqual(paired["mode"], "selected", path)
+                self.assertNotEqual(paired["crate_buckets"], [], path)
 
     def test_codebase_memory_artifacts_select_no_rust_lane(self) -> None:
         """Shared agent graph data has no Reborn product or test surface."""
@@ -1604,6 +1739,126 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["tests/snapshots/unowned__case.snap"])
 
+    def plan_prompt_surface_owners(self, paths: list[str]) -> dict:
+        """Plan a pull request in a workspace naming the prompt-surface crates.
+
+        Same shape as `real_owner_metadata`: the planner rejects changed
+        packages outside the canonical set, so the crates the
+        `PROMPT_SURFACE_*` tables route from have to exist with their real
+        manifest paths for the paths under test to classify as production
+        changes rather than falling into the exhaustive-plan arm.
+        """
+
+        def package(name: str, manifest: str) -> dict:
+            return {
+                "id": name,
+                "name": name,
+                "manifest_path": str(ROOT / manifest),
+            }
+
+        packages = [
+            package("ironclaw_integration_tests", "Cargo.toml"),
+            package(
+                "ironclaw_host_runtime",
+                "crates/kernel/ironclaw_host_runtime/Cargo.toml",
+            ),
+            package(
+                "ironclaw_loop_contracts",
+                "crates/contracts/ironclaw_loop_contracts/Cargo.toml",
+            ),
+            package(
+                "ironclaw_host_api",
+                "crates/contracts/ironclaw_host_api/Cargo.toml",
+            ),
+            package("ironclaw_turns", "crates/kernel/ironclaw_turns/Cargo.toml"),
+            package(
+                "ironclaw_agent_loop",
+                "crates/loop/ironclaw_agent_loop/Cargo.toml",
+            ),
+            package(
+                "ironclaw_loop_host",
+                "crates/loop/ironclaw_loop_host/Cargo.toml",
+            ),
+            package("ironclaw_memory", "crates/domains/ironclaw_memory/Cargo.toml"),
+        ]
+        metadata = {
+            "workspace_members": [entry["id"] for entry in packages],
+            "packages": packages,
+            "resolve": {
+                "nodes": [{"id": entry["id"], "deps": []} for entry in packages]
+            },
+        }
+        return planner.build_plan(
+            event="pull_request",
+            changed_paths=paths,
+            metadata=metadata,
+            canonical_packages=[
+                entry["name"]
+                for entry in packages
+                if entry["name"] != "ironclaw_integration_tests"
+            ],
+        )
+
+    def test_prompt_surface_change_schedules_golden_lane_and_crate_bucket(self) -> None:
+        """Every configured entry gets a positive case BY CONSTRUCTION.
+
+        The cases are derived from the `PROMPT_SURFACE_*` tables themselves
+        (each exact path, plus one representative file per prefix), so adding
+        an entry whose crate is missing from the fixture fails here instead of
+        shipping untested — the expected package is resolved from the fixture
+        directories, and an unresolvable entry is an explicit failure, not a
+        skip.
+        """
+        golden_lane = planner._integration_test_lanes()[
+            planner.PROMPT_SURFACE_GOLDEN_OWNER
+        ]
+        fixture_directories = {
+            "crates/kernel/ironclaw_host_runtime": "ironclaw_host_runtime",
+            "crates/contracts/ironclaw_loop_contracts": "ironclaw_loop_contracts",
+            "crates/contracts/ironclaw_host_api": "ironclaw_host_api",
+            "crates/kernel/ironclaw_turns": "ironclaw_turns",
+            "crates/loop/ironclaw_agent_loop": "ironclaw_agent_loop",
+            "crates/loop/ironclaw_loop_host": "ironclaw_loop_host",
+        }
+        cases = list(planner.PROMPT_SURFACE_PATHS) + [
+            f"{prefix}golden_probe.md" for prefix in planner.PROMPT_SURFACE_PREFIXES
+        ]
+        for path in cases:
+            with self.subTest(path=path):
+                package = next(
+                    (
+                        name
+                        for directory, name in fixture_directories.items()
+                        if path.startswith(f"{directory}/")
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(
+                    package,
+                    f"prompt-surface entry {path} names a crate the fixture does "
+                    "not carry; add it to plan_prompt_surface_owners so the "
+                    "entry is actually tested",
+                )
+                plan = self.plan_prompt_surface_owners([path])
+                self.assertIn(
+                    golden_lane,
+                    plan["integration_lanes"],
+                    "a prompt-surface change must run the golden snapshots on the PR",
+                )
+                self.assertIn(package, plan["changed_packages"])
+
+    def test_non_prompt_production_change_does_not_schedule_golden_lane(self) -> None:
+        plan = self.plan_prompt_surface_owners(
+            ["crates/domains/ironclaw_memory/src/lib.rs"]
+        )
+        self.assertEqual(
+            plan["integration_lanes"],
+            [],
+            "ordinary production changes keep the narrow plan; the merge queue "
+            "remains the exhaustive gate",
+        )
+        self.assertIn("ironclaw_memory", plan["changed_packages"])
+
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])
         self.assertEqual(plan["mode"], "none")
@@ -1621,6 +1876,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.crate_buckets", workflow)
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
+        self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
+        self.assertIn("--test user_sandbox_docker_live", workflow)
+        self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
             '"${feature_args[@]}" --ignore-rust-version --all-targets',
             workflow,

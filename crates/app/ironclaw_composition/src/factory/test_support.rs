@@ -129,11 +129,6 @@ impl RebornRuntimeStores {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn skill_mounts_for_test(&self) -> &MountView {
-        &self.skill_mounts
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn memory_mounts_for_test(&self) -> &MountView {
         &self.memory_mounts
     }
@@ -1144,6 +1139,17 @@ mod attachment_seam_tests {
 pub(crate) fn workspace_mounts_for_test(stores: &RebornRuntimeStores) -> &MountView {
     shared_workspace_view(&stores.workspace_mounts)
         .expect("test runtime uses a shared workspace mount policy")
+}
+
+/// The skill view a lease-terms assertion must use, from the invocation's own scope. There is
+/// deliberately no runtime field to read: production derives it per gate in
+/// `PolicyApprovalLeaseTermsProvider::skill_mounts_for`, so a test must too.
+#[cfg(test)]
+pub(crate) fn skill_mounts_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> MountView {
+    crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
+        .expect("skill mounts scope for test")
 }
 
 #[cfg(test)]

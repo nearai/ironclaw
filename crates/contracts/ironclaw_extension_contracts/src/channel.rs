@@ -104,6 +104,12 @@ pub struct ChannelDescriptor {
     pub inbound: bool,
     #[serde(default)]
     pub outbound: bool,
+    /// This channel can fulfil blocked-automation notifications (approval/auth
+    /// gates, failure notices). Independent of `inbound`/`outbound`: a channel
+    /// may deliver notifications without being a two-way conversation surface
+    /// (e.g. a browser-push channel, notification-only for final replies).
+    #[serde(default)]
+    pub notifications: bool,
     /// Required: how external conversations bind (checklist MAN-10).
     pub conversation_model: ConversationModel,
     /// Exact product command tokens exposed by this channel, without a leading
@@ -202,6 +208,10 @@ impl ChannelDescriptor {
                         pointer,
                         ..
                     } => pointer.starts_with('/'),
+                    // Field-free: the host derives everything (audience,
+                    // expiry, header value) from the request at the
+                    // injection chokepoint.
+                    ironclaw_host_api::http::RuntimeCredentialTarget::VapidAuthorization => true,
                 };
                 if !well_formed {
                     return Err(ChannelDescriptorError::InvalidEgressInjection {
@@ -500,6 +510,13 @@ pub struct ChannelPresentation {
     pub supports_markdown: bool,
     #[serde(default)]
     pub supports_threads: bool,
+    /// Whether the channel replies to a shared-conversation message by
+    /// creating/continuing a vendor-side thread anchored on it, as opposed
+    /// to an inline anchored reply in the flat conversation. Declares the
+    /// reply-placement contract; the per-vendor anchor mechanics (a thread
+    /// root id vs. a reply-to-message id) live in each channel package.
+    #[serde(default)]
+    pub can_reply_in_threads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_chars: Option<u32>,
     /// Optional per-command display prefix a channel adapter renders before
@@ -594,6 +611,7 @@ credential_handle = "vendor_bot_token"
 [presentation]
 supports_markdown = true
 supports_threads = true
+can_reply_in_threads = true
 max_message_chars = 40000
 "#
     }
@@ -723,6 +741,10 @@ max_message_chars = 40000
         assert_eq!(ingress.route_suffix.as_str(), "events");
         assert_eq!(ingress.body_limit_bytes, 1_048_576);
         assert!(channel.presentation.supports_threads);
+        // Reply-placement contract (#7377): declared in the documented shape,
+        // absent elsewhere in this module's fixtures — the field defaults to
+        // false (anchored inline replies) unless a channel opts in.
+        assert!(channel.presentation.can_reply_in_threads);
     }
 
     #[test]
