@@ -202,13 +202,15 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 async fn host_http_egress_composes_and_redacts_rfc7617_basic_credentials() {
     let encoded = "d2F6dWgtd3VpOnMzY3IzdA==";
     let authorization = format!("Basic {encoded}");
+    let percent_encoded_authorization = "Basic%20d2F6dWgtd3VpOnMzY3IzdA%3D%3D";
+    let reflected_credentials = format!("{authorization} {percent_encoded_authorization}");
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
-        body: authorization.as_bytes().to_vec(),
+        body: reflected_credentials.as_bytes().to_vec(),
         usage: NetworkUsage {
             request_bytes: 5,
-            response_bytes: authorization.len() as u64,
+            response_bytes: reflected_credentials.len() as u64,
             resolved_ip: None,
         },
     });
@@ -248,7 +250,7 @@ async fn host_http_egress_composes_and_redacts_rfc7617_basic_credentials() {
         .await
         .expect("basic credential should be injected through host egress");
 
-    assert_eq!(response.body, b"[REDACTED]");
+    assert_eq!(response.body, b"[REDACTED] [REDACTED]");
     assert!(response.redaction_applied);
 
     let requests = network_recorder.lock().unwrap();

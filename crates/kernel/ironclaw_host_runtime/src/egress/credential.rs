@@ -451,7 +451,9 @@ fn apply_credential_injection(
             let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
             let authorization = format!("Basic {encoded}");
             push_injected_header(request, "Authorization", authorization.clone())?;
-            return Ok(vec![encoded, authorization]);
+            let mut derived_redaction_values = redaction_values_for_secret(&encoded);
+            derived_redaction_values.extend(redaction_values_for_secret(&authorization));
+            return Ok(derived_redaction_values);
         }
         RuntimeCredentialTarget::QueryParam { name } => {
             let url = parsed_request_url(&request.url, parsed_url)?;
@@ -565,9 +567,8 @@ fn apply_credential_injection(
                         reason: error.sanitized_reason().to_string(),
                     },
                 )?;
-            request
-                .headers
-                .push(("authorization".to_string(), header_value));
+            push_injected_header(request, "authorization", header_value.clone())?;
+            return Ok(redaction_values_for_secret(&header_value));
         }
     }
     Ok(Vec::new())
