@@ -46,6 +46,17 @@ pub struct TraceClientAutonomousCaptureRequest<'a> {
     /// authoritative than the response-presence fallback used when message
     /// transcripts carry no structured outcome payload.
     pub outcome_override: Option<trace::TaskSuccess>,
+    /// The run that produced this turn, when the caller knows it.
+    ///
+    /// Threaded in for the same reason as `outcome_override`: the contribution
+    /// path reconstructs a trace from a transcript after the fact, so it
+    /// cannot derive an identity that only existed during generation. This is
+    /// the key the logprob sidecar is written under, and supplying it is what
+    /// lets a contribution carry confidence aggregates.
+    ///
+    /// `None` simply means no aggregates — capture is off by default, so that
+    /// is the ordinary case and not a degradation.
+    pub run_id: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -160,10 +171,15 @@ impl TraceClientHost {
             )),
             credit_account_ref: None,
         };
-        let envelope = self
+        let mut envelope = self
             .build_envelope_from_capture_turns(&turns, options, Some(persisted_outcome))
             .await
             .context("failed to redact autonomous trace")?;
+        // Reduce whatever the logprob sidecar captured for this run into the
+        // four numbers the envelope carries. The raw distributions stay on
+        // disk: they cannot cross the ingest boundary and they are more
+        // sensitive than the text they describe.
+        envelope.training_dynamics = trace::training_dynamics_for_run(request.run_id);
 
         match trace::trace_autonomous_eligibility(&envelope, request.policy) {
             trace::TraceQueueEligibility::Submit => Ok(
@@ -484,6 +500,101 @@ mod tests {
         assert_eq!(parsed_outcome.task_success, TaskSuccess::Failure);
     }
 
+    /// The join the whole feature depends on: the model gateway writes the
+    /// sidecar keyed by run id during generation, and the contribution path —
+    /// which rebuilds a trace from a transcript afterwards and has no identity
+    /// of its own — finds it again by that same key.
+    #[tokio::test]
+    async fn a_captured_run_contributes_confidence_aggregates() {
+        let dir = std::env::temp_dir().join(format!("ironclaw-wiring-{}", uuid::Uuid::new_v4()));
+        // SAFETY: the sidecar directory is read through the same env helper the
+        // gateway writes through; this test owns the value for its duration.
+        unsafe {
+            std::env::set_var(ironclaw_llm::logprob_sidecar::LOGPROB_SIDECAR_DIR_ENV, &dir);
+        }
+
+        let run_id = "run-wiring-test";
+        ironclaw_llm::logprob_sidecar::append(
+            &dir,
+            Some(run_id),
+            Some("turn-1"),
+            "qwen3-30b",
+            true,
+            &[
+                ironclaw_llm::logprob_sidecar::TokenLogprob {
+                    token: "a".into(),
+                    logprob: 0.9f32.ln(),
+                    top_logprobs: vec![],
+                },
+                ironclaw_llm::logprob_sidecar::TokenLogprob {
+                    token: "b".into(),
+                    logprob: 0.85f32.ln(),
+                    top_logprobs: vec![],
+                },
+            ],
+        );
+
+        let policy = enabled_policy();
+        let messages = vec![msg("user", "hello"), msg("assistant", "hi")];
+        let envelope = TraceClientHost
+            .build_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
+                scope: TraceClientScope::user("user-123"),
+                channel: TraceChannel::Web,
+                messages: &messages,
+                policy: &policy,
+                max_turns: 5,
+                outcome_override: None,
+                run_id: Some(run_id),
+            })
+            .await
+            .expect("capture succeeds")
+            .expect("eligible envelope");
+
+        let signals = envelope
+            .training_dynamics
+            .expect("a captured run contributes aggregates");
+        let mean = signals.mean_confidence.expect("mean present");
+        assert!(
+            (mean - 0.875).abs() < 1e-3,
+            "expected the mean of the captured probabilities, got {mean}"
+        );
+        assert_eq!(
+            signals.cartography_bucket,
+            Some(crate::contribution::CartographyBucket::Easy)
+        );
+        assert!(
+            signals.correctness.is_none(),
+            "correctness needs an outcome signal, not confidence"
+        );
+
+        unsafe {
+            std::env::remove_var(ironclaw_llm::logprob_sidecar::LOGPROB_SIDECAR_DIR_ENV);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Capture is off by default, so this is the ordinary path and it must not
+    /// invent signals.
+    #[tokio::test]
+    async fn a_run_without_capture_contributes_no_aggregates() {
+        let policy = enabled_policy();
+        let messages = vec![msg("user", "hello"), msg("assistant", "hi")];
+        let envelope = TraceClientHost
+            .build_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
+                scope: TraceClientScope::user("user-123"),
+                channel: TraceChannel::Web,
+                messages: &messages,
+                policy: &policy,
+                max_turns: 5,
+                outcome_override: None,
+                run_id: None,
+            })
+            .await
+            .expect("capture succeeds")
+            .expect("eligible envelope");
+        assert!(envelope.training_dynamics.is_none());
+    }
+
     #[tokio::test]
     async fn autonomous_capture_uses_scoped_client_identity() {
         let policy = enabled_policy();
@@ -498,6 +609,7 @@ mod tests {
                 policy: &policy,
                 max_turns: 5,
                 outcome_override: None,
+                run_id: None,
             })
             .await
             .expect("capture succeeds")
@@ -530,6 +642,7 @@ mod tests {
                 policy: &policy,
                 max_turns: 5,
                 outcome_override: None,
+                run_id: None,
             })
             .await
             .expect("policy skip is not an error");
@@ -552,6 +665,7 @@ mod tests {
                 policy: &policy,
                 max_turns: 5,
                 outcome_override: None,
+                run_id: None,
             })
             .await
             .expect("capture evaluates");

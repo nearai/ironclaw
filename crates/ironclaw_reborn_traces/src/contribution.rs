@@ -553,6 +553,184 @@ pub enum CartographyBucket {
     Unknown,
 }
 
+/// At or above this mean confidence, a steady trace is [`CartographyBucket::Easy`].
+///
+/// Provisional rather than calibrated — no corpus has been measured against
+/// it. **Mirrors `trace_commons_protocol::trace_contribution`;** the two
+/// constants must move together or contributors and server will disagree about
+/// what a bucket means.
+pub const CARTOGRAPHY_EASY_MEAN_CONFIDENCE: f32 = 0.75;
+
+/// At or above this dispersion a trace is [`CartographyBucket::Ambiguous`]
+/// whatever its mean. Mirrors the server constant; see above.
+pub const CARTOGRAPHY_AMBIGUOUS_VARIABILITY: f32 = 0.25;
+
+/// Reduce per-token probabilities to the aggregate signals the envelope carries.
+///
+/// `probabilities` are p(chosen token) — `exp(logprob)`, not the logprob. An
+/// empty slice measures nothing and yields empty signals rather than a
+/// confident-looking zero.
+///
+/// # These are not dataset cartography
+///
+/// The field names come from Swayamdipta et al. (2020), which defines
+/// confidence, variability and correctness **across training epochs against a
+/// gold label**. Single-pass generation has neither. `variability` here is
+/// dispersion *across tokens within one trace*, which differs in kind from the
+/// paper's across-epoch instability and must not be compared to it. The names
+/// are kept because they are already on the wire.
+///
+/// # `correctness` is never produced here
+///
+/// No arrangement of log-probabilities answers whether the work was right. It
+/// needs an outcome signal — a failing test, a task-failed flag — and callers
+/// that have one set it themselves. Substituting confidence for correctness
+/// would be a quiet redefinition of the field.
+///
+/// This mirrors `trace_commons_protocol::trace_contribution::reduce_token_confidences`.
+/// IronClaw keeps its own copy of the envelope types rather than depending on
+/// the protocol crate, so this function is a deliberate duplicate; a change to
+/// either without the other is a bug.
+#[must_use]
+pub fn reduce_token_confidences(probabilities: &[f32]) -> TrainingDynamicsSignals {
+    if probabilities.is_empty() {
+        return TrainingDynamicsSignals::default();
+    }
+
+    let count = probabilities.len() as f32;
+    let clamped = || {
+        probabilities.iter().map(|p| {
+            if p.is_finite() {
+                p.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+    };
+
+    let mean = (clamped().sum::<f32>() / count).clamp(0.0, 1.0);
+    let variance = clamped().map(|p| (p - mean).powi(2)).sum::<f32>() / count;
+    let variability = variance.sqrt().clamp(0.0, 1.0);
+
+    let bucket = if variability >= CARTOGRAPHY_AMBIGUOUS_VARIABILITY {
+        // Dispersion first: a run that swings between certainty and doubt is
+        // the interesting case, and its mean hides exactly that.
+        CartographyBucket::Ambiguous
+    } else if mean >= CARTOGRAPHY_EASY_MEAN_CONFIDENCE {
+        CartographyBucket::Easy
+    } else {
+        CartographyBucket::Hard
+    };
+
+    TrainingDynamicsSignals {
+        mean_confidence: Some(mean),
+        variability: Some(variability),
+        correctness: None,
+        cartography_bucket: Some(bucket),
+    }
+}
+
+/// Confidence aggregates for a run, from whatever the logprob sidecar captured.
+///
+/// Returns `None` when capture was off, the backend ignored the request, or the
+/// run predates capture — all of which are the normal case, and none of which
+/// is an error. The raw distributions never leave the machine: this is the
+/// reduction step that lets four numbers travel instead of megabytes.
+#[must_use]
+pub fn training_dynamics_for_run(run_id: Option<&str>) -> Option<TrainingDynamicsSignals> {
+    let dir = ironclaw_llm::logprob_sidecar::sidecar_dir();
+    let probabilities = ironclaw_llm::logprob_sidecar::read_token_probabilities(&dir, run_id);
+    if probabilities.is_empty() {
+        return None;
+    }
+    Some(reduce_token_confidences(&probabilities))
+}
+
+#[cfg(test)]
+mod training_dynamics_reduction_tests {
+    use super::{
+        CartographyBucket, TrainingDynamicsSignals, reduce_token_confidences,
+        training_dynamics_for_run,
+    };
+
+    fn approx(actual: Option<f32>, expected: f32) {
+        let actual = actual.expect("value present");
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected ~{expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn empty_input_measures_nothing() {
+        assert_eq!(
+            reduce_token_confidences(&[]),
+            TrainingDynamicsSignals::default()
+        );
+    }
+
+    #[test]
+    fn mean_and_variability_match_the_server_definition() {
+        let signals = reduce_token_confidences(&[0.2, 0.4, 0.6, 0.8]);
+        approx(signals.mean_confidence, 0.5);
+        approx(signals.variability, 0.223_607);
+    }
+
+    #[test]
+    fn correctness_is_never_inferred_from_confidence() {
+        for probs in [vec![0.99, 0.99], vec![0.01, 0.01], vec![0.5, 0.9, 0.1]] {
+            assert!(reduce_token_confidences(&probs).correctness.is_none());
+        }
+    }
+
+    #[test]
+    fn buckets_match_the_server_definition() {
+        assert_eq!(
+            reduce_token_confidences(&[0.95, 0.93, 0.97]).cartography_bucket,
+            Some(CartographyBucket::Easy)
+        );
+        assert_eq!(
+            reduce_token_confidences(&[0.10, 0.12, 0.08]).cartography_bucket,
+            Some(CartographyBucket::Hard)
+        );
+        assert_eq!(
+            reduce_token_confidences(&[0.99, 0.01, 0.99, 0.01]).cartography_bucket,
+            Some(CartographyBucket::Ambiguous)
+        );
+    }
+
+    /// Every value the reduction can emit has to satisfy the bound the server
+    /// enforces on the envelope, or contributions fail validation at ingest.
+    #[test]
+    fn output_is_always_within_the_envelope_bounds() {
+        let corpora: Vec<Vec<f32>> = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![0.0, 1.0],
+            vec![f32::NAN, 0.5],
+            vec![2.0, -1.0],
+            (0..500).map(|i| (i % 101) as f32 / 100.0).collect(),
+        ];
+        for probs in corpora {
+            let signals = reduce_token_confidences(&probs);
+            for value in [signals.mean_confidence, signals.variability] {
+                let value = value.expect("present");
+                assert!(
+                    value.is_finite() && (0.0..=1.0).contains(&value),
+                    "out of envelope bounds: {value} from {probs:?}"
+                );
+            }
+        }
+    }
+
+    /// Capture off, backend ignored the parameter, or a run older than the
+    /// feature — all normal, none an error.
+    #[test]
+    fn a_run_with_no_capture_yields_nothing() {
+        assert!(training_dynamics_for_run(Some("run-that-was-never-captured")).is_none());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProcessEvaluationLabels {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -23,28 +23,28 @@ use serde::{Deserialize, Serialize};
 
 /// Directory override for captured logprobs. Defaults to
 /// `<ironclaw_base_dir>/logprobs`.
-pub(crate) const LOGPROB_SIDECAR_DIR_ENV: &str = "IRONCLAW_NEARAI_LOGPROB_DIR";
+pub const LOGPROB_SIDECAR_DIR_ENV: &str = "IRONCLAW_NEARAI_LOGPROB_DIR";
 
 /// Per-token log-probabilities for one choice, as returned by an
 /// OpenAI-compatible backend.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub(crate) struct ChoiceLogprobs {
+pub struct ChoiceLogprobs {
     #[serde(default)]
-    pub(crate) content: Vec<TokenLogprob>,
+    pub content: Vec<TokenLogprob>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct TokenLogprob {
-    pub(crate) token: String,
-    pub(crate) logprob: f32,
+pub struct TokenLogprob {
+    pub token: String,
+    pub logprob: f32,
     #[serde(default)]
-    pub(crate) top_logprobs: Vec<TopLogprob>,
+    pub top_logprobs: Vec<TopLogprob>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct TopLogprob {
-    pub(crate) token: String,
-    pub(crate) logprob: f32,
+pub struct TopLogprob {
+    pub token: String,
+    pub logprob: f32,
 }
 
 /// One appended line: the distributions for a single completion, tagged with
@@ -63,7 +63,7 @@ struct LogprobRecord<'a> {
 }
 
 /// Resolve the sidecar directory.
-pub(crate) fn sidecar_dir() -> PathBuf {
+pub fn sidecar_dir() -> PathBuf {
     match ironclaw_common::env_helpers::env_or_override(LOGPROB_SIDECAR_DIR_ENV) {
         Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
         _ => ironclaw_common::paths::ironclaw_base_dir().join("logprobs"),
@@ -75,7 +75,7 @@ pub(crate) fn sidecar_dir() -> PathBuf {
 /// `run_id` reaches us through an opaque metadata map, so it is untrusted for
 /// this purpose: anything that is not alphanumeric, dash or underscore is
 /// replaced, which makes traversal (`../`) and absolute paths unrepresentable.
-pub(crate) fn sidecar_file_name(run_id: Option<&str>) -> String {
+pub fn sidecar_file_name(run_id: Option<&str>) -> String {
     let raw = run_id.map(str::trim).filter(|s| !s.is_empty());
     let Some(raw) = raw else {
         return "unattributed.jsonl".to_string();
@@ -99,7 +99,7 @@ pub(crate) fn sidecar_file_name(run_id: Option<&str>) -> String {
 
 /// Append one record. Best-effort: capture is diagnostic, so a failure to
 /// write is logged and swallowed rather than failing the user's turn.
-pub(crate) fn append(
+pub fn append(
     dir: &Path,
     run_id: Option<&str>,
     turn_id: Option<&str>,
@@ -148,9 +148,197 @@ fn try_append(
     file.write_all(line.as_bytes())
 }
 
+/// One appended line, read back.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StoredLogprobRecord {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub tokens: Vec<TokenLogprob>,
+}
+
+/// Read every record captured for a run.
+///
+/// Malformed lines are skipped rather than failing the read: the file is
+/// append-only and best-effort, so a truncated final line after a hard kill is
+/// expected rather than exceptional. The count of skipped lines is logged.
+#[must_use]
+pub fn read_records(dir: &Path, run_id: Option<&str>) -> Vec<StoredLogprobRecord> {
+    let path = dir.join(sidecar_file_name(run_id));
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut skipped = 0usize;
+    let records: Vec<StoredLogprobRecord> = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(record) => Some(record),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
+        .collect();
+    if skipped > 0 {
+        tracing::debug!(
+            "skipped {skipped} malformed line(s) reading captured logprobs from {}",
+            path.display()
+        );
+    }
+    records
+}
+
+/// Probability of each token the model actually emitted, across every record
+/// captured for a run, in capture order.
+///
+/// This is `exp(logprob)` — the quantity the confidence aggregates are defined
+/// over. Non-finite or out-of-range results are dropped rather than clamped: a
+/// logprob that does not exponentiate into a probability is corrupt, and
+/// averaging a repaired value in would quietly bias the mean.
+#[must_use]
+pub fn read_token_probabilities(dir: &Path, run_id: Option<&str>) -> Vec<f32> {
+    read_records(dir, run_id)
+        .into_iter()
+        .flat_map(|record| record.tokens)
+        .map(|token| token.logprob.exp())
+        .filter(|p| p.is_finite() && (0.0..=1.0).contains(p))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- reading back ---------------------------------------------------------
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ironclaw-logprob-{tag}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn reading_a_missing_file_is_empty_not_an_error() {
+        let dir = temp_dir("missing");
+        assert!(read_records(&dir, Some("nope")).is_empty());
+        assert!(read_token_probabilities(&dir, Some("nope")).is_empty());
+    }
+
+    #[test]
+    fn probabilities_round_trip_through_the_sidecar() {
+        let dir = temp_dir("roundtrip");
+        // ln(0.5) and ln(0.25), so the probabilities come back exactly.
+        append(
+            &dir,
+            Some("run-rt"),
+            Some("turn-1"),
+            "qwen3-30b",
+            true,
+            &[
+                TokenLogprob {
+                    token: "a".into(),
+                    logprob: 0.5f32.ln(),
+                    top_logprobs: vec![],
+                },
+                TokenLogprob {
+                    token: "b".into(),
+                    logprob: 0.25f32.ln(),
+                    top_logprobs: vec![],
+                },
+            ],
+        );
+
+        let probs = read_token_probabilities(&dir, Some("run-rt"));
+        assert_eq!(probs.len(), 2);
+        assert!((probs[0] - 0.5).abs() < 1e-5, "got {}", probs[0]);
+        assert!((probs[1] - 0.25).abs() < 1e-5, "got {}", probs[1]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn probabilities_span_every_record_for_the_run() {
+        let dir = temp_dir("multi");
+        for turn in 0..3 {
+            append(
+                &dir,
+                Some("run-multi"),
+                Some(&format!("turn-{turn}")),
+                "qwen3-30b",
+                true,
+                &[TokenLogprob {
+                    token: "x".into(),
+                    logprob: 0.5f32.ln(),
+                    top_logprobs: vec![],
+                }],
+            );
+        }
+        assert_eq!(read_records(&dir, Some("run-multi")).len(), 3);
+        assert_eq!(read_token_probabilities(&dir, Some("run-multi")).len(), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The file is append-only and written best-effort, so a truncated final
+    /// line after a hard kill is expected. It must not lose the good records.
+    #[test]
+    fn a_truncated_final_line_does_not_discard_earlier_records() {
+        let dir = temp_dir("truncated");
+        append(
+            &dir,
+            Some("run-trunc"),
+            None,
+            "qwen3-30b",
+            false,
+            &[TokenLogprob {
+                token: "ok".into(),
+                logprob: 0.5f32.ln(),
+                top_logprobs: vec![],
+            }],
+        );
+        let path = dir.join("run-trunc.jsonl");
+        let mut contents = std::fs::read_to_string(&path).unwrap();
+        contents.push_str("{\"run_id\":\"run-trunc\",\"tok");
+        std::fs::write(&path, contents).unwrap();
+
+        assert_eq!(read_records(&dir, Some("run-trunc")).len(), 1);
+        assert_eq!(read_token_probabilities(&dir, Some("run-trunc")).len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A logprob that does not exponentiate into a probability is corrupt.
+    /// Dropping beats clamping, which would bias the mean toward whatever
+    /// bound the repair chose.
+    #[test]
+    fn corrupt_logprobs_are_dropped_not_repaired() {
+        let dir = temp_dir("corrupt");
+        append(
+            &dir,
+            Some("run-corrupt"),
+            None,
+            "qwen3-30b",
+            false,
+            &[
+                TokenLogprob {
+                    token: "good".into(),
+                    logprob: 0.5f32.ln(),
+                    top_logprobs: vec![],
+                },
+                TokenLogprob {
+                    // exp(5.0) is 148 — not a probability.
+                    token: "bad".into(),
+                    logprob: 5.0,
+                    top_logprobs: vec![],
+                },
+            ],
+        );
+        let probs = read_token_probabilities(&dir, Some("run-corrupt"));
+        assert_eq!(probs.len(), 1, "only the well-formed token survives");
+        assert!((probs[0] - 0.5).abs() < 1e-5);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn token(text: &str, logprob: f32) -> TokenLogprob {
         TokenLogprob {

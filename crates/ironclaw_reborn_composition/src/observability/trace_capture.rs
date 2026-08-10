@@ -218,6 +218,10 @@ pub(crate) async fn capture_turn_trace(
     }
 
     let turn_failed = matches!(event.kind, TurnEventKind::Failed);
+    // The same identity the model gateway writes the logprob sidecar under, so
+    // a turn's confidence aggregates can be found again after the fact. The
+    // transcript this trace is rebuilt from carries no such identity.
+    let run_id = event.run_id.to_string();
     let outcome = TraceClientHost
         .prepare_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
             scope: TraceClientScope::user(scope.clone()),
@@ -231,6 +235,7 @@ pub(crate) async fn capture_turn_trace(
             // Reborn thread transcripts carry no structured outcome payload;
             // the lifecycle event's terminal status is authoritative.
             outcome_override: turn_failed.then_some(trace::TaskSuccess::Failure),
+            run_id: Some(run_id.as_str()),
         })
         .await;
     match outcome {

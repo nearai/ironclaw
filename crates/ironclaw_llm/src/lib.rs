@@ -25,7 +25,7 @@ pub(crate) mod gemini_oauth;
 mod github_copilot;
 pub(crate) mod github_copilot_auth;
 pub mod host;
-mod logprob_sidecar;
+pub mod logprob_sidecar;
 pub mod nearai_chat;
 pub mod openai_codex_provider;
 pub(crate) mod openai_codex_session;
