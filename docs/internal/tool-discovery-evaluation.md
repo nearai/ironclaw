@@ -51,6 +51,30 @@ Run the same task set and catalog seed for every arm:
 5. Namespace summaries, bounded complete signatures, and reviewed profile
    pins.
 
+All five arms are selectable from the same binary:
+
+| Arm | `REBORN_TOOL_DISCLOSURE` |
+| --- | --- |
+| Full advertised schemas | `off` |
+| Current compact search/describe/call | `compact` |
+| Bounded complete signatures | `signatures` |
+| Namespace summaries + signatures | `namespaces` |
+| Namespace summaries + signatures + pins | `bridged` (default) |
+
+Unknown values fail closed to `off`. A benchmark runner should restart the
+service between arms, keep the model route and catalog seed fixed, and capture
+the run's selected value with every observation.
+
+Profile pins are supplied as canonical capability IDs in a JSON object keyed by
+capability-surface profile. The initial reviewed benchmark map is:
+
+```bash
+REBORN_TOOL_DISCLOSURE_PROFILE_PINS='{"interactive_tools":["gmail.list_messages","google-calendar.list_events","github.search_code"],"mission_tools":["github.search_issues_pull_requests","github.get_file_content"],"subagent_tools":["github.search_issues_pull_requests","github.get_file_content"]}'
+```
+
+Invalid JSON or any invalid capability ID fails closed to an empty pin map. A
+pin absent from the effective authorized surface has no effect.
+
 The 100-, 500-, and 1,000-tool catalogs must preserve the same judged tasks.
 Each size may add deterministic distractors, but the report must record the
 generator version and seed.
@@ -130,6 +154,13 @@ Every model/provider configuration runs at least one cold repetition and three
 warm repetitions. Reports include median, worst case, spread, and failure
 categories; cache-provider measurements additionally report cached-input
 tokens and tool-definition signature changes.
+
+Deterministic repository tests gate catalog construction, retrieval quality,
+protocol shape, authorization fitting, namespace fairness, and stable
+serialization. Provider token usage and network/model latency are intentionally
+not estimated from JSON bytes or local test timings; those fields are populated
+only by the deployed cold/warm runner. This separation prevents a deterministic
+CI proxy from being presented as end-to-end model evidence.
 
 ## Rollout gates
 

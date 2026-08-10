@@ -93,6 +93,12 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
+        self
+    }
+
     /// Force `ToolDisclosureMode::Off` into the group's ONE planned runtime
     /// config, regardless of `REBORN_TOOL_DISCLOSURE`. Used by the disclosure
     /// mode's negative-control test to pin Off-mode behavior explicitly:

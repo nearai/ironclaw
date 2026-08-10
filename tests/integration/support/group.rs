@@ -962,12 +962,10 @@ impl RebornIntegrationGroupBuilder {
         let restart_builder = self.clone();
         // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
         // if the override is set without Bridged mode also selected.
-        if self.narrowed_bridged_policy.is_some()
-            && self.tool_disclosure != ToolDisclosureMode::Bridged
-        {
+        if self.narrowed_bridged_policy.is_some() && !self.tool_disclosure.is_bridged() {
             return Err(
                 "with_narrowed_capability_surface_policy_for_bridged_test() was set but \
-                 tool_disclosure is not Bridged — the override only applies to \
+                 tool_disclosure is Off — the override only applies to \
                  bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
                     .into(),
             );
@@ -1019,7 +1017,7 @@ impl RebornIntegrationGroupBuilder {
         // disclosure's synthetic bridge surface, so this is production parity,
         // not a bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure == ToolDisclosureMode::Bridged {
+            if self.tool_disclosure.is_bridged() {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     policy: self
                         .narrowed_bridged_policy
@@ -1238,6 +1236,13 @@ impl RebornIntegrationGroupBuilder {
                 // Enabler (b): test groups are hermetically pinned and never
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
+                tool_disclosure_profile_pins: std::collections::BTreeMap::from([(
+                    "interactive_tools".to_string(),
+                    vec![
+                        ironclaw_host_api::ids::CapabilityId::new("github.search_code")
+                            .expect("valid integration profile pin"),
+                    ],
+                )]),
                 // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
                 // production rides out provider outages for minutes (deep
                 // availability retries with long backoff), which would stall

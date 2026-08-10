@@ -24,7 +24,8 @@ use tracing::debug;
 use crate::tool_disclosure::{
     ActiveSet, CapabilityCatalog, CatalogSearchResult, DisclosureCaps, PromotedSet, TOOL_CALL_NAME,
     TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json,
-    definition_matches_provider_name, is_bridge_capability_id, is_bridge_name, select_active_set,
+    definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
+    select_active_set_for_mode,
 };
 use crate::tool_search::{
     AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
@@ -62,6 +63,7 @@ pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    mode: crate::ToolDisclosureMode,
 }
 
 impl ToolDisclosureCapabilityDecorator {
@@ -70,7 +72,15 @@ impl ToolDisclosureCapabilityDecorator {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
+            mode: crate::ToolDisclosureMode::Bridged,
         }
+    }
+
+    /// Select one of the benchmarkable disclosure arms. Production uses the
+    /// default `Bridged` arm; the other variants are explicit controls.
+    pub fn with_mode(mut self, mode: crate::ToolDisclosureMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Wrap one run's capability port with disclosure using the exact
@@ -81,13 +91,28 @@ impl ToolDisclosureCapabilityDecorator {
         inner: Arc<dyn LoopCapabilityPort>,
         policy: Arc<CapabilitySurfacePolicy>,
     ) -> Arc<dyn LoopCapabilityPort> {
+        self.decorate_with_policy_and_pins(run_context, inner, policy, Vec::new())
+    }
+
+    /// Wrap one run with profile-owned visibility pins. Pins use canonical
+    /// capability ids and are only applied after the effective authorized
+    /// definitions have been fitted, so they can never grant authority.
+    pub fn decorate_with_policy_and_pins(
+        &self,
+        run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+        policy: Arc<CapabilitySurfacePolicy>,
+        profile_pins: Vec<CapabilityId>,
+    ) -> Arc<dyn LoopCapabilityPort> {
         Arc::new(ToolDisclosureCapabilityPort {
             inner,
             run_context: run_context.clone(),
             result_writer: Arc::clone(&self.result_writer),
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
+            mode: self.mode,
             policy,
+            profile_pins,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -101,11 +126,15 @@ struct ToolDisclosureCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    mode: crate::ToolDisclosureMode,
     /// #5712/#5659-w6: the caller's effective policy, resolved once in
     /// `ToolDisclosureCapabilityDecorator::decorate_with_policy` — narrows disclosed
     /// tool_search/tool_describe metadata *and* the tool_search bridge's own
     /// advertised description (the always-on catalog index).
     policy: Arc<CapabilitySurfacePolicy>,
+    /// Reviewed visibility preferences from the run-profile owner. These are
+    /// not grants; catalog construction sees only authorized definitions.
+    profile_pins: Vec<CapabilityId>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -181,6 +210,20 @@ fn bounded_search_results(
                 output["parameters"] = result.parameters;
             }
             output
+        })
+        .collect()
+}
+
+fn compact_search_results(results: Vec<CatalogSearchResult>) -> Vec<Value> {
+    results
+        .into_iter()
+        .map(|result| {
+            json!({
+                "name": result.name,
+                "capability_id": result.capability_id.as_str(),
+                "description": result.description,
+                "required": result.required_params,
+            })
         })
         .collect()
 }
@@ -668,7 +711,12 @@ impl ToolDisclosureCapabilityPort {
             .unwrap_or(true);
         if rebuild {
             let index_started_at = std::time::Instant::now();
-            let catalog = CapabilityCatalog::new(&authorized_definitions, &[]);
+            let effective_pins = if self.mode.includes_profile_pins() {
+                self.profile_pins.as_slice()
+            } else {
+                &[]
+            };
+            let catalog = CapabilityCatalog::new(&authorized_definitions, effective_pins);
             let search_index = AuthorizedToolSearchIndex::new(authorized_definitions.iter());
             debug!(
                 target: "ironclaw::reborn::tool_search",
@@ -678,7 +726,8 @@ impl ToolDisclosureCapabilityPort {
                 "rebuilt authorized deferred-tool search index"
             );
             let promoted = self.promoted_for_scope()?;
-            let active = select_active_set(&catalog, &promoted, self.caps, &self.policy);
+            let active =
+                select_active_set_for_mode(&catalog, &promoted, self.caps, &self.policy, self.mode);
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
@@ -1072,11 +1121,15 @@ impl ToolDisclosureCapabilityPort {
                     ranked_results.push(result);
                 }
             }
-            let results = bounded_search_results(
-                ranked_results,
-                MAX_SEARCH_SIGNATURE_BYTES_TOTAL,
-                MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT,
-            );
+            let results = if self.mode.includes_complete_signatures() {
+                bounded_search_results(
+                    ranked_results,
+                    MAX_SEARCH_SIGNATURE_BYTES_TOTAL,
+                    MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT,
+                )
+            } else {
+                compact_search_results(ranked_results)
+            };
             json!({
                 "query": query,
                 "results": results,
@@ -3735,6 +3788,18 @@ mod tests {
     }
 
     #[test]
+    fn compact_control_arm_omits_signature_contract_fields() {
+        let results = compact_search_results(vec![search_result_with_schema(
+            "alpha",
+            json!({"type": "object"}),
+        )]);
+
+        assert!(results[0].get("parameters").is_none());
+        assert!(results[0].get("schema_complete").is_none());
+        assert_eq!(results[0]["name"], "alpha");
+    }
+
+    #[test]
     fn bounded_search_signatures_preserve_rank_and_skip_oversized_schemas() {
         let oversized = search_result_with_schema("first", json!({"value": "x".repeat(64)}));
         let small = search_result_with_schema("second", json!({"type": "object"}));
@@ -3826,9 +3891,11 @@ mod tests {
                 max_tools: 5,
                 ctx_limit: None,
             },
+            mode: crate::ToolDisclosureMode::Bridged,
             // Unnarrowed — unit tests here exercise disclosure mechanics, not
             // profile narrowing (that's the integration tier).
             policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
+            profile_pins: Vec::new(),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

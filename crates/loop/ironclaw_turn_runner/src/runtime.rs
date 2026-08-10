@@ -1,6 +1,6 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
@@ -113,6 +113,9 @@ pub struct DefaultPlannedRuntimeConfig {
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
+    /// Profile-owned visibility preferences, keyed by capability-surface
+    /// profile id. Values are canonical capability ids and never grant access.
+    pub tool_disclosure_profile_pins: BTreeMap<String, Vec<CapabilityId>>,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Override for the default family's model availability-retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
@@ -132,10 +135,44 @@ impl Default for DefaultPlannedRuntimeConfig {
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
+            tool_disclosure_profile_pins: tool_disclosure_profile_pins_from_env(),
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
         }
     }
+}
+
+pub const REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV: &str = "REBORN_TOOL_DISCLOSURE_PROFILE_PINS";
+
+fn tool_disclosure_profile_pins_from_env() -> BTreeMap<String, Vec<CapabilityId>> {
+    let Ok(raw) = std::env::var(REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV) else {
+        return BTreeMap::new();
+    };
+    let Ok(resolved) = parse_tool_disclosure_profile_pins(&raw) else {
+        tracing::debug!(
+            target: "ironclaw::reborn::runtime",
+            env = REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
+            "tool-disclosure profile pins are invalid; ignoring all pins"
+        );
+        return BTreeMap::new();
+    };
+    resolved
+}
+
+fn parse_tool_disclosure_profile_pins(
+    raw: &str,
+) -> Result<BTreeMap<String, Vec<CapabilityId>>, ()> {
+    let parsed = serde_json::from_str::<BTreeMap<String, Vec<String>>>(raw).map_err(|_error| ())?;
+    let mut resolved = BTreeMap::new();
+    for (profile, pins) in parsed {
+        let pins = pins
+            .into_iter()
+            .map(CapabilityId::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_error| ())?;
+        resolved.insert(profile, pins);
+    }
+    Ok(resolved)
 }
 
 /// Map the configured worker count into a scheduler-semaphore permit count.
@@ -666,9 +703,10 @@ where
             target: "ironclaw::reborn::runtime",
             "reborn tool disclosure decorator wired (bridged)"
         );
-        Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
-            Arc::clone(&parts.capability_result_writer),
-        )))
+        Some(Arc::new(
+            ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer))
+                .with_mode(parts.config.tool_disclosure),
+        ))
     } else {
         None
     };
@@ -695,6 +733,7 @@ where
             tool_disclosure_decorator,
             global_denied,
             scheduled_trigger_denied,
+            tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins,
         });
     let safety_context = parts
         .safety_context
@@ -842,6 +881,7 @@ struct RuntimeProfiledCapabilityPortFactory {
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
     global_denied: Vec<CapabilityId>,
     scheduled_trigger_denied: Vec<CapabilityId>,
+    tool_disclosure_profile_pins: BTreeMap<String, Vec<CapabilityId>>,
 }
 
 #[async_trait::async_trait]
@@ -873,8 +913,22 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         capabilities = self.spawn_decorator.decorate(run_context, capabilities);
         capabilities = apply_capability_surface_policy(capabilities, Arc::clone(&policy));
         if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
-            capabilities =
-                decorator.decorate_with_policy(run_context, capabilities, Arc::clone(&policy));
+            let pins = self
+                .tool_disclosure_profile_pins
+                .get(
+                    run_context
+                        .resolved_run_profile
+                        .capability_surface_profile_id
+                        .as_str(),
+                )
+                .cloned()
+                .unwrap_or_default();
+            capabilities = decorator.decorate_with_policy_and_pins(
+                run_context,
+                capabilities,
+                Arc::clone(&policy),
+                pins,
+            );
         }
         Ok(capabilities)
     }
@@ -932,6 +986,7 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -939,7 +994,8 @@ mod tests {
 
     use super::{
         RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+        ToolDisclosureCapabilityDecorator, parse_tool_disclosure_profile_pins,
+        scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -994,6 +1050,33 @@ mod tests {
         assert_eq!(permits, tokio::sync::Semaphore::MAX_PERMITS);
         // Must not panic.
         let _ = tokio::sync::Semaphore::new(permits);
+    }
+
+    #[test]
+    fn profile_pin_config_parses_typed_capability_ids() {
+        let parsed = parse_tool_disclosure_profile_pins(
+            r#"{"interactive_tools":["github.search_code","gmail.list_messages"]}"#,
+        )
+        .expect("valid profile-pin configuration");
+
+        assert_eq!(
+            parsed["interactive_tools"]
+                .iter()
+                .map(CapabilityId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["github.search_code", "gmail.list_messages"]
+        );
+    }
+
+    #[test]
+    fn profile_pin_config_rejects_the_entire_map_when_any_id_is_invalid() {
+        assert!(
+            parse_tool_disclosure_profile_pins(
+                r#"{"interactive_tools":["github.search_code"],"mission":["invalid"]}"#,
+            )
+            .is_err()
+        );
+        assert!(parse_tool_disclosure_profile_pins("[]").is_err());
     }
 
     async fn test_run_context() -> LoopRunContext {
@@ -1311,6 +1394,7 @@ mod tests {
             ))),
             global_denied: vec![denied_id.clone()],
             scheduled_trigger_denied: Vec::new(),
+            tool_disclosure_profile_pins: BTreeMap::new(),
         };
 
         factory
@@ -1452,6 +1536,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied,
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            tool_disclosure_profile_pins: BTreeMap::new(),
         };
 
         let scheduled_ids =
@@ -1509,6 +1594,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            tool_disclosure_profile_pins: BTreeMap::new(),
         };
 
         let scheduled_ids =

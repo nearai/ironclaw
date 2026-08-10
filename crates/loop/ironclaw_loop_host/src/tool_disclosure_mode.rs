@@ -13,7 +13,15 @@ pub const REBORN_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolDisclosureMode {
+    /// Control arm: advertise every authorized schema.
     Off,
+    /// Control arm: alphabetical preview and mandatory describe-style compact search results.
+    Compact,
+    /// Bounded complete signatures with the legacy alphabetical preview.
+    Signatures,
+    /// Namespace-aware preview and bounded signatures, without profile pins.
+    Namespaces,
+    /// Production arm: namespace-aware preview, bounded signatures, and pins.
     #[default]
     Bridged,
 }
@@ -43,6 +51,9 @@ impl ToolDisclosureMode {
     fn from_raw(raw: Option<&str>) -> Self {
         match raw {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
+            Some(value) if value.eq_ignore_ascii_case("compact") => Self::Compact,
+            Some(value) if value.eq_ignore_ascii_case("signatures") => Self::Signatures,
+            Some(value) if value.eq_ignore_ascii_case("namespaces") => Self::Namespaces,
             Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
             Some(value) if !value.is_empty() => {
                 tracing::debug!(
@@ -58,6 +69,18 @@ impl ToolDisclosureMode {
     }
 
     pub fn is_bridged(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub(crate) fn includes_complete_signatures(self) -> bool {
+        matches!(self, Self::Signatures | Self::Namespaces | Self::Bridged)
+    }
+
+    pub(crate) fn includes_namespace_summaries(self) -> bool {
+        matches!(self, Self::Namespaces | Self::Bridged)
+    }
+
+    pub(crate) fn includes_profile_pins(self) -> bool {
         matches!(self, Self::Bridged)
     }
 }
@@ -87,6 +110,15 @@ mod tests {
             !ToolDisclosureMode::from_raw(Some("off")).is_bridged(),
             "explicit REBORN_TOOL_DISCLOSURE=off disables disclosure"
         );
+        assert!(ToolDisclosureMode::from_raw(Some("compact")).is_bridged());
+        assert!(ToolDisclosureMode::from_raw(Some("signatures")).is_bridged());
+        assert!(ToolDisclosureMode::from_raw(Some("namespaces")).is_bridged());
+        assert!(!ToolDisclosureMode::Compact.includes_complete_signatures());
+        assert!(ToolDisclosureMode::Signatures.includes_complete_signatures());
+        assert!(!ToolDisclosureMode::Signatures.includes_namespace_summaries());
+        assert!(ToolDisclosureMode::Namespaces.includes_namespace_summaries());
+        assert!(!ToolDisclosureMode::Namespaces.includes_profile_pins());
+        assert!(ToolDisclosureMode::Bridged.includes_profile_pins());
         // Per-variant gating is unchanged.
         assert!(!ToolDisclosureMode::Off.is_bridged());
         assert!(ToolDisclosureMode::Bridged.is_bridged());
