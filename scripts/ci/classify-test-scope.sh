@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # Classify a list of changed paths (one per line on stdin) into the test scopes
-# the CI workflows select on: docs_only / has_core_code / has_legacy_tests /
-# has_reborn_tests.
+# the CI workflows select on: docs_only / has_core_code / has_legacy_tests.
 #
 # Crate paths are normalized to `crates/<crate>/...` BEFORE the case arms run,
 # so the arms below stay keyed to crate identity rather than to how deep the
@@ -25,7 +24,6 @@ set -euo pipefail
 has_core_code=false
 docs_only=true
 has_legacy_tests=false
-has_reborn_tests=false
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="${IRONCLAW_REPO_ROOT:-$(cd "${script_dir}/../.." && pwd)}"
@@ -217,7 +215,7 @@ normalize_crate_path() {
   # (`crates/<family>/packages/...`) after the family move (PROPOSAL §5), the
   # `crates/extensions/packages/*` arms in is_shared_test_path stop matching,
   # and the file falls through to `is_code_path`'s bare `crates/*` arm —
-  # bucketing it has_reborn_tests=false where it was true. A `wasm-src/` guest
+  # losing the shared-test classification it should have carried. A `wasm-src/` guest
   # inside the SAME package would be caught by package_asset_dir first (it is
   # also under `packages/`) and gets the identical rewrite, so its own
   # `nested_workspace_dir` membership never needs to be consulted here.
@@ -337,6 +335,13 @@ is_shared_test_path() {
   esac
 }
 
+# A path matching here identifies a Reborn-only crate or script: one that is
+# NOT covered by the legacy suite, so the classification loop below must not
+# let it fall through to is_code_path's has_legacy_tests=true arm. This used
+# to also drive a has_reborn_tests output, but that output had no remaining
+# consumer in CI (routing for the Reborn suite itself now lives in
+# scripts/ci/reborn_pr_test_plan.py) and was removed as dead code following
+# #6952; this function is kept purely for the has_legacy_tests exclusion.
 is_reborn_test_path() {
   local path="$1"
   case "$path" in
@@ -420,9 +425,8 @@ while IFS= read -r raw_path || [ -n "$raw_path" ]; do
 
   if is_shared_test_path "$path"; then
     has_legacy_tests=true
-    has_reborn_tests=true
   elif is_reborn_test_path "$path"; then
-    has_reborn_tests=true
+    : # Reborn-only path: deliberately excluded from has_legacy_tests.
   elif is_code_path "$path"; then
     has_legacy_tests=true
   fi
@@ -432,5 +436,4 @@ cat <<EOF
 docs_only=${docs_only}
 has_core_code=${has_core_code}
 has_legacy_tests=${has_legacy_tests}
-has_reborn_tests=${has_reborn_tests}
 EOF
