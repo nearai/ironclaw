@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -17,11 +18,6 @@ release = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = release
 SPEC.loader.exec_module(release)
 
-# `release` imports crate_tree as a side effect of exec_module above (it
-# inserts scripts/ci/lib onto sys.path), so this import is safe here without
-# repeating the path insertion.
-import crate_tree  # noqa: E402
-
 VERSION = "1.1.0-rc.1"
 SHA = "a" * 40
 
@@ -33,21 +29,26 @@ def _write_candidate_manifest(
     *,
     package_name: str = "ironclaw",
 ) -> None:
-    """A candidate checkout fixture: the shipping crate at
-    `crate_relative_dir` plus enough filler crates to clear crate_tree's
-    discovery floor (a realistic-enough tree, not a one-crate stub)."""
+    """Add a package to a minimal candidate Cargo workspace fixture."""
     manifest = root / crate_relative_dir / "Cargo.toml"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
-        f'[package]\nname = "{package_name}"\nversion = "{version}"\n',
+        f'[package]\nname = "{package_name}"\nversion = "{version}"\n'
+        'edition = "2021"\n',
         encoding="utf-8",
     )
-    for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
-        filler = root / "crates" / f"ironclaw_filler_{index}"
-        filler.mkdir(parents=True, exist_ok=True)
-        (filler / "Cargo.toml").write_text(
-            f'[package]\nname = "ironclaw_filler_{index}"\n', encoding="utf-8"
-        )
+    (manifest.parent / "src").mkdir(exist_ok=True)
+    (manifest.parent / "src/lib.rs").write_text("", encoding="utf-8")
+
+    members = sorted(
+        manifest.parent.relative_to(root).as_posix()
+        for manifest in (root / "crates").rglob("Cargo.toml")
+    )
+    rendered_members = ",\n".join(f'  "{member}"' for member in members)
+    (root / "Cargo.toml").write_text(
+        f'[workspace]\nresolver = "2"\nmembers = [\n{rendered_members}\n]\n',
+        encoding="utf-8",
+    )
 
 
 class ReleaseTagTests(unittest.TestCase):
@@ -291,7 +292,7 @@ class ReleaseTagTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 release.ReleaseTagError,
-                "exactly one candidate package named 'ironclaw', found 0",
+                "exactly one candidate workspace package named 'ironclaw', found 0",
             ):
                 release._manifest_version(candidate_root)
 
@@ -306,7 +307,65 @@ class ReleaseTagTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 release.ReleaseTagError,
-                "exactly one candidate package named 'ironclaw', found 2",
+                "cannot inventory Cargo workspace.*two packages named `ironclaw`",
+            ):
+                release._manifest_version(candidate_root)
+
+    def test_candidate_manifest_resolution_rejects_non_workspace_package(
+        self,
+    ) -> None:
+        """A filesystem crate excluded from Cargo's workspace cannot identify
+        the package that cargo-dist will release."""
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root,
+                "crates/workspace_member",
+                VERSION,
+                package_name="not-the-shipping-package",
+            )
+            unlisted = candidate_root / "crates/unlisted_ironclaw"
+            (unlisted / "src").mkdir(parents=True)
+            (unlisted / "Cargo.toml").write_text(
+                f'[package]\nname = "ironclaw"\nversion = "{VERSION}"\n'
+                'edition = "2021"\n',
+                encoding="utf-8",
+            )
+            (unlisted / "src/lib.rs").write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "exactly one candidate workspace package named 'ironclaw', found 0",
+            ):
+                release._manifest_version(candidate_root)
+
+    def test_candidate_manifest_resolution_rejects_malformed_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            manifest = candidate_root / "crates/ironclaw_cli/Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('[package\nname = "ironclaw"\n', encoding="utf-8")
+            metadata = {
+                "workspace_members": ["ironclaw-id"],
+                "packages": [
+                    {
+                        "id": "ironclaw-id",
+                        "manifest_path": str(manifest),
+                    }
+                ],
+            }
+            completed = mock.Mock(
+                returncode=0,
+                stdout=json.dumps(metadata),
+                stderr="",
+            )
+
+            with (
+                mock.patch.object(release.subprocess, "run", return_value=completed),
+                self.assertRaisesRegex(
+                    release.ReleaseTagError,
+                    "cannot read candidate manifest.*Expected ']'",
+                ),
             ):
                 release._manifest_version(candidate_root)
 
@@ -317,16 +376,15 @@ class ReleaseTagTests(unittest.TestCase):
         silently read `manifest_version` as empty or wrong."""
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
-            for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
-                filler = candidate_root / "crates" / f"ironclaw_filler_{index}"
-                filler.mkdir(parents=True)
-                (filler / "Cargo.toml").write_text(
-                    f'[package]\nname = "ironclaw_filler_{index}"\n',
-                    encoding="utf-8",
-                )
+            _write_candidate_manifest(
+                candidate_root,
+                "crates/not_ironclaw",
+                VERSION,
+                package_name="not-the-shipping-package",
+            )
             with self.assertRaisesRegex(
                 release.ReleaseTagError,
-                "exactly one candidate package named 'ironclaw', found 0",
+                "exactly one candidate workspace package named 'ironclaw', found 0",
             ):
                 release._manifest_version(candidate_root)
 
