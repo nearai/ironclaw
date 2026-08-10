@@ -621,7 +621,9 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ActivePreferenceTargetCodecs` port beside its sibling
         // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
         // no logic. Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 7_748),
+        // Typed progressive-preview manifest metadata and the three-part
+        // channel adapter vocabulary; execution remains product/adapter-owned.
+        ("ironclaw_extension_contracts", 7_825),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

@@ -344,6 +344,8 @@ impl ChannelAdapter for ScriptedChannelAdapter {
 struct StaticChannelResolver {
     adapter: Arc<ScriptedChannelAdapter>,
     unavailable: bool,
+    progressive_preview:
+        Option<ironclaw_extension_contracts::channel::ProgressivePreviewPresentation>,
 }
 
 impl ChannelDeliveryResolver for StaticChannelResolver {
@@ -356,6 +358,7 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
+            progressive_preview: self.progressive_preview.clone(),
         })
     }
 }
@@ -410,6 +413,7 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
+            progressive_preview: None,
         })
     }
 }
@@ -624,6 +628,7 @@ fn coordinator_over_recording_reply_lookups(
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
+            progressive_preview: None,
         }),
         Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -975,6 +980,59 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn coordinator_does_not_retry_progressive_preview_updates() {
+    use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ProgressivePreviewPart};
+
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![sent("must-not-send")],
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    request.intent = DeliveryIntent::ProgressivePreview;
+    request.parts = vec![OutboundPart::ProgressivePreview(
+        ProgressivePreviewPart::Update {
+            vendor_message_ref: "preview-1".to_string(),
+            accepted_text: "Hello".to_string(),
+            current_text: "Hello world".to_string(),
+        },
+    )];
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("preview attempt is recorded");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::TransportUnavailable,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1);
 }
 
 #[tokio::test]
@@ -1652,6 +1710,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
+            progressive_preview: None,
         }),
         reply_context as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1769,6 +1828,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            progressive_preview: None,
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
@@ -1824,6 +1884,51 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
         extension_id,
         notice_ref: "run-42".to_string(),
     }
+}
+
+#[tokio::test]
+async fn coordinator_passes_product_working_text_to_progressive_preview_start() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-preview")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            progressive_preview: Some(
+                ironclaw_extension_contracts::channel::ProgressivePreviewPresentation {
+                    scope: ironclaw_extension_contracts::channel::ProgressivePreviewScope::All,
+                    max_chars: 12_000,
+                },
+            ),
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+    let mut request = working_notice(scope, "vendorx");
+    request.parts.clear();
+
+    let outcome = coordinator
+        .deliver_working_notice(request, "Ironclaw is thinking...", true)
+        .await
+        .expect("working preview starts");
+
+    assert!(outcome.progressive);
+    assert_eq!(outcome.vendor_message_ref.as_deref(), Some("ts-preview"));
+    let envelopes = adapter.envelopes();
+    assert!(matches!(
+        &envelopes[0].parts[..],
+        [ironclaw_extension_contracts::channel_adapter::OutboundPart::ProgressivePreview(
+            ironclaw_extension_contracts::channel_adapter::ProgressivePreviewPart::Start(initial_text),
+        )] if initial_text == "Ironclaw is thinking..."
+    ));
 }
 
 #[tokio::test]
@@ -1957,10 +2062,12 @@ async fn coordinator_deliver_rejects_notice_class_intents() {
 }
 
 #[test]
-fn model_delivery_is_policy_class() {
+fn model_text_deliveries_are_policy_class() {
     use ironclaw_assistant::DeliveryIntent;
     assert!(DeliveryIntent::ModelDelivery.runs_outbound_policy());
     assert!(!DeliveryIntent::ModelDelivery.is_notice_class());
+    assert!(DeliveryIntent::ProgressivePreview.runs_outbound_policy());
+    assert!(!DeliveryIntent::ProgressivePreview.is_notice_class());
 }
 
 #[tokio::test]
@@ -2072,6 +2179,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            progressive_preview: None,
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),

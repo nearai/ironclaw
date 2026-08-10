@@ -27,7 +27,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ironclaw_extension_contracts::channel_adapter::OutboundPart;
+use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ProgressivePreviewPart};
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
@@ -38,6 +38,7 @@ use ironclaw_outbound::{
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
 use ironclaw_auth::product_prompt::BlockedAuthFlowCanceller;
+use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
@@ -48,12 +49,14 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
 };
+
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
 
 mod gate_routes;
 mod observer;
 pub(crate) mod prompts;
+mod streaming;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
@@ -139,6 +142,21 @@ pub struct RunDeliveryServices {
     pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    /// The live projection feed the WebUI drains (live text, thinking,
+    /// capability activity). The preview forwarder subscribes here for
+    /// the run's token deltas; wired to the runtime's
+    /// `RebornProjectionServices::product_event_stream()` in production.
+    pub projection_stream: Arc<dyn ProjectionStream>,
+}
+
+/// A posted working indicator: either a progressive preview or a plain
+/// transient message. Both are disposable; neither is the final reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedWorkingNotice {
+    pub conversation: ExternalConversationRef,
+    pub vendor_message_ref: String,
+    pub progressive: bool,
+    pub max_chars: u32,
 }
 
 /// One message a channel accepted, in generic vocabulary: the conversation
@@ -471,6 +489,120 @@ impl RunDeliveryServices {
                 %error,
                 "failed to retract channel prompt/status message"
             );
+        }
+    }
+
+    /// Raise the working indicator for a run: the coordinator reduces the
+    /// `Working` intent to a progressive-preview start when the resolved
+    /// channel declares that capability, else to a plain text notice. Best-effort
+    /// — a failure returns `None` and the run simply has no indicator.
+    pub(crate) async fn start_working_notice(
+        &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        conversation: &ExternalConversationRef,
+        direct_message: bool,
+    ) -> Option<PostedWorkingNotice> {
+        let notice_ref = format!(
+            "working:{}",
+            run_id.map(|id| id.to_string()).unwrap_or_default()
+        );
+        match self
+            .coordinator
+            .deliver_working_notice(
+                NoticeDeliveryRequest {
+                    intent: DeliveryIntent::Working,
+                    scope,
+                    turn_run_id: run_id,
+                    conversation: conversation.clone(),
+                    thread_anchor: None,
+                    parts: Vec::new(),
+                    extension_id: &self.extension_id,
+                    notice_ref,
+                },
+                prompts::WORKING_MESSAGE,
+                direct_message,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                outcome
+                    .vendor_message_ref
+                    .map(|vendor_message_ref| PostedWorkingNotice {
+                        conversation: outcome.conversation,
+                        vendor_message_ref,
+                        progressive: outcome.progressive,
+                        max_chars: outcome.max_chars,
+                    })
+            }
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "working indicator delivery failed (best-effort)"
+                );
+                None
+            }
+        }
+    }
+
+    /// Remove a working notice. Progressive-preview cleanup is vendor-specific
+    /// behind the adapter; plain notices use the generic retract operation.
+    /// Cleanup is best-effort and never changes final-reply delivery.
+    pub(crate) async fn stop_working_notice(
+        &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        notice: PostedWorkingNotice,
+    ) -> bool {
+        let notice_ref = format!(
+            "retract-{}",
+            notice
+                .vendor_message_ref
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+                .collect::<String>()
+        );
+        let parts = if notice.progressive {
+            vec![OutboundPart::ProgressivePreview(
+                ProgressivePreviewPart::Stop {
+                    vendor_message_ref: notice.vendor_message_ref,
+                },
+            )]
+        } else {
+            vec![OutboundPart::Retract {
+                vendor_message_ref: notice.vendor_message_ref,
+            }]
+        };
+        match self
+            .coordinator
+            .deliver_notice(NoticeDeliveryRequest {
+                intent: DeliveryIntent::Cleanup,
+                scope,
+                turn_run_id: run_id,
+                conversation: notice.conversation,
+                thread_anchor: None,
+                parts,
+                extension_id: &self.extension_id,
+                notice_ref,
+            })
+            .await
+        {
+            // `DeliveredUnconfirmed` sent the cleanup (only the durable write
+            // failed), so count it as stopped.
+            Ok(
+                CoordinatedDeliveryOutcome::Delivered { .. }
+                | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
+            ) => true,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "failed to remove working indicator/preview"
+                );
+                false
+            }
         }
     }
 }

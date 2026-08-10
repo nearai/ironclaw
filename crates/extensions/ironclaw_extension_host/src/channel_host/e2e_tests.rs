@@ -45,6 +45,12 @@ use ironclaw_assistant::{
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
+    ProductProjectionState,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+
 use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
@@ -255,6 +261,10 @@ struct Harness {
     workflow_factory: Arc<ironclaw_assistant::RebornChannelWorkflowFactory>,
     /// The store that factory wired into every triggered driver it builds.
     triggered_delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    /// The live projection fake wired into the workflow's delivery services;
+    /// streaming tests push live text through it and wait on
+    /// [`Self::wait_for_live_subscriber`].
+    projection: Arc<ironclaw_assistant::LiveProjectionStream>,
 }
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -405,6 +415,67 @@ impl Harness {
     fn slack_deletes(&self) -> Vec<serde_json::Value> {
         self.egress.bodies_for("/api/chat.delete")
     }
+
+    fn slack_updates(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.update")
+    }
+
+    fn slack_stream_starts(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.startStream")
+    }
+
+    fn slack_stream_appends(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.appendStream")
+    }
+
+    fn slack_stream_stops(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.stopStream")
+    }
+
+    /// Push one live cumulative-text update for `run_id` into the projection
+    /// fake (the shape `LiveProjectionPublisher` emits: cumulative body,
+    /// run-scoped item id).
+    fn push_live_text(&self, run_id: TurnRunId, id: &str, body: &str) {
+        self.projection.push(live_text_envelope(run_id, id, body));
+    }
+
+    /// Wait until the preview forwarder subscribed to the projection fake
+    /// (the live feed has no replay — pushes must land after this).
+    async fn wait_for_live_subscriber(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.projection.subscriber_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview forwarder never subscribed to the live projection"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+/// One cumulative live-text projection update for a run (mirrors
+/// `LiveProjectionPublisher`'s product envelope shape).
+fn live_text_envelope(run_id: TurnRunId, id: &str, body: &str) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new("slack").expect("adapter id"), // safety: static literal is valid.
+        AdapterInstallationId::new(INSTALLATION).expect("installation id"), // safety: static literal is valid.
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("binding").expect("binding ref"), // safety: static literal is valid.
+            ExternalConversationRef::new(None, "C-E2E", None, None).expect("conversation"), // safety: static literal is valid.
+            None,
+        ),
+        ironclaw_product_contracts::outbound::ProjectionCursor::new("cursor:live").expect("cursor"), // safety: static literal is valid.
+        ProductOutboundPayload::ProjectionUpdate {
+            state: ProductProjectionState {
+                thread_id: "thread-e2e".to_string(),
+                items: vec![ProductProjectionItem::Text {
+                    id: id.to_string(),
+                    run_id: Some(run_id),
+                    body: body.to_string(),
+                }],
+            },
+        },
+    )
 }
 
 /// Options every harness variant composes; the core builder is the single
@@ -525,6 +596,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
+    let projection = Arc::new(ironclaw_assistant::LiveProjectionStream::default());
 
     let host =
         slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
@@ -622,6 +694,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                     max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
                 },
                 triggered_delivery_store: Arc::clone(&triggered_delivery_store),
+                projection_stream: Arc::clone(&projection) as Arc<dyn ProjectionStream>,
             }),
         },
     ));
@@ -677,6 +750,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         assembly,
         workflow_factory,
         triggered_delivery_store,
+        projection,
     }
 }
 
@@ -1542,6 +1616,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream)
+            as Arc<dyn ProjectionStream>,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -1821,6 +1897,8 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream)
+            as Arc<dyn ProjectionStream>,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -1947,6 +2025,8 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream)
+            as Arc<dyn ProjectionStream>,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -2506,14 +2586,14 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
 }
 
 #[tokio::test]
-async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
+async fn slack_dm_edits_a_preview_then_posts_the_complete_answer() {
     let harness = build_harness(TurnMode::Running).await;
 
     let response = harness.post_event(dm_message("Ev-working", "think")).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     for _ in 0..80 {
-        if harness.slack_messages().len() == 1 {
+        if !harness.slack_messages().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2522,21 +2602,95 @@ async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[0].get("thread_ts").is_none(),
+        "DM previews must remain visible in the top-level conversation"
+    );
+    let preview_ts = stable_slack_test_ts(
+        &serde_json::to_vec(&messages[0]).expect("serialize preview request"), // safety: test JSON is serializable.
+    );
 
+    harness.wait_for_live_subscriber().await;
+    let run_id = harness.coordinator.active_run_id().expect("run id");
+    let live_body = "Hello world — ".repeat(18);
+    harness.push_live_text(run_id, "text:r:0", &live_body);
+    // Completion can race the first-update debounce. The latest cumulative
+    // text still needs to reach the visible preview before it is removed.
     harness
         .coordinator
-        .complete_active_run("done thinking")
+        .complete_active_run(&live_body)
         .await
         .expect("complete running turn");
     harness.drain().await;
 
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["text"], "done thinking");
+    let updates = harness.slack_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["channel"], CHANNEL);
+    assert_eq!(updates[0]["ts"], preview_ts);
+    assert_eq!(updates[0]["markdown_text"], live_body);
+
     let deletes = harness.slack_deletes();
     assert_eq!(deletes.len(), 1);
     assert_eq!(deletes[0]["channel"], CHANNEL);
+    assert_eq!(deletes[0]["ts"], preview_ts);
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["text"], live_body);
+    assert!(harness.slack_stream_starts().is_empty());
+    assert!(harness.slack_stream_appends().is_empty());
+    assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_does_not_update_preview_for_trailing_whitespace_alone() {
+    let harness = build_harness(TurnMode::Running).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    harness.wait_for_live_subscriber().await;
+    let run_id = harness.coordinator.active_run_id().expect("run id");
+    harness.push_live_text(run_id, "text:r:0", "Hello");
+    for _ in 0..80 {
+        if harness.slack_updates().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_updates().len(), 1);
+
+    harness.push_live_text(run_id, "text:r:0", "Hello\n");
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(
+        harness.slack_updates().len(),
+        1,
+        "trailing whitespace alone must not produce a visible Slack update"
+    );
+
+    harness.push_live_text(run_id, "text:r:0", "Hello\nworld");
+    for _ in 0..80 {
+        if harness.slack_updates().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let updates = harness.slack_updates();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[1]["markdown_text"], "Hello\nworld");
+
+    harness
+        .coordinator
+        .complete_active_run("Hello\nworld")
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
 }
 
 #[tokio::test]
@@ -2736,6 +2890,8 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
             .as_str()
             .is_some_and(|text| text.contains("Authentication required"))
     );
+    // The run never ran, so no preview started before the block.
+    assert_eq!(harness.slack_messages().len(), 1);
 
     harness
         .coordinator
@@ -2752,6 +2908,7 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["channel"], CHANNEL);
     assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+    assert!(messages[1].get("thread_ts").is_none());
 
     harness
         .coordinator
@@ -2762,13 +2919,268 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
 
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 3);
-    assert_eq!(messages[2]["channel"], CHANNEL);
     assert_eq!(messages[2]["text"], "authenticated and finished");
+    // Both the auth prompt and the disposable preview are cleaned up.
     let deletes = harness.slack_deletes();
     assert_eq!(deletes.len(), 2);
-    assert_eq!(deletes[0]["channel"], CHANNEL);
-    assert_eq!(deletes[1]["channel"], CHANNEL);
+    assert!(harness.slack_stream_starts().is_empty());
+    assert!(harness.slack_stream_stops().is_empty());
     auth_provider.assert_single_call();
+}
+
+#[tokio::test]
+async fn slack_dm_preview_is_deleted_when_the_run_fails() {
+    let harness = build_harness(TurnMode::Failed).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    let preview_ts = stable_slack_test_ts(
+        &serde_json::to_vec(&messages[0]).expect("serialize preview request"), // safety: test JSON is serializable.
+    );
+
+    harness
+        .coordinator
+        .fail_active_run()
+        .await
+        .expect("fail active run");
+    harness.drain().await;
+
+    // No final text exists, but the recorded preview request is cleaned up.
+    assert_eq!(harness.slack_messages().len(), 1);
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["ts"], preview_ts);
+    assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_channel_falls_back_to_plain_indicator_when_stream_start_is_rejected() {
+    let harness = build_harness(TurnMode::Running).await;
+    harness.egress.fail_slack_method("chat.startStream");
+
+    let response = harness
+        .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Degraded path: the old plain-text indicator, deleted after the reply.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+    assert_eq!(messages[0]["thread_ts"], "1710000000.000008");
+    // The stream start WAS attempted and rejected by the vendor (the request
+    // is recorded even when it fails); the degraded plain-text path is what
+    // the assertions above pin.
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+
+    harness
+        .coordinator
+        .complete_active_run("fallback answer")
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["text"], "fallback answer");
+    assert_eq!(harness.slack_deletes().len(), 1);
+    assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_preview_cleanup_failure_does_not_block_the_final_message() {
+    let harness = build_harness(TurnMode::Running).await;
+    harness.egress.fail_slack_method_n("chat.delete", 1);
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    harness
+        .coordinator
+        .complete_active_run("never lose the answer")
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    // Cleanup is best-effort and cannot alter authoritative final delivery.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["text"], "never lose the answer");
+    assert_eq!(harness.slack_deletes().len(), 1);
+    assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_preview_is_deleted_when_the_delivery_times_out() {
+    let harness = build_harness_with_max_wait(TurnMode::Running, Duration::from_millis(300)).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    let preview_ts = stable_slack_test_ts(
+        &serde_json::to_vec(&messages[0]).expect("serialize preview request"), // safety: test JSON is serializable.
+    );
+
+    // Let max_wait expire with the run still running.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    harness.drain().await;
+
+    // The safety net removes the preview; timeout feedback posts alongside.
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["ts"], preview_ts);
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("taking longer than expected")),
+        "timeout feedback expected, got: {messages:?}"
+    );
+    assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_preview_is_deleted_before_the_gate_prompt_and_recreated_after_resume() {
+    let harness = build_harness(TurnMode::Running).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    // The run blocks while previewing: the preview is deleted BEFORE the prompt
+    // posts (the partial text must not linger as an answer-shaped message).
+    harness
+        .coordinator
+        .transition_running_to_blocked_approval()
+        .await
+        .expect("block the running turn");
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let requests = harness.egress.requests();
+    let delete_index = requests
+        .iter()
+        .position(|request| request.url.ends_with("/api/chat.delete"))
+        .expect("blocked run must delete its preview");
+    let prompt_index = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.url.ends_with("/api/chat.postMessage"))
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("blocked run must post the gate prompt");
+    assert!(
+        delete_index < prompt_index,
+        "the preview must be deleted BEFORE the gate prompt posts"
+    );
+    assert_eq!(harness.slack_deletes().len(), 1);
+
+    // Resume: a second preview starts, then ordinary final delivery follows.
+    harness
+        .coordinator
+        .resume_blocked_run_to_running()
+        .await
+        .expect("resume the blocked run");
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_messages().len(), 3);
+    harness
+        .coordinator
+        .complete_active_run("blocked then resumed answer")
+        .await
+        .expect("complete the resumed run");
+    harness.drain().await;
+
+    assert_eq!(harness.slack_deletes().len(), 2);
+    assert_eq!(
+        harness.slack_messages().last().expect("final")["text"],
+        "blocked then resumed answer"
+    );
+    assert!(harness.slack_stream_starts().is_empty());
+    assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_preview_update_failure_disables_preview_but_final_still_posts() {
+    let harness = build_harness(TurnMode::Running).await;
+    harness.egress.fail_slack_method_n("chat.update", 1);
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    harness.wait_for_live_subscriber().await;
+    let run_id = harness.coordinator.active_run_id().expect("run id");
+    let live_body = "update will fail — ".repeat(18);
+    harness.push_live_text(run_id, "text:r:0", &live_body);
+    for _ in 0..80 {
+        if !harness.slack_updates().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // The update is attempted once; a rejection disables further previews.
+    assert_eq!(harness.slack_updates().len(), 1);
+
+    harness
+        .coordinator
+        .complete_active_run(&live_body)
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["text"], live_body);
+    assert_eq!(harness.slack_deletes().len(), 1);
+    assert!(harness.slack_stream_stops().is_empty());
 }
 
 #[derive(Debug, Clone)]
@@ -2777,6 +3189,9 @@ enum TurnMode {
         assistant_text: String,
     },
     Running,
+    /// Starts Running; the test transitions to `TurnStatus::Failed` via
+    /// `RecordingTurnCoordinator::fail_active_run`.
+    Failed,
     BlockApproval,
     /// Starts as BlockedApproval; the test manually transitions to BlockedAuth
     /// via `RecordingTurnCoordinator::transition_blocked_approval_to_blocked_auth`.
@@ -2843,6 +3258,28 @@ impl RecordingTurnCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .submitted_scopes
             .clone()
+    }
+
+    /// Drive the active running run to `TurnStatus::Failed` (no final
+    /// assistant message) — the orphaned-working-indicator scenario.
+    async fn fail_active_run(&self) -> Result<(), ProductSurfaceFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .active_run_id
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
+                    reason: "missing active run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductSurfaceFailure::TurnResumeRejected {
+                reason: "missing active run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::Failed;
+        Ok(())
     }
 
     async fn cancel_blocked_run(&self) -> Result<TurnRunId, ProductSurfaceFailure> {
@@ -2967,6 +3404,30 @@ impl RecordingTurnCoordinator {
         Ok(())
     }
 
+    /// Transition the ACTIVE running run to `BlockedApproval` with a gate ref
+    /// (the "stream started, then the run blocked" scenario).
+    async fn transition_running_to_blocked_approval(&self) -> Result<(), ProductSurfaceFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .active_run_id
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
+                    reason: "missing active run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductSurfaceFailure::TurnResumeRejected {
+                reason: "missing active run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::BlockedApproval;
+        run.gate_ref = Some(TurnGateRef::new("gate:approval:stream-block").expect("gate ref")); // safety: static gate ref is valid.
+        state.blocked_run_id = Some(run_id);
+        Ok(())
+    }
+
     /// Complete the blocked run to `Completed` in a single locked mutation, skipping
     /// any observable `Running` state.
     ///
@@ -3067,7 +3528,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 })?;
                 TurnStatus::Completed
             }
-            TurnMode::Running => TurnStatus::Running,
+            TurnMode::Running | TurnMode::Failed => TurnStatus::Running,
             TurnMode::BlockApproval | TurnMode::BlockApprovalThenAuth => {
                 TurnStatus::BlockedApproval
             }
@@ -3531,6 +3992,10 @@ impl ironclaw_product_contracts::surface::ProductSurface for RecordingCommandExe
 #[derive(Clone, Default)]
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<ApprovedChannelEgress>>>,
+    /// Slack API methods to reject with `not_allowed_token_type`
+    /// (failure injection for preview fallback/cleanup tests), and how many
+    /// more times each rejection applies. `usize::MAX` = fail forever.
+    fail_slack_methods: Arc<Mutex<std::collections::HashMap<String, usize>>>,
 }
 
 impl RecordingEgress {
@@ -3550,6 +4015,119 @@ impl RecordingEgress {
             })
             .collect()
     }
+
+    /// Make the given Slack method fail with the vendor's
+    /// `not_allowed_token_type` rejection.
+    fn fail_slack_method(&self, method: &str) {
+        self.fail_slack_method_n(method, usize::MAX);
+    }
+
+    /// Fail the method only the next `failures` calls (recovery paths then
+    /// succeed).
+    fn fail_slack_method_n(&self, method: &str, failures: usize) {
+        self.fail_slack_methods
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(method.to_string(), failures);
+    }
+
+    fn slack_response(
+        &self,
+        approved: &ApprovedChannelEgress,
+    ) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+        fn response(
+            body: &[u8],
+        ) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+            ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                status: 200,
+                body: body.to_vec(),
+            }
+        }
+        let path = url::Url::parse(&approved.url)
+            .map(|url| url.path().to_string())
+            .unwrap_or_default();
+        if path.starts_with("/api/chat.") {
+            let has_json_content_type = approved.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("content-type") && value.starts_with("application/json")
+            });
+            if !has_json_content_type {
+                return response(br#"{"ok":false,"error":"missing_post_type"}"#);
+            }
+        }
+        let method = path.strip_prefix("/api/").unwrap_or_default().to_string();
+        {
+            let mut fails = self
+                .fail_slack_methods
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(remaining) = fails.get_mut(&method)
+                && *remaining > 0
+            {
+                if *remaining != usize::MAX {
+                    *remaining -= 1;
+                }
+                return response(br#"{"ok":false,"error":"not_allowed_token_type"}"#);
+            }
+        }
+        if path == "/api/chat.postMessage" {
+            let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
+                Ok(body) => body,
+                Err(_) => {
+                    return response(br#"{"ok":false,"error":"invalid_json"}"#);
+                }
+            };
+            let channel = body["channel"].as_str().unwrap_or("DTEST");
+            let ts_seed = stable_slack_test_ts(&approved.body);
+            return response(
+                serde_json::json!({
+                    "ok": true,
+                    "channel": channel,
+                    "ts": ts_seed,
+                })
+                .to_string()
+                .as_bytes(),
+            );
+        }
+        if path == "/api/chat.startStream" {
+            let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
+                Ok(body) => body,
+                Err(_) => {
+                    return response(br#"{"ok":false,"error":"invalid_json"}"#);
+                }
+            };
+            let channel = body["channel"].as_str().unwrap_or("DTEST");
+            let ts_seed = stable_slack_test_ts(&approved.body);
+            return response(
+                serde_json::json!({
+                    "ok": true,
+                    "channel": channel,
+                    "ts": ts_seed,
+                })
+                .to_string()
+                .as_bytes(),
+            );
+        }
+        if path == "/api/chat.appendStream" || path == "/api/chat.stopStream" {
+            let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
+                Ok(body) => body,
+                Err(_) => {
+                    return response(br#"{"ok":false,"error":"invalid_json"}"#);
+                }
+            };
+            let channel = body["channel"].as_str().unwrap_or("DTEST");
+            let ts = body["ts"].as_str().unwrap_or("1710000000.000100");
+            return response(
+                serde_json::json!({
+                    "ok": true,
+                    "channel": channel,
+                    "ts": ts,
+                })
+                .to_string()
+                .as_bytes(),
+            );
+        }
+        response(br#"{"ok":true}"#)
+    }
 }
 
 #[async_trait]
@@ -3561,57 +4139,13 @@ impl ChannelEgressTransport for RecordingEgress {
         ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
         ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
-        let response = slack_response_for_approved(&approved);
+        let response = self.slack_response(&approved);
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(approved);
         Ok(response)
     }
-}
-
-fn slack_response_for_approved(
-    approved: &ApprovedChannelEgress,
-) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
-    fn response(
-        body: &[u8],
-    ) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
-        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
-            status: 200,
-            body: body.to_vec(),
-        }
-    }
-    let path = url::Url::parse(&approved.url)
-        .map(|url| url.path().to_string())
-        .unwrap_or_default();
-    if path.starts_with("/api/chat.") {
-        let has_json_content_type = approved.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("content-type") && value.starts_with("application/json")
-        });
-        if !has_json_content_type {
-            return response(br#"{"ok":false,"error":"missing_post_type"}"#);
-        }
-    }
-    if path == "/api/chat.postMessage" {
-        let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
-            Ok(body) => body,
-            Err(_) => {
-                return response(br#"{"ok":false,"error":"invalid_json"}"#);
-            }
-        };
-        let channel = body["channel"].as_str().unwrap_or("DTEST");
-        let ts_seed = stable_slack_test_ts(&approved.body);
-        return response(
-            serde_json::json!({
-                "ok": true,
-                "channel": channel,
-                "ts": ts_seed,
-            })
-            .to_string()
-            .as_bytes(),
-        );
-    }
-    response(br#"{"ok":true}"#)
 }
 
 fn stable_slack_test_ts(body: &[u8]) -> String {

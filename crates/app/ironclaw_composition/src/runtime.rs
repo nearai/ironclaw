@@ -1139,6 +1139,7 @@ impl RebornRuntime {
             deployment_channels: Arc::clone(&self.deployment_channels),
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
+            projection_stream: self.product_event_stream(),
         };
         let admin_users: Arc<dyn AdminUserService> =
             Arc::new(ironclaw_assistant::RebornAdminUserDirectory::new(
@@ -3938,6 +3939,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             auth_challenges,
             outbound_delivery_targets: outbound_delivery_target_registry.as_ref(),
             local_runtime,
+            projection_stream: projection_services.product_event_stream(),
         },
     )
     .await;

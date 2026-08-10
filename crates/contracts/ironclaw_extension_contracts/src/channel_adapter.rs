@@ -294,6 +294,9 @@ pub enum OutboundPart {
         view: Box<crate::auth_prompt::AuthPromptView>,
         direct_message: bool,
     },
+    /// Best-effort, disposable presentation while a response is generated.
+    /// The final answer always uses the ordinary delivery path.
+    ProgressivePreview(ProgressivePreviewPart),
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
     /// intent, e.g. deleting a working indicator). `vendor_message_ref` is
     /// the reference a previous [`PartDeliveryOutcome::Sent`] returned; the
@@ -301,6 +304,23 @@ pub enum OutboundPart {
     Retract {
         vendor_message_ref: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum ProgressivePreviewPart {
+    /// Product-owned text shown until the first generated text arrives.
+    Start(String),
+    /// `current_text` is cumulative; `accepted_text` is the exact cumulative
+    /// prefix Ironclaw knows the provider accepted.
+    Update {
+        vendor_message_ref: String,
+        accepted_text: String,
+        current_text: String,
+    },
+    /// End Ironclaw's ownership of the preview. The adapter removes it when
+    /// the provider supports removal; otherwise it may rely on declared native
+    /// expiry. This never represents final delivery.
+    Stop { vendor_message_ref: String },
 }
 
 /// Structured per-attempt delivery report. The adapter cannot mark anything

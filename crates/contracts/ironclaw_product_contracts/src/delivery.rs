@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel::ProgressivePreviewPresentation;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::ids::ExtensionId;
@@ -38,6 +39,8 @@ pub struct ResolvedChannelDelivery {
     pub adapter: Arc<dyn ChannelAdapter>,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
+    /// Manifest-declared best-effort progressive preview capability.
+    pub progressive_preview: Option<ProgressivePreviewPresentation>,
 }
 
 /// Resolver port: the coordinator's view of the active extension set.

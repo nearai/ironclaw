@@ -482,7 +482,11 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         api_post.paths,
         [
             "/api/chat.postMessage",
+            "/api/chat.update",
             "/api/chat.delete",
+            "/api/chat.startStream",
+            "/api/chat.appendStream",
+            "/api/chat.stopStream",
             "/api/conversations.open",
             "/api/files.completeUploadExternal",
         ]
@@ -555,6 +559,7 @@ fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
             "/bot{telegram_bot_token}/setWebhook",
             "/bot{telegram_bot_token}/deleteWebhook",
             "/bot{telegram_bot_token}/sendMessage",
+            "/bot{telegram_bot_token}/sendMessageDraft",
             "/bot{telegram_bot_token}/deleteMessage",
             "/bot{telegram_bot_token}/getFile",
             "/bot{telegram_bot_token}/sendDocument",
@@ -569,6 +574,16 @@ fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
     // threads a reply). A file-sized response cap here failed sends that had
     // already reached the user, so it keeps the host default.
     assert_eq!(post.response_body_limit_bytes, Some(256 * 1024));
+    let preview = channel
+        .presentation
+        .progressive_preview
+        .as_ref()
+        .expect("Telegram private chats declare native draft previews");
+    assert_eq!(preview.max_chars, 4096);
+    assert_eq!(
+        preview.scope,
+        ironclaw_extension_contracts::channel::ProgressivePreviewScope::DirectOnly
+    );
 
     let download = channel
         .egress

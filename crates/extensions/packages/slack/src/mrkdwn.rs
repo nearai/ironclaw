@@ -6,6 +6,9 @@
 const SLACK_TEXT_SOFT_LIMIT_CHARS: usize = 35_000;
 const SLACK_TEXT_CHUNK_BODY_CHARS: usize = 34_900;
 
+/// Slack progressive-preview update cap.
+pub(crate) const SLACK_STREAM_TEXT_LIMIT_CHARS: usize = 12_000;
+
 pub(crate) fn render_slack_mrkdwn(markdown: &str) -> String {
     let mut rendered = String::with_capacity(markdown.len());
     let lines = markdown.lines().collect::<Vec<_>>();

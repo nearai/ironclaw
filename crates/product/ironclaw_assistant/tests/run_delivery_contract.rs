@@ -324,6 +324,8 @@ impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgr
 
 struct StaticResolver {
     adapter: Arc<RecordingChannelAdapter>,
+    progressive_preview:
+        Option<ironclaw_extension_contracts::channel::ProgressivePreviewPresentation>,
 }
 
 impl ChannelDeliveryResolver for StaticResolver {
@@ -334,6 +336,7 @@ impl ChannelDeliveryResolver for StaticResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(DenyAllEgress),
+            progressive_preview: self.progressive_preview.clone(),
         })
     }
 }
@@ -847,6 +850,7 @@ fn build_harness_with_settings(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            progressive_preview: None,
         }),
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
@@ -878,6 +882,8 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         auth_flow_cancel: None,
+        projection_stream: Arc::new(ironclaw_assistant::LiveProjectionStream::default())
+            as Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
     let observer = Arc::new(
@@ -2186,6 +2192,7 @@ fn build_triggered_harness_with_catalog(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            progressive_preview: None,
         }),
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
@@ -2219,6 +2226,8 @@ fn build_triggered_harness_with_catalog(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         auth_flow_cancel: None,
+        projection_stream: Arc::new(ironclaw_assistant::LiveProjectionStream::default())
+            as Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,

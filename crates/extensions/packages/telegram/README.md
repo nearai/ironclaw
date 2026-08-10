@@ -8,6 +8,8 @@ code. Extension id: `telegram`.
 - **Surfaces:** channel (`messages`, inbound + outbound) only — no `[[tools]]`, no `[auth.*]` recipe (deployment credentials — bot token, webhook secret — arrive via `[admin_configuration]`)
 - **Vendor (credential authority):** none (pairing uses the `web_generated_code` connection strategy)
 - **Runtime:** `first_party`
+- **Presentation:** native `sendMessageDraft` previews in private chats; durable
+  final replies remain ordinary `sendMessage` deliveries
 - **Code:** crate `ironclaw_telegram_extension` (`src/`: `payload.rs` Bot API normalization, `render.rs` outbound shaping, `channel.rs` adapter, attachment/preference codecs) + `manifest.toml`
 - **Depends on:** contracts tier only — dependency-set parity with Slack (`host_api`, `extension_contracts`, `product_contracts`, `attachments`), pinned by `telegram_extension_gates.rs`; linked only by the binary and tests
 - **Tests:** `cargo test -p ironclaw_telegram_extension` — `tests/channel_conformance.rs`

@@ -78,6 +78,7 @@ paths = [
   "/bot{telegram_bot_token}/setWebhook",
   "/bot{telegram_bot_token}/deleteWebhook",
   "/bot{telegram_bot_token}/sendMessage",
+  "/bot{telegram_bot_token}/sendMessageDraft",
   "/bot{telegram_bot_token}/deleteMessage",
   "/bot{telegram_bot_token}/getFile",
   "/bot{telegram_bot_token}/sendDocument",
@@ -121,3 +122,7 @@ injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 supports_markdown = false
 supports_threads = true
 max_message_chars = 4096
+
+[channel.presentation.progressive_preview]
+scope = "direct_only"
+max_chars = 4096

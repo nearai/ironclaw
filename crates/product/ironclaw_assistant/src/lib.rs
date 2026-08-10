@@ -161,7 +161,8 @@ pub use extension_account_setup::ExtensionAccountSetupRegistry;
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, NoProjectFilesystem, rejecting_product_surface_error,
+    FakeInboundTurnService, LiveProjectionStream, NoProjectFilesystem, NoopProjectionStream,
+    rejecting_product_surface_error,
 };
 pub use scoped_fs::{
     ProjectScopedAttachmentReader,

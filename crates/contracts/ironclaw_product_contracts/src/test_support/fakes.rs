@@ -23,6 +23,11 @@ use crate::inbound::{
 use crate::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use crate::projection::{ProjectionStream, ProjectionSubscriptionRequest};
 
+/// Buffered envelope + optional expected-subscription matcher. `push_for_request`
+/// envelopes are delivered only to matching subscriptions; `push` envelopes to
+/// every subscription. Drains only — tests that need live push semantics use
+/// `ironclaw_assistant::LiveProjectionStream` (the streaming forwarder's
+/// shape: push while the run streams).
 pub struct FakeProjectionStream {
     state: Mutex<
         Vec<(
@@ -55,12 +60,6 @@ impl FakeProjectionStream {
     }
 }
 
-impl Default for FakeProjectionStream {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl ProjectionStream for FakeProjectionStream {
     async fn drain(
@@ -82,6 +81,12 @@ impl ProjectionStream for FakeProjectionStream {
         }
         *state = retained;
         Ok(drained)
+    }
+}
+
+impl Default for FakeProjectionStream {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

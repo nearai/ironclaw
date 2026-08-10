@@ -692,6 +692,7 @@ mod tests {
         let mut telegram = channel_extension("telegram");
         telegram.summary.channel_presentation =
             Some(ironclaw_extension_contracts::channel::ChannelPresentation {
+                progressive_preview: None,
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),
@@ -726,6 +727,7 @@ mod tests {
         assert_eq!(
             channels[0].presentation,
             Some(ironclaw_extension_contracts::channel::ChannelPresentation {
+                progressive_preview: None,
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),

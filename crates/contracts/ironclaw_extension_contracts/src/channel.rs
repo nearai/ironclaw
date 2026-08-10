@@ -156,6 +156,14 @@ impl ChannelDescriptor {
         {
             return Err(ChannelDescriptorError::InvalidCommandPrefix);
         }
+        if self
+            .presentation
+            .progressive_preview
+            .as_ref()
+            .is_some_and(|preview| preview.max_chars == 0)
+        {
+            return Err(ChannelDescriptorError::InvalidProgressivePreview);
+        }
         if self.inbound && self.ingress.is_none() {
             return Err(ChannelDescriptorError::InboundWithoutIngress);
         }
@@ -509,6 +517,24 @@ pub struct ChannelPresentation {
     /// renders the bare `/{name}` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,
+    /// Optional best-effort preview of the response while it is generated.
+    /// The ordinary final delivery remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progressive_preview: Option<ProgressivePreviewPresentation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgressivePreviewPresentation {
+    pub scope: ProgressivePreviewScope,
+    pub max_chars: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressivePreviewScope {
+    All,
+    DirectOnly,
 }
 
 /// Structural channel-descriptor failures (path context added by the
@@ -527,6 +553,8 @@ pub enum ChannelDescriptorError {
         "channel presentation command_prefix must be non-empty, start with '/', contain no control characters, and be at most 32 bytes"
     )]
     InvalidCommandPrefix,
+    #[error("channel presentation progressive_preview max_chars must be positive")]
+    InvalidProgressivePreview,
     #[error("an inbound channel must declare [channel.ingress]")]
     InboundWithoutIngress,
     #[error("[channel.connection] requires inbound = true")]
@@ -712,6 +740,36 @@ max_message_chars = 40000
                 "expected invalid command_prefix: {bad}"
             );
         }
+    }
+
+    #[test]
+    fn progressive_preview_is_optional_typed_and_bounded() {
+        let absent: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        assert!(absent.presentation.progressive_preview.is_none());
+
+        let declared: ChannelDescriptor = toml::from_str(&format!(
+            "{}\n[presentation.progressive_preview]\nscope = \"direct_only\"\nmax_chars = 12000\n",
+            documented_channel_toml()
+        ))
+        .unwrap();
+        declared.validate().unwrap();
+        assert_eq!(
+            declared.presentation.progressive_preview,
+            Some(ProgressivePreviewPresentation {
+                scope: ProgressivePreviewScope::DirectOnly,
+                max_chars: 12_000,
+            })
+        );
+
+        let invalid: ChannelDescriptor = toml::from_str(&format!(
+            "{}\n[presentation.progressive_preview]\nscope = \"all\"\nmax_chars = 0\n",
+            documented_channel_toml()
+        ))
+        .unwrap();
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            ChannelDescriptorError::InvalidProgressivePreview
+        );
     }
 
     #[test]

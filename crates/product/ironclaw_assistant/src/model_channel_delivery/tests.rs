@@ -320,6 +320,7 @@ impl ChannelDeliveryResolver for StaticResolver {
             .expect("installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(DenyAllEgress),
+            progressive_preview: None,
         })
     }
 }

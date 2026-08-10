@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome, ProgressivePreviewPart,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
@@ -47,17 +47,214 @@ impl RestrictedEgress for ScriptedEgress {
 }
 
 fn envelope(parts: Vec<OutboundPart>, topic: Option<&str>) -> OutboundEnvelope {
+    envelope_for_chat("8675309", parts, topic)
+}
+
+fn envelope_for_chat(
+    chat_id: &str,
+    parts: Vec<OutboundPart>,
+    topic: Option<&str>,
+) -> OutboundEnvelope {
     OutboundEnvelope {
         extension_id: "telegram".to_string(),
         installation_id: "install_alpha".to_string(),
         delivery_attempt_id: "attempt-1".to_string(),
         target: OutboundTarget {
-            conversation: ExternalConversationRef::new(None, "8675309", topic, None)
+            conversation: ExternalConversationRef::new(None, chat_id, topic, None)
                 .expect("conversation"),
             thread_anchor: None,
         },
         parts,
         reply_context: None,
+    }
+}
+
+#[tokio::test]
+async fn progressive_preview_uses_native_telegram_drafts_in_private_topics() {
+    let egress = ScriptedEgress::new(vec![
+        ScriptedEgress::ok(r#"{"ok":true,"result":true}"#),
+        ScriptedEgress::ok(r#"{"ok":true,"result":true}"#),
+    ]);
+    let adapter = TelegramChannelAdapter::default();
+
+    let start = adapter
+        .deliver(
+            envelope(
+                vec![OutboundPart::ProgressivePreview(
+                    ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
+                )],
+                Some("77"),
+            ),
+            &egress,
+        )
+        .await
+        .expect("preview starts");
+    let draft_id = match &start.parts[0] {
+        PartDeliveryOutcome::Sent {
+            vendor_message_ref: Some(draft_id),
+        } => draft_id.clone(),
+        outcome => panic!("preview start must return its draft id: {outcome:?}"),
+    };
+    assert_ne!(draft_id, "0");
+
+    let update = adapter
+        .deliver(
+            envelope(
+                vec![OutboundPart::ProgressivePreview(
+                    ProgressivePreviewPart::Update {
+                        vendor_message_ref: draft_id.clone(),
+                        accepted_text: "Hello".to_string(),
+                        current_text: "Hello from Telegram".to_string(),
+                    },
+                )],
+                Some("77"),
+            ),
+            &egress,
+        )
+        .await
+        .expect("preview updates");
+    assert!(matches!(
+        &update.parts[0],
+        PartDeliveryOutcome::Sent { vendor_message_ref: Some(id) } if id == &draft_id
+    ));
+
+    let requests = egress.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(
+            request.url,
+            "https://api.telegram.org/bot{telegram_bot_token}/sendMessageDraft"
+        );
+    }
+    let start_body: serde_json::Value =
+        serde_json::from_slice(requests[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(start_body["chat_id"], 8675309);
+    assert_eq!(start_body["message_thread_id"], 77);
+    assert_eq!(start_body["draft_id"].to_string(), draft_id);
+    assert_eq!(start_body["text"], "");
+    let update_body: serde_json::Value =
+        serde_json::from_slice(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(update_body["draft_id"], start_body["draft_id"]);
+    assert_eq!(update_body["text"], "Hello from Telegram");
+}
+
+#[tokio::test]
+async fn progressive_preview_is_retry_stable_private_only_and_append_only() {
+    let adapter = TelegramChannelAdapter::default();
+    let first_egress =
+        ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true,"result":true}"#)]);
+    let second_egress =
+        ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true,"result":true}"#)]);
+    let start = || {
+        envelope(
+            vec![OutboundPart::ProgressivePreview(
+                ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
+            )],
+            None,
+        )
+    };
+    let first = adapter
+        .deliver(start(), &first_egress)
+        .await
+        .expect("first start");
+    let second = adapter
+        .deliver(start(), &second_egress)
+        .await
+        .expect("retried start");
+    let sent_ref = |report: &DeliveryReport| match &report.parts[0] {
+        PartDeliveryOutcome::Sent {
+            vendor_message_ref: Some(reference),
+        } => reference.clone(),
+        outcome => panic!("expected sent draft reference: {outcome:?}"),
+    };
+    assert_eq!(sent_ref(&first), sent_ref(&second));
+
+    let rejected = adapter
+        .deliver(
+            envelope_for_chat(
+                "-1008675309",
+                vec![OutboundPart::ProgressivePreview(
+                    ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
+                )],
+                None,
+            ),
+            &ScriptedEgress::new(Vec::new()),
+        )
+        .await
+        .expect("unsupported group target is reported");
+    assert!(matches!(
+        rejected.parts[0],
+        PartDeliveryOutcome::Permanent { .. }
+    ));
+
+    let changed_prefix_egress = ScriptedEgress::new(Vec::new());
+    let changed_prefix = adapter
+        .deliver(
+            envelope(
+                vec![OutboundPart::ProgressivePreview(
+                    ProgressivePreviewPart::Update {
+                        vendor_message_ref: sent_ref(&first),
+                        accepted_text: "accepted".to_string(),
+                        current_text: "rewritten".to_string(),
+                    },
+                )],
+                None,
+            ),
+            &changed_prefix_egress,
+        )
+        .await
+        .expect("changed prefix is reported");
+    assert!(matches!(
+        changed_prefix.parts[0],
+        PartDeliveryOutcome::Permanent { .. }
+    ));
+    assert!(changed_prefix_egress.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn progressive_preview_stop_relies_on_native_expiry_without_egress() {
+    let egress = ScriptedEgress::new(Vec::new());
+    let report = TelegramChannelAdapter::default()
+        .deliver(
+            envelope(
+                vec![OutboundPart::ProgressivePreview(
+                    ProgressivePreviewPart::Stop {
+                        vendor_message_ref: "12345".to_string(),
+                    },
+                )],
+                None,
+            ),
+            &egress,
+        )
+        .await
+        .expect("preview stop is local");
+    assert!(matches!(
+        &report.parts[0],
+        PartDeliveryOutcome::Sent { vendor_message_ref: Some(id) } if id == "12345"
+    ));
+    assert!(egress.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn progressive_preview_start_requires_true_result_evidence() {
+    for body in [r#"{"ok":true,"result":false}"#, r#"{"ok":true}"#] {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(body)]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
+                    )],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("preview start reports vendor evidence failure");
+        assert!(
+            !matches!(report.parts[0], PartDeliveryOutcome::Sent { .. }),
+            "sendMessageDraft must not report Sent without result:true: {body}"
+        );
     }
 }
 

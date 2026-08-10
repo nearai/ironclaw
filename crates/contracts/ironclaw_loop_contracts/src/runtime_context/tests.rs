@@ -154,6 +154,7 @@ fn renders_channel_presentation_hint() {
                         supports_threads: false,
                         max_message_chars: Some(4000),
                         command_prefix: None,
+                        progressive_preview: None,
                     }),
                 },
                 ConnectedChannelSummary {
@@ -165,6 +166,7 @@ fn renders_channel_presentation_hint() {
                         supports_threads: true,
                         max_message_chars: None,
                         command_prefix: None,
+                        progressive_preview: None,
                     }),
                 },
             ]),

@@ -30,6 +30,7 @@ use crate::outbound::MutableOutboundDeliveryTargetRegistry;
 use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
+use ironclaw_product_contracts::projection::ProjectionStream;
 
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
@@ -364,6 +365,9 @@ pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     pub(crate) outbound_delivery_targets: Option<&'a Arc<MutableOutboundDeliveryTargetRegistry>>,
     pub(crate) local_runtime: Option<&'a RebornRuntimeStores>,
+    /// The live projection feed the run-delivery streaming forwarder
+    /// subscribes through.
+    pub(crate) projection_stream: Arc<dyn ProjectionStream>,
 }
 
 pub(crate) struct ChannelHostAssemblySource {
@@ -391,9 +395,15 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) channel_pairing:
         Option<Arc<ironclaw_extension_host::channel_pairing::ChannelPairingRegistry>>,
+    /// The live projection feed the WebUI drains; the run-delivery streaming
+    /// forwarder subscribes here for token deltas.
+    pub(crate) projection_stream: Arc<dyn ProjectionStream>,
 }
 
-fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAssemblySource> {
+fn channel_host_source(
+    services: &RebornRuntimeStores,
+    projection_stream: Arc<dyn ProjectionStream>,
+) -> Option<ChannelHostAssemblySource> {
     // Lander and reader share ONE handle so an inbound attachment is read back
     // from the subtree it landed in. Under a per-caller workspace policy that
     // subtree is the caller's own; the shared read-only `workspace_filesystem`
@@ -431,6 +441,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         deployment_channels: Arc::clone(&services.deployment_channels),
         channel_config: Arc::clone(&services.channel_config_service),
         channel_pairing: services.channel_pairing.clone(),
+        projection_stream,
     })
 }
 
@@ -501,6 +512,7 @@ pub(crate) fn start_channel_host(
         deployment_channels,
         channel_config,
         channel_pairing,
+        projection_stream,
     } = source;
     let delivery = delivery_coordinator.clone().map(|coordinator| {
         ironclaw_assistant::ChannelWorkflowDeliveryServices {
@@ -515,6 +527,7 @@ pub(crate) fn start_channel_host(
             auth_flow_cancel,
             settings: run_delivery_settings,
             triggered_delivery_store: Arc::clone(triggered_delivery_store),
+            projection_stream: projection_stream.clone(),
         }
     });
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
@@ -571,8 +584,9 @@ pub(crate) async fn build_runtime_channel_host(
         auth_challenges,
         outbound_delivery_targets,
         local_runtime,
+        projection_stream,
     } = wiring;
-    let source = channel_host_source(services)?;
+    let source = channel_host_source(services, projection_stream)?;
     let approval_context = Some(Arc::new(
         ironclaw_extension_host::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
             Arc::clone(&services.approval_requests)
@@ -648,6 +662,8 @@ pub(crate) fn start_channel_host_from_stores(
     services: &RebornRuntimeStores,
     wiring: ChannelHostAssemblyWiring,
 ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
-    let source = channel_host_source(services)?;
+    // Test-support paths without a composed projection pipeline get the inert
+    // stream; suites that exercise live streaming inject their own.
+    let source = channel_host_source(services, Arc::new(ironclaw_assistant::NoopProjectionStream))?;
     Some(start_channel_host(&source, wiring).assembly)
 }

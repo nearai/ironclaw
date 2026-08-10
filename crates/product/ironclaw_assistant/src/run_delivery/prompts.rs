@@ -385,6 +385,27 @@ mod tests {
         );
     }
 
+    /// The stream-fallback re-drive mints a DIFFERENT delivery identity from
+    /// the original final reply, so the deterministic delivery id (derived
+    /// from the projection ref) cannot suppress it as AlreadyDelivered.
+    #[test]
+    fn final_reply_stream_fallback_discriminator_is_distinct() {
+        let run_id = TurnRunId::new();
+        let original =
+            run_notification_projection_id(run_id, RunNotificationEventKind::FinalReplyReady, None);
+        let fallback = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::FinalReplyReady,
+            Some("stream-fallback"),
+        );
+        assert_ne!(original, fallback);
+        assert_eq!(original, format!("run-notification:final:{run_id}"));
+        assert_eq!(
+            fallback,
+            format!("run-notification:final:stream-fallback:{run_id}")
+        );
+    }
+
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
         AuthPromptView {
             turn_run_id: TurnRunId::new(),

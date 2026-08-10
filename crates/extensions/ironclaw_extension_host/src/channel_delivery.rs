@@ -104,6 +104,11 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                 installation_id,
                 adapter: Arc::clone(&extension.adapter),
                 egress,
+                progressive_preview: extension
+                    .resolved
+                    .channel
+                    .as_ref()
+                    .and_then(|channel| channel.presentation.progressive_preview.clone()),
             });
         }
         let snapshot = self.watch.current();
@@ -134,6 +139,11 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             installation_id,
             adapter,
             egress,
+            progressive_preview: extension
+                .resolved
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.presentation.progressive_preview.clone()),
         })
     }
 }

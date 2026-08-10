@@ -44,11 +44,13 @@ use ironclaw_turns::{
 use tokio::sync::Semaphore;
 
 use super::prompts;
+use super::streaming::PreviewForwarderHandle;
 use super::{
-    BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
-    RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
-    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    thread_scope_from_binding, turn_scope_from_thread_scope,
+    BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet,
+    PostedWorkingNotice, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
+    blocked_actionable_marker, cancel_auth_blocked_run, delivered_messages_from_outcome,
+    gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
+    turn_scope_from_thread_scope,
 };
 use crate::ProductSurfaceFailure;
 use crate::delivery_coordinator::{
@@ -455,16 +457,64 @@ impl RunDeliveryObserver {
             Err(error) => return Err(error.into()),
         }
         let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
-        let mut working_message: Option<DeliveredChannelMessage> = None;
+        let mut working_notice: Option<PostedWorkingNotice> = None;
+        let mut forwarder: Option<PreviewForwarderHandle> = None;
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
+        let result = self
+            .deliver_final_reply_inner(
+                &envelope,
+                &binding,
+                &thread_scope,
+                &scope,
+                &actor,
+                run_id,
+                &mut delivered_blocked_marker,
+                &mut working_notice,
+                &mut forwarder,
+                &mut messages_to_delete_after_final,
+            )
+            .await;
+        // Safety net: on every exit, stop forwarding and remove any remaining
+        // disposable working indicator/preview.
+        if let Some(forwarder) = forwarder.take() {
+            forwarder.shutdown().await;
+        }
+        if let Some(notice) = working_notice.take() {
+            self.services
+                .stop_working_notice(scope.clone(), Some(run_id), notice)
+                .await;
+        }
+        result
+    }
+
+    /// The poll-and-deliver loop. Returns after the terminal delivery (or the
+    /// no-final-text early return); the caller owns cleanup of any still-open
+    /// working notice/forwarder.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver_final_reply_inner(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        binding: &ResolvedBinding,
+        thread_scope: &ironclaw_threads::ThreadScope,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        run_id: TurnRunId,
+        delivered_blocked_marker: &mut Option<BlockedActionableMarker>,
+        working_notice: &mut Option<PostedWorkingNotice>,
+        forwarder: &mut Option<PreviewForwarderHandle>,
+        messages_to_delete_after_final: &mut Vec<DeliveredChannelMessage>,
+    ) -> Result<(), RunDeliveryError> {
         loop {
             let actionable_state = {
                 self.wait_for_actionable(
-                    &envelope,
-                    &scope,
+                    envelope,
+                    thread_scope,
+                    scope,
+                    actor,
                     run_id,
                     delivered_blocked_marker.as_ref(),
-                    &mut working_message,
+                    working_notice,
+                    forwarder,
                 )
                 .await
                 .map_err(|err| {
@@ -483,18 +533,23 @@ impl RunDeliveryObserver {
             if matches!(
                 actionable_state.status,
                 TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
-            ) && let Some(message) = working_message.take()
+            ) && let Some(notice) = working_notice.take()
             {
+                if let Some(forwarder) = forwarder.take() {
+                    forwarder.shutdown().await;
+                }
+                // Remove the preview before the gate prompt posts; partial
+                // model text must not linger beside an actionable prompt.
                 self.services
-                    .retract_message(scope.clone(), Some(run_id), message)
+                    .stop_working_notice(scope.clone(), Some(run_id), notice)
                     .await;
             }
             let Some(notification) = self
                 .notification_for_actionable_state(
-                    &envelope,
-                    &binding,
-                    &thread_scope,
-                    &scope,
+                    envelope,
+                    binding,
+                    thread_scope,
+                    scope,
                     run_id,
                     &actionable_state,
                 )
@@ -505,17 +560,40 @@ impl RunDeliveryObserver {
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
+            let is_terminal = next_blocked_marker.is_none();
+            let is_final_reply = event_kind == RunNotificationEventKind::FinalReplyReady;
+
+            let final_text = notification.text.clone();
+            if is_terminal
+                && is_final_reply
+                && working_notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.progressive)
+            {
+                if let Some(forwarder) = forwarder.take() {
+                    forwarder.shutdown().await;
+                }
+                if let Some(notice) = working_notice.take() {
+                    self.services
+                        .stop_working_notice(scope.clone(), Some(run_id), notice)
+                        .await;
+                }
+            }
+            // The complete finalized text always uses the ordinary delivery
+            // path. Preview state is never authoritative and never affects
+            // retries or recovery of the final reply.
             let delivered_messages = self
                 .deliver_run_notification(
                     RunNotificationDeliveryContext {
-                        envelope: &envelope,
-                        scope: &scope,
-                        thread_scope: &thread_scope,
-                        actor: &actor,
+                        envelope,
+                        scope,
+                        thread_scope,
+                        actor,
                     },
                     run_id,
                     &actionable_state,
-                    notification,
+                    &notification,
+                    vec![OutboundPart::Text(final_text)],
                 )
                 .await?;
             if (event_kind == RunNotificationEventKind::ApprovalNeeded
@@ -528,7 +606,7 @@ impl RunDeliveryObserver {
                     &scope.tenant_id,
                     &binding.actor_user_id,
                     gate_ref_str,
-                    &scope,
+                    scope,
                     &delivered_messages,
                     Some(envelope.external_conversation_ref()),
                 )
@@ -544,12 +622,14 @@ impl RunDeliveryObserver {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record_delivered(run_id);
-                if let Some(message) = working_message.take() {
+                // A plain working notice still needs its retract; a preview
+                // was removed before the final post.
+                if let Some(notice) = working_notice.take() {
                     self.services
-                        .retract_message(scope.clone(), Some(run_id), message)
+                        .stop_working_notice(scope.clone(), Some(run_id), notice)
                         .await;
                 }
-                for message in messages_to_delete_after_final {
+                for message in messages_to_delete_after_final.drain(..) {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
@@ -559,21 +639,27 @@ impl RunDeliveryObserver {
             if event_kind == RunNotificationEventKind::AuthRequired {
                 messages_to_delete_after_final.extend(delivered_messages);
             }
-            delivered_blocked_marker = Some(marker);
+            *delivered_blocked_marker = Some(marker);
         }
     }
 
     /// The live-path poll loop: waits for a terminal or newly-blocked state,
-    /// raising the working indicator once while the run is quietly running.
-    /// (Mirror of `wait_for_actionable_state`; kept separate so the indicator
-    /// side effect stays on the live path only.)
+    /// raising the working indicator once while the run is quietly running,
+    /// and spawning the preview forwarder when a progressive notice is
+    /// raised (the live feed has no replay — every poll delay would lose
+    /// deltas). (Mirror of `wait_for_actionable_state`; kept separate so the
+    /// indicator side effect stays on the live path only.)
+    #[allow(clippy::too_many_arguments)]
     async fn wait_for_actionable(
         &self,
         envelope: &ProductInboundEnvelope,
+        thread_scope: &ThreadScope,
         scope: &TurnScope,
+        actor: &TurnActor,
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
-        working_message: &mut Option<DeliveredChannelMessage>,
+        working_notice: &mut Option<PostedWorkingNotice>,
+        forwarder: &mut Option<PreviewForwarderHandle>,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
@@ -597,18 +683,37 @@ impl RunDeliveryObserver {
             if start.elapsed() >= self.settings.max_wait {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
-            if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
-                *working_message = self
+            if working_notice.is_none() && blocked_actionable_marker(&state).is_none() {
+                *working_notice = self
                     .services
-                    .post_notice(
-                        DeliveryIntent::Working,
+                    .start_working_notice(
                         scope.clone(),
                         Some(run_id),
                         envelope.external_conversation_ref(),
-                        prompts::WORKING_MESSAGE,
-                        format!("working:{run_id}"),
+                        envelope_is_direct_chat(envelope),
                     )
                     .await;
+                if forwarder.is_none()
+                    && working_notice
+                        .as_ref()
+                        .is_some_and(|notice| notice.progressive)
+                    && let Some(notice) = working_notice.clone()
+                {
+                    *forwarder = super::streaming::spawn_preview_forwarder(
+                        Arc::new(self.services.clone()),
+                        scope.clone(),
+                        actor.clone(),
+                        run_id,
+                        notice,
+                        super::streaming::PreviewSourceRoute {
+                            thread_scope: thread_scope.clone(),
+                            reply_target: state.reply_target_binding_ref.clone(),
+                            conversation: envelope.external_conversation_ref().clone(),
+                            actor_ref: envelope.external_actor_ref().clone(),
+                        },
+                    )
+                    .await;
+                }
             }
             tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
             poll_interval = poll_interval
@@ -786,7 +891,8 @@ impl RunDeliveryObserver {
         context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
         state: &TurnRunState,
-        notification: ActionableNotification,
+        notification: &ActionableNotification,
+        parts: Vec<OutboundPart>,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
         let RunNotificationDeliveryContext {
             envelope,
@@ -848,8 +954,8 @@ impl RunDeliveryObserver {
                 CoordinatedDeliveryRequest {
                     intent: notification.intent,
                     delivery,
-                    parts: vec![OutboundPart::Text(notification.text)],
-                    attachments: notification.attachments,
+                    parts,
+                    attachments: notification.attachments.clone(),
                     thread_anchor: None,
                     // MUST stay false on this path. `ObservedReplyTargetAuthority`
                     // (below) has no DM classification for the raw source

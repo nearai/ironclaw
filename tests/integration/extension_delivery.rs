@@ -365,6 +365,7 @@ fn delivery_run_services(
         Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream),
         binding_service: harness
             .binding_service_for_test()
             .expect("group binding service"),
@@ -2826,6 +2827,34 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         .await;
     assert_eq!(status, StatusCode::OK);
     let first_run = paused.wait_for_run_id().await;
+    // Telegram private-chat runs use the native ephemeral draft surface. The
+    // generated draft id is adapter-owned and the normal final message later
+    // clears the preview; no durable placeholder message is posted.
+    let draft_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let draft_body = loop {
+        let draft = inbound
+            .captured_network_requests_for_test()
+            .into_iter()
+            .find(|request| {
+                request.url.ends_with("/sendMessageDraft")
+                    && serde_json::from_slice::<serde_json::Value>(&request.body)
+                        .is_ok_and(|body| body["chat_id"] == 717171)
+            });
+        if let Some(request) = draft {
+            break serde_json::from_slice::<serde_json::Value>(&request.body)
+                .expect("Telegram draft body is JSON");
+        }
+        assert!(
+            tokio::time::Instant::now() < draft_deadline,
+            "the paused private-chat run must start a native Telegram draft"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(draft_body["text"], "");
+    assert!(
+        draft_body["draft_id"].as_i64().is_some_and(|id| id > 0),
+        "native draft id must be a non-zero Telegram integer: {draft_body:?}"
+    );
     // The second message arrives while the first run is parked on its model
     // call — the genuine mid-run overlap from the issue report.
     let status = ingress
@@ -2880,17 +2909,14 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let coordinator = inbound.turn_coordinator_for_test();
     wait_for_run_status_in_scope(&coordinator, &race_scope, first_run, TurnStatus::Completed).await;
     ingress.drain().await;
-    // Every race-chat sendMessage quotes the message it belongs to: exactly
-    // one working indicator and one final reply anchored to the FIRST
-    // message (dm_body assigns update_id + 10 → 618), the one busy notice
-    // anchored to the SECOND (619), and no other anchors. Bounded poll —
-    // the final reply lands observer-driven after drain returns.
+    // Durable race-chat sendMessage calls quote the message they belong to:
+    // the final reply anchors to the FIRST message (dm_body assigns update_id
+    // + 10 → 618), while the busy notice anchors to the SECOND (619). The
+    // working preview above is an ephemeral draft, not a third message.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let bodies = race_bodies();
-        if anchored_count(&bodies, RACE_REPLY, 618) == 1
-            && anchored_count(&bodies, "is thinking", 618) == 1
-        {
+        if anchored_count(&bodies, RACE_REPLY, 618) == 1 {
             assert_eq!(
                 anchored_count(&bodies, "still working on a previous message", 619),
                 1,
@@ -2903,12 +2929,17 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 "every race-chat message must anchor to one of the two prompting \
                  messages: {bodies:?}"
             );
+            assert_eq!(
+                anchored_count(&bodies, "is thinking", 618),
+                0,
+                "native Telegram drafts replace the durable working placeholder"
+            );
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the working indicator and final reply must each anchor to their \
-             own prompt exactly once; saw: {bodies:?}"
+            "the native draft, busy notice, and final reply must reach their \
+             intended Telegram surfaces; saw durable bodies: {bodies:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
