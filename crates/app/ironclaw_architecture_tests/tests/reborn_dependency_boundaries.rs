@@ -712,7 +712,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Vocabulary/comment change only — the actor-first ladder itself is
         // preserved (WebChat=actor, trigger=creator, system=fallback). Count
         // read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_112),
+        // 13_112 -> 13_172 (2026-08-10, #7247 truthful connection context):
+        // `PendingExtensionAuthState` (the per-caller "installed but not
+        // authenticated for this user" DTO) + its bounded, sanitized render
+        // arm beside the existing connected-channels line. Declaration and
+        // rendering vocabulary only — the per-caller verdict computation
+        // lives in ironclaw_assistant (`caller_extension_auth`), the ports in
+        // composition. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_172),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

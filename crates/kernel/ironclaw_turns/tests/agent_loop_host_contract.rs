@@ -39,9 +39,9 @@ use ironclaw_loop_contracts::{
     LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
     LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext,
     LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest,
-    NotificationChannelsState, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
-    SkillTrustLevel, SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    resolution,
+    NotificationChannelsState, ParentLoopOutput, PendingExtensionAuthState, PromptMode,
+    PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
 };
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
@@ -4687,6 +4687,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             communication: Some(CommunicationRuntimeContext {
+                pending_extension_auth: PendingExtensionAuthState::Unknown,
                 connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
                     name: "Slack".to_string(),
                     authenticated: true,
@@ -4762,6 +4763,7 @@ async fn instruction_bundle_runtime_scheduled_trigger_without_delivery_tools_omi
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             communication: Some(CommunicationRuntimeContext {
+                pending_extension_auth: PendingExtensionAuthState::Unknown,
                 connected_channels: ConnectedChannelsState::Unknown,
                 notification_channels: NotificationChannelsState::Known(0),
                 delivery_tools_visible: false,
