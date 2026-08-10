@@ -1331,13 +1331,13 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         .await;
 
     let texts = harness.adapter.texts();
-    assert_eq!(
-        texts,
-        vec![
-            "Ironclaw is thinking...".to_string(),
-            "done thinking".to_string()
-        ]
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert!(
+        !texts[0].is_empty() && texts[0] != "done thinking",
+        "a distinct working indicator precedes the final reply, got {:?}",
+        texts[0]
     );
+    assert_eq!(texts[1], "done thinking");
     // The working indicator's vendor ref came back through the coordinator
     // outcome and was retracted after the final reply (Cleanup intent).
     let retracted = harness.adapter.retracted_refs();
@@ -1388,13 +1388,14 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
         tokio::time::Instant::now().duration_since(started) > Duration::from_secs(2 * 60),
         "the scripted run must cross the previous delivery deadline"
     );
-    assert_eq!(
-        harness.adapter.texts(),
-        vec![
-            "Ironclaw is thinking...".to_string(),
-            "slow run finished".to_string()
-        ]
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert!(
+        !texts[0].is_empty() && texts[0] != "slow run finished",
+        "a distinct working indicator precedes the final reply, got {:?}",
+        texts[0]
     );
+    assert_eq!(texts[1], "slow run finished");
     assert_eq!(harness.adapter.retracted_refs().len(), 1);
 }
 
@@ -1427,7 +1428,11 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
     let texts = harness.adapter.texts();
     assert_eq!(texts.len(), 3, "auth prompt + working + final reply");
     assert!(texts[0].contains("Authentication required"));
-    assert_eq!(texts[1], "Ironclaw is thinking...");
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[2],
+        "a distinct working indicator sits between the auth prompt and the reply, got {:?}",
+        texts[1]
+    );
     assert_eq!(texts[2], "authenticated and finished");
     assert_eq!(
         harness.adapter.retracted_refs(),

@@ -1751,14 +1751,14 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // The model is deliberately paused so the generic observer must surface
     // a working indicator through the real Telegram adapter before the final
     // reply exists.
+    // The model is paused, so the only `/sendMessage` posted before release is
+    // the working indicator (its copy varies per run, so match on the call, not
+    // the words — content is pinned in the assistant's prompt unit test).
     for _ in 0..200 {
         if inbound
             .captured_network_requests_for_test()
             .iter()
-            .any(|request| {
-                request.url.ends_with("/sendMessage")
-                    && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
-            })
+            .any(|request| request.url.ends_with("/sendMessage"))
         {
             break;
         }
@@ -1767,10 +1767,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let requests = inbound.captured_network_requests_for_test();
     let working = requests
         .iter()
-        .find(|request| {
-            request.url.ends_with("/sendMessage")
-                && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
-        })
+        .find(|request| request.url.ends_with("/sendMessage"))
         .expect("a running Telegram turn must post the generic working indicator");
     let working_body: serde_json::Value =
         serde_json::from_slice(&working.body).expect("working sendMessage body is JSON");

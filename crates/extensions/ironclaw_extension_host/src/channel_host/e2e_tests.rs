@@ -2785,7 +2785,12 @@ async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "a running turn posts a working indicator before the reply"
+    );
 
     harness
         .coordinator
@@ -3015,7 +3020,12 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "the resumed turn posts a working indicator before the reply"
+    );
 
     harness
         .coordinator
@@ -3262,8 +3272,8 @@ impl RecordingTurnCoordinator {
     ///
     /// This prevents the delivery loop from waking in the gap between
     /// `resume_blocked_run_to_running` and `complete_active_run`, observing
-    /// `Running` with no blocked marker, and posting the "Ironclaw is thinking..."
-    /// working indicator — which would produce a spurious 4th message and make the
+    /// `Running` with no blocked marker, and posting the working indicator —
+    /// which would produce a spurious 4th message and make the
     /// `messages.len() == 3` assertion flaky.
     async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductSurfaceFailure> {
         // Append the final assistant message first (does not touch `state`).
