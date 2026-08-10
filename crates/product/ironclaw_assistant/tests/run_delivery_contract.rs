@@ -410,6 +410,106 @@ impl DeliveryReplyContextSource for NoStoredReplyContext {
     }
 }
 
+/// Delegating store whose terminal `Delivered` status write fails — the
+/// durable shape behind a vendor accept that never gets durably confirmed
+/// ([`ironclaw_assistant::CoordinatedDeliveryOutcome::DeliveredUnconfirmed`]).
+/// Mirrors `outbound_delivery_contract.rs`'s `TerminalDeliveredWriteFailingStore`
+/// (each test binary compiles independently, so the fixture is duplicated
+/// rather than shared).
+struct TerminalDeliveredWriteFailingStore {
+    inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ironclaw_outbound::ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+    async fn load_thread_notification_policy(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<ironclaw_outbound::ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+    async fn upsert_subscription(
+        &self,
+        record: ironclaw_outbound::ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+    async fn load_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+    async fn advance_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.advance_subscription_cursor(request).await
+    }
+    async fn record_delivery_attempt(
+        &self,
+        attempt: ironclaw_outbound::OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+    async fn update_delivery_status(
+        &self,
+        request: ironclaw_outbound::UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        if matches!(
+            request.status,
+            ironclaw_outbound::OutboundDeliveryStatus::Delivered
+        ) {
+            return Err(OutboundError::Backend);
+        }
+        self.inner.update_delivery_status(request).await
+    }
+    async fn list_delivery_attempts(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::OutboundDeliveryAttempt>, OutboundError> {
+        self.inner.list_delivery_attempts(scope).await
+    }
+}
+
 #[derive(Default)]
 struct ScriptedProjectFilesystemReader {
     files: Mutex<HashMap<String, Result<WorkspaceFile, ProjectFsError>>>,
@@ -1416,6 +1516,54 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
     );
 }
 
+/// Pins `NoticeEgress::into_retraction_handle()` at the `working_message`
+/// call site: a vendor accept with no message ref (web push; a Slack `ok`
+/// with no `ts`) still delivers the working indicator, but leaves no handle
+/// to retract — the working-indicator retraction after the final reply must
+/// be skipped, not attempted against a nonexistent ref.
+#[tokio::test]
+async fn observer_working_indicator_skips_retraction_when_the_vendor_omits_a_message_ref() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            }],
+        });
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "done thinking").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-working-no-ref"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert_eq!(texts[1], "done thinking");
+    assert!(
+        harness.adapter.retracted_refs().is_empty(),
+        "a ref-less working indicator has no retraction handle and must not be retracted: {:?}",
+        harness.adapter.retracted_refs()
+    );
+}
+
 /// A run whose triggering message has a vendor ref is marked 👀 while working
 /// and swapped to ✅ when it completes, so a busy channel shows at a glance
 /// which ping is being handled.
@@ -2356,6 +2504,160 @@ async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry()
         attempts.last().map(|attempt| attempt.status),
         Some(ironclaw_outbound::OutboundDeliveryStatus::Delivered)
     ));
+}
+
+/// Headline regression for #7473: `post_notice` used to collapse "nothing
+/// sent" and "sent, but no vendor ref came back" into the same `None`, so the
+/// connect-nudge throttle released its reservation on ANY ref-less result —
+/// including a genuinely-delivered notice. web push always omits a message
+/// ref, and Slack does whenever `chat.postMessage` succeeds without a `ts`;
+/// either one used to reopen the reservation and let a duplicate "please
+/// connect" nudge through. This must fail on the pre-fix release condition
+/// (`delivered.is_none()`) and pass once the release is keyed off
+/// `NoticeEgress::reached_vendor()` instead.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_the_vendor_accepts_without_a_message_ref() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    // The vendor accepted the notice — `Sent` — but returned no ref.
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            }],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-no-ref-1"),
+            rejected.clone(),
+        )
+        .await;
+    // A second unbound ping in the same conversation, still inside the
+    // throttle window: must NOT draw a second nudge — the first one already
+    // reached the user, ref or no ref.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-no-ref-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "a ref-less vendor accept must hold the reservation, not release it for a duplicate: {texts:?}"
+    );
+}
+
+/// `DeliveredUnconfirmed` (vendor accepted, refs came back, but the durable
+/// `Delivered` write failed) is the other outcome the pre-fix code
+/// mishandled: `delivered_messages_from_outcome` DOES return a message for
+/// it, so that half was accidentally correct — but the mapping needed to be
+/// principled (keyed off the outcome variant), not lucky. Assert the
+/// reservation is held here too.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_delivery_is_unconfirmed() {
+    let inner_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let store = Arc::new(TerminalDeliveredWriteFailingStore {
+        inner: Arc::clone(&inner_store),
+    });
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::Running,
+        None,
+    )]));
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticResolver {
+            adapter: Arc::clone(&adapter),
+        }),
+        Arc::new(NoStoredReplyContext),
+        DeliveryRetryPolicy {
+            max_attempts: 2,
+            backoff: Duration::ZERO,
+        },
+    ));
+    let services = RunDeliveryServices {
+        binding_service: Arc::new(StaticBindingService {
+            binding: binding(),
+            fail: true,
+        }),
+        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        route_store: Arc::clone(&inner_store) as Arc<dyn DeliveredGateRouteStore>,
+        communication_preferences: Arc::clone(&inner_store)
+            as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        delivery_targets: Arc::new(StaticTargetCatalog {
+            targets: Vec::new(),
+        }) as Arc<dyn OutboundDeliveryTargetProvider>,
+        coordinator,
+        extension_id: EXTENSION_ID.to_string(),
+        fallback_notice_scope: fallback_scope(),
+        approval_context: None,
+        blocked_auth_prompts: None,
+        auth_flow_cancel: None,
+    };
+    let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
+    let observer = Arc::new(
+        RunDeliveryObserver::with_settings_and_connection_notices(
+            services,
+            RunDeliverySettings {
+                poll_interval: Duration::from_millis(1),
+                max_wait: Duration::from_millis(20),
+                max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+                max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+                first_nudge_after: Duration::from_secs(3600),
+                renudge_interval: Duration::from_secs(3600),
+            },
+            connection_notices.clone(),
+        )
+        .with_enabled_commands(["status"], None),
+    );
+
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+    observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unconfirmed-1"),
+            rejected.clone(),
+        )
+        .await;
+    observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unconfirmed-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = adapter.texts();
+    assert_eq!(
+        texts,
+        vec![connection_notices.connect_required.clone()],
+        "an unconfirmed-but-sent delivery must hold the reservation, not release it: {texts:?}"
+    );
 }
 
 #[tokio::test]
