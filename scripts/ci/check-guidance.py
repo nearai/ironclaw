@@ -20,14 +20,19 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      `README.md` under `crates/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
      directory. Every `.md`/`.mdx` under `docs/` — the public Mintlify tree,
-     the `zh/` locale mirror, and the living contract corpus
-     `docs/reborn/contracts/` — is scanned the same way, but for **backticked
-     inline paths only**: markdown link targets there are Mintlify site paths
-     (extensionless page routes, site-absolute `/using/cli` forms), a
-     different namespace than the tracked tree, so the link extractor is off
-     for `docs/**` by design rather than suppressed case-by-case. The dated
-     archives (`docs/internal/`, the non-contract parts of `docs/reborn/`)
-     are excluded as classes — see `DOCS_EXCLUDED_PREFIXES` below.
+     the `zh/` locale mirror, and the living corpora named in
+     `DOCS_REINCLUDED_PREFIXES` (the contract corpus, the extension-runtime
+     spec pages, guidance-conventions.md) — is scanned the same way, but on
+     published pages for **backticked inline paths only**: markdown link
+     targets there are Mintlify site paths (extensionless page routes,
+     site-absolute `/using/cli` forms), a different namespace than the
+     tracked tree, so the link extractor is off by design rather than
+     suppressed case-by-case. The re-included corpora are the exception:
+     they are fenced out of publication, so their relative markdown links
+     are repo-path claims and are checked like any guidance file's. The
+     dated archives (`docs/internal/`, the non-reincluded parts of
+     `docs/reborn/`) are excluded as classes — see `DOCS_EXCLUDED_PREFIXES`
+     below.
   2. **Rule triggers are live.** Every `paths:` glob in a rule's (or skill's)
      frontmatter must match at least one tracked file. A rule whose glob
      matches nothing is a rule that never loads — the exact
