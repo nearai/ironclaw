@@ -8,6 +8,7 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     USER_ID,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -68,39 +69,16 @@ async def _open_stubbed_auth_thread(
     thread_records = thread_records or default_thread_records
     timelines = timelines or default_timelines
 
+    await install_fake_v2_event_stream(page)
+    # OAuth-open stub shared by the legacy auth flows: records every window.open
+    # so tests can assert the browser is never handed an untrusted URL.
     await page.add_init_script(
         """
         (() => {
-          const streams = [];
           window.__openedAuth = [];
           window.open = (url, target, features) => {
             window.__openedAuth.push({ url, target, features });
             return null;
-          };
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-auth") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
           };
         })();
         """

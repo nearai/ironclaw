@@ -407,16 +407,19 @@ async def _run_fault_scenario(
                 timeout=60,
             )
 
-    requests = await _wait_for_mock_llm_request_count(
+    # The retry/delay fault scenarios above are the contract under test: the
+    # run finalizes with the right answer after the scripted provider faults.
+    await _wait_for_mock_llm_request_count(
         mock_llm_server,
         marker,
         expected_request_count,
     )
     assert submitted["run_id"] in json.dumps(sse_event)
     assert assistant["content"] == "The answer is 4."
-    assert all(
-        request.get("stream") is True for request in requests[:expected_request_count]
-    )
+    # The OpenAI-compatible mock rides the buffered trait fallback since
+    # #7120: rig-core 0.33 synthesizes its final response after EOF, so
+    # IronClaw cannot distinguish a complete OpenAI stream from a truncated
+    # one and deliberately keeps the buffered request path for it.
 
 
 async def test_reborn_v2_sse_stream_accepts_bearer_served(

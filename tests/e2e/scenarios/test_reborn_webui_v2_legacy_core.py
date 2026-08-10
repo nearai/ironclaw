@@ -14,6 +14,7 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     USER_ID,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
@@ -75,27 +76,7 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
     page = await context.new_page()
     session_requests: list[str] = []
 
-    await page.add_init_script(
-        """
-        (() => {
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200):
         await route.fulfill(
