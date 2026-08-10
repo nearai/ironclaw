@@ -170,3 +170,58 @@ pub use trace_capture::trace_capture_turn_event_sink_for_test;
 pub use trigger_materializer::materialize_trigger_prompt_for_test;
 #[cfg(feature = "test-support")]
 pub use user_profile::build_user_profile_source_for_test;
+
+/// Expose the production skill mount views so a test can compare the read and write sides.
+///
+/// They must resolve `/skills` to the same tree. When they did not, `skill_install` wrote to the
+/// database and discovery listed the host disk, and an agent-installed skill was invisible forever
+/// (nearai/ironclaw#7168). Comparing the views directly is the cheapest guard that names the
+/// divergence, and neither view is public outside this crate.
+pub fn production_skill_management_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::factory::production_backend_assembly::production_skill_management_mount_view(scope)
+}
+
+/// Read-side counterpart of [`production_skill_management_mount_view_for_test`].
+pub fn production_skill_context_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::factory::production_backend_assembly::production_skill_context_mount_view(scope)
+}
+
+/// The filesystem tools' mount view for a run, including the read-only skill paths.
+///
+/// Exposed so a test can pin that `read_file` can reach a SKILL.md and cannot write one.
+pub fn capability_workspace_mounts_with_skills_for_test(
+    workspace_mounts: ironclaw_host_api::mount::MountView,
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::runtime::capability_host::with_read_only_skill_paths_for_test(workspace_mounts, scope)
+}
+
+/// Expose the production database composite so a test can assert what production actually mounts.
+///
+/// Used to pin that `/system/skills` is seeded with the bundled skills on the Postgres path, which
+/// shipped empty.
+pub fn production_database_root_filesystem_for_test<F>(
+    backend: std::sync::Arc<F>,
+    backend_id: &str,
+) -> Result<std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>, crate::RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    crate::filesystem_assembly::production_database_root_filesystem(backend, backend_id)
+}
+
+/// Read-side skill mounts for the local-dev / local-storage / hosted-single-tenant shapes.
+///
+/// A separate seam because those shapes take a different branch: they supply their own
+/// `workspace_filesystems`, so they never reach the view above. That is how #7168 survived its first
+/// fix — the fix landed on the branch only hosted multi-tenant Postgres takes, while local-dev kept
+/// reading the host disk. Both readers need a parity guard against the same writer.
+pub fn db_backed_skill_context_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::runtime_mounts::db_backed_skill_context_mount_view(scope)
+}

@@ -865,12 +865,17 @@ function appendRunFailureMessage(
         failureStatus: status,
         failureCategory,
         failureSummary,
+        turnRunId: runId,
       };
       return next;
     }
     const lastMessage = prev[prev.length - 1];
     if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
-      const replacement = promotedRunFailureMessage(lastMessage, messageId);
+      const replacement = promotedRunFailureMessage(
+        lastMessage,
+        messageId,
+        runId,
+      );
       if (replacement === lastMessage) return prev;
       const next = [...prev];
       next[next.length - 1] = replacement;
@@ -885,6 +890,11 @@ function appendRunFailureMessage(
         failureStatus: status,
         failureCategory,
         failureSummary,
+        // Lets the failed-run bubble reuse the same run-artifact/trace
+        // export as a completed assistant reply (#7369) — without this the
+        // error message has no run id and the download action never has
+        // anything to fetch.
+        turnRunId: runId,
       }),
     ];
   });
@@ -901,10 +911,10 @@ function isAdjacentDuplicateRunFailure(message, content) {
   );
 }
 
-function promotedRunFailureMessage(message, messageId) {
+function promotedRunFailureMessage(message, messageId, runId) {
   return message?.id === UNKNOWN_RUN_FAILURE_ID &&
     messageId !== UNKNOWN_RUN_FAILURE_ID
-    ? { ...message, id: messageId }
+    ? { ...message, id: messageId, turnRunId: runId }
     : message;
 }
 

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "seed": 7405,
+  "intent_count": 72,
+  "synthetic_namespace_count": 20,
+  "cases": [
+    {
+      "tool_count": 100,
+      "quality": {
+        "recall_at_1": 0.7864583333333334,
+        "recall_at_5": 0.9375,
+        "recall_at_10": 0.9661458333333334,
+        "mrr": 0.94921875,
+        "ndcg_at_10": 0.9426374896514516,
+        "no_match_accuracy": 1.0
+      }
+    },
+    {
+      "tool_count": 500,
+      "quality": {
+        "recall_at_1": 0.7864583333333334,
+        "recall_at_5": 0.9375,
+        "recall_at_10": 0.9557291666666667,
+        "mrr": 0.94921875,
+        "ndcg_at_10": 0.9403590604241029,
+        "no_match_accuracy": 1.0
+      }
+    },
+    {
+      "tool_count": 1000,
+      "quality": {
+        "recall_at_1": 0.7864583333333334,
+        "recall_at_5": 0.9375,
+        "recall_at_10": 0.9557291666666667,
+        "mrr": 0.94921875,
+        "ndcg_at_10": 0.9403590604241029,
+        "no_match_accuracy": 1.0
+      }
+    }
+  ]
+}

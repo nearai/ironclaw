@@ -158,7 +158,11 @@ observed_date = "2026-08-07"
 # (base_resource_scope_for_run) and the shared-admission wiring add +64
 # production LOC on the merged tree. Recorded here rather than parked in the
 # 150-line tolerance; measured with `bash scripts/ci/check-composition-budget.sh`.
-loc_ceiling = 40811
+# Raised 40811 -> 41135 on 2026-08-08 by the skills stack's top layer (#7171): skill-bundle
+# staging into the workspace, the host-reachability root map the shell consults, and the
+# process-alias wiring that resolves a host-backed workdir. A raise, not a re-ratchet, so it is
+# the reviewed decision this file's own rule requires. Measured with --print; set to current.
+loc_ceiling = 41135
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -169,7 +173,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40811
+loc_observed = 41135
 loc_observed_date = "2026-08-08"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

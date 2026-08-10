@@ -397,7 +397,7 @@ fn hash_json(value: &Value, hasher: &mut impl Hasher) {
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::ProviderToolName;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::time::Instant;
 
@@ -798,7 +798,7 @@ mod tests {
         relevance: BTreeMap<String, u8>,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
     struct QualityMetrics {
         recall_at_1: f64,
         recall_at_5: f64,
@@ -806,6 +806,38 @@ mod tests {
         mrr: f64,
         ndcg_at_10: f64,
         no_match_accuracy: f64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ScaleBaseline {
+        version: u32,
+        seed: u64,
+        intent_count: usize,
+        synthetic_namespace_count: usize,
+        cases: Vec<ScaleBaselineCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ScaleBaselineCase {
+        tool_count: usize,
+        quality: QualityMetrics,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ScaleBenchmarkReport {
+        version: u32,
+        seed: u64,
+        intent_count: usize,
+        cases: Vec<ScaleBenchmarkCaseReport>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ScaleBenchmarkCaseReport {
+        tool_count: usize,
+        synthetic_namespace_count: usize,
+        index_build_micros: u128,
+        query_total_micros: u128,
+        quality: QualityMetrics,
     }
 
     #[derive(Debug)]
@@ -855,23 +887,7 @@ mod tests {
                 );
             }
         }
-        let definitions: Vec<_> = corpus
-            .tools
-            .iter()
-            .map(|tool| {
-                definition(
-                    &tool.capability_id,
-                    &tool.name,
-                    &tool.description,
-                    tool.parameters.clone(),
-                    if tool.verified {
-                        CapabilityDescriptionTrust::VerifiedCatalog
-                    } else {
-                        CapabilityDescriptionTrust::Untrusted
-                    },
-                )
-            })
-            .collect();
+        let definitions: Vec<_> = corpus.tools.iter().map(corpus_definition).collect();
 
         let build_started = Instant::now();
         let index = AuthorizedToolSearchIndex::new(definitions.iter());
@@ -970,6 +986,251 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn committed_scale_baseline_covers_100_500_and_1000_tools() {
+        let corpus: Corpus =
+            serde_json::from_str(include_str!("../tests/fixtures/tool_search_relevance.json"))
+                .expect("committed tool-search corpus is valid");
+        let baseline: ScaleBaseline = serde_json::from_str(include_str!(
+            "../tests/fixtures/tool_search_scale_baseline.json"
+        ))
+        .expect("committed tool-search scale baseline is valid");
+
+        assert_eq!(baseline.version, 1, "unknown scale baseline version");
+        assert_eq!(
+            baseline.intent_count,
+            corpus.intents.len(),
+            "scale baseline must cover the complete judged intent corpus"
+        );
+        assert_eq!(
+            baseline
+                .cases
+                .iter()
+                .map(|case| case.tool_count)
+                .collect::<Vec<_>>(),
+            vec![100, 500, 1_000]
+        );
+        let mut reports = Vec::new();
+        for case in &baseline.cases {
+            let first = scaled_definitions(&corpus, case.tool_count, baseline.seed);
+            let second = scaled_definitions(&corpus, case.tool_count, baseline.seed);
+            assert_eq!(first, second, "scaled catalog must be deterministic");
+            assert_eq!(first.len(), case.tool_count);
+
+            let synthetic_namespace_counts = synthetic_namespace_counts(&corpus, &first);
+            assert_eq!(
+                synthetic_namespace_counts.len(),
+                baseline.synthetic_namespace_count,
+                "every configured synthetic namespace must be represented"
+            );
+            let smallest_namespace = synthetic_namespace_counts
+                .values()
+                .min()
+                .copied()
+                .expect("scale fixture has synthetic namespaces");
+            let largest_namespace = synthetic_namespace_counts
+                .values()
+                .max()
+                .copied()
+                .expect("scale fixture has synthetic namespaces");
+            assert!(
+                largest_namespace.saturating_sub(smallest_namespace) <= 1,
+                "synthetic tools must be distributed evenly across namespaces: {synthetic_namespace_counts:?}"
+            );
+
+            let build_started = Instant::now();
+            let index = AuthorizedToolSearchIndex::new(first.iter());
+            let index_build_micros = build_started.elapsed().as_micros();
+            let query_started = Instant::now();
+            let rankings: Vec<_> = corpus
+                .intents
+                .iter()
+                .map(|intent| index.search(&intent.query, 10).names)
+                .collect();
+            let query_total_micros = query_started.elapsed().as_micros();
+            let quality = quality_metrics(&corpus.intents, &rankings);
+            reports.push(ScaleBenchmarkCaseReport {
+                tool_count: case.tool_count,
+                synthetic_namespace_count: synthetic_namespace_counts.len(),
+                index_build_micros,
+                query_total_micros,
+                quality,
+            });
+        }
+
+        let report = ScaleBenchmarkReport {
+            version: baseline.version,
+            seed: baseline.seed,
+            intent_count: corpus.intents.len(),
+            cases: reports,
+        };
+        eprintln!(
+            "tool-search scale baseline:\n{}",
+            serde_json::to_string_pretty(&report).expect("serialize scale benchmark report")
+        );
+        for (actual, expected) in report.cases.iter().zip(&baseline.cases) {
+            assert_quality_matches_baseline(actual.tool_count, actual.quality, expected.quality);
+        }
+    }
+
+    fn scaled_definitions(
+        corpus: &Corpus,
+        tool_count: usize,
+        seed: u64,
+    ) -> Vec<ProviderToolDefinition> {
+        assert!(
+            tool_count >= corpus.tools.len(),
+            "scale target cannot discard judged corpus tools"
+        );
+        let mut definitions: Vec<_> = corpus.tools.iter().map(corpus_definition).collect();
+        let synthetic_count = tool_count - definitions.len();
+        let namespace_offset = seed as usize % SCALE_NAMESPACES.len();
+        let action_offset = seed as usize % SCALE_ACTIONS.len();
+        let noun_offset = seed as usize % SCALE_NOUNS.len();
+        for ordinal in 0..synthetic_count {
+            let namespace = SCALE_NAMESPACES[(ordinal + namespace_offset) % SCALE_NAMESPACES.len()];
+            let action = SCALE_ACTIONS[(ordinal + action_offset) % SCALE_ACTIONS.len()];
+            let noun = SCALE_NOUNS[(ordinal + noun_offset) % SCALE_NOUNS.len()];
+            let local_name = format!("{action}_{ordinal:04}");
+            definitions.push(definition(
+                &format!("{namespace}.{local_name}"),
+                &format!("{namespace}__{local_name}"),
+                &format!("{action} {noun} records in the {namespace} benchmark integration."),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        format!("{noun}_id"): {"type": "string"},
+                        "cursor": {"type": "string"},
+                        "limit": {"type": "integer"}
+                    },
+                    "required": [format!("{noun}_id")]
+                }),
+                CapabilityDescriptionTrust::Untrusted,
+            ));
+        }
+        definitions
+    }
+
+    fn corpus_definition(tool: &CorpusTool) -> ProviderToolDefinition {
+        definition(
+            &tool.capability_id,
+            &tool.name,
+            &tool.description,
+            tool.parameters.clone(),
+            if tool.verified {
+                CapabilityDescriptionTrust::VerifiedCatalog
+            } else {
+                CapabilityDescriptionTrust::Untrusted
+            },
+        )
+    }
+
+    fn synthetic_namespace_counts(
+        corpus: &Corpus,
+        definitions: &[ProviderToolDefinition],
+    ) -> BTreeMap<String, usize> {
+        definitions.iter().skip(corpus.tools.len()).fold(
+            BTreeMap::new(),
+            |mut counts, definition| {
+                let namespace = definition
+                    .capability_id
+                    .as_str()
+                    .split_once('.')
+                    .map_or(definition.capability_id.as_str(), |(namespace, _)| {
+                        namespace
+                    });
+                counts
+                    .entry(namespace.to_string())
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+                counts
+            },
+        )
+    }
+
+    fn assert_quality_matches_baseline(
+        tool_count: usize,
+        actual: QualityMetrics,
+        expected: QualityMetrics,
+    ) {
+        for (name, actual, expected) in [
+            ("recall_at_1", actual.recall_at_1, expected.recall_at_1),
+            ("recall_at_5", actual.recall_at_5, expected.recall_at_5),
+            ("recall_at_10", actual.recall_at_10, expected.recall_at_10),
+            ("mrr", actual.mrr, expected.mrr),
+            ("ndcg_at_10", actual.ndcg_at_10, expected.ndcg_at_10),
+            (
+                "no_match_accuracy",
+                actual.no_match_accuracy,
+                expected.no_match_accuracy,
+            ),
+        ] {
+            assert!(
+                (actual - expected).abs() <= QUALITY_BASELINE_TOLERANCE,
+                "{tool_count}-tool {name} baseline drifted: expected {expected:.16}, actual {actual:.16}"
+            );
+        }
+    }
+
+    const QUALITY_BASELINE_TOLERANCE: f64 = 1e-12;
+
+    const SCALE_NAMESPACES: [&str; 20] = [
+        "asset_hub",
+        "audit_log",
+        "billing_ops",
+        "compliance_archive",
+        "content_registry",
+        "customer_directory",
+        "data_exchange",
+        "device_fleet",
+        "document_vault",
+        "incident_queue",
+        "inventory_ledger",
+        "media_pipeline",
+        "network_inventory",
+        "quality_control",
+        "research_catalog",
+        "service_directory",
+        "support_queue",
+        "telemetry_store",
+        "training_library",
+        "workflow_admin",
+    ];
+
+    const SCALE_ACTIONS: [&str; 16] = [
+        "archive_record",
+        "compare_snapshot",
+        "export_summary",
+        "get_status",
+        "inspect_artifact",
+        "list_categories",
+        "normalize_dataset",
+        "record_checkpoint",
+        "resolve_reference",
+        "review_manifest",
+        "summarize_usage",
+        "sync_metadata",
+        "validate_policy",
+        "verify_checksum",
+        "view_history",
+        "write_annotation",
+    ];
+
+    const SCALE_NOUNS: [&str; 12] = [
+        "artifact",
+        "batch",
+        "bundle",
+        "checkpoint",
+        "entry",
+        "manifest",
+        "record",
+        "reference",
+        "snapshot",
+        "summary",
+        "version",
+        "workspace",
+    ];
 
     fn legacy_rank(
         definitions: &[ProviderToolDefinition],

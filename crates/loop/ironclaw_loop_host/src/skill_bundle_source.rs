@@ -36,6 +36,27 @@ pub trait SkillBundleSource: Send + Sync {
         bundle_id: &SkillBundleId,
         path: &SkillFilePath,
     ) -> Result<Vec<u8>, SkillBundleSourceError>;
+
+    /// Lists the bundle-relative files a bundle carries besides its manifest.
+    ///
+    /// Needed to copy a bundle somewhere a host process can open it: a skill's `scripts/*.py` lives
+    /// only in the database, so `python3 scripts/foo.py` has nothing to exec, and
+    /// [`Self::read_skill_bundle_file`] can only fetch a path the caller already knows. Measured
+    /// consequence of having no enumeration: an agent that had just read its own script through
+    /// `read_file` could not run it, and re-typed the algorithm into `python3 -c` instead.
+    ///
+    /// Defaults to empty so a source that cannot enumerate at all (in-memory test doubles) keeps
+    /// working -- an empty list means "nothing to stage", never an error. Excludes `SKILL.md`: the
+    /// manifest is already delivered as model context, and a second copy invites edits that discovery
+    /// never sees.
+    async fn list_skill_bundle_files(
+        &self,
+        run_context: &LoopRunContext,
+        bundle_id: &SkillBundleId,
+    ) -> Result<Vec<SkillFilePath>, SkillBundleSourceError> {
+        let _ = (run_context, bundle_id);
+        Ok(Vec::new())
+    }
 }
 
 /// Host-approved scope from which a skill bundle was discovered.

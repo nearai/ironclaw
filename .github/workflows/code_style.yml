@@ -467,6 +467,7 @@ jobs:
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
+        shell: bash
         run: |
           set -euo pipefail
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"

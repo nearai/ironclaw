@@ -54,7 +54,7 @@ use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_require_approval};
 use crate::factory::RebornRuntimeStores;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
+use crate::runtime_mounts::{WorkspaceMountPolicy, db_backed_skill_management_mount_view};
 use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_assistant::projection::{
     CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore,
@@ -256,6 +256,40 @@ struct RefreshingLoopCapabilityPortFactory {
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
+/// Make skill files readable by the ordinary filesystem tools, read-only.
+///
+/// Skill mounts went to the skill capabilities only, so a model reaching for
+/// `skills/<name>/SKILL.md` was told the path resolves in no available root. That is a parity gap,
+/// not just a bad message: in Claude Code a SKILL.md *is* a file, and skills reference siblings
+/// (`references/*.md`, `scripts/*.py`) progressive disclosure expects the agent to open.
+///
+/// Read-only and additive: writes stay with `skill_install`/`skill_update`, and existing aliases are
+/// left untouched, so this can never widen or downgrade a grant.
+fn with_read_only_skill_paths(
+    workspace_mounts: MountView,
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    let skill_reads = crate::runtime_mounts::db_backed_skill_context_mount_view(scope)?;
+    let mut mounts = workspace_mounts.mounts;
+    for grant in skill_reads.mounts {
+        if !mounts
+            .iter()
+            .any(|existing| existing.alias.as_str() == grant.alias.as_str())
+        {
+            mounts.push(grant);
+        }
+    }
+    MountView::new(mounts)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn with_read_only_skill_paths_for_test(
+    workspace_mounts: MountView,
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    with_read_only_skill_paths(workspace_mounts, scope)
+}
+
 #[async_trait::async_trait]
 impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
     async fn create_capability_port(
@@ -275,13 +309,17 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         surface_policy: Arc<CapabilitySurfacePolicy>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
-        let skill_mounts = scoped_skill_management_mount_view(&resource_scope)
+        // Database-backed, same tree the reader and Settings use. This port is where an agent's own
+        // `skill_install` lands, and it used to write host disk instead (nearai/ironclaw#7168).
+        let skill_mounts = db_backed_skill_management_mount_view(&resource_scope)
             .map_err(host_api_agent_loop_error)?;
         // Same scope the skill mounts key off, so a run's workspace grants and
         // its skill mounts can never resolve to different callers.
         let workspace_mounts = self
             .workspace_mounts
             .capability_grant_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
+        let workspace_mounts = with_read_only_skill_paths(workspace_mounts, &resource_scope)
             .map_err(host_api_agent_loop_error)?;
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),

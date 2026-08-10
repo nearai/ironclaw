@@ -155,37 +155,25 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
 
 #[tokio::test]
 async fn coordinator_listing_uses_descriptor_order_without_criteria_input() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
-        .await
-        .expect("skill-activation group builds");
-    let capability_harness = group
-        .capability_harness()
-        .expect("skill-activation group has a host-runtime capability harness");
+    // Seeded BEFORE the group boots: skills are read from the database tree, and the host-disk
+    // store is migrated into it at boot, so a skill written after this point is never picked up.
+    let group = RebornIntegrationGroup::skill_activation_tools_with_user_skills(&[
+        (
+            "alpha",
+            "alpha baseline skill",
+            "ALPHA_SKILL_SENTINEL",
+            false,
+        ),
+        ("zulu", "zulu baseline skill", "ZULU_SKILL_SENTINEL", false),
+    ])
+    .await
+    .expect("skill-activation group builds");
     let harness = group
         .thread("conv-skill-listing-order")
         .script([RebornScriptedReply::text("done")])
         .build()
         .await
         .expect("thread builds");
-    capability_harness
-        .seed_user_skill_for_test(
-            &harness.binding.tenant_id,
-            &harness.binding.actor_user_id,
-            "alpha",
-            "alpha baseline skill",
-            "ALPHA_SKILL_SENTINEL",
-        )
-        .expect("alpha user skill seeds");
-    capability_harness
-        .seed_user_skill_for_test(
-            &harness.binding.tenant_id,
-            &harness.binding.actor_user_id,
-            "zulu",
-            "zulu baseline skill",
-            "ZULU_SKILL_SENTINEL",
-        )
-        .expect("zulu user skill seeds");
-
     harness
         .submit_turn("a request unrelated to the seeded activation keywords")
         .await
@@ -252,12 +240,16 @@ async fn unknown_skill_activation_is_a_noop_and_the_run_continues() {
 
 #[tokio::test]
 async fn installed_skill_is_listed_but_not_model_activatable() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
-        .await
-        .expect("skill-activation group builds");
-    let capability_harness = group
-        .capability_harness()
-        .expect("skill-activation group has a host-runtime capability harness");
+    // `installed: true` adds the URL-install provenance sidecar, which is what downgrades the
+    // bundle's trust to `Installed`. Seeded pre-boot for the same reason as the listing test.
+    let group = RebornIntegrationGroup::skill_activation_tools_with_user_skills(&[(
+        "remote-helper",
+        "a remotely installed helper",
+        "REMOTE_INSTALLED_SKILL_SENTINEL",
+        true,
+    )])
+    .await
+    .expect("skill-activation group builds");
     let harness = group
         .thread("conv-skill-activate-installed")
         .script([
@@ -270,16 +262,6 @@ async fn installed_skill_is_listed_but_not_model_activatable() {
         .build()
         .await
         .expect("thread builds");
-    capability_harness
-        .seed_installed_user_skill_for_test(
-            &harness.binding.tenant_id,
-            &harness.binding.actor_user_id,
-            "remote-helper",
-            "a remotely installed helper",
-            "REMOTE_INSTALLED_SKILL_SENTINEL",
-        )
-        .expect("installed user skill seeds");
-
     harness
         .submit_turn("use the remote helper")
         .await
@@ -383,9 +365,16 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
     run_async_test_with_stack(
         "skill_activate_ambiguous_name_surfaces_recoverable_failed",
         || async {
-            let group = RebornIntegrationGroup::skill_activation_tools()
-                .await
-                .expect("skill-activation group builds");
+            // The user-scoped half of the ambiguous pair must exist before boot; the system half
+            // is seeded below, against the system tree the runtime re-reads.
+            let group = RebornIntegrationGroup::skill_activation_tools_with_user_skills(&[(
+                "duplicate",
+                "a user-scoped skill",
+                "USER_DUPLICATE_SKILL_SENTINEL",
+                false,
+            )])
+            .await
+            .expect("skill-activation group builds");
             let capability_harness = group
                 .capability_harness()
                 .expect("skill-activation group has a host-runtime capability harness");
@@ -409,19 +398,6 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
                 .build()
                 .await
                 .expect("thread builds");
-            // The user-scoped root is seeded under the SAME (tenant, actor) the built
-            // thread's run resolves under (`harness.binding`) — only then does the
-            // user `/skills` mount the run actually reads from contain this file.
-            capability_harness
-                .seed_user_skill_for_test(
-                    &harness.binding.tenant_id,
-                    &harness.binding.actor_user_id,
-                    "duplicate",
-                    "a user-scoped skill",
-                    "USER_DUPLICATE_SKILL_SENTINEL",
-                )
-                .expect("user-scoped duplicate skill seeds");
-
             harness
                 .submit_turn("activate the duplicate skill")
                 .await
