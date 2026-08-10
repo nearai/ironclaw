@@ -54,8 +54,8 @@ use crate::{
     ResetConversationRequest, ResolveConversationRequest, ValidateReplyTargetRequest,
     memory::{
         AcceptedMessageReplayKey, ActorKey, BindingKey, BindingRecord, ExternalEventRouteKey,
-        InMemoryState, MessageIdempotencyKey, ReplyTargetRecord, StoredAcceptedMessageReplay,
-        ThreadKey, ThreadRecord,
+        InMemoryState, MessageIdempotencyKey, ReplyTargetRecord, SharedEventBinding,
+        StoredAcceptedMessageReplay, ThreadKey, ThreadRecord,
     },
     state_store::{ConversationStateRepository, PersistedConversationState},
 };
@@ -121,6 +121,8 @@ struct StoredConversationState {
     threads: Vec<(ThreadKey, ThreadRecord)>,
     external_event_routes: Vec<(ExternalEventRouteKey, ExternalConversationIdentity)>,
     #[serde(default)]
+    event_shared_bindings: Vec<(ExternalEventRouteKey, SharedEventBinding)>,
+    #[serde(default)]
     binding_resets: Vec<(ExternalEventRouteKey, ResetConversationOutcome)>,
     message_idempotency: Vec<(MessageIdempotencyKey, AcceptedConversationMessage)>,
     message_replays: Vec<(AcceptedMessageReplayKey, StoredAcceptedMessageReplay)>,
@@ -160,6 +162,11 @@ impl StoredConversationState {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            event_shared_bindings: state
+                .event_shared_bindings
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             binding_resets: state
                 .binding_resets
                 .iter()
@@ -194,11 +201,12 @@ impl StoredConversationState {
             persistence_revision: 0,
             pairings: self.pairings.into_iter().collect(),
             pairing_epochs: self.pairing_epochs.into_iter().collect(),
-            bindings: self.bindings.into_iter().collect(),
+            bindings: collapse_per_actor_shared_bindings(self.bindings),
             source_bindings: self.source_bindings,
             reply_targets: self.reply_targets,
             threads: self.threads.into_iter().collect(),
             external_event_routes: self.external_event_routes.into_iter().collect(),
+            event_shared_bindings: self.event_shared_bindings.into_iter().collect(),
             binding_resets: self.binding_resets.into_iter().collect(),
             message_idempotency: self.message_idempotency.into_iter().collect(),
             message_replays: self.message_replays.into_iter().collect(),
@@ -207,6 +215,55 @@ impl StoredConversationState {
             messages: self.messages,
         }
     }
+}
+
+/// Fold the persisted `Vec<(BindingKey, BindingRecord)>` into the in-memory
+/// map, collapsing key collisions DETERMINISTICALLY instead of letting
+/// `HashMap::from_iter` keep an arbitrary last-writer.
+///
+/// A store written by the retired per-actor shared-binding model keyed one
+/// shared row PER ACTOR (`BindingKey::shared_actor_user_id`); the
+/// conversation-keyed model drops that discriminator, so those rows now
+/// deserialize to the identical actor-less key. Left to `into_iter().collect()`
+/// the survivor would be whichever row landed last in the Vec — an order the
+/// writer produced from its randomized `HashMap` iteration, so the surviving
+/// conversation-keyed binding (whose thread seeds the stable source/reply refs)
+/// would differ across replicas, backups, and reloads of the same bytes. Pick
+/// the survivor by a stable ordering (lowest `thread_id`) and record every
+/// collapse at `debug!`, so the outcome is reproducible and observable, never
+/// silent. Non-surviving per-actor threads stay in `threads`/`messages` (LLM
+/// data is never deleted); under ephemeral-per-ping each later ping resolves
+/// onto its own event-keyed thread, so nothing re-joins the survivor.
+fn collapse_per_actor_shared_bindings(
+    entries: Vec<(BindingKey, BindingRecord)>,
+) -> HashMap<BindingKey, BindingRecord> {
+    use std::collections::hash_map::Entry;
+    let mut map: HashMap<BindingKey, BindingRecord> = HashMap::with_capacity(entries.len());
+    for (key, record) in entries {
+        match map.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(record);
+            }
+            Entry::Occupied(mut slot) => {
+                let keep_incoming = record.thread_id.as_str() < slot.get().thread_id.as_str();
+                let (kept, dropped) = if keep_incoming {
+                    (record.thread_id.clone(), slot.get().thread_id.clone())
+                } else {
+                    (slot.get().thread_id.clone(), record.thread_id.clone())
+                };
+                tracing::debug!(
+                    kept_thread = %kept,
+                    dropped_thread = %dropped,
+                    "collapsed a retired per-actor shared binding onto its \
+                     conversation-keyed survivor"
+                );
+                if keep_incoming {
+                    slot.insert(record);
+                }
+            }
+        }
+    }
+    map
 }
 
 #[async_trait]

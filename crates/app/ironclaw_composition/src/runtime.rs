@@ -75,8 +75,8 @@ use ironclaw_loop_host::{
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
-    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
+    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::operator_llm::ActiveModelReader;

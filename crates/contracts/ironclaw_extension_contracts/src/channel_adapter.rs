@@ -82,6 +82,20 @@ pub trait ChannelAdapter: Send + Sync {
         Err(ChannelError::Unsupported)
     }
 
+    /// Fetch recent vendor-side conversation context for one inbound shared
+    /// message, through the channel's restricted egress. `topic`-bearing
+    /// conversations fetch that thread's messages; top-level conversations
+    /// fetch recent channel history. Returns `Ok(None)` when the channel has
+    /// no such capability (the default), when scopes are missing, or when the
+    /// vendor call fails — context is advisory and must never fail admission.
+    async fn fetch_conversation_context(
+        &self,
+        _conversation: &ExternalConversationRef,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<Option<ChannelConversationContext>, ChannelError> {
+        Ok(None)
+    }
+
     /// Render and send one normalized outbound envelope through restricted
     /// egress. Owns vendor formatting, splitting, target syntax, DM
     /// provisioning, and safe error mapping. Never touches the delivery
@@ -125,6 +139,14 @@ pub struct VerifiedInbound<'a> {
     /// Request headers the host chose to forward (verification headers are
     /// consumed by the host and not exposed).
     pub headers: &'a [(String, String)],
+    /// This channel's declared `presentation.can_reply_in_threads`: whether a
+    /// top-level shared-conversation message should be rooted as its own
+    /// vendor thread (so the whole exchange threads) rather than kept flat
+    /// with anchored replies. The host reads it from the resolved manifest
+    /// and passes it here so an adapter's conversation-rooting honors the
+    /// declaration instead of hardcoding it — a channel that declares
+    /// `false` keeps replies flat even on a threading-capable vendor.
+    pub can_reply_in_threads: bool,
 }
 
 /// The normalized result of parsing one inbound request.
@@ -239,6 +261,42 @@ impl std::fmt::Debug for ChannelAttachmentRef {
             .debug_struct("ChannelAttachmentRef")
             .field("descriptor", &self.descriptor)
             .finish_non_exhaustive()
+    }
+}
+
+/// Maximum size of one [`ChannelConversationContext`] text payload.
+pub const MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES: usize = 32 * 1024;
+
+/// Recent vendor-side conversation history fetched host-side for one inbound
+/// shared-channel message.
+///
+/// The text is UNTRUSTED third-party content (whatever other channel members
+/// wrote): consumers must frame it as quoted information, never as
+/// instructions, before it reaches a model. It is advisory context — absence
+/// or loss never fails admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelConversationContext {
+    pub text: String,
+}
+
+impl ChannelConversationContext {
+    /// Validate adapter-supplied context text (the adapter is untrusted for
+    /// size): non-empty and within the host byte bound.
+    pub fn new(text: String) -> Result<Self, ChannelError> {
+        if text.trim().is_empty() {
+            return Err(ChannelError::Parse {
+                reason: "conversation context text must not be empty".to_string(),
+            });
+        }
+        if text.len() > MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES {
+            return Err(ChannelError::Parse {
+                reason: format!(
+                    "conversation context exceeds the \
+                     {MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES}-byte bound"
+                ),
+            });
+        }
+        Ok(Self { text })
     }
 }
 
@@ -436,6 +494,25 @@ mod tests {
             body: vec![0u8; MAX_IMMEDIATE_RESPONSE_BYTES + 1],
         };
         assert!(response.validate().is_err());
+    }
+
+    #[test]
+    fn conversation_context_bounds_fail_closed() {
+        assert!(matches!(
+            ChannelConversationContext::new(String::new()),
+            Err(ChannelError::Parse { .. })
+        ));
+        assert!(matches!(
+            ChannelConversationContext::new("   \n\t".to_string()),
+            Err(ChannelError::Parse { .. })
+        ));
+        assert!(matches!(
+            ChannelConversationContext::new("x".repeat(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES + 1)),
+            Err(ChannelError::Parse { .. })
+        ));
+        let context = ChannelConversationContext::new("<@U1>: hello".to_string())
+            .expect("bounded context text is accepted");
+        assert_eq!(context.text, "<@U1>: hello");
     }
 
     fn valid_batch_fragment() -> InboundBatchFragment {

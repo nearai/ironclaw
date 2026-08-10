@@ -16,7 +16,6 @@ SLACK_DECLARED = {
     "slack_api_app_id",
     "slack_installation_id",
     "slack_bot_user_id",
-    "slack_allowed_channels",
     "slack_oauth_client_id",
     "slack_oauth_client_secret",
 }
@@ -30,7 +29,6 @@ class AdminHandleMappingTests(unittest.TestCase):
                 "api_app_id": "A456",
                 "installation_id": "I789",
                 "bot_user_id": "U000",
-                "allowed_channels": '["C0SHARED"]',
                 "oauth_client_id": "C222",
             },
             SLACK_DECLARED,
@@ -42,7 +40,6 @@ class AdminHandleMappingTests(unittest.TestCase):
                 "slack_api_app_id": "A456",
                 "slack_installation_id": "I789",
                 "slack_bot_user_id": "U000",
-                "slack_allowed_channels": '["C0SHARED"]',
                 "slack_oauth_client_id": "C222",
             },
         )

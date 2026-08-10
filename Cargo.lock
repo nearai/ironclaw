@@ -4884,6 +4884,7 @@ dependencies = [
  "serde_urlencoded",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "url",
  "uuid",
 ]

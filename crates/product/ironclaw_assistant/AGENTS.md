@@ -270,13 +270,14 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
-A run acts as its invoker: a shared channel conversation binds one thread per
-(conversation, actor), each thread owned by the actor who invoked the bot —
-there is no configured subject user. The only installation configuration for a
-shared conversation is admission (the `*_allowed_channels` connected-channel
-list, consulted through `SharedConversationAdmission`), and it is checked
-fail-closed on resolve, lookup, and reset: no admission port wired, or a
-conversation the saved value does not list, means rejection — never a fallback
+A run acts as its invoker: a shared conversation is ONE canonical thread
+(conversation-keyed — the Slack thread, the Telegram chat/topic) owned by
+whoever bound it first and joined by every later paired participant, and each
+message inside it runs as its sender — there is no configured subject user.
+Admission is presence-based (delivery through the channel's verified ingress
+is the membership evidence, consulted through `SharedConversationAdmission`)
+and is checked fail-closed on resolve, lookup, and reset: no admission port
+wired, or a foreign installation, means rejection — never a fallback
 owner.
 
 Outbound delivery orchestration starts only after `ironclaw_outbound` resolves

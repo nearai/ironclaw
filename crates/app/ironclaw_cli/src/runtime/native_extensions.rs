@@ -223,6 +223,7 @@ mod tests {
                     config: &config,
                     body: &body,
                     headers: &[],
+                    can_reply_in_threads: false,
                 })
                 .expect("shipping Telegram adapter normalizes the private command");
             let InboundOutcome::Messages(mut messages) = outcome else {

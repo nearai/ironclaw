@@ -2,8 +2,8 @@ use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope};
 
 use super::{ProcessJournalMaterializedState, ProcessJournalStoreError};
 use crate::{
-    JournaledProcessSnapshot, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessLeaseToken, ProcessLifecycleStatus, ProcessWorkerId,
+    JournaledProcessSnapshot, ProcessConcurrencyLimits, ProcessGateQuery, ProcessLeaseToken,
+    ProcessLifecycleStatus, ProcessWorkerId,
 };
 
 pub(super) fn ensure_transition(
@@ -79,16 +79,10 @@ pub(super) fn process_gate_snapshot_matches(
             .gate_ref
             .as_ref()
             .is_none_or(|gate_ref| suspension.gate_ref.as_ref() == Some(gate_ref))
-        && request.owner_user_id.as_ref().is_none_or(|owner| {
-            match request
-                .owner_match
-                .unwrap_or(ProcessGateOwnerMatch::Explicit)
-            {
-                ProcessGateOwnerMatch::Explicit | ProcessGateOwnerMatch::ExplicitOrActor => {
-                    snapshot.owner_user_id.as_ref() == Some(owner)
-                }
-            }
-        })
+        && request
+            .owner_user_id
+            .as_ref()
+            .is_none_or(|owner| snapshot.owner_user_id.as_ref() == Some(owner))
 }
 
 pub(super) fn process_claim_within_limits(

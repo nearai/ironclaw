@@ -241,17 +241,15 @@ fn invocation_effective_input_ref(
 ///
 /// This answers an AUTHORIZATION question — whose delivery targets may this
 /// call see, whose notification channels may it rewrite — so it follows the
-/// ACTING user, not the thread's owner. A run acts as the user who invoked
-/// it; owner and actor coincide on every binding created under that rule, and
-/// the actor stays authoritative for the runs persisted before it.
+/// run's user. Since the ephemeral-per-ping remodel a run's owner IS its
+/// actor, so there is a single identity to follow.
 ///
-/// The same acting identity scopes the whole approval-gate dance
+/// The same identity scopes the whole approval-gate dance
 /// ([`LoopRunContext::acting_resource_scope`] via [`resource_scope_for_run`],
 /// plus [`settings_scope_for_run`]): every store the dance touches is
 /// scope-keyed, and a raise and its resume must derive the same scope or the
-/// approved capability strands. The owner-first split #7157 shipped here as an
-/// interim is gone; the raise/resume coverage that unification required is
-/// `notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor`.
+/// approved capability strands. That raise/resume coverage is
+/// `notification_channels_set_approval_raise_and_resume_stay_scope_matched`.
 ///
 /// `pub(super)`: called from the sibling `notification_channels_set` module.
 pub(super) fn caller_for_run(
@@ -852,55 +850,53 @@ mod tests {
         assert!(error.to_string().contains("unsupported field `unexpected`"));
     }
 
-    /// A run acts as the user who invoked it: the authorization identity AND
-    /// the approval-gate/lease/settings scopes all follow the actor. This test
-    /// previously pinned the interim #7157 split (approval scope
-    /// owner-first); that split is deliberately removed with shared-route
-    /// subject binding — the raise/resume dance under owner ≠ actor is pinned
-    /// end-to-end by
-    /// `notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor`.
+    /// A run acts as the user it belongs to: the authorization identity AND the
+    /// approval-gate/lease/settings scopes all follow that one user. Owner ==
+    /// actor since the ephemeral-per-ping remodel, so there is no owner-vs-actor
+    /// split left to pin (the retired raise/resume-under-owner-≠-actor dance is
+    /// gone); an actorless host run falls back to the thread owner, then to the
+    /// configured host fallback.
     #[test]
-    fn authorization_and_approval_scopes_both_follow_the_actor() {
-        let owner = UserId::new("user-legacy-owner").expect("owner id");
-        let actor = UserId::new("user-participant").expect("actor id");
+    fn authorization_and_approval_scopes_all_follow_the_run_user() {
+        let user = UserId::new("user-participant").expect("user id");
         let fallback = UserId::new("user-fallback").expect("fallback id");
         let scope = ironclaw_turns::TurnScope::new_with_owner(
             ironclaw_host_api::ids::TenantId::new("tenant-shared").expect("tenant"),
             None,
             None,
             ironclaw_host_api::ids::ThreadId::new("thread-shared").expect("thread"),
-            Some(owner.clone()),
+            Some(user.clone()),
         );
 
-        let with_actor = run_context_for_test(scope.clone(), Some(actor.clone()));
+        let with_actor = run_context_for_test(scope.clone(), Some(user.clone()));
         assert_eq!(
             with_actor.acting_user_id(&fallback),
-            actor,
-            "a shared-channel participant acts as themselves"
+            user,
+            "a run acts as its user"
         );
         assert_eq!(
             resource_scope_for_run(&with_actor, &fallback, InvocationId::new()).user_id,
-            actor,
-            "the approval-gate raise is scoped to the acting user"
+            user,
+            "the approval-gate raise is scoped to the run user"
         );
         assert_eq!(
             with_actor.acting_resource_scope(&fallback).user_id,
-            actor,
+            user,
             "the replay-payload/gate-record scope matches the raise scope's user"
         );
         assert_eq!(
             settings_scope_for_run(&with_actor, &fallback).user_id,
-            actor,
-            "approval settings are read as the acting user"
+            user,
+            "approval settings are read as the run user"
         );
 
         // A host-initiated run carries no actor: fall back to the owner, not to
         // the configured fallback identity.
         let actorless = run_context_for_test(scope, None);
-        assert_eq!(actorless.acting_user_id(&fallback), owner);
+        assert_eq!(actorless.acting_user_id(&fallback), user);
         assert_eq!(
             resource_scope_for_run(&actorless, &fallback, InvocationId::new()).user_id,
-            owner,
+            user,
             "an actorless run's gate dance stays scoped to the thread owner"
         );
     }

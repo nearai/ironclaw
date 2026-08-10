@@ -489,6 +489,11 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
     }
 }
 
+// Note: the `RecordingAuthPromptSource` / `RecordingAuthFlowCanceller` seams
+// retired with the ephemeral-per-ping remodel (#7377) — they existed only to
+// observe which user the auth flow was keyed by when owner != actor, a shape
+// that no longer exists (owner == actor universally).
+
 /// One entry in the scripted notification catalog: an opaque catalog id, the
 /// vendor binding ref it resolves to, the conversation that ref decodes back
 /// to, and whether the catalog entry is a personal DM.
@@ -678,6 +683,8 @@ fn binding() -> ironclaw_product_contracts::binding::ResolvedBinding {
         thread_id: ThreadId::new("thread-a").expect("thread"),
         agent_id: Some(agent()),
         project_id: None,
+        source_binding_ref: SourceBindingRef::new("source:thread-a").expect("source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:thread-a").expect("reply ref"),
     }
 }
 
@@ -837,6 +844,38 @@ fn build_harness_with_settings(
     commands: &[&str],
     prefix: Option<&str>,
 ) -> Harness {
+    build_harness_with_gate_ports(
+        states,
+        bind_fails,
+        settings,
+        commands,
+        prefix,
+        binding(),
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
+        None,
+    )
+}
+
+/// The parameterized core behind every `build_harness*` wrapper: an explicit
+/// resolved binding plus injectable auth gate ports (so a test can observe
+/// exactly which user the observer keys the auth flow by — always the actor
+/// now that ephemeral-per-ping makes owner == actor).
+// arch-exempt: too_many_args, no RunDeliveryHarnessConfig bundle for gate-port test inputs, plan #7397
+#[allow(clippy::too_many_arguments)]
+fn build_harness_with_gate_ports(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    settings: RunDeliverySettings,
+    commands: &[&str],
+    prefix: Option<&str>,
+    resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
+    auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -857,7 +896,7 @@ fn build_harness_with_settings(
     ));
     let services = RunDeliveryServices {
         binding_service: Arc::new(StaticBindingService {
-            binding: binding(),
+            binding: resolved_binding,
             fail: bind_fails,
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
@@ -873,12 +912,8 @@ fn build_harness_with_settings(
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: auth_url.map(|url| {
-            Arc::new(OAuthPromptSource {
-                authorization_url: Some(url.to_string()),
-            }) as Arc<dyn BlockedAuthPromptSource>
-        }),
-        auth_flow_cancel: None,
+        blocked_auth_prompts,
+        auth_flow_cancel,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
     let observer = Arc::new(
@@ -1738,12 +1773,13 @@ async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_rout
 }
 
 #[tokio::test]
-async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
-    // The shared-origin leg below is ALSO the run-acts-as-invoker silence
-    // contract: an unpaired participant in an admitted shared channel gets no
-    // reply and no pairing prompt in the channel (a one-person nudge must
-    // never land in a shared room; pairing happens via Extensions, and DMs
-    // still nudge) — the operator docs and CHANGELOG document this silence.
+async fn observer_connect_nudge_reaches_unbound_senders_in_direct_and_shared_chats() {
+    // Pin changed with the presence-admission UX (#7377): an unpaired sender
+    // gets the connect nudge WHEREVER they ping. In a shared conversation it
+    // is delivered into that conversation as a reply anchored on their own
+    // message (the envelope's message-scoped ref carries the anchor — Slack
+    // threads on the ping, Telegram quotes it; anchoring is asserted at the
+    // vendor wire in the channel e2e suites), throttled per conversation.
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],
         true,
@@ -1755,15 +1791,59 @@ async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
         "unbound",
     ));
 
-    // Shared-channel origin: no nudge.
+    // Shared-channel origin (its own conversation, distinct from the direct
+    // legs below): the nudge posts into the shared conversation.
     harness
         .observer
         .observe_ack(
-            user_message_envelope(ProductTriggerReason::BotMention, "evt-shared"),
+            user_message_envelope_for_conversation(
+                ProductTriggerReason::BotMention,
+                "evt-shared",
+                "conv-shared",
+            ),
             rejected.clone(),
         )
         .await;
-    assert!(harness.adapter.texts().is_empty(), "no nudge into shared");
+    assert_eq!(
+        harness.adapter.texts(),
+        vec![harness.connection_notices.connect_required.clone()],
+        "an unpaired shared-channel sender is nudged, not ignored"
+    );
+    // …and INTO that shared conversation, not the sender's DM or the fallback
+    // notice conversation: the captured outbound envelope must target the
+    // fingerprint of the conversation the ping arrived in. A nudge routed to
+    // any per-user fallback would carry a different fingerprint and fail here
+    // (#7377 — the shared nudge is a public reply where the user asked).
+    let shared_conversation =
+        ExternalConversationRef::new(Some("space-1"), "conv-shared", None, None)
+            .expect("shared conversation ref");
+    let shared_nudges = harness.adapter.envelopes();
+    assert_eq!(shared_nudges.len(), 1, "exactly the shared nudge so far");
+    assert_eq!(
+        shared_nudges[0]
+            .target
+            .conversation
+            .conversation_fingerprint(),
+        shared_conversation.conversation_fingerprint(),
+        "the shared nudge must land in the shared conversation itself"
+    );
+    // A repeat in the same shared conversation stays throttled.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope_for_conversation(
+                ProductTriggerReason::BotMention,
+                "evt-shared-2",
+                "conv-shared",
+            ),
+            rejected.clone(),
+        )
+        .await;
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "shared-conversation nudges are throttled per conversation"
+    );
 
     // 1:1 direct chat origin: nudge posted under the fallback notice scope.
     harness
@@ -1795,21 +1875,60 @@ async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
         .await;
     let texts = harness.adapter.texts();
     assert_eq!(
-        texts,
-        vec![
-            harness.connection_notices.connect_required.clone(),
-            harness.connection_notices.connect_required.clone(),
-        ]
+        texts.len(),
+        3,
+        "one nudge per distinct conversation (shared + two direct): {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text == &harness.connection_notices.connect_required),
+        "every nudge is the fixed host-authored connect notice"
     );
     let attempts = harness
         .store
         .list_delivery_attempts(fallback_scope())
         .await
         .expect("attempts");
-    assert_eq!(attempts.len(), 2, "one nudge attempt per conversation");
+    assert_eq!(attempts.len(), 3, "one nudge attempt per conversation");
     assert_eq!(
         attempts[0].candidate.kind,
         ironclaw_outbound::OutboundPushKind::DeliveryStatus
+    );
+}
+
+/// The nudge fires only for messages that ADDRESS the bot. A shared channel
+/// forwards ordinary chatter, and a `ReplyToBot` in a thread the bot was
+/// never bound to also rejects `BindingRequired` — nudging it would post a
+/// "connect" notice into a human-to-human conversation nobody pointed at the
+/// bot. Regression for that misfire (an unbound thread reply must stay
+/// silent even though its rejection kind matches).
+#[tokio::test]
+async fn observer_connect_nudge_stays_silent_for_unaddressed_shared_messages() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    // A reply inside an unbound thread — BindingRequired, but nobody
+    // addressed the bot: no nudge.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::ReplyToBot, "evt-unbound-thread"),
+            rejected,
+        )
+        .await;
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "an unaddressed unbound-thread reply must not draw a public connect notice: {:?}",
+        harness.adapter.texts()
     );
 }
 
@@ -2099,6 +2218,12 @@ async fn observer_non_oauth_auth_block_cancels_run_and_posts_unavailable_notice(
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("Ironclaw web app"), "{}", texts[0]);
 }
+
+// Note: `shared_join_binding` and the `*_belongs_to_the_joiner` auth-flow pins
+// retired with the ephemeral-per-ping remodel (#7377). Their whole point was
+// owner != actor (a canonical thread owned by its first binder while the run
+// ACTS as a later joiner); ephemeral-per-ping makes owner == actor, so that
+// binding shape no longer exists.
 
 // ── Triggered rows ─────────────────────────────────────────────────────────
 

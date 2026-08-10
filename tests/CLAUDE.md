@@ -131,7 +131,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 | The user can… | Evidence |
 |---|---|
-| Share one deployment with someone else and each keep their own threads | `scenario_two_actors_own_threads.rs` |
+| Mention the bot in a shared channel and have the run act as the pinger — a second, distinct actor's run acts as itself, never the first binder (owner == actor) — while a Direct-route probe of the shared conversation is refused. Ephemeral-per-ping thread minting is pinned at the conversations tier and the channel e2e. | `scenario_shared_route_refuses_direct_reclassification.rs` |
 | Not read another user's memories (and still read their own) | `scenario_memory_isolation_across_actors.rs` |
 | Not have another user's "always allow" apply to them | `scenario_auto_approve_isolation_across_actors.rs` |
 | Not see another user's run/turn state | `scenario_turn_state_isolation_across_actors.rs` |

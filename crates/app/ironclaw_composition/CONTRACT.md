@@ -226,12 +226,14 @@ manual-code redeem route and Slack command flow are not mounted.
 `GET /api/webchat/v2/channels/slack/subjects` admin routes carrying
 `subject_user_id` assignments. Those routes were never shipped (zero
 occurrences in the webui source), and the per-channel subject concept is
-retired: a run acts as its invoker, so a shared Slack conversation binds one
-thread per participant and there is no subject user to assign.
-Shared-channel admission is the `slack_allowed_channels` channel-config value
-(saved through the generic extension setup/admin-configuration surface),
-checked fail-closed by `ironclaw_extension_host`'s
-`ChannelConfigSharedAdmission`; unlisted shared conversations are rejected.
+retired: a run acts as its invoker — a shared Slack conversation is one
+canonical thread its paired participants share, each message running as its
+sender, with no subject user to assign. Shared-channel admission is
+presence-based and needs no configuration: `ironclaw_extension_host`'s
+`PresenceSharedAdmission` admits exactly the conversations delivered through
+the channel's verified ingress for its own installation (the bot being in
+the channel is the admission), still consulted fail-closed through the
+`SharedConversationAdmission` port on resolve, lookup, and reset.
 
 ### Host-supplied public route mount (#4116 — SSO login surface)
 

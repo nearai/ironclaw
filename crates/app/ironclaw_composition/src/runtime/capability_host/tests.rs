@@ -220,6 +220,12 @@ mod tests {
         }
     }
 
+    /// A multi-user WebChat run carries an actor but NO explicit thread owner
+    /// (`ActorFallback`): its runtime scope — grants, mounts, gate dance — must
+    /// follow that actor (the authenticated caller), never the host fallback.
+    /// The actor-first rung of `LoopRunContext::acting_user_id` is what keeps a
+    /// caller's grants scoped to the caller and not the operator; this is
+    /// legitimate run-user resolution, not owner-vs-actor divergence.
     #[tokio::test]
     async fn visible_capability_request_uses_run_actor_for_runtime_scope() {
         let run_context = run_context("actor-runtime-scope")
@@ -234,36 +240,12 @@ mod tests {
         assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
     }
 
-    /// Pin changed with the run-acts-as-invoker unification (#7377): the
-    /// runtime scope previously derived owner-first (this test pinned the
-    /// explicit owner beating the actor). Grants, mounts, and the gate dance
-    /// now all key off `LoopRunContext::acting_user_id`, so on the only run
-    /// shape where the two differ — a legacy owner≠actor run parked across
-    /// the deploy — the ACTOR is authoritative, matching its gates and
-    /// settings instead of splitting one run across two identities.
-    #[tokio::test]
-    async fn visible_capability_request_uses_acting_user_for_runtime_scope() {
-        let legacy_owner_user_id = UserId::new("team-agent-user").expect("owner user id");
-        let run_context = run_context_with_scope(TurnScope::new_with_owner(
-            TenantId::new("tenant-owner").expect("tenant id"),
-            Some(AgentId::new("agent-owner").expect("agent id")),
-            Some(ProjectId::new("project-owner").expect("project id")),
-            ThreadId::new("thread-owner").expect("thread id"),
-            Some(legacy_owner_user_id),
-        ))
-        .await
-        .with_actor(TurnActor::new(
-            UserId::new("slack-sender").expect("actor user id"),
-        ));
-        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
-        let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
-
-        assert_eq!(request.context.user_id.as_str(), "slack-sender");
-        assert_eq!(
-            request.context.resource_scope.user_id.as_str(),
-            "slack-sender"
-        );
-    }
+    // Note: `visible_capability_request_uses_acting_user_for_runtime_scope`
+    // retired with the ephemeral-per-ping remodel (#7377). Its whole point was
+    // that the runtime scope followed the ACTOR over a DIFFERENT explicit
+    // thread owner (owner ≠ actor); that divergence can no longer occur. The
+    // legitimate actor-derived case is covered by
+    // `visible_capability_request_uses_run_actor_for_runtime_scope` above.
 
     #[tokio::test]
     async fn visible_capability_request_keeps_fallback_user_without_actor() {
@@ -278,8 +260,19 @@ mod tests {
         );
     }
 
+    /// `thread_scope_for_run` resolves the run's user for durable thread I/O:
+    /// an explicit-owner run (host/trigger creator) uses its explicit owner, a
+    /// multi-user WebChat run (actor, no explicit owner) uses its actor, and an
+    /// ownerless run falls back to the host owner. Owner == actor since the
+    /// ephemeral-per-ping remodel, so the explicit-owner and actor paths yield
+    /// the same user for a normal run — they differ only for triggers (explicit
+    /// creator, no actor) and system runs (fallback).
     #[tokio::test]
-    async fn standalone_durable_thread_scope_preserves_owner_resolution_precedence() {
+    async fn standalone_durable_thread_scope_resolves_the_runs_user() {
+        let fallback_user_id = UserId::new("durable-fallback-owner").expect("fallback user id");
+
+        // Explicit-owner run (host/trigger creator, no TurnActor): the thread
+        // uses the explicit owner.
         let explicit_owner = UserId::new("durable-explicit-owner").expect("explicit owner");
         let explicit_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-durable-scope").expect("tenant id"),
@@ -288,18 +281,14 @@ mod tests {
             ThreadId::new("thread-durable-scope").expect("thread id"),
             Some(explicit_owner.clone()),
         ))
-        .await
-        .with_actor(TurnActor::new(
-            UserId::new("durable-run-actor").expect("actor user id"),
-        ));
-        let fallback_user_id = UserId::new("durable-fallback-owner").expect("fallback user id");
-
+        .await;
         let scope = thread_scope_for_run(&explicit_context, &fallback_user_id)
             .expect("agent-scoped run produces a thread scope");
-
         assert_eq!(scope.owner_user_id, Some(explicit_owner));
 
-        let actor_owner = UserId::new("durable-run-actor-only").expect("actor user id");
+        // Multi-user WebChat run (actor, no explicit owner): the thread uses
+        // the actor.
+        let actor_owner = UserId::new("durable-run-actor").expect("actor user id");
         let actor_context = run_context("durable-actor-scope")
             .await
             .with_actor(TurnActor::new(actor_owner.clone()));
@@ -307,6 +296,7 @@ mod tests {
             .expect("agent-scoped run produces a thread scope");
         assert_eq!(actor_scope.owner_user_id, Some(actor_owner));
 
+        // No actor, no explicit owner: fall back to the host owner.
         let fallback_context = run_context("durable-fallback-scope").await;
         let fallback_scope = thread_scope_for_run(&fallback_context, &fallback_user_id)
             .expect("agent-scoped run produces a thread scope");
@@ -4092,8 +4082,9 @@ mod tests {
             ),
         };
 
-        let owner_user_id = UserId::new("outbound-delivery-owner").expect("user id");
-        let actor_user_id = UserId::new("outbound-delivery-actor").expect("user id");
+        // owner == actor since the ephemeral-per-ping remodel: one run user.
+        let owner_user_id = UserId::new("outbound-delivery-user").expect("user id");
+        let actor_user_id = owner_user_id.clone();
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-outbound-delivery").expect("tenant id"),
             Some(AgentId::new("agent-outbound-delivery").expect("agent id")),
@@ -4104,13 +4095,8 @@ mod tests {
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
         let expected_provider_caller =
-            // The outbound capabilities resolve as the ACTING user, not the
-            // thread owner: on a shared-route conversation the owner is the
-            // route's configured subject (the operator by default) while the
-            // actor is whoever posted, and owner-resolution let a participant
-            // reach the subject's own destinations. This assertion previously
-            // pinned the owner; that pin predates operator-defaulted subjects
-            // and is reversed deliberately here.
+            // owner == actor since the ephemeral-per-ping remodel, so the
+            // outbound capabilities resolve as the single run user.
             expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         let port = factory
@@ -4211,7 +4197,7 @@ mod tests {
             observed_provider_callers
                 .iter()
                 .all(|caller| caller == &expected_provider_caller),
-            "outbound target provider should be scoped to the acting caller: {observed_provider_callers:?}"
+            "outbound target provider should be scoped to the run-user caller: {observed_provider_callers:?}"
         );
         assert!(
             !observed_provider_callers.is_empty(),
@@ -4275,8 +4261,9 @@ mod tests {
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
-        let owner_user_id = UserId::new("local-yolo-outbound-owner").expect("user id");
-        let actor_user_id = UserId::new("local-yolo-outbound-actor").expect("user id");
+        // owner == actor since the ephemeral-per-ping remodel: one run user.
+        let owner_user_id = UserId::new("local-yolo-outbound-user").expect("user id");
+        let actor_user_id = owner_user_id.clone();
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-local-yolo-outbound").expect("tenant id"),
             Some(AgentId::new("agent-local-yolo-outbound").expect("agent id")),
@@ -4287,13 +4274,8 @@ mod tests {
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
         let expected_provider_caller =
-            // The outbound capabilities resolve as the ACTING user, not the
-            // thread owner: on a shared-route conversation the owner is the
-            // route's configured subject (the operator by default) while the
-            // actor is whoever posted, and owner-resolution let a participant
-            // reach the subject's own destinations. This assertion previously
-            // pinned the owner; that pin predates operator-defaulted subjects
-            // and is reversed deliberately here.
+            // owner == actor since the ephemeral-per-ping remodel, so the
+            // outbound capabilities resolve as the single run user.
             expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         let fallback_user_id = UserId::new("local-yolo-outbound-fallback").expect("user id");
@@ -4318,10 +4300,6 @@ mod tests {
             .await
             .expect("capability port");
 
-        let owner_preference_key = CommunicationPreferenceKey::personal(
-            run_context.scope.tenant_id.clone(),
-            owner_user_id.clone(),
-        );
         let actor_preference_key = CommunicationPreferenceKey::personal(
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
@@ -4364,7 +4342,7 @@ mod tests {
                 .outbound_preferences_for_test()
                 .load_communication_preference(actor_preference_key.clone())
                 .await
-                .expect("acting-user preference read after missing-target set")
+                .expect("run-user preference read after missing-target set")
                 .is_none()
         );
 
@@ -4394,18 +4372,18 @@ mod tests {
             observed_provider_callers
                 .iter()
                 .all(|caller| caller == &expected_provider_caller),
-            "outbound target provider should be scoped to owner caller: {observed_provider_callers:?}"
+            "outbound target provider should be scoped to the run-user caller: {observed_provider_callers:?}"
         );
-        let acting_preference = runtime_surfaces
+        let run_preference = runtime_surfaces
             .outbound_preferences_for_test()
             .load_communication_preference(actor_preference_key)
             .await
-            .expect("acting-user preference read after direct set")
-            .expect("acting-user preference persisted");
+            .expect("run-user preference read after direct set")
+            .expect("run-user preference persisted");
         // The bypassed-gate dispatch writes the notification-channel set, not a
         // final-reply route: `notification_channels_set` replaces the whole set.
         assert_eq!(
-            acting_preference
+            run_preference
                 .record
                 .notification_targets
                 .iter()
@@ -4413,22 +4391,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![slack_target_id.as_str()]
         );
-        assert!(
-            runtime_surfaces
-                .outbound_preferences_for_test()
-                .load_communication_preference(owner_preference_key)
-                .await
-                .expect("owner preference read after direct set")
-                .is_none()
-        );
+        // Note: the retired owner-does-not-see-it isolation assertion is gone —
+        // owner == actor since the ephemeral-per-ping remodel, so there is no
+        // separate owner key to prove empty.
     }
 
     /// The full `builtin.notification_channels_set` approval-gate dance —
     /// raise → replay payload → user approve (store + lease mint) → approved
-    /// resume → lease claim → dispatch → lease consume — on a run whose thread
-    /// OWNER differs from its ACTING user. That is the shape a shared-route
-    /// conversation produced before scope followed the invoker, and the shape
-    /// any run parked across that deploy boundary still has.
+    /// resume → lease claim → dispatch → lease consume — on an ordinary run.
+    /// Since the ephemeral-per-ping remodel a run has a single user (owner ==
+    /// actor), so the value here is that the raise and resume halves agree on
+    /// the scope, not any owner-vs-actor split.
     ///
     /// Two properties are pinned:
     ///
@@ -4439,19 +4412,17 @@ mod tests {
     ///    capability never runs. This test drives both halves through the real
     ///    port, so any half-unified derivation change fails it.
     /// 2. **Whose identity that scope carries.** Deliberately asserted so a
-    ///    derivation change is a recorded decision, not drift.
+    ///    derivation change is a recorded decision, not drift — and that the
+    ///    gate is isolated from unrelated identities.
     ///
     /// Tier note: this lives at the capability-host tier rather than
-    /// `tests/integration/` because the product rule "a run acts as its
-    /// invoker" makes owner ≠ actor unconstructible through every product
-    /// front door — bindings now always scope to the actor. The run-context
-    /// shape itself remains legal kernel state (in-flight parked runs across
-    /// the deploy carry it), which is exactly what this fixture builds. The
-    /// owner == actor dance stays covered end-to-end at the integration tier
+    /// `tests/integration/` so it can drive the raise and resume halves
+    /// directly against the real port and pin that both derive the gate scope
+    /// the SAME way. The approve-applies-channels flow stays covered end-to-end
+    /// at the integration tier
     /// (`outbound_target.rs::notification_channels_set_approval_gate_approve_applies_channels`).
     #[tokio::test]
-    async fn notification_channels_set_approval_raise_and_resume_stay_scope_matched_when_owner_differs_from_actor()
-     {
+    async fn notification_channels_set_approval_raise_and_resume_stay_scope_matched() {
         use ironclaw_approvals::ApprovalRequestStorePort as _;
         use ironclaw_authorization::CapabilityLeaseStorePort as _;
 
@@ -4511,8 +4482,13 @@ mod tests {
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
-        let owner_user_id = UserId::new("gate-scope-owner").expect("user id");
-        let actor_user_id = UserId::new("gate-scope-actor").expect("user id");
+        // Owner == actor since the ephemeral-per-ping remodel: one run user,
+        // bound as both the scope owner and the actor. `other_user_id` is an
+        // unrelated identity, used only to prove the raised gate is isolated
+        // from users it was not raised for.
+        let owner_user_id = UserId::new("gate-scope-user").expect("user id");
+        let actor_user_id = owner_user_id.clone();
+        let other_user_id = UserId::new("gate-scope-other").expect("user id");
         let fallback_user_id = UserId::new("gate-scope-fallback").expect("user id");
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-gate-scope").expect("tenant id"),
@@ -4523,17 +4499,17 @@ mod tests {
         ))
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
-        // The authorization identity is the ACTING user (#7157): the target
-        // provider must be queried as the actor on both the raise-side
-        // validation and the post-approval dispatch.
+        // The authorization identity is the run user: the target provider must
+        // be queried as that user on both the raise-side validation and the
+        // post-approval dispatch.
         let expected_provider_caller =
             expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         // Local-dev defaults global auto-approve ON, which would bypass the
-        // gate. Disable it for BOTH candidate identities so the gate raises
-        // regardless of which one the settings-scope derivation follows — the
-        // derivation itself is what this test pins, not the settings default.
-        for settings_user in [&owner_user_id, &actor_user_id] {
+        // gate. Disable it for the run user (whom the settings-scope derivation
+        // follows) and the unrelated `other_user_id`, so the gate raises and
+        // the isolation check below is not confounded by a stray auto-approve.
+        for settings_user in [&owner_user_id, &other_user_id] {
             let mut settings_scope = run_context.scope.to_resource_scope();
             settings_scope.user_id = (*settings_user).clone();
             ironclaw_approvals::AutoApproveSettingStorePort::set(
@@ -4616,15 +4592,13 @@ mod tests {
             &fallback_user_id,
             raise_invocation_id,
         );
-        // PINNED IDENTITY: a run acts as the user who invoked it, so the
-        // approval-gate raise (and therefore the lease) is scoped to the
-        // ACTING user — the invoker sees and approves the gate. This flipped
-        // from the thread owner when the interim #7157 split was unified onto
-        // the actor; this test passed under both derivations, which is the
-        // point: raise and resume moved together.
+        // PINNED IDENTITY: a run acts as its user, so the approval-gate raise
+        // (and therefore the lease) is scoped to that user — who sees and
+        // approves the gate. Raise and resume derive this identity the same
+        // way; the test drives both halves so a one-sided change fails it.
         assert_eq!(
-            raise_scope.user_id, actor_user_id,
-            "the approval-gate scope follows the acting user"
+            raise_scope.user_id, owner_user_id,
+            "the approval-gate scope follows the run user"
         );
         let approval_requests = runtime_surfaces.approval_requests_for_test();
         let raise_record = approval_requests
@@ -4641,10 +4615,9 @@ mod tests {
             .invocation_fingerprint
             .clone()
             .expect("the raise fingerprints the invocation");
-        // Scope isolation: the OTHER candidate identity (the thread owner)
-        // must not see the gate.
+        // Scope isolation: an unrelated identity must not see the gate.
         let mut other_scope = raise_scope.clone();
-        other_scope.user_id = owner_user_id.clone();
+        other_scope.user_id = other_user_id.clone();
         assert!(
             approval_requests
                 .get(&other_scope, approval_request_id)
@@ -4713,7 +4686,7 @@ mod tests {
             "an approved resume must complete the set, got {resume_outcome:?}"
         );
 
-        // The applied set persisted under the ACTING user's preference key.
+        // The applied set persisted under the run user's preference key.
         let actor_preference = runtime_surfaces
             .outbound_preferences_for_test()
             .load_communication_preference(CommunicationPreferenceKey::personal(
@@ -4721,8 +4694,8 @@ mod tests {
                 actor_user_id.clone(),
             ))
             .await
-            .expect("acting-user preference read")
-            .expect("acting-user preference persisted after the approved resume");
+            .expect("run-user preference read")
+            .expect("run-user preference persisted after the approved resume");
         assert_eq!(
             actor_preference
                 .record
@@ -4732,14 +4705,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![slack_target_id.as_str()]
         );
-        // The provider was queried as the actor on every leg.
+        // The provider was queried as the run user on every leg.
         let observed_provider_callers = slack_provider.observed_callers();
         assert!(
             !observed_provider_callers.is_empty()
                 && observed_provider_callers
                     .iter()
                     .all(|caller| caller == &expected_provider_caller),
-            "the outbound target provider must be queried as the acting user: {observed_provider_callers:?}"
+            "the outbound target provider must be queried as the run user: {observed_provider_callers:?}"
         );
         // The lease was claimed and consumed under the raise scope: the dance
         // closed on the same identity it opened on.
