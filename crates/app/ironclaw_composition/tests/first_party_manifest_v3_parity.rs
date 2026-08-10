@@ -485,6 +485,8 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
             "/api/chat.delete",
             "/api/conversations.open",
             "/api/files.completeUploadExternal",
+            "/api/reactions.add",
+            "/api/reactions.remove",
         ]
     );
     assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));
@@ -561,6 +563,7 @@ fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
             "/bot{telegram_bot_token}/deleteWebhook",
             "/bot{telegram_bot_token}/sendMessage",
             "/bot{telegram_bot_token}/deleteMessage",
+            "/bot{telegram_bot_token}/setMessageReaction",
             "/bot{telegram_bot_token}/getFile",
             "/bot{telegram_bot_token}/sendDocument",
         ]
