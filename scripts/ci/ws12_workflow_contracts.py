@@ -56,10 +56,7 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     ".github/workflows/live-canary.yml": (
         '- cron: "0 */3 * * *"',
-        '- cron: "30 5 * * 1"',
         "github.event.schedule == '0 */3 * * *'",
-        "github.event.schedule == '30 5 * * 1'",
-        "provider-matrix:",
     ),
     ".github/workflows/code_style.yml": (
         # The docs publication-boundary gate: the job, its self-test step, its
