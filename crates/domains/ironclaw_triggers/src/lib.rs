@@ -1344,9 +1344,9 @@ pub use worker::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFailedFireSettlement,
     TriggerFireSettlementObserver, TriggerPollerFailureReason, TriggerPollerFireOutcome,
     TriggerPollerFireReport, TriggerPollerTickReport, TriggerPollerWorker,
-    TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome,
-    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest, active_hold_projection,
-    active_holds_for_records,
+    TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRunFailureSettlement,
+    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

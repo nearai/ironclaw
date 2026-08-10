@@ -565,6 +565,23 @@ fn duplicate_normalized_skill_bundle_paths_are_rejected_by_catalog_validation() 
 }
 
 #[test]
+fn skill_bundle_file_directory_collisions_are_rejected_by_catalog_validation() {
+    for files in [
+        vec![skill_file("SKILL.md/helper", &"1".repeat(64))],
+        vec![skill_file(".ironclaw-install.json/helper", &"1".repeat(64))],
+        vec![
+            skill_file("scripts", &"1".repeat(64)),
+            skill_file("scripts/run.py", &"2".repeat(64)),
+        ],
+    ] {
+        assert!(
+            validate_manifest(&skill_manifest_with_files(files)).is_err(),
+            "catalog validation must reject destinations that collide as files and directories"
+        );
+    }
+}
+
+#[test]
 fn a_skill_bundle_is_bounded_by_count_and_total_declared_bytes() {
     let mut too_many = Vec::new();
     for index in 0..=ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {

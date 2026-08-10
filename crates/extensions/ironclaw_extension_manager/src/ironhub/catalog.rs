@@ -353,7 +353,10 @@ fn validate_manifest_artifacts(
             )));
         }
         let mut bundle_bytes: u64 = 0;
-        let mut bundle_destinations = BTreeSet::new();
+        let mut bundle_destinations = BTreeSet::from([
+            "SKILL.md".to_string(),
+            ironclaw_skills::INSTALL_METADATA_FILE_NAME.to_string(),
+        ]);
         for file in &entry.files {
             let destination =
                 match ironclaw_skills::normalize_install_bundle_relative_path(&file.path) {
@@ -371,12 +374,21 @@ fn validate_manifest_artifacts(
                         )));
                     }
                 };
-            if !bundle_destinations.insert(destination) {
+            if bundle_destinations.iter().any(|existing| {
+                existing == &destination
+                    || existing
+                        .strip_prefix(&destination)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                    || destination
+                        .strip_prefix(existing)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            }) {
                 return Err(catalog(format!(
-                    "skill '{}' publishes duplicate bundled file destinations",
+                    "skill '{}' publishes colliding bundled file destinations",
                     entry.name
                 )));
             }
+            bundle_destinations.insert(destination);
             validate_artifact_for_origin(&file.artifact, skill_file_byte_cap(), origin)?;
             bundle_bytes = bundle_bytes.saturating_add(file.artifact.size_bytes);
         }

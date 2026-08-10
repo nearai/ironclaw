@@ -6,7 +6,7 @@ use crate::{
 use super::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
-    TriggerPollerWorker, failure::classify_failure,
+    TriggerPollerWorker, TriggerRunFailureSettlement, failure::classify_failure,
 };
 
 struct ActiveLookupItem {
@@ -145,7 +145,7 @@ impl TriggerPollerWorker {
             };
             match clear {
                 Some((cleared_outcome, status)) => {
-                    let outcome = if self
+                    let cleared = self
                         .deps
                         .repository
                         .clear_active_fire(ClearActiveFireRequest {
@@ -156,8 +156,31 @@ impl TriggerPollerWorker {
                             status,
                         })
                         .await?
-                        .is_some()
-                    {
+                        .is_some();
+                    // A terminal failure (run ended `Failed` / `Cancelled` /
+                    // `RecoveryRequired`, cleared as `Error`) previously had no
+                    // settlement failure hook — the active-cleanup sweep cleared
+                    // the slot with no observability. Surface it to the
+                    // settlement observer so automation-health telemetry can see
+                    // post-accept failures (#6896). `Ok`/`Running` and
+                    // already-cleared fires do not fire the hook — the former
+                    // are not failures, and the latter already did (or never
+                    // reached terminal here). The observer is invoked inline
+                    // per the `TriggerFireSettlementObserver` contract: it
+                    // must be cheap and non-blocking, detaching any heavy
+                    // work internally.
+                    if cleared && status == TriggerRunHistoryStatus::Error {
+                        self.deps
+                            .fire_settlement_observer
+                            .on_run_failure_settled(TriggerRunFailureSettlement {
+                                tenant_id: record.tenant_id.clone(),
+                                trigger_id: record.trigger_id,
+                                fire_slot,
+                                run_id,
+                            })
+                            .await;
+                    }
+                    let outcome = if cleared {
                         cleared_outcome
                     } else {
                         TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id }

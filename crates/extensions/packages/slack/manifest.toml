@@ -232,6 +232,11 @@ paths = [
   "/api/chat.delete",
   "/api/conversations.open",
   "/api/files.completeUploadExternal",
+  # 👀→✅ run-lifecycle reaction on the triggering message (needs the
+  # reactions:write scope operator-side; a missing scope fails the reaction
+  # best-effort and never fails the run).
+  "/api/reactions.add",
+  "/api/reactions.remove",
 ]
 request_body_limit_bytes = 262144
 response_body_limit_bytes = 262144
