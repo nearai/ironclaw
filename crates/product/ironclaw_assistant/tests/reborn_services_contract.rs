@@ -165,7 +165,8 @@ use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPreferenceRequest,
+    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -10461,6 +10462,9 @@ struct SetupRecordingLlmConfigService {
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
     next_login_error: Mutex<Option<LlmConfigServiceError>>,
     next_model_resolution: Mutex<Option<Result<Option<String>, LlmConfigServiceError>>>,
+    user_model_catalog: Mutex<UserModelCatalog>,
+    user_model_preference: Mutex<UserModelPreference>,
+    user_model_preference_updates: Mutex<Vec<Option<String>>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10479,6 +10483,13 @@ impl Default for SetupRecordingLlmConfigService {
             next_set_active_error: Mutex::new(None),
             next_login_error: Mutex::new(None),
             next_model_resolution: Mutex::new(None),
+            user_model_catalog: Mutex::new(UserModelCatalog {
+                selection_enabled: true,
+                workspace_default: Some("model-a".to_string()),
+                models: vec!["model-a".to_string(), "model-b".to_string()],
+            }),
+            user_model_preference: Mutex::new(UserModelPreference { model: None }),
+            user_model_preference_updates: Mutex::new(Vec::new()),
         }
     }
 }
@@ -10542,6 +10553,13 @@ impl SetupRecordingLlmConfigService {
 
     fn resolve_next_model_as(&self, result: Result<Option<String>, LlmConfigServiceError>) {
         *self.next_model_resolution.lock().expect("lock") = Some(result);
+    }
+
+    fn user_model_preference_updates(&self) -> Vec<Option<String>> {
+        self.user_model_preference_updates
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     fn empty_snapshot() -> LlmConfigSnapshot {
@@ -10679,6 +10697,36 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
             .expect("lock")
             .take()
             .unwrap_or(Ok(requested_model))
+    }
+
+    async fn user_model_catalog(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        Ok(self.user_model_catalog.lock().expect("lock").clone())
+    }
+
+    async fn user_model_preference(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Ok(self.user_model_preference.lock().expect("lock").clone())
+    }
+
+    async fn set_user_model_preference(
+        &self,
+        _caller: ProductSurfaceCaller,
+        request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        self.user_model_preference_updates
+            .lock()
+            .expect("lock")
+            .push(request.model.clone());
+        let preference = UserModelPreference {
+            model: request.model,
+        };
+        *self.user_model_preference.lock().expect("lock") = preference.clone();
+        Ok(preference)
     }
 
     // The three vendor logins answer with `next_login_error` when one is armed.
@@ -16428,13 +16476,10 @@ async fn member_command_list_excludes_admin_audience() {
         .find(|command| command.name == "model")
         .expect("model command listed");
     assert_eq!(model.title, "Model");
-    assert_eq!(
-        model.description,
-        "Show or switch the active LLM provider and model"
-    );
+    assert_eq!(model.description, "Show or choose your preferred LLM model");
     assert_eq!(
         model.usage,
-        "/model [<model> | set-provider <provider> [--model <model>]]"
+        "/model [use <model> | default | <model> | set-provider <provider> [--model <model>]]"
     );
     let status = response
         .commands
@@ -16548,6 +16593,47 @@ async fn member_execute_model_read_returns_view() {
     assert!(response.rejection.is_none());
     let result = response.result.expect("model read must return a view");
     assert_eq!(result.title, "Model");
+}
+
+#[tokio::test]
+async fn member_model_preference_commands_update_only_the_callers_preference() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        llm_config.clone(),
+    );
+
+    let selected = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model use model-b",
+    )
+    .await
+    .expect("member may set a caller-scoped preference");
+    assert!(selected.rejection.is_none(), "{selected:?}");
+    assert_eq!(
+        selected.result.expect("selection view").title,
+        "Model preference updated"
+    );
+
+    let reset = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model default",
+    )
+    .await
+    .expect("member may return to the workspace default");
+    assert!(reset.rejection.is_none(), "{reset:?}");
+    assert_eq!(
+        llm_config.user_model_preference_updates(),
+        vec![Some("model-b".to_string()), None]
+    );
 }
 
 #[tokio::test]

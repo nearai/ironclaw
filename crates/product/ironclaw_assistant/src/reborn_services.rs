@@ -26,7 +26,7 @@ use ironclaw_product_contracts::operator_llm::{
     LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID, LlmConfigService, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
-    USER_MODEL_PREFERENCE_VIEW, UpsertLlmProviderRequest,
+    USER_MODEL_PREFERENCE_VIEW, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -670,6 +670,34 @@ fn model_command_view(title: &str, snapshot: &LlmConfigSnapshot) -> CommandResul
     CommandResultView {
         title: title.to_string(),
         fields,
+        lines,
+    }
+}
+
+fn user_model_preference_command_view(
+    title: &str,
+    catalog: &UserModelCatalog,
+    preference: &UserModelPreference,
+) -> CommandResultView {
+    let preferred = preference.model.as_deref().unwrap_or("workspace default");
+    let effective = preference
+        .model
+        .as_deref()
+        .or(catalog.workspace_default.as_deref())
+        .unwrap_or("not configured");
+    let mut lines = Vec::new();
+    if catalog.selection_enabled {
+        lines.push(format!("Available models: {}", catalog.models.join(", ")));
+        lines.push("Use `/model use <model>` or `/model default`.".to_string());
+    } else {
+        lines.push("User model selection is not configured for this workspace.".to_string());
+    }
+    CommandResultView {
+        title: title.to_string(),
+        fields: vec![
+            command_result_field("Preference", preferred),
+            command_result_field("Effective model", effective),
+        ],
         lines,
     }
 }
@@ -3008,8 +3036,41 @@ where
     ) -> Result<CommandResultView, ProductSurfaceError> {
         match action {
             ProductModelCommand::Status => {
-                let snapshot = self.build_llm_config_view(caller).await?;
-                Ok(model_command_view("Model", &snapshot))
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model",
+                    &catalog,
+                    &preference,
+                ))
+            }
+            ProductModelCommand::Use { model } => {
+                self.invoke_user_model_preference_set(
+                    caller.clone(),
+                    serde_json::json!({ "model": model }),
+                )
+                .await?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model preference updated",
+                    &catalog,
+                    &preference,
+                ))
+            }
+            ProductModelCommand::Default => {
+                self.invoke_user_model_preference_set(
+                    caller.clone(),
+                    serde_json::json!({ "model": null }),
+                )
+                .await?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model preference updated",
+                    &catalog,
+                    &preference,
+                ))
             }
             ProductModelCommand::Set { model } => {
                 let snapshot = self.build_llm_config_view(caller.clone()).await?;
