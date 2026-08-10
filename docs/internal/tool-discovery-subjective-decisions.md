@@ -195,3 +195,34 @@ potentially misleading retrieval vocabulary.
 Rejected because byte truncation can split meaning, and arbitrary descriptions
 are neither guaranteed safe for the always-visible surface nor stable enough
 for cache comparisons.
+
+## D13 — Stop the full live matrix on a required-scenario arm failure
+
+**Decision:** Screen every arm with the exact canonical-ID scenario before the
+full live matrix. If an arm deterministically fails that minimum path, fix it
+before spending the remaining provider calls.
+
+**Evidence:** On 2026-08-10 at commit `7a4cafea`, the 100-tool screen completed
+in `off` and pinned `bridged`. `compact`, `signatures`, and unpinned
+`namespaces` ended after their first `tool_call` or `tool_search` without
+invoking the target; repeating with the exact canonical query produced the
+same result. The preliminary scale screen compared only the two working paths.
+Both completed at 500 and 1,000 tools, but the single cold samples had high
+provider variance: `off` took 86.7s and 41.6s, while `bridged` took 11.3s and
+75.0s. These are diagnostics, not a winner claim.
+
+**Why:** A 420-observation result would not rescue a path that fails a required
+scenario by construction, and averaging that failure into an overall score
+would hide the actual merge blocker.
+
+**Alternative considered:** Complete the matrix and rank the two working arms.
+Rejected until the blocked arms pass the smoke case; one cold observation per
+size is not enough to distinguish provider variance from disclosure latency.
+
+**Resolution:** The screen exposed the model gateway's unavailable-capability
+guard comparing an explicitly requested canonical ID only with the advertised
+subset. It suppressed both the policy-filtered discovery call and the later
+exact deferred invocation. The guard now allows `tool_search`/`tool_describe`
+and the exact requested target to reach the normal capability policy while it
+continues suppressing unrelated substitute calls. A fresh live `signatures`
+screen then completed search, signature return, and the correct MCP invocation.

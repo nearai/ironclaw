@@ -735,6 +735,74 @@ async fn gateway_suppresses_tool_calls_when_user_names_unavailable_capability() 
 }
 
 #[tokio::test]
+async fn gateway_allows_policy_filtered_discovery_for_named_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_search".to_string(),
+        name: "tool_search".to_string(),
+        arguments: serde_json::json!({"query": "demo.hidden"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
+    let capability_port: Arc<dyn LoopCapabilityPort> = capabilities.clone();
+    let mut request = model_request(interactive_model());
+    request.messages[1].content =
+        "Use the demo.hidden capability; search for it first if tools are deferred.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capability_port)
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected policy-filtered discovery call");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].capability_id.as_str(), "ironclaw.tool_search");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn gateway_allows_exact_named_deferred_capability_for_policy_resolution() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_hidden".to_string(),
+        name: "demo__hidden".to_string(),
+        arguments: serde_json::json!({"message": "authorized at the capability port"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_hidden_resolvable_tool_surface());
+    let capability_port: Arc<dyn LoopCapabilityPort> = capabilities.clone();
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use the demo.hidden capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capability_port)
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected exact deferred capability call");
+    };
+    assert_eq!(calls[0].capability_id.as_str(), "demo.hidden");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn gateway_suppresses_tool_calls_when_user_names_unavailable_hidden_namespace_capability() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_shell".to_string(),
@@ -4814,6 +4882,27 @@ impl GatewayCapabilityPort {
             }),
         });
         port
+    }
+
+    fn with_discovery_bridge_surface() -> Self {
+        let definitions = vec![ProviderToolDefinition {
+            capability_id: CapabilityId::new("ironclaw.tool_search").unwrap(),
+            name: provider_name("tool_search"),
+            description: "Search authorized deferred tools".to_string(),
+            description_trust: Default::default(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }),
+        }];
+        Self {
+            resolvable_definitions: definitions.clone(),
+            definitions,
+            registered: Mutex::new(Vec::new()),
+            validation_error: None,
+            registration_error: None,
+        }
     }
 
     fn with_builtin_shell_surface() -> Self {
