@@ -1,12 +1,35 @@
+import { authScope } from "../../../lib/auth-scope";
 import {
   ActivityKind,
   MAX_INSPECTOR_ACTIVITY_ENTRIES,
   activityKindFromWire,
 } from "./activity-kind";
 
-export const INSPECTOR_RUN_HISTORY_KEY = "ironclaw:inspector-run-history";
+const INSPECTOR_RUN_HISTORY_KEY_PREFIX = "ironclaw:inspector-run-history";
+
+/**
+ * Per-caller storage key for the observed-run index.
+ *
+ * The thread and run ids of one operator's conversations are that operator's
+ * data, and a single tab supports bearer session changes without an explicit
+ * sign-out. Namespacing by the resolved identity means a later caller simply
+ * misses the previous caller's entries instead of inheriting them.
+ */
+export function inspectorRunHistoryKey(): string {
+  return `${INSPECTOR_RUN_HISTORY_KEY_PREFIX}:${authScope()}`;
+}
+
 export { MAX_INSPECTOR_ACTIVITY_ENTRIES } from "./activity-kind";
-const MAX_INSPECTOR_RUNS_PER_THREAD = 32;
+/**
+ * Turn-navigation window, mirroring `DEFAULT_MAX_RETAINED_RUNS_PER_SESSION` in
+ * `crates/contracts/ironclaw_product_contracts/src/inspector.rs`.
+ *
+ * Navigation must never offer more turns than the host retains diagnostics
+ * for: an older run resolves to an empty snapshot, so a wider window just
+ * advertises turns that read as blank. The `reborn_inspector_retention_alignment`
+ * architecture test pins these two constants together.
+ */
+export const MAX_INSPECTOR_RUNS_PER_THREAD = 4;
 
 export interface BoundedDiagnosticText {
   content: string;
@@ -77,11 +100,12 @@ export function rememberInspectorRun(
 ): string[] {
   if (!threadId) return [];
   try {
-    const history = validRunHistory(JSON.parse(storage?.getItem(INSPECTOR_RUN_HISTORY_KEY) || "{}"));
+    const key = inspectorRunHistoryKey();
+    const history = validRunHistory(JSON.parse(storage?.getItem(key) || "{}"));
     const current = history[threadId] || [];
     if (runId) history[threadId] = [...current.filter((value) => value !== runId), runId]
       .slice(-MAX_INSPECTOR_RUNS_PER_THREAD);
-    storage?.setItem(INSPECTOR_RUN_HISTORY_KEY, JSON.stringify(history));
+    storage?.setItem(key, JSON.stringify(history));
     return history[threadId] || [];
   } catch (_) {
     return runId ? [runId] : [];

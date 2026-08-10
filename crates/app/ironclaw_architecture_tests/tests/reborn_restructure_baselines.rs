@@ -129,7 +129,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// run-acts-as-invoker: the acting-user scope helper and shared-admission
 /// wiring add +64 production LOC on the merged tree. Manifest ceiling and
 /// observed value move with this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_811;
+/// ✎ Re-recorded 40_811 → 41_135 on 2026-08-08 for #7171 (skill-bundle staging plus the
+/// host-reachability root map), paired with the `[gate].loc_ceiling` raise in the same commit --
+/// this ratchet fails when the two disagree.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_135;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

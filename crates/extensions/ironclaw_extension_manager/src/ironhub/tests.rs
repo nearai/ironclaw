@@ -581,6 +581,11 @@ fn a_skill_bundle_is_bounded_by_count_and_total_declared_bytes() {
     let total_cap_file_count = ironclaw_skills::MAX_INSTALL_BUNDLE_TOTAL_BYTES
         / ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES
         + 1;
+    assert!(
+        total_cap_file_count <= ironclaw_skills::MAX_INSTALL_BUNDLE_FILES,
+        "the total-bytes-cap case must stay under the file-count cap so this rejection is \
+         attributed to the total cap"
+    );
     for index in 0..total_cap_file_count {
         let mut file = skill_file(&format!("scripts/g{index}.py"), &"1".repeat(64));
         file.artifact.size_bytes = per_file;
@@ -1279,16 +1284,23 @@ async fn bundled_file_downloads_are_bounded_and_all_files_install() {
         test_manifest_verify_keys(),
     );
 
-    service
-        .execute(IronHubCommand::Install {
+    // A concurrency regression must fail the test, not hang it: the egress
+    // barrier below only releases once EXPECTED_CONCURRENCY downloads are in
+    // flight, so if the download concurrency limit is ever lowered past the
+    // barrier width this timeout turns the stall into an assertion failure.
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        service.execute(IronHubCommand::Install {
             name: "bundled-skill".to_string(),
             options: IronHubInstallOptions {
                 kind: Some(IronHubEntryKind::Skill),
                 ..IronHubInstallOptions::default()
             },
-        })
-        .await
-        .expect("bounded companion downloads install");
+        }),
+    )
+    .await
+    .expect("download concurrency dropped below the barrier width")
+    .expect("bounded companion downloads install");
 
     assert_eq!(egress.companion_downloads(), FILE_COUNT);
     assert_eq!(egress.max_concurrency(), EXPECTED_CONCURRENCY);

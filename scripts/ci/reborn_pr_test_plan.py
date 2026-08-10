@@ -333,11 +333,18 @@ PR_STATIC_CONTROL_PATHS = {
     #     and additionally has a Code Style self-test
     #     (`scripts/ci/test-build-wasm-extensions.sh`). No Reborn Rust lane
     #     executes it.
+    #   * `e2e-skill-self-creation.sh` drives the skill self-creation e2e
+    #     against a live model, selected by `E2E_PROFILE`. Like
+    #     `run-reborn-webui.sh` it is referenced by no workflow (a search over
+    #     `.github/` finds nothing) and needs credentials no lane has, so no
+    #     lane can be selected for it; it is run by hand per
+    #     `docs/internal/skills/multi_tenant_enablement.md`.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
+    "scripts/e2e-skill-self-creation.sh",
     # `codebase-graph.sh` inspects agent-only graph metadata. It does not
     # execute or select a Reborn product test surface. (Arrived with #7215.)
     "scripts/codebase-graph.sh",

@@ -7,8 +7,10 @@ putting verbose diagnostic content into the normal chat event stream.
 
 ## Activation and authorization
 
-- The browser enables the panel only when the chat URL contains
-  `?debug=true`. Ordinary chat routes and layouts remain unchanged otherwise.
+- `?debug=true` enables the inspector for the current browser tab and records
+  that opt-in in `sessionStorage`, so it survives route changes and reloads.
+  `?debug=false` explicitly clears the opt-in. Ordinary chat routes and layouts
+  remain unchanged otherwise.
 - Every inspector HTTP and SSE route requires both an authenticated caller
   with operator configuration authority and a deployment that exposes the
   operator configuration surface. Either missing gate returns `403` before a
@@ -43,8 +45,10 @@ expands that activity.
   truncation are explicit.
 - Per run: 128 retained model calls, 16 retained tool executions, 1,000
   activity entries, and 1,024 retained updates.
-- Process defaults: eight caller sessions and two runs per session, all with
-  deterministic bounded eviction.
+- Process defaults: eight caller sessions and four runs per session, all with
+  deterministic bounded eviction. Capture is unconditional, so these are
+  resident-memory choices, not debug-time ones. Every limit is a ceiling as
+  well as a default — a deployment may shrink one, never raise it.
 - Prompt, model, tool, failure, and summary text crosses control-character
   sanitation and secret scanning before retention. Diagnostic text types
   validate UTF-8-safe bounds and reject inconsistent size metadata.
@@ -71,10 +75,31 @@ product lifecycle hints while waiting for host diagnostics, but replaces those
 hints when the matching authoritative event arrives. A started model or tool
 activity remains pending until its correlated terminal event arrives.
 
-Turn navigation is session-local. The browser retains at most 32 observed run
-ids per thread in `sessionStorage`, selects the active/latest run by default,
-and lets the operator move to the previous or next observed turn. It does not
+Turn navigation is session-local. The browser retains observed run ids per
+thread in `sessionStorage`, selects the active/latest run by default, and lets
+the operator move to the previous, next, or latest observed turn. It does not
 create a durable run index.
+
+That window is capped at the host's retained runs per session, and the
+`reborn_inspector_retention_alignment` gate pins the two constants together. A
+wider window would advertise turns whose snapshot is already evicted, so
+navigation would silently walk into blank turns. A run that leaves the window,
+or that is evicted while pinned, drops the operator back to the latest turn.
+
+The Stats view also reports browser-observed stream state, reconnect attempts,
+accepted diagnostic-update count, and the last accepted update time. These
+values are tab-session diagnostics, not server accounting. They are bounded in
+`sessionStorage`, retain cursors for at most 32 observed runs, and reject
+duplicate or backwards cursors when a run is revisited or the page reloads.
+Browser-session inspector state — the observed-run index, resume cursors,
+observation counters, and page-session statistics — is namespaced by the
+resolved `(tenant_id, user_id)`, so a bearer session change inside one tab
+never inherits the previous caller's runs or counters. A background snapshot
+refresh triggered by a live update is not a reconnect and does not change the
+reported connection state.
+Closing the panel or entering the mobile layout hides only its presentation;
+while debug mode remains enabled, the browser continues observing the selected
+run so those UI choices do not create gaps in page-session statistics.
 
 ## Failure behavior
 
@@ -96,7 +121,9 @@ strictly newer generation.
   context, cross-scope reads, redaction, bounds, sequence/rebase behavior, and
   the absence of verbose tool data in updates.
 - Frontend tests cover activation, responsive layouts, preferences, bounded
-  reducers, pending states, cursor deduplication, and dedicated detail lookup.
+  reducers, pending states, cursor deduplication, dedicated detail lookup,
+  per-caller storage namespacing, and the refusal to accumulate an incomplete
+  statistics record as real zeros.
 - Playwright scenarios cover ordinary-chat isolation, desktop/tablet/mobile
   behavior, prompt/activity/stat rendering, multi-turn navigation, reload
   reconnect, tool detail expansion, and the 50 KiB result limit.

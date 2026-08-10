@@ -756,7 +756,6 @@ pub(crate) struct InteractionServiceTestParts {
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
     workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
-    skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -4124,7 +4123,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             capability_leases: Arc::clone(&local_runtime.capability_leases),
             extension_registry: Arc::clone(&local_runtime.extension_registry),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
-            skill_mounts: local_runtime.skill_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
@@ -4528,6 +4526,7 @@ fn skill_activation_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
     activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
+    process_execution_available: bool,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
@@ -4552,6 +4551,7 @@ fn skill_activation_selector_config(
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         activation_strategy,
+        process_execution_available,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4659,16 +4659,55 @@ fn filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    // Whether this deployment can execute a process at all. Under `ProcessBackendKind::None` (hosted
+    // multi-tenant + secure default) a skill that says "run scripts/foo.py" is instructing the model to
+    // do something impossible, and it does not degrade gracefully -- see
+    // `SkillActivationSelectorConfig::process_execution_available`.
+    //
+    // MULTI-TENANT ENABLEMENT: this is one of the two places that change when the tenant sandbox
+    // lands. Once `HostedMultiTenant` + `SecureDefault` resolves to `ProcessBackendKind::TenantSandbox`
+    // instead of `None`, this returns true on its own and skills stop being told they cannot run
+    // anything. See docs/skills/multi_tenant_enablement.md.
+    //
+    // `unwrap_or(true)` is not a fail-open: `build_runtime` rejects a services input with no
+    // resolved policy long before this, so only local test harnesses (which do have a shell) can
+    // observe the fallback.
+    let process_execution_available = runtime
+        .runtime_policy
+        .as_ref()
+        .map(|policy| {
+            policy.process_backend != ironclaw_host_api::runtime_policy::ProcessBackendKind::None
+        })
+        .unwrap_or(true);
     let selector_config = skill_activation_selector_config(
         regex_skill_activation_enabled,
         skill_injection_mode_env()?,
         skill_activation_env()?,
+        process_execution_available,
     );
-    let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        selector_config,
-        Arc::clone(workspace_filesystem),
-        Arc::clone(skill_auto_activate_learned),
+    // Staging needs a READ-WRITE workspace handle: `workspace_filesystem` beside it is deliberately
+    // read-only (it backs setup-marker reads) and fails closed on write. Same recipe the inbound
+    // attachment lander uses, and the same reason -- under a per-caller policy it addresses the
+    // caller's own subtree rather than the shared root.
+    let staging_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &runtime.extension_filesystem,
+        &runtime.workspace_mounts,
     );
+    let selectable_skills = match staging_filesystem {
+        Some(staging_filesystem) => extension.selectable_skill_runtime_with_staging(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            staging_filesystem,
+            Arc::clone(skill_auto_activate_learned),
+        ),
+        // No writable workspace (hosted multi-tenant today) -- skills still activate, and a body that
+        // promises execution gets the "cannot execute processes" note instead of a staged path.
+        None => extension.selectable_skill_runtime_with_setup_markers(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            Arc::clone(skill_auto_activate_learned),
+        ),
+    };
     let bundle_source = extension.bundle_source();
     Ok(ComposedSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
