@@ -1526,6 +1526,10 @@ mod tests {
     use ironclaw_product_contracts::test_support::fakes::{
         FakeOperatorSecretValueStore, OperatorSecretValueOp,
     };
+    use ironclaw_product_contracts::operator_llm::{
+        SetUserModelPreferenceRequest, UserModelPreference, UserModelPreferenceStore,
+        UserModelPreferenceStoreError,
+    };
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -1606,6 +1610,47 @@ mod tests {
         policies: std::sync::Mutex<HashMap<String, ModelSelectionPolicy>>,
     }
 
+    #[derive(Default)]
+    struct InMemoryUserModelPreferenceStore {
+        preferences: std::sync::Mutex<HashMap<(String, String), UserModelPreference>>,
+    }
+
+    #[async_trait]
+    impl UserModelPreferenceStore for InMemoryUserModelPreferenceStore {
+        async fn read(
+            &self,
+            caller: &ProductSurfaceCaller,
+        ) -> Result<Option<UserModelPreference>, UserModelPreferenceStoreError> {
+            Ok(self
+                .preferences
+                .lock()
+                .expect("preference lock")
+                .get(&(
+                    caller.tenant_id.as_str().to_string(),
+                    caller.user_id.as_str().to_string(),
+                ))
+                .cloned())
+        }
+
+        async fn write(
+            &self,
+            caller: &ProductSurfaceCaller,
+            preference: &UserModelPreference,
+        ) -> Result<(), UserModelPreferenceStoreError> {
+            self.preferences
+                .lock()
+                .expect("preference lock")
+                .insert(
+                    (
+                        caller.tenant_id.as_str().to_string(),
+                        caller.user_id.as_str().to_string(),
+                    ),
+                    preference.clone(),
+                );
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl ModelSelectionPolicyStore for InMemoryModelPolicyStore {
         async fn read(
@@ -1650,7 +1695,10 @@ mod tests {
             .set_provider(provider_id, Some(model))
             .expect("persist active provider");
         let service = RebornLlmConfigService::new(boot, key_store())
-            .with_model_policy_store(Arc::new(InMemoryModelPolicyStore::default()));
+            .with_model_policy_store(Arc::new(InMemoryModelPolicyStore::default()))
+            .with_user_model_preference_store(Arc::new(
+                InMemoryUserModelPreferenceStore::default(),
+            ));
         (temp, service)
     }
 
@@ -1716,6 +1764,148 @@ mod tests {
             service
                 .resolve_user_model(caller(), Some("model-c".to_string()))
                 .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_preference_is_isolated_per_user_and_applies_to_new_turns() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let alice = caller();
+        let bob = ProductSurfaceCaller::new(
+            alice.tenant_id.clone(),
+            UserId::new("user-beta").expect("user"),
+            alice.agent_id.clone(),
+            alice.project_id.clone(),
+        );
+        service
+            .set_user_model_policy(
+                alice.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+
+        assert_eq!(
+            service
+                .set_user_model_preference(
+                    alice.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-b".to_string()),
+                    },
+                )
+                .await
+                .expect("set preference"),
+            UserModelPreference {
+                model: Some("model-b".to_string()),
+            },
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(alice.clone(), None)
+                .await
+                .expect("alice preference"),
+            Some("model-b".to_string()),
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(bob.clone(), None)
+                .await
+                .expect("bob default"),
+            Some("model-a".to_string()),
+        );
+        assert_eq!(
+            service
+                .user_model_preference(bob)
+                .await
+                .expect("bob preference"),
+            UserModelPreference { model: None },
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_turn_model_overrides_preference_and_reset_restores_workspace_default() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        service
+            .set_user_model_policy(
+                user.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+
+        assert_eq!(
+            service
+                .resolve_user_model(user.clone(), Some("model-a".to_string()))
+                .await
+                .expect("explicit model"),
+            Some("model-a".to_string()),
+        );
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest { model: None },
+            )
+            .await
+            .expect("reset preference");
+        assert_eq!(
+            service
+                .resolve_user_model(user, None)
+                .await
+                .expect("workspace default"),
+            Some("model-a".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_model_cannot_be_saved_and_a_stale_preference_fails_closed() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        let admin = user.clone().with_operator_config(true);
+        service
+            .set_user_model_policy(
+                admin.clone(),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        assert!(matches!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-c".to_string()),
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+        service
+            .set_user_model_policy(admin, policy_request("model-a", &["model-a"]))
+            .await
+            .expect("narrow policy");
+
+        assert!(matches!(
+            service.resolve_user_model(user, None).await,
             Err(LlmConfigServiceError::InvalidRequest { .. })
         ));
     }
