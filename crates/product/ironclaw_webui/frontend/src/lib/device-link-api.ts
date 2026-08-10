@@ -13,17 +13,26 @@ import { channelSetupError } from "./channel-setup-api";
 // straight to `submitDeviceLinkInput` and never retained: the host takes
 // custody of the resulting session, and the browser never sees it.
 //
-// TODO(design): these paths are the browser half of the PR 4 backend route
-// ("route input submission to the driver", PROPOSAL §8.12), which is not on
-// this branch yet. The shapes mirror `DeviceLinkFlowDriver`'s
-// `start`/`poll`/`submit_input`/`cancel` and the `OAuth*` route naming already
-// in `crates/product/ironclaw_webui/src/product_auth/mod.rs`; if the landed
-// route names differ, this module is the single place to reconcile them.
-const DEVICE_LINK_BASE = "/api/reborn/product-auth/device-link";
-
-export function deviceLinkFlowPath(flowId, action) {
-  return `${DEVICE_LINK_BASE}/flow/${encodeURIComponent(flowId)}/${action}`;
+// These call the EXISTING generic product-auth routes. A device link is an
+// `AuthFlowRecord` like any other, and `flow_status(scope, flow_id)` is generic
+// over flows — the route is merely *named* `oauth/...` for historical reasons.
+// PROPOSAL §8.12 is explicit that the backend work is "additive flow-status
+// fields (step, revision, display, retry-after); route input submission to the
+// driver" — i.e. EXTEND these, never a parallel `/device-link` namespace.
+//
+// TODO(backend): the status route must carry the additive device-link frame,
+// and secret submission must route to the device-link driver. Both are small
+// extensions of the handlers already mounted in
+// `crates/product/ironclaw_webui/src/product_auth/mod.rs`.
+// The generic flow-status route (shared with OAuth — same record type).
+export function deviceLinkStatusPath(flowId) {
+  return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status`;
 }
+
+// Start rides the extension auth-start route; input rides the generic
+// secret-submit route. Neither is device-link specific.
+const START_PATH = "/api/reborn/product-auth/extension/oauth/start";
+const INPUT_PATH = "/api/reborn/product-auth/manual-token/secret/submit";
 
 // -> { flow_id, status, device_link }
 //
@@ -42,7 +51,7 @@ export function startDeviceLink({
   resumeFlowId,
   signal,
 } = {}) {
-  return apiFetch(`${DEVICE_LINK_BASE}/start`, {
+  return apiFetch(START_PATH, {
     method: "POST",
     signal,
     body: JSON.stringify({
@@ -64,7 +73,7 @@ export function pollDeviceLink({ flowId, invocationId, signal } = {}) {
   const query = invocationId
     ? `?invocation_id=${encodeURIComponent(invocationId)}`
     : "";
-  return apiFetch(`${deviceLinkFlowPath(flowId, "status")}${query}`, { signal });
+  return apiFetch(`${deviceLinkStatusPath(flowId)}${query}`, { signal });
 }
 
 // -> { flow_id, status, device_link }
@@ -80,10 +89,11 @@ export function submitDeviceLinkInput({
   invocationId,
   signal,
 } = {}) {
-  return apiFetch(deviceLinkFlowPath(flowId, "input"), {
+  return apiFetch(INPUT_PATH, {
     method: "POST",
     signal,
     body: JSON.stringify({
+      flow_id: flowId,
       revision,
       kind,
       value,
@@ -95,10 +105,10 @@ export function submitDeviceLinkInput({
 // -> { flow_id, status }; abandons the flow so the vendor side is logged out
 // rather than left as an orphan authorization (PROPOSAL §4.3).
 export function cancelDeviceLink({ flowId, invocationId, signal } = {}) {
-  return apiFetch(deviceLinkFlowPath(flowId, "cancel"), {
+  return apiFetch(`/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/reconcile`, {
     method: "POST",
     signal,
-    body: JSON.stringify({ invocation_id: invocationId }),
+    body: JSON.stringify({ invocation_id: invocationId, cancel: true }),
   });
 }
 
