@@ -4,48 +4,35 @@ use super::{
 
 const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
 const SENSITIVE_TERMS: &[SensitiveTerm] = &[
-    sensitive_term("access token", true, true),
-    sensitive_term("api key", true, true),
-    sensitive_term("api_key", true, true),
-    sensitive_term("api secret", true, true),
-    sensitive_term("authorization", true, true),
-    sensitive_term("bearer", true, true),
-    sensitive_term("client secret", true, true),
-    sensitive_term("invalid api key", true, false),
-    sensitive_term("password", true, true),
-    sensitive_term("passwd", true, true),
-    sensitive_term("secret key", true, true),
-    sensitive_term("secret-key", true, true),
-    sensitive_term("secret token", true, true),
-    sensitive_term("secret_token", true, true),
-    sensitive_term("shared secret", true, true),
+    sensitive_term("access token"),
+    sensitive_term("api key"),
+    sensitive_term("api_key"),
+    sensitive_term("api secret"),
+    sensitive_term("authorization"),
+    sensitive_term("bearer"),
+    sensitive_term("client secret"),
+    sensitive_term("password"),
+    sensitive_term("passwd"),
+    sensitive_term("secret key"),
+    sensitive_term("secret-key"),
+    sensitive_term("secret token"),
+    sensitive_term("secret_token"),
+    sensitive_term("shared secret"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SensitiveTerm {
-    /// Some terms, such as "invalid api key", are phrase-only so ordinary
-    /// diagnostic prose after the phrase is not parsed as a credential value.
     phrase: &'static str,
-    reject_as_phrase: bool,
-    reject_value_after_label: bool,
 }
 
-const fn sensitive_term(
-    phrase: &'static str,
-    reject_as_phrase: bool,
-    reject_value_after_label: bool,
-) -> SensitiveTerm {
-    SensitiveTerm {
-        phrase,
-        reject_as_phrase,
-        reject_value_after_label,
-    }
+const fn sensitive_term(phrase: &'static str) -> SensitiveTerm {
+    SensitiveTerm { phrase }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PromptTextPolicy {
-    /// Whether host-assembled content is denylisted for security vocabulary,
-    /// host paths, and credential-shaped values. Structural and framing checks
+    /// Whether host-assembled content is checked for credential-shaped values.
+    /// Structural and framing checks
     /// (empty/oversize content and control characters) are enforced separately
     /// on every surface and are NOT governed by this flag.
     ///
@@ -55,13 +42,11 @@ struct PromptTextPolicy {
     /// first-party skills shipped in the repo `skills/` directory (installed
     /// into the trusted system-skill root) and user-placed local skills (the
     /// user `skills/` root). Registry/marketplace/URL skills are `Installed`,
-    /// not trusted: they keep the full checks here and their body is withheld
-    /// from the prompt entirely. This denylist false-positived constantly on
-    /// legitimate skill docs describing OAuth headers, API keys, and host paths
-    /// — failing the whole turn (#5169).
+    /// not trusted: they keep credential-shaped value checks here and their
+    /// body is withheld from the prompt entirely.
     ///
     /// Untrusted surfaces (memory snippets, runtime-context labels, generic
-    /// model content, safe summaries) keep the full checks; those surfaces also
+    /// model content, safe summaries) keep these checks; those surfaces also
     /// have independent guards (`validate_loop_safe_summary`,
     /// `sanitize_prompt_string`, the skill-context validators, egress credential
     /// blocking), so this remains defense in depth rather than the sole control.
@@ -175,8 +160,8 @@ pub(super) fn validate_prompt_text_with_diagnostics(
             ),
         ));
     }
-    // The content denylist (host paths, security vocabulary, credential-shaped
-    // values) is skipped for trusted skill instructions; see PromptTextPolicy.
+    // Credential-shaped value checks are skipped for trusted skill
+    // instructions; see PromptTextPolicy.
     if !surface.policy().enforce_content_checks {
         return Ok(value);
     }
@@ -189,25 +174,8 @@ fn reject_sensitive_text(
     label: &'static str,
 ) -> Result<(), PromptTextValidationError> {
     let lower = value.to_ascii_lowercase();
-    for forbidden_path in [
-        "/users/",
-        "/home/",
-        "/private/",
-        "/tmp/", // safety: model-safety denylist literal, not a filesystem temp path.
-        "/var/",
-        "/etc/",
-    ] {
-        if lower.contains(forbidden_path) {
-            return non_model_safe(label, forbidden_path);
-        }
-    }
     for term in SENSITIVE_TERMS {
-        if term.reject_as_phrase && contains_token_phrase(&lower, term.phrase) {
-            return non_model_safe(label, term.phrase);
-        }
-        if term.reject_value_after_label
-            && contains_credential_value_after_label(&lower, term.phrase)
-        {
+        if contains_credential_value_after_label(&lower, term.phrase) {
             return non_model_safe(label, term.phrase);
         }
     }
@@ -350,13 +318,6 @@ fn non_model_safe<T>(
     ))
 }
 
-fn contains_token_phrase(value: &str, phrase: &str) -> bool {
-    value.match_indices(phrase).any(|(start, matched)| {
-        let end = start + matched.len();
-        is_token_boundary(char_before(value, start)) && is_token_boundary(char_at(value, end))
-    })
-}
-
 fn char_before(value: &str, byte_index: usize) -> Option<char> {
     value.get(..byte_index)?.chars().next_back()
 }
@@ -376,10 +337,15 @@ fn is_token_boundary(character: Option<char>) -> bool {
 mod tests {
     use super::*;
 
-    const SENSITIVE_SAMPLES: &[&str] = &[
-        "Use the Authorization: Bearer ghp_secretvalue123 header.", // vocab + credential value
-        "Read /Users/alice/.config/token first.",                   // host path
-        "here is my key sk-abc123def456ghi789",                     // sk- token
+    const CREDENTIAL_SAMPLES: &[&str] = &[
+        "Use the Authorization: Bearer ghp_secretvalue123 header.",
+        "api key: abc123def456",
+        "here is my key sk-abc123def456ghi789",
+    ];
+    const SECURITY_PROSE_SAMPLES: &[&str] = &[
+        "The report documents an authorization flow and API key rotation.",
+        "Read /Users/alice/.config/token before reviewing the report.",
+        "The upstream service returned invalid API key.",
     ];
 
     #[test]
@@ -391,10 +357,10 @@ mod tests {
     }
 
     /// #5169: trusted/certified skill instruction content bypasses content
-    /// denylisting (security vocabulary, host paths, credential-shaped values).
+    /// credential-shaped value checks.
     #[test]
     fn trusted_skill_instruction_bypasses_content_denylist() {
-        for sample in SENSITIVE_SAMPLES {
+        for sample in CREDENTIAL_SAMPLES {
             validate_prompt_text(
                 sample.to_string(),
                 "skill content",
@@ -410,7 +376,7 @@ mod tests {
 
     #[test]
     fn verified_catalog_description_bypasses_content_denylist() {
-        for sample in SENSITIVE_SAMPLES {
+        for sample in CREDENTIAL_SAMPLES {
             validate_prompt_text(
                 sample.to_string(),
                 "catalog description",
@@ -425,16 +391,14 @@ mod tests {
         }
     }
 
-    /// Untrusted surfaces keep the full content denylist — the trust gate is the
-    /// only thing that relaxes it, so a non-skill surface still rejects the same
-    /// samples a trusted skill is allowed to carry.
+    /// Untrusted surfaces still reject credential-shaped values.
     #[test]
-    fn untrusted_surfaces_still_reject_content_denylist() {
+    fn untrusted_surfaces_still_reject_credential_values() {
         for surface in [
             PromptTextSurface::GenericModelContent,
             PromptTextSurface::SafeSummary,
         ] {
-            for sample in SENSITIVE_SAMPLES {
+            for sample in CREDENTIAL_SAMPLES {
                 let error = validate_prompt_text(sample.to_string(), "context content", surface)
                     .expect_err(&format!("untrusted surface must reject {sample:?}"));
                 assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
@@ -442,9 +406,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn untrusted_surfaces_allow_security_prose_and_paths() {
+        for surface in [
+            PromptTextSurface::GenericModelContent,
+            PromptTextSurface::SafeSummary,
+        ] {
+            for sample in SECURITY_PROSE_SAMPLES {
+                validate_prompt_text(sample.to_string(), "context content", surface)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "ordinary security prose must remain usable; got {error:?}: {sample:?}"
+                        )
+                    });
+            }
+        }
+    }
+
     /// Control characters corrupt prompt/log/terminal framing, so they are
     /// rejected on every surface — including trusted skill content. The trust
-    /// gate relaxes only the vocabulary/path/credential content denylist.
+    /// gate relaxes only credential-shaped value checks.
     #[test]
     fn control_characters_are_rejected_on_all_surfaces() {
         for surface in [

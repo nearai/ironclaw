@@ -1031,7 +1031,47 @@ mod tests {
         assert_eq!(bundle.materialized_messages[0].model_content, inline_body);
     }
 
-    fn auth_vocabulary_surface(trust: CapabilityDescriptionTrust) -> VisibleCapabilitySurface {
+    #[test]
+    fn instruction_bundle_replays_security_context_without_blocking_thread_recovery() {
+        let model_content = concat!(
+            "The report documents an authorization flow and API key rotation.\n",
+            "The captured fixture was stored under /Users/alice/security/report.json.\n",
+            "All credential values in this report are redacted."
+        )
+        .to_string();
+        let context_bundle = LoopContextBundle {
+            memory_snippets: vec![LoopContextSnippet {
+                snippet_ref: "memory:security-report".to_string(),
+                model_content: model_content.clone(),
+                safe_summary: "security report".to_string(),
+                metadata: None,
+            }],
+            ..LoopContextBundle::default()
+        };
+
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle,
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: Vec::new(),
+            })
+            .expect("ordinary security context must not make a persisted thread unrecoverable");
+
+        assert!(
+            bundle
+                .materialized_messages
+                .iter()
+                .any(|message| message.model_content == model_content),
+            "recovered context must remain available to the model"
+        );
+    }
+
+    fn capability_description_surface(
+        trust: CapabilityDescriptionTrust,
+        description: &str,
+    ) -> VisibleCapabilitySurface {
         VisibleCapabilitySurface {
             version: crate::CapabilitySurfaceVersion::new("surface:auth-vocab").unwrap(),
             descriptors: vec![CapabilityDescriptorView {
@@ -1042,7 +1082,7 @@ mod tests {
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "extension_register_hosted_mcp".to_string(),
-                safe_description: "Choose oauth for a browser authorization-code flow.".to_string(),
+                safe_description: description.to_string(),
                 description_trust: trust,
                 concurrency_hint: crate::ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type": "object"}),
@@ -1051,11 +1091,11 @@ mod tests {
         }
     }
 
-    fn surface_summary_for(trust: CapabilityDescriptionTrust) -> String {
+    fn surface_summary_for(trust: CapabilityDescriptionTrust, description: &str) -> String {
         let bundle = InstructionBundleBuilder::new(test_context())
             .build(InstructionBundleRequest {
                 context_bundle: LoopContextBundle::default(),
-                visible_surface: Some(auth_vocabulary_surface(trust)),
+                visible_surface: Some(capability_description_surface(trust, description)),
                 safety_context: None,
                 runtime_context: None,
                 inline_messages: Vec::new(),
@@ -1075,21 +1115,39 @@ mod tests {
     /// silently drop them from the prompt's capability surface.
     #[test]
     fn verified_catalog_descriptions_with_auth_vocabulary_stay_on_the_surface() {
-        let summary = surface_summary_for(CapabilityDescriptionTrust::VerifiedCatalog);
+        let summary = surface_summary_for(
+            CapabilityDescriptionTrust::VerifiedCatalog,
+            "Choose oauth for a browser authorization-code flow.",
+        );
         assert!(
             summary.contains("builtin.extension_register_hosted_mcp"),
             "verified-catalog description must stay on the prompt surface: {summary}"
         );
     }
 
-    /// The strict scan still governs untrusted provenance: the same
-    /// description from an unverified source stays off the surface.
+    /// Ordinary security vocabulary is data, not a credential or an authority
+    /// claim, even when its provenance is untrusted.
     #[test]
-    fn untrusted_descriptions_with_auth_vocabulary_are_omitted_from_the_surface() {
-        let summary = surface_summary_for(CapabilityDescriptionTrust::Untrusted);
+    fn untrusted_descriptions_with_auth_vocabulary_stay_on_the_surface() {
+        let summary = surface_summary_for(
+            CapabilityDescriptionTrust::Untrusted,
+            "Choose oauth for a browser authorization-code flow.",
+        );
+        assert!(
+            summary.contains("builtin.extension_register_hosted_mcp"),
+            "ordinary auth vocabulary must stay on the prompt surface: {summary}"
+        );
+    }
+
+    #[test]
+    fn untrusted_descriptions_with_credential_values_are_omitted_from_the_surface() {
+        let summary = surface_summary_for(
+            CapabilityDescriptionTrust::Untrusted,
+            "Use Authorization: Bearer ghp_secretvalue123.",
+        );
         assert!(
             !summary.contains("builtin.extension_register_hosted_mcp"),
-            "untrusted description must be omitted from the prompt surface: {summary}"
+            "credential-bearing description must be omitted from the prompt surface: {summary}"
         );
         assert!(
             summary.contains("(none)"),
