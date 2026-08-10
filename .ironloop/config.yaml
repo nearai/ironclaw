@@ -1,18 +1,4 @@
 version: 1
 
-implementer:
+qa:
   network_access: true
-
-reviewer:
-  network_access: true
-  auto_review:
-    enabled: true
-    max_runs: 10
-    user_open: true
-    user_update: false
-
-resolver:
-  network_access: true
-  auto_resolve:
-    enabled: true
-    max_runs: 10
