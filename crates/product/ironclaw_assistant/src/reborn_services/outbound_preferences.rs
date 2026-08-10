@@ -67,10 +67,10 @@ impl OutboundPreferencesProductService for RebornOutboundPreferencesService {
             .await
             .map_err(map_outbound_repository_error)?
             .into_iter()
-            // Notification-channel picker: any target that can receive
-            // blocked-automation notices. The model-facing delivery list narrows
-            // this to `final_replies` in `list_outbound_delivery_targets_for_model`.
-            .filter(|entry| entry.capabilities.notifications)
+            // Base list is the UNION of both capabilities; each consumer narrows
+            // to the one it needs (picker → notifications, model → final_replies),
+            // keeping the two capabilities independent.
+            .filter(|entry| entry.capabilities.final_replies || entry.capabilities.notifications)
             .map(|entry| {
                 Ok(RebornOutboundDeliveryTargetOption {
                     target: reborn_summary_from_outbound(&entry.summary)?,
@@ -143,6 +143,7 @@ fn reborn_capabilities_from_outbound(
         final_replies: capabilities.final_replies,
         gate_prompts: capabilities.gate_prompts,
         auth_prompts: capabilities.auth_prompts,
+        notifications: capabilities.notifications,
     }
 }
 

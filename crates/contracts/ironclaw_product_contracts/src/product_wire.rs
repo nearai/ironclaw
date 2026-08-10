@@ -799,6 +799,11 @@ pub struct RebornOutboundDeliveryTargetCapabilities {
     pub final_replies: bool,
     pub gate_prompts: bool,
     pub auth_prompts: bool,
+    /// This target can receive blocked-automation notifications. Independent of
+    /// `final_replies`: the notification-channel picker filters on this, the
+    /// model-delivery list filters on `final_replies`.
+    #[serde(default)]
+    pub notifications: bool,
 }
 
 /// Client-safe opaque outbound delivery target id.
