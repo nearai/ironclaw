@@ -189,7 +189,10 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
-tracing-test = "0.2"
+# `no-env-filter` captures every event regardless of its metadata target —
+# the observer test asserts a `target: "ironclaw::reborn::…"` warning, which
+# the default `{crate}=trace` filter would drop.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 
 [[test]]
 name = "production_runtime_automations"

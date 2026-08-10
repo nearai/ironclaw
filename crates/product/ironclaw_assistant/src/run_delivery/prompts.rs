@@ -82,6 +82,12 @@ pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
 /// line. Channel-neutral and diagnostic-free — details stay in the web app.
 pub(crate) const RUN_FAILED_MESSAGE: &str =
     "That run didn't finish — open the Ironclaw web app for details.";
+/// Posted as the terminal reply for a triggered run that ended in
+/// `Cancelled` (host cancel: auth-auto-deny, policy, supersession, or an
+/// operator action). A scheduled run has no user in the channel to act on a
+/// cancel, so this is informational only — it closes the loop on a fire that
+/// would otherwise vanish (#6896).
+pub(crate) const TRIGGERED_RUN_CANCELED_MESSAGE: &str = "This scheduled run was canceled before it could finish. Open the Ironclaw web app for details.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";

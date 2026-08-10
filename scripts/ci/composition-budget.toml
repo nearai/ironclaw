@@ -163,7 +163,11 @@ observed_date = "2026-08-07"
 # Re-measured on the MERGED tree (web-push + skills) with
 # `bash scripts/ci/check-composition-budget.sh` -> 41509 (base 40811 + web-push
 # assembly + #7171 skills assembly; the deltas are additive on the merged tree).
-loc_ceiling = 41509
+# Re-measured 41509 -> 41582 on 2026-08-10 after merging main into
+# implement-issue-6896-fix: #7131's run-failure settlement observer adds its
+# production wiring and inline regression coverage to the current main tree.
+# Measured with --print; set to current rather than hidden in tolerance.
+loc_ceiling = 41582
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -174,8 +178,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41509
-loc_observed_date = "2026-08-08"
+loc_observed = 41582
+loc_observed_date = "2026-08-10"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

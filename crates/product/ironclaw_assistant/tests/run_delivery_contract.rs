@@ -38,7 +38,7 @@ use ironclaw_host_api::product_adapter::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    SanitizedFailure, SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
@@ -85,12 +85,24 @@ use ironclaw_turns::{
 struct ScriptedRunState {
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
+    failure: Option<SanitizedFailure>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
         gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
+        failure: None,
+    }
+}
+
+/// Scripted terminal state carrying a sanitized failure category so tests can
+/// assert the per-category summary reaches the channel instead of silence.
+fn scripted_failed_state(status: TurnStatus, category: &str) -> ScriptedRunState {
+    ScriptedRunState {
+        status,
+        gate_ref: None,
+        failure: Some(SanitizedFailure::new(category.to_string()).expect("valid failure category")),
     }
 }
 
@@ -99,6 +111,11 @@ struct ScriptedTurnCoordinator {
     clamp_at_last: bool,
     calls: Mutex<usize>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
+    /// Optional late transition: from call `flip.0` on, `flip.1` is returned
+    /// instead of the scripted sequence — used to race a terminal state in
+    /// after the wait backstop has already fired. One tuple keeps the flip
+    /// point and target from being configured independently.
+    flip: Option<(usize, ScriptedRunState)>,
 }
 
 impl ScriptedTurnCoordinator {
@@ -109,6 +126,23 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            flip: None,
+        }
+    }
+
+    /// `initial` until call `flip_after` (exclusive), then `terminal` — for
+    /// racing a terminal state in after the wait backstop.
+    fn with_late_terminal(
+        initial: ScriptedRunState,
+        terminal: ScriptedRunState,
+        flip_after: usize,
+    ) -> Self {
+        Self {
+            states: vec![initial],
+            clamp_at_last: true,
+            calls: Mutex::new(0),
+            cancel_calls: Mutex::new(Vec::new()),
+            flip: Some((flip_after, terminal)),
         }
     }
 
@@ -149,13 +183,19 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         let mut calls = self.calls.lock().expect("calls");
-        let idx = if self.clamp_at_last {
-            (*calls).min(self.states.len() - 1)
-        } else {
-            *calls % self.states.len()
-        };
+        let call = *calls;
         *calls += 1;
-        let scripted = self.states[idx].clone();
+        let scripted = match self.flip {
+            Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
+            _ => {
+                let idx = if self.clamp_at_last {
+                    call.min(self.states.len() - 1)
+                } else {
+                    call % self.states.len()
+                };
+                self.states[idx].clone()
+            }
+        };
         Ok(TurnRunState {
             scope: request.scope.clone(),
             actor: None,
@@ -176,7 +216,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             gate_ref: scripted.gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: scripted.failure,
             event_cursor: EventCursor(1),
             product_context: None,
             resume_disposition: None,
@@ -2536,6 +2576,24 @@ fn build_triggered_harness(
     build_triggered_harness_with_initial_codecs(states, auth_url, catalog, initially_active)
 }
 
+/// [`build_triggered_harness`] with a prebuilt turn coordinator, for tests
+/// that script a late state transition.
+fn build_triggered_harness_with_turns(
+    turns: Arc<ScriptedTurnCoordinator>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+) -> TriggeredHarness {
+    let initially_active = catalog.clone();
+    build_triggered_harness_with_turns_catalog(
+        turns,
+        auth_url,
+        catalog,
+        initially_active,
+        None,
+        None,
+    )
+}
+
 /// [`build_triggered_harness`] with the ACTIVE codec set narrower than the
 /// catalog, so a test can activate the rest partway through.
 fn build_triggered_harness_with_initial_codecs(
@@ -2574,13 +2632,32 @@ fn build_triggered_harness_with_catalog(
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
     delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> TriggeredHarness {
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
+    build_triggered_harness_with_turns_catalog(
+        turns,
+        auth_url,
+        catalog,
+        initially_active,
+        communication_preferences,
+        delivery_targets,
+    )
+}
+
+/// [`build_triggered_harness_with_catalog`] with a prebuilt turn coordinator.
+fn build_triggered_harness_with_turns_catalog(
+    turns: Arc<ScriptedTurnCoordinator>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+    initially_active: Vec<TestNotificationTarget>,
+    communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
+    delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let delivery_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
@@ -3144,14 +3221,315 @@ async fn triggered_failure_notifies_all_targets() {
     let texts = harness.adapter.texts();
     assert_eq!(texts.len(), 2, "one failure notice per target: {texts:?}");
     assert!(
-        texts.iter().all(|text| text.contains("routine run failed")),
-        "{texts:?}"
+        texts
+            .iter()
+            .all(|text| text.contains("The run failed before producing a reply")),
+        "generic failure summary reaches every channel: {texts:?}"
     );
     assert!(
         texts
             .iter()
             .all(|text| text.contains("From a triggered event: “watch the deploys”.")),
         "the failure notice names the routine: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_failed_run_with_failure_category_delivers_category_summary() {
+    // A scheduled run that died with a sanitized failure category delivers
+    // the per-category summary so the creator sees *why* it died, not
+    // silence (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(TurnStatus::Failed, "model_error")],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "one per-category notice per target: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("The run failed while calling the model")),
+        "per-category failure summary reaches every channel: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event: “watch the deploys”.")),
+        "the notice names the routine: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_recovery_required_run_delivers_failure_summary() {
+    // A run that ended `RecoveryRequired` is a terminal failure: the creator
+    // gets the same per-category treatment as `Failed` (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(
+            TurnStatus::RecoveryRequired,
+            "model_error",
+        )],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("The run failed while calling the model"),
+        "recovery-required carries the per-category summary: {}",
+        texts[0]
+    );
+    assert!(texts[0].contains("From a triggered event:"));
+}
+
+#[tokio::test]
+async fn triggered_cancelled_run_delivers_cancellation_notice() {
+    // A scheduled run the host cancelled (auth-auto-deny, policy,
+    // supersession, or an operator action) gets the fixed cancellation
+    // notice — a cancel is not a failure (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Cancelled, None)],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "one cancellation notice per target: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("canceled before it could finish")),
+        "cancellation notice reaches every channel: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event:")),
+        "the notice names the routine: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_cancelled_run_with_failure_category_still_delivers_cancellation_notice() {
+    // Cancelled runs never carry a failure category in the real system, and
+    // a failure summary would mislabel a host/operator cancel as a failed
+    // run — the fixed cancellation notice always wins for `Cancelled`.
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(TurnStatus::Cancelled, "model_error")],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice wins over the failure category: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("The run failed while calling the model"),
+        "no failure summary for a cancelled run: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_that_times_out_before_actionable_delivers_timeout_notice() {
+    // A run that never reaches an actionable state before `max_wait` used to
+    // only log a warn and record `Failed` — hiding the hang from the creator.
+    // It now delivers the timeout notice as a terminal reply (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one timeout notice per target: {texts:?}");
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("taking longer than expected")),
+        "timeout notice text present: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event:")),
+        "triggered footer present: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_timeout_notice_without_channels_records_no_default_configured() {
+    // With no notification channels configured the notifier records
+    // `NoDefaultConfigured` and sends nothing — the web app is the whole
+    // surface.
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        Vec::new(),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "timeout notice cannot be delivered without a target"
+    );
+}
+
+#[tokio::test]
+async fn triggered_timeout_notice_delivery_failure_records_failed() {
+    // The timeout arm maps a transport-level delivery failure to `Failed`:
+    // the notice was attempted but the channel rejected it, so the run is
+    // recorded as failed rather than silently delivered.
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted failure".to_string(),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "timeout notice attempted once");
+    assert!(
+        texts[0].contains("taking longer than expected"),
+        "timeout notice text present: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellation_notice() {
+    // Regression guard: a run still in flight at the wait backstop but which
+    // crosses into a terminal state during the bounded race-grace window
+    // must receive the correct terminal notice — the timeout arm used to
+    // exit the watcher and lose the terminal copy.
+    //
+    // Deterministic grace-path entry: the wait loop polls at 1ms intervals
+    // doubling to a 5s cap against a 60ms max_wait, so the wait backstop
+    // fires after at most ~8 `get_run_state` calls — far below the flip at
+    // call 30. The scripted Cancelled state is therefore never observable
+    // inside the wait loop; only the grace window (60ms, 1ms polls) reaches
+    // call 30 and observes the terminal state.
+    let harness = build_triggered_harness_with_turns(
+        Arc::new(ScriptedTurnCoordinator::with_late_terminal(
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Cancelled, None),
+            30,
+        )),
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one terminal notice delivered");
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice wins over the timeout copy: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("taking longer than expected"),
+        "no timeout copy for a run that reached terminal: {}",
+        texts[0]
+    );
+    assert_eq!(
+        harness.turns.cancel_call_count(),
+        0,
+        "grace loop observed the terminal state without issuing a cancellation"
     );
 }
 
