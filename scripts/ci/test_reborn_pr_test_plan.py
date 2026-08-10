@@ -877,12 +877,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_wit_only_change_is_owned_by_platform_and_compat(self) -> None:
         # Both the historical root location and the current crate-owned one
         # (CHECKLIST WS4 moved `wit/` inside `ironclaw_wasm`) must delegate,
-        # so a real `crates/ironclaw_wasm/wit/*.wit` change never falls
-        # through to `ironclaw_wasm`'s own production-package lane. The
-        # crate-owned prefix is derived at runtime through the crate
-        # inventory (`_wasm_wit_prefix`), not a hardcoded literal, the same
-        # way `test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay`
-        # derives its input from `_webui_frontend_prefix`.
+        # so a real `<ironclaw_wasm>/wit/*.wit` change never falls through to
+        # `ironclaw_wasm`'s own production-package lane. The crate-owned
+        # prefix is resolved through the crate inventory (`_wasm_wit_prefix`)
+        # at test-input time too, not a hardcoded literal — mirroring
+        # `test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay`,
+        # so this stays correct regardless of where `ironclaw_wasm` lives.
         wasm_wit_prefix = planner._wasm_wit_prefix()
         for path in (
             "wit/tool.wit",
@@ -918,20 +918,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
         (rather than the `alpha`/`beta`/`gamma` fixture) since
         `_wasm_wit_prefix` resolves the crate through the live repo tree.
         """
+        wasm_directory = planner.crate_directory("ironclaw_wasm", ROOT)
         wasm_metadata = metadata()
         wasm_metadata["workspace_members"].append("wasm")
         wasm_metadata["packages"].append(
             {
                 "id": "wasm",
                 "name": "ironclaw_wasm",
-                "manifest_path": str(ROOT / "crates/ironclaw_wasm/Cargo.toml"),
+                "manifest_path": str(ROOT / wasm_directory / "Cargo.toml"),
             }
         )
         wasm_metadata["resolve"]["nodes"].append({"id": "wasm", "deps": []})
 
         plan = planner.build_plan(
             event="pull_request",
-            changed_paths=["crates/ironclaw_wasm/witless/notes.txt"],
+            changed_paths=[f"{wasm_directory}/witless/notes.txt"],
             metadata=wasm_metadata,
             canonical_packages=self.canonical + ["ironclaw_wasm"],
         )
@@ -1002,8 +1003,44 @@ class RebornPrTestPlanTests(unittest.TestCase):
         finally:
             planner._wasm_wit_prefix.cache_clear()
 
+    def test_unrelated_path_never_triggers_wasm_crate_resolution(self) -> None:
+        """A docs-only PR must not resolve the ironclaw_wasm crate at all.
+
+        The WIT-routing check (`path.startswith("wit/") or
+        path.startswith(_wasm_wit_prefix())`) sits after the ignore-prefix
+        filter, so an ignored path like `docs/readme-typo-fix.md` is
+        `continue`d out by that filter before the WIT check's `or` clause
+        ever calls `_wasm_wit_prefix()`. Before that reordering, `or` still
+        evaluated `_wasm_wit_prefix()` for every path not literally starting
+        with `wit/`, so an unrelated docs change could trip
+        `crate_directory`'s `CrateTreeError` and fail the whole planner
+        closed with a `RuntimeError` — mirroring
+        `test_frontend_prefix_resolution_failure_fails_closed`, but proving
+        the mock is never even called for a path this unrelated."""
+        planner._wasm_wit_prefix.cache_clear()
+        try:
+            with (
+                mock.patch.object(planner, "_sandbox_docker_prefixes", return_value=()),
+                mock.patch.object(
+                    planner,
+                    "crate_directory",
+                    side_effect=planner.CrateTreeError("boom"),
+                ) as resolver,
+            ):
+                plan = self.plan("pull_request", ["docs/readme-typo-fix.md"])
+            resolver.assert_not_called()
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["reasons"], ["no Reborn test surface changed"])
+        finally:
+            planner._wasm_wit_prefix.cache_clear()
+
     def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
-        for wit_path in ("wit/tool.wit", f"{planner._wasm_wit_prefix()}tool.wit"):
+        # The crate-owned WIT path is derived from `_wasm_wit_prefix` at
+        # test-input time (not a hardcoded literal), same as
+        # `test_wit_only_change_is_owned_by_platform_and_compat`, so this
+        # stays correct regardless of where `ironclaw_wasm` lives.
+        wasm_wit_prefix = planner._wasm_wit_prefix()
+        for wit_path in ("wit/tool.wit", f"{wasm_wit_prefix}tool.wit"):
             with self.subTest(wit_path=wit_path):
                 plan = self.plan(
                     "pull_request",
