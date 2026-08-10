@@ -1468,15 +1468,31 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
     default_prompt = f"settings default model routing {uuid.uuid4()}"
     suffix = uuid.uuid4().hex[:8]
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as operator:
-        policy = await operator.put(
-            f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
-            json={
-                "workspace_default": "mock-model",
-                "allowed_models": ["mock-model", selected_model],
-            },
-            timeout=15,
+        admin_context = await reborn_v2_browser.new_context(
+            viewport={"width": 1280, "height": 720}
         )
-        policy.raise_for_status()
+        admin_page = await admin_context.new_page()
+        try:
+            await admin_page.goto(
+                f"{reborn_v2_server}/settings/inference?token={REBORN_V2_AUTH_TOKEN}"
+            )
+            await admin_page.wait_for_selector(
+                SEL_V2["settings_model_policy_editor"], timeout=15000
+            )
+            model_input = admin_page.locator(
+                SEL_V2["settings_model_policy_model_input"]
+            )
+            await model_input.fill(selected_model)
+            await admin_page.locator(
+                SEL_V2["settings_model_policy_add_model"]
+            ).click()
+            await admin_page.locator(SEL_V2["settings_model_policy_save"]).click()
+            await expect(
+                admin_page.locator(SEL_V2["settings_model_policy_status"])
+            ).to_contain_text("Model selection enabled", timeout=15000)
+        finally:
+            await admin_context.close()
+
         selected_created = await operator.post(
             f"{reborn_v2_server}/api/webchat/v2/admin/users",
             json={
@@ -1540,6 +1556,9 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
                 )
                 await expect(
                     selected_page.get_by_role("button", name="Add provider")
+                ).to_have_count(0)
+                await expect(
+                    selected_page.locator(SEL_V2["settings_model_policy_editor"])
                 ).to_have_count(0)
                 selector = selected_page.locator(SEL_V2["settings_model_selector"])
                 button = selector.get_by_role("button")
