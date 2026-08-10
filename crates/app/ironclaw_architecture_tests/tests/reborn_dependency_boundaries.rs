@@ -635,7 +635,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // flag. Contract vocabulary only — the fetch impl lives in the slack
         // package, the flag is consumed by the channel workflow. Count read from
         // this test's failure on the rebased base.
-        ("ironclaw_extension_contracts", 7_851),
+        // 7_851 -> 7_885 (2026-08-10, rich working indicator #7446): the
+        // `OutboundPart::React` variant plus the neutral `RunReaction` /
+        // `ReactionAction` enums for run-lifecycle reactions on the triggering
+        // message. Contract vocabulary only — vendor reaction rendering (Slack
+        // reactions.add/remove, Telegram setMessageReaction) lives in the channel
+        // packages and the reaction lifecycle in the delivery observer. Count
+        // read from this test's failure message.
+        ("ironclaw_extension_contracts", 7_885),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

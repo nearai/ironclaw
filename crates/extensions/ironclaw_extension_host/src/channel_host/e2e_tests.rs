@@ -635,6 +635,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                     max_wait: options.max_wait,
                     max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
                     max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+                    first_nudge_after: Duration::from_secs(3600),
+                    renudge_interval: Duration::from_secs(3600),
                 },
                 triggered_delivery_store: Arc::clone(&triggered_delivery_store),
             }),
@@ -1580,6 +1582,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -1859,6 +1863,8 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -1985,6 +1991,8 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -3023,8 +3031,9 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
     assert!(
         messages[1]["text"]
             .as_str()
-            .is_some_and(|text| !text.is_empty()),
-        "the resumed turn posts a working indicator before the reply"
+            .is_some_and(|text| !text.is_empty())
+            && messages[1]["text"] != messages[0]["text"],
+        "the resumed turn posts a working indicator distinct from the auth prompt"
     );
 
     harness

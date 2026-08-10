@@ -32,6 +32,22 @@ pub(crate) const WORKING_MESSAGES: &[&str] = &[
 pub(crate) fn working_message(seed: u64) -> &'static str {
     WORKING_MESSAGES[(seed % WORKING_MESSAGES.len() as u64) as usize]
 }
+
+/// Escalated "still working" notices that replace the initial indicator when a
+/// run runs long, so the user knows it hasn't stalled. Picked by `(seed, nudge)`
+/// so successive nudges on one run vary their wording (see [`long_running_message`]).
+pub(crate) const LONG_RUNNING_MESSAGES: &[&str] = &[
+    "Still on it — this one's taking a little longer than usual…",
+    "Hang tight, I haven't forgotten you — still working through this…",
+    "This is taking a bit longer than expected, but I'm still on it…",
+    "Bear with me — still crunching through this one…",
+];
+
+/// Pick an escalated "still working" notice for the `nudge`-th update of a run,
+/// varying the wording each time while staying deterministic for replays.
+pub(crate) fn long_running_message(seed: u64, nudge: u64) -> &'static str {
+    LONG_RUNNING_MESSAGES[(seed.wrapping_add(nudge) % LONG_RUNNING_MESSAGES.len() as u64) as usize]
+}
 pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run has no channel-serviceable auth challenge. This stays
 /// deliberately generic because missing/unknown challenge metadata cannot
@@ -60,6 +76,12 @@ pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
+/// Posted when an interactive channel run reaches a terminal *failed* state
+/// (as opposed to a self-authored error reply): the working indicator is
+/// replaced with this so the user gets closure instead of a stuck "thinking"
+/// line. Channel-neutral and diagnostic-free — details stay in the web app.
+pub(crate) const RUN_FAILED_MESSAGE: &str =
+    "That run didn't finish — open the Ironclaw web app for details.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
