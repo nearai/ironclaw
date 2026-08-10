@@ -915,6 +915,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", ["Makefile"])
 
+    def test_nextest_config_widens_to_exhaustive_plan(self) -> None:
+        """`.config/nextest.toml` is runner config every test lane reads.
+
+        Regression for the provider-matrix retirement PR: deleting the dead
+        `live_tests::zizmor_scan*` overrides from `.config/nextest.toml` made
+        the fail-closed arm raise `unclassified pull-request path`, which
+        failed `Detect Reborn test scope` and skipped every downstream Reborn
+        lane. The file is read by every `Tests (Reborn)` lane, so no narrow
+        lane can exercise a change to it; it must NOT go to static control
+        (whose membership rule is "no Reborn test lane reads the file").
+        Widening to the exhaustive plan is the safe resolution — a superset
+        can never under-select.
+        """
+        plan = self.plan("pull_request", [".config/nextest.toml"])
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("nextest runner config changed", plan["reasons"][0])
+
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
 
