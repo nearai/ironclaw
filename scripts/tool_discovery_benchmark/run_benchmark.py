@@ -82,8 +82,9 @@ TASKS = (
     {
         "id": "nested-argument-vocabulary",
         "prompt": (
-            "Upload report.csv to Google Drive using MIME type text/csv. Use the "
-            "available tool that accepts mime_type."
+            "Upload a file named report.csv containing exactly `benchmark-report` "
+            "to Google Drive using MIME type text/csv. Use the available tool that "
+            "accepts mime_type."
         ),
         "expected": ("google_drive__upload_file",),
     },

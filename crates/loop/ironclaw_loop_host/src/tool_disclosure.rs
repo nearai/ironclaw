@@ -245,17 +245,7 @@ impl CapabilityCatalog {
                 && policy.permits_capability_id(&entry.definition.capability_id)
         }) {
             namespaces
-                .entry(
-                    entry
-                        .definition
-                        .capability_id
-                        .as_str()
-                        .split_once('.')
-                        .map_or(entry.definition.capability_id.as_str(), |(namespace, _)| {
-                            namespace
-                        })
-                        .to_string(),
-                )
+                .entry(discovery_namespace(&entry.definition.capability_id))
                 .or_default()
                 .push(entry.definition.name.to_string());
         }
@@ -313,6 +303,59 @@ impl CapabilityCatalog {
         }
         descriptors.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
         descriptors
+    }
+}
+
+/// Model-facing grouping for passive catalog discovery.
+///
+/// Extension-owned tools retain their stable extension id. First-party ids use
+/// intent-oriented groups because `builtin` and `ironclaw` describe ownership,
+/// not what the tools help the model accomplish.
+fn discovery_namespace(capability_id: &CapabilityId) -> String {
+    let raw = capability_id.as_str();
+    if let Some(local_id) = raw.strip_prefix("builtin.") {
+        return builtin_discovery_namespace(local_id).to_string();
+    }
+    if raw.starts_with("ironclaw.memory.") {
+        return "memory".to_string();
+    }
+    if raw.starts_with("ironclaw.") {
+        return "system".to_string();
+    }
+    raw.split_once('.')
+        .map_or(raw, |(extension_id, _)| extension_id)
+        .to_string()
+}
+
+fn builtin_discovery_namespace(local_id: &str) -> &'static str {
+    if matches!(
+        local_id,
+        "read_file" | "write_file" | "list_dir" | "glob" | "grep" | "apply_patch" | "shell"
+    ) {
+        "coding"
+    } else if local_id == "http" || local_id.starts_with("http.") {
+        "web"
+    } else if local_id.starts_with("extension_") || local_id.starts_with("ironhub_") {
+        "extensions"
+    } else if local_id.starts_with("skill_") {
+        "skills"
+    } else if local_id.starts_with("trigger_") {
+        "scheduling"
+    } else if local_id.starts_with("outbound_")
+        || local_id.starts_with("notification_")
+        || local_id == "attach_workspace_file_to_reply"
+    {
+        "messaging"
+    } else if local_id.starts_with("trace_commons.") {
+        "observability"
+    } else if local_id.starts_with("admin_") || local_id.starts_with("operator_config_") {
+        "settings"
+    } else if local_id == "spawn_subagent" {
+        "agents"
+    } else if local_id == "json" {
+        "data"
+    } else {
+        "system"
     }
 }
 
@@ -2127,6 +2170,41 @@ mod tests {
             description,
             catalog_index_tool_search_description(&reordered, &policy)
         );
+    }
+
+    #[test]
+    fn namespace_preview_uses_semantic_first_party_groups_and_extension_fallbacks() {
+        let definitions = vec![
+            fixture_tool_with_capability_id("builtin.trigger_pause", "builtin__trigger_pause"),
+            fixture_tool_with_capability_id("builtin.skill_update", "builtin__skill_update"),
+            fixture_tool_with_capability_id(
+                "builtin.trace_commons.status",
+                "builtin__trace_commons__status",
+            ),
+            fixture_tool_with_capability_id(
+                "ironclaw.memory.profile_set",
+                "ironclaw__memory__profile_set",
+            ),
+            fixture_tool_with_capability_id("github.list_issues", "github__list_issues"),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let description =
+            catalog_index_tool_search_description(&catalog, &CapabilitySurfacePolicy::allow_all());
+
+        for expected in [
+            "github (1)",
+            "memory (1)",
+            "observability (1)",
+            "scheduling (1)",
+            "skills (1)",
+        ] {
+            assert!(
+                description.contains(expected),
+                "semantic namespace {expected:?} missing from {description}"
+            );
+        }
+        assert!(!description.contains("builtin ("), "{description}");
+        assert!(!description.contains("ironclaw ("), "{description}");
     }
 
     #[test]

@@ -40,6 +40,14 @@ def test_score_requires_complete_workflow_and_no_match_silence():
     assert not BENCH.score_task(no_match, [{"name": "unrelated"}])["completed"]
 
 
+def test_upload_task_is_self_contained_and_does_not_require_a_workspace_fixture():
+    upload = next(task for task in BENCH.TASKS if task["id"] == "nested-argument-vocabulary")
+
+    assert "report.csv" in upload["prompt"]
+    assert "benchmark-report" in upload["prompt"]
+    assert "mime_type" in upload["prompt"]
+
+
 def test_aggregate_keeps_completion_and_latency_by_arm_and_size():
     observations = [
         {

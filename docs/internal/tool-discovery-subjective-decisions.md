@@ -5,23 +5,31 @@ can be reviewed independently from the code. It is intentionally explicit
 about alternatives and should be updated whenever implementation evidence
 changes one of these choices.
 
-## D1 — Namespace identity comes from `CapabilityId`
+## D1 — Namespace identity comes from `CapabilityId`, with semantic first-party groups
 
-**Decision:** Treat the first segment of the typed, extension-prefixed
-`CapabilityId` as the authoritative discovery namespace. Never derive a
+**Decision:** Derive discovery namespaces only from the typed `CapabilityId`.
+For extension-owned tools, keep the first segment as the namespace (`github`,
+`gmail`, and so on). For the platform-owned `builtin.*` and `ironclaw.*`
+families, map stable capability-id families to intent-oriented groups such as
+`coding`, `memory`, `scheduling`, `skills`, and `observability`. Never derive a
 namespace from the provider-facing tool name or description.
 
 **Why:** The `CapabilityId` contract already requires
 `<extension>.<capability>[.<sub>...]`, and extension registration constructs
-capability IDs from the package/extension identity. Provider names are encoded
-for model APIs and are not an ownership boundary.
+capability IDs from the package/extension identity. That identity is useful for
+external products, but the platform owners `builtin` and `ironclaw` collapse
+unrelated intents and provide almost no routing signal. Provider names are
+encoded for model APIs and are not an ownership boundary.
 
 **Alternative considered:** Add a second namespace field to every provider tool
-definition. Rejected for this issue because it duplicates an invariant already
-carried by `CapabilityId` and would require migration across every producer.
+definition. Rejected because the current first-party taxonomy is deterministic
+from stable IDs, while a new cross-crate field would require every producer,
+adapter, wrapper, and test double to migrate. Revisit when extensions need to
+override their extension-id namespace.
 
-**Review trigger:** Revisit if a valid capability can be owned by an extension
-different from the first capability-ID segment.
+**Review trigger:** Revisit if extensions need multiple model-facing groups or a
+valid capability can be owned by an extension different from the first
+capability-ID segment.
 
 ## D2 — Explicit search remains relevance-first
 
@@ -260,3 +268,50 @@ specific pin-induced wrong-tool call and false success claim. Latency does not
 override the task-completion gate. Removing only the calendar pin was also
 rejected as overfitting this seven-task fixture; pins remain an explicit,
 reviewable deployment choice.
+
+## D15 — Replace first-party ownership buckets with semantic namespaces
+
+**Decision:** Keep extension IDs as discovery namespaces for external tools,
+but group platform-owned capability-ID families by user intent. The initial
+closed taxonomy is `agents`, `coding`, `data`, `extensions`, `memory`,
+`messaging`, `observability`, `scheduling`, `settings`, `skills`, and `web`,
+with `system` as the deterministic fallback for uncategorized first-party IDs.
+
+**Evidence:** Exact-head Railway QA for the namespace default exposed only
+`builtin (22)` and `ironclaw (2)` before this change. Those labels correctly
+described ownership but did not tell the model whether the deferred tools were
+for scheduling, skill management, observability, or another task family. A
+focused 100-tool live run after the change completed six unaffected task
+classes with zero unauthorized calls. The upload task found the correct tool
+but stopped because the benchmark had named a nonexistent workspace file; once
+the prompt supplied deterministic inline content, the rerun completed too.
+
+**Why:** Namespace summaries spend permanent prompt bytes and therefore must
+provide routing information. A closed mapping over stable capability IDs is
+cache-stable, deterministic, reviewable, and cannot be manipulated through
+provider-facing names or descriptions. Coding tools are included in the
+taxonomy but appear in the on-demand summary only when they are actually
+deferred; directly advertised core tools are not counted as searchable.
+
+**Alternative considered:** Add a model-facing namespace field to the shared
+provider-tool contract. Rejected for this PR because first-party intent is
+already encoded in stable capability-ID families, while a new field would
+force a cross-workspace producer and test-double migration. This becomes the
+preferred follow-up if extensions need multiple semantic groups or explicit
+namespace overrides.
+
+## D16 — Live benchmark tasks own every required input
+
+**Decision:** Make the upload scenario provide deterministic file content in
+the prompt rather than depend on a pre-existing workspace fixture.
+
+**Why:** The benchmark scores whether the model discovers and invokes the
+correct tool. Asking it to upload an absent file instead measures whether it
+fabricates content or correctly requests missing input. The observed model
+found the exact Google Drive upload tool and its complete `mime_type` schema,
+then reasonably refused to invent `report.csv`; scoring that as retrieval
+failure was invalid.
+
+**Alternative considered:** Create `report.csv` in the temporary workspace.
+Rejected because inline content keeps the task self-contained across server
+homes and avoids adding filesystem setup as another benchmark dependency.
