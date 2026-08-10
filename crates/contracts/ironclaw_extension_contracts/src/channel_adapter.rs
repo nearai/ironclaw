@@ -365,8 +365,8 @@ pub enum OutboundPart {
     /// `vendor_message_ref` is the target message's vendor id (a source
     /// message's `reply_target_message_id`, or a bot message ref). Each adapter
     /// maps the neutral [`RunReaction`] to a vendor-safe emoji — a raw emoji
-    /// would be unsafe because e.g. Telegram's `setMessageReaction` only accepts
-    /// a fixed allowlist. Best-effort: a failed reaction never fails the run.
+    /// would be unsafe because some vendors' reaction APIs only accept a fixed
+    /// emoji allowlist. Best-effort: a failed reaction never fails the run.
     React {
         vendor_message_ref: String,
         reaction: RunReaction,

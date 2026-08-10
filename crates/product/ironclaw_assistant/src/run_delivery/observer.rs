@@ -555,7 +555,7 @@ impl RunDeliveryObserver {
                     // genuine failure (not a completed-but-empty run) also post a
                     // brief failure notice and mark ❌ — source-routed through the
                     // same reliable path as the working indicator, so it reaches
-                    // Slack and Telegram even without a reply-target binding.
+                    // the originating channel even without a reply-target binding.
                     if actionable_state.status.is_terminal() {
                         self.delivery_runs
                             .lock()
