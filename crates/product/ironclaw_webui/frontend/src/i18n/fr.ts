@@ -335,6 +335,7 @@ registerPack("fr", {
   "llm.configureToUse": "Configurer ce fournisseur avant de l'activer.",
   "llm.confirmDelete": "Supprimer le fournisseur « {id} » ?",
   "llm.defaultModel": "Modèle par défaut",
+  "llm.searchModels": "Rechercher des modèles",
   "llm.editProvider": "Modifier le fournisseur",
   "llm.fetchModels": "Récupérer les modèles",
   "llm.fetchingModels": "Récupération...",

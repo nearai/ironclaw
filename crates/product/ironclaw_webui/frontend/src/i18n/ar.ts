@@ -335,6 +335,7 @@ registerPack("ar", {
   "llm.configureToUse": "تكوين هذا الموفر قبل تنشيطه.",
   "llm.confirmDelete": "هل تريد حذف الموفر \"{id}\"؟",
   "llm.defaultModel": "النموذج الافتراضي",
+  "llm.searchModels": "البحث عن النماذج",
   "llm.editProvider": "تحرير الموفر",
   "llm.fetchModels": "إحضار النماذج",
   "llm.fetchingModels": "جلب...",

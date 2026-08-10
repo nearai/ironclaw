@@ -335,6 +335,7 @@ registerPack("zh-CN", {
   "llm.configureToUse": "在使用此提供商之前需先进行配置。",
   "llm.confirmDelete": "确认删除提供商 \"{id}\"？",
   "llm.defaultModel": "默认模型",
+  "llm.searchModels": "搜索模型",
   "llm.editProvider": "编辑提供商",
   "llm.fetchModels": "获取模型列表",
   "llm.fetchingModels": "获取中...",

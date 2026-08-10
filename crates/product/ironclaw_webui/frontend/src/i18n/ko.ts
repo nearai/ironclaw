@@ -335,6 +335,7 @@ registerPack("ko", {
   "llm.configureToUse": "이 공급자를 활성화하기 전에 구성하십시오.",
   "llm.confirmDelete": "'{id}' 공급자를 삭제하시겠습니까?",
   "llm.defaultModel": "기본 모델",
+  "llm.searchModels": "모델 검색",
   "llm.editProvider": "공급자 편집",
   "llm.fetchModels": "모델 가져오기",
   "llm.fetchingModels": "가져오는 중...",

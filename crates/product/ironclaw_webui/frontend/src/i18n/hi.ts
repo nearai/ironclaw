@@ -335,6 +335,7 @@ registerPack("hi", {
   "llm.configureToUse": "इस प्रदाता को सक्रिय करने से पहले कॉन्फ़िगर करें।",
   "llm.confirmDelete": "प्रदाता \"{id}\" हटाएं?",
   "llm.defaultModel": "डिफ़ॉल्ट मॉडल",
+  "llm.searchModels": "मॉडल खोजें",
   "llm.editProvider": "प्रदाता संपादित करें",
   "llm.fetchModels": "मॉडल लायें",
   "llm.fetchingModels": "लायें...",

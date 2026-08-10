@@ -335,6 +335,7 @@ registerPack("ja", {
   "llm.configureToUse": "このプロバイダーをアクティブ化する前に構成してください。",
   "llm.confirmDelete": "プロバイダー「{id}」を削除しますか?",
   "llm.defaultModel": "デフォルトのモデル",
+  "llm.searchModels": "モデルを検索",
   "llm.editProvider": "プロバイダーの編集",
   "llm.fetchModels": "モデルのフェッチ",
   "llm.fetchingModels": "フェッチ中...",

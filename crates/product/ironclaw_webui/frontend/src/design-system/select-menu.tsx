@@ -168,11 +168,21 @@ export function SelectMenu({
   optionClassName = "",
   align = "right",
   placeholder = "",
+  searchable = false,
+  searchAriaLabel = "Search options",
+  searchPlaceholder = "Search options",
   ...rest
 }) {
   const [open, setOpen] = React.useState(false);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase();
+  const visibleOptions = normalizedSearchQuery
+    ? options.filter((option) =>
+        optionLabel(option).toLocaleLowerCase().includes(normalizedSearchQuery)
+      )
+    : options;
   const [activeIndex, setActiveIndex] = React.useState(() =>
-    selectedOptionIndex(options, value)
+    selectedOptionIndex(visibleOptions, value)
   );
   const rootRef = React.useRef(null);
   const buttonRef = React.useRef(null);
@@ -187,14 +197,14 @@ export function SelectMenu({
   const selectedLabel = optionLabel(selectedOption, placeholder);
   const listboxId = `${idRef.current}-listbox`;
   const activeOptionId =
-    open && activeIndex >= 0 && activeIndex < options.length
+    open && activeIndex >= 0 && activeIndex < visibleOptions.length
       ? `${idRef.current}-option-${activeIndex}`
       : null;
   const effectiveAriaLabel = ariaLabel || ariaLabelProp;
   const effectiveAlign = normalizeAlign(align);
   const hasEnabledOption = firstEnabledIndex(options) >= 0;
   const interactionDisabled = disabled || !hasEnabledOption;
-  const optionsKey = optionsIdentity(options);
+  const optionsKey = optionsIdentity(visibleOptions);
   const rootPassthroughProps = safeRootProps(rest);
   const buttonListboxProps = {
     ...(open ? { "aria-controls": listboxId } : {}),
@@ -217,8 +227,12 @@ export function SelectMenu({
   }
 
   React.useEffect(() => {
-    setActiveIndex(selectedOptionIndex(options, value));
-  }, [optionsKey, value]);
+    setActiveIndex(selectedOptionIndex(visibleOptions, value));
+  }, [optionsKey, value, normalizedSearchQuery]);
+
+  React.useEffect(() => {
+    if (!open && searchQuery) setSearchQuery("");
+  }, [open, searchQuery]);
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -241,7 +255,9 @@ export function SelectMenu({
 
   const openWithIndex = (index) => {
     if (interactionDisabled || index < 0) return;
-    setActiveIndex(index < options.length ? index : firstEnabledIndex(options));
+    setActiveIndex(
+      index < visibleOptions.length ? index : firstEnabledIndex(visibleOptions)
+    );
     setOpen(true);
   };
 
@@ -250,8 +266,10 @@ export function SelectMenu({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const baseIndex = open ? activeIndex : selectedIndex;
-      const nextIndex = nextEnabledIndex(options, baseIndex, direction);
+      const baseIndex = open
+        ? activeIndex
+        : selectedOptionIndex(visibleOptions, value);
+      const nextIndex = nextEnabledIndex(visibleOptions, baseIndex, direction);
       openWithIndex(nextIndex);
       return;
     }
@@ -259,7 +277,7 @@ export function SelectMenu({
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
       const direction = event.key === "Home" ? 1 : -1;
-      openWithIndex(edgeEnabledIndex(options, direction));
+      openWithIndex(edgeEnabledIndex(visibleOptions, direction));
       return;
     }
 
@@ -269,7 +287,7 @@ export function SelectMenu({
         openWithIndex(selectedIndex);
         return;
       }
-      chooseOption(options[activeIndex]);
+      chooseOption(visibleOptions[activeIndex]);
       return;
     }
 
@@ -307,7 +325,7 @@ export function SelectMenu({
           !interactionDisabled &&
           setOpen((current) => {
             restoreFocusOnCloseRef.current = false;
-            if (!current) setActiveIndex(selectedIndex);
+            if (!current) setActiveIndex(selectedOptionIndex(visibleOptions, value));
             return !current;
           })}
         onKeyDown={handleKeyDown}
@@ -337,8 +355,6 @@ export function SelectMenu({
 
       {open && (
         <div
-          id={listboxId}
-          role="listbox"
           className={cn(
             "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
             "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",
@@ -349,7 +365,25 @@ export function SelectMenu({
             menuClassName
           )}
         >
-          {options.map((option, index) => {
+          {searchable && (
+            <input
+              type="search"
+              value={searchQuery}
+              aria-label={searchAriaLabel}
+              placeholder={searchPlaceholder}
+              autoFocus
+              onChange={(event) => setSearchQuery(event.currentTarget.value)}
+              className={cn(
+                "sticky top-0 z-10 mb-1 h-9 w-full rounded-[7px] border px-2.5",
+                "border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)]",
+                "text-[var(--v2-text-strong)] placeholder:text-[var(--v2-text-faint)]",
+                "focus-visible:outline-none focus-visible:ring-2",
+                "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]"
+              )}
+            />
+          )}
+          <div id={listboxId} role="listbox">
+          {visibleOptions.map((option, index) => {
             const isSelected = option.value === value;
             const isActive = index === activeIndex;
             return (
@@ -390,6 +424,7 @@ export function SelectMenu({
               </button>
             );
           })}
+          </div>
         </div>
       )}
     </div>

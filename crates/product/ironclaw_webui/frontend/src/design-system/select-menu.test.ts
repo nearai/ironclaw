@@ -293,6 +293,27 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
 });
 
+test("SelectMenu filters searchable options from the open listbox", () => {
+  const harness = createHarness();
+  const props = {
+    searchable: true,
+    searchAriaLabel: "Search models",
+    searchPlaceholder: "Search models",
+  };
+
+  firstValueAfter(harness.render(props), "onClick=")();
+  let rendered = harness.render(props);
+  assert.match(collectTemplateText(rendered), /type="search"/);
+  assert.equal(firstValueAfter(rendered, "placeholder="), "Search models");
+
+  firstValueAfter(rendered, "onChange=")({ currentTarget: { value: "ask" } });
+  rendered = harness.render(props);
+
+  assert.ok(collectScalars(rendered).includes("Ask each time"));
+  assert.equal(collectScalars(rendered).includes("Always allow"), false);
+  assert.equal(collectScalars(rendered).includes("Disabled"), false);
+});
+
 test("SelectMenu supports keyboard navigation and Enter selection", () => {
   const changes = [];
   const harness = createHarness();
