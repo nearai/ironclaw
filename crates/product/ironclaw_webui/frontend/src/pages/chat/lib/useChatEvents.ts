@@ -931,7 +931,7 @@ function withoutStreamingAssistantPhaseForRun(messages, runId) {
         message?.role === "assistant" &&
         message.turnRunId === runId &&
         message.isFinalReply === false &&
-        message.isStreaming !== false
+        message.isStreaming === true
       ),
   );
   return next.length === messages.length ? messages : next;

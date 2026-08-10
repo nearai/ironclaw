@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 import {
   isTerminalToolStatus,
+  messagesFromTimeline,
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages";
@@ -2778,6 +2779,57 @@ for (const terminalStatus of ["failed", "recovery_required"]) {
     assertNoProgressFailureClearsDraft(terminalStatus);
   });
 }
+
+test("useChatEvents: run failure preserves completed durable timeline phases", () => {
+  const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
+  const durableMessages = messagesFromTimeline([
+    {
+      message_id: "tool-result-1",
+      kind: "tool_result",
+      status: "finalized",
+      content: "The tool completed before the run failed.",
+      turn_run_id: "run-1",
+    },
+  ]);
+  harness.replaceMessages([
+    ...durableMessages,
+    {
+      id: "text-run-1:draft",
+      role: "assistant",
+      content: "Let me check what capabilities are available to provide more useful",
+      turnRunId: "run-1",
+      isFinalReply: false,
+      isStreaming: true,
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-1",
+              status: "failed",
+              failure_category: "no_progress_detected",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-tool-result-1", "err-run-1"],
+    "a failure must remove only the live draft, not a completed durable phase",
+  );
+  assert.equal(
+    harness.messages[0].content,
+    "The tool completed before the run failed.",
+  );
+});
 
 test("useChatEvents: terminal cancellation settles the run as not successful", () => {
   const harness = createUseChatEventsHarness();
