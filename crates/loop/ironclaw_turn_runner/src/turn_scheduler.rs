@@ -13,9 +13,57 @@ use ironclaw_turns::{
     claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
 };
 
-#[derive(Debug, Clone, Default)]
+/// Consecutive heartbeat failures a turn run absorbs before the supervisor gives
+/// up on it.
+///
+/// The generic [`ProcessSupervisorConfig`] default is 3. At the hosted
+/// heartbeat interval of 5 seconds — which the supervisor also uses as each
+/// heartbeat's timeout — 3 failures is roughly 30 seconds of tolerance, less
+/// than a single Postgres connection-checkout timeout. One slow checkout was
+/// therefore enough to abandon a healthy run. 8 keeps a run alive across a
+/// checkout stall while still giving up inside the lease TTL (see
+/// [`heartbeat_failure_budget_within_lease`]).
+///
+/// This is a turn-run figure only. The generic default stays at 3 because the
+/// capability path heartbeats every 30 seconds, where 8 failures would run far
+/// past the lease TTL.
+pub const TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES: usize = 8;
+
+/// Largest failure budget whose abandon window still fits inside the process
+/// lease TTL at the given heartbeat interval.
+///
+/// A failing heartbeat costs one interval of waiting plus one heartbeat timeout,
+/// and the supervisor passes the interval as that timeout, so each failure costs
+/// `2 * interval`. Staying inside the TTL is what keeps abandonment a *decision
+/// the worker makes* — it stops, records a heartbeat failure, and the journal's
+/// lease is still live — rather than a lease expiry discovered by a recovery
+/// sweep with no idea whether the worker is alive.
+fn heartbeat_failure_budget_within_lease(interval: Duration) -> usize {
+    let cost_per_failure = interval.saturating_mul(2);
+    if cost_per_failure.is_zero() {
+        return TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES;
+    }
+    let affordable = usize::try_from(
+        ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION.as_millis()
+            / cost_per_failure.as_millis(),
+    )
+    .unwrap_or(usize::MAX);
+    affordable.clamp(1, TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES)
+}
+
+#[derive(Debug, Clone)]
 pub struct TurnRunSchedulerConfig {
     inner: ProcessSupervisorConfig,
+}
+
+impl Default for TurnRunSchedulerConfig {
+    fn default() -> Self {
+        let inner = ProcessSupervisorConfig::default();
+        let budget = heartbeat_failure_budget_within_lease(inner.heartbeat_interval());
+        Self {
+            inner: inner.with_max_consecutive_heartbeat_failures(budget),
+        }
+    }
 }
 
 impl TurnRunSchedulerConfig {
@@ -70,8 +118,13 @@ impl TurnRunSchedulerConfig {
         self
     }
 
+    /// Set the heartbeat interval, and with it the failure budget the lease TTL
+    /// can afford at that interval. A deployment that widens the interval gets a
+    /// smaller budget rather than an abandon window that outlives its lease.
     pub fn with_runner_heartbeat_interval(mut self, value: Duration) -> Self {
         self.inner = self.inner.with_heartbeat_interval(value);
+        let budget = heartbeat_failure_budget_within_lease(self.inner.heartbeat_interval());
+        self.inner = self.inner.with_max_consecutive_heartbeat_failures(budget);
         self
     }
 
@@ -288,5 +341,62 @@ impl TurnRunSchedulerHandle {
         if let Some(supervisor) = self.supervisor.take() {
             supervisor.shutdown().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The failure budget exists to survive a slow store, but a worker that
+    /// keeps retrying past its lease TTL is worse than one that gives up: the
+    /// journal reclaims the run while the worker is still executing it. Every
+    /// heartbeat interval a deployment can configure must keep the abandon
+    /// window inside the TTL.
+    #[test]
+    fn heartbeat_failure_budget_never_outlives_the_process_lease() {
+        let intervals = [
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+        ];
+        for interval in intervals {
+            let config = TurnRunSchedulerConfig::default().with_runner_heartbeat_interval(interval);
+            let budget = config.max_consecutive_heartbeat_failures();
+            assert!(budget >= 1, "a run must tolerate at least one failure");
+            // The supervisor passes the interval as the per-heartbeat timeout,
+            // so a failed heartbeat costs interval + timeout.
+            let abandon_window = interval
+                .saturating_mul(2)
+                .saturating_mul(u32::try_from(budget).expect("budget fits u32"));
+            assert!(
+                abandon_window <= ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION || budget == 1,
+                "interval {interval:?} yields budget {budget} and an abandon window of \
+                 {abandon_window:?}, past the {:?} lease TTL",
+                ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION
+            );
+        }
+    }
+
+    /// The hosted configuration is the one the pool-starvation incident hit: a
+    /// 5-second heartbeat must clear a 30-second Postgres checkout timeout.
+    #[test]
+    fn hosted_heartbeat_interval_absorbs_one_postgres_checkout_timeout() {
+        let config = TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(Duration::from_secs(5));
+        assert_eq!(
+            config.max_consecutive_heartbeat_failures(),
+            TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES
+        );
+        let tolerated = Duration::from_secs(5).saturating_mul(2).saturating_mul(
+            u32::try_from(config.max_consecutive_heartbeat_failures()).expect("budget"),
+        );
+        assert!(
+            tolerated >= Duration::from_secs(30),
+            "a run must survive one full connection-checkout stall, tolerated {tolerated:?}"
+        );
     }
 }

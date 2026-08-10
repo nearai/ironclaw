@@ -786,6 +786,11 @@ mod tests {
         None,
         Error,
         Pending,
+        /// The store is briefly slower than the heartbeat interval — the shape a
+        /// contended connection pool produces — and then healthy again. Each slow
+        /// heartbeat still commits, but the supervisor's per-heartbeat timeout
+        /// fires first, so it counts against the failure budget.
+        SlowThenHealthy,
     }
 
     struct FaultRuntime {
@@ -796,6 +801,8 @@ mod tests {
         fail_errors_remaining: AtomicUsize,
         fail_attempts: AtomicUsize,
         relinquishes: AtomicUsize,
+        slow_heartbeats_remaining: AtomicUsize,
+        heartbeat_delay: Duration,
     }
 
     impl FaultRuntime {
@@ -812,7 +819,15 @@ mod tests {
                 fail_errors_remaining: AtomicUsize::new(fail_errors),
                 fail_attempts: AtomicUsize::new(0),
                 relinquishes: AtomicUsize::new(0),
+                slow_heartbeats_remaining: AtomicUsize::new(0),
+                heartbeat_delay: Duration::ZERO,
             }
+        }
+
+        fn with_slow_heartbeats(mut self, count: usize, delay: Duration) -> Self {
+            self.slow_heartbeats_remaining = AtomicUsize::new(count);
+            self.heartbeat_delay = delay;
+            self
         }
 
         fn with_claim_errors(mut self, errors: usize) -> Self {
@@ -863,6 +878,18 @@ mod tests {
                 HeartbeatFault::None => self.inner.heartbeat_process(request).await,
                 HeartbeatFault::Error => Err(Self::injected_error()),
                 HeartbeatFault::Pending => std::future::pending().await,
+                HeartbeatFault::SlowThenHealthy => {
+                    if self
+                        .slow_heartbeats_remaining
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            remaining.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
+                        tokio::time::sleep(self.heartbeat_delay).await;
+                    }
+                    self.inner.heartbeat_process(request).await
+                }
             }
         }
 
@@ -939,6 +966,33 @@ mod tests {
             &self,
             claimed: ClaimedProcess,
         ) -> Result<(), ProcessExecutorFailure> {
+            self.runtime
+                .complete_process(ProcessStateTransitionRequest {
+                    lease: ProcessLeaseRequest {
+                        process_id: claimed.state.process_id,
+                        worker_id: claimed.worker_id,
+                        lease_token: claimed.lease_token,
+                    },
+                    metadata: None,
+                })
+                .await
+                .map_err(|_| ProcessExecutorFailure::new("completion_failed"))?;
+            Ok(())
+        }
+    }
+
+    struct SlowCompletingExecutor {
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
+        work: Duration,
+    }
+
+    #[async_trait]
+    impl JournalProcessExecutor for SlowCompletingExecutor {
+        async fn execute_claimed_process(
+            &self,
+            claimed: ClaimedProcess,
+        ) -> Result<(), ProcessExecutorFailure> {
+            tokio::time::sleep(self.work).await;
             self.runtime
                 .complete_process(ProcessStateTransitionRequest {
                     lease: ProcessLeaseRequest {
@@ -1312,6 +1366,53 @@ mod tests {
         );
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         handle.shutdown().await;
+    }
+
+    /// A stretch of heartbeats slower than the interval is what a contended
+    /// connection pool looks like from inside a healthy run. The failure budget
+    /// is what decides whether that run finishes or is abandoned mid-work, so
+    /// both sides of the boundary are pinned here.
+    #[tokio::test]
+    async fn a_run_survives_slow_heartbeats_within_its_failure_budget() {
+        let slow_heartbeats = 5;
+        for (budget, expected) in [
+            (slow_heartbeats + 3, ProcessLifecycleStatus::Completed),
+            (2, ProcessLifecycleStatus::Failed),
+        ] {
+            let store = Arc::new(crate::ProcessJournalStore::new(
+                in_memory_backed_processes_filesystem(),
+            ));
+            let process_id = submit(&store, ProcessKind::Internal).await;
+            let faults = Arc::new(
+                FaultRuntime::new(Arc::clone(&store), HeartbeatFault::SlowThenHealthy, 0)
+                    .with_slow_heartbeats(slow_heartbeats, Duration::from_millis(50)),
+            );
+            let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+                faults.clone();
+            let handle = ProcessSupervisor::new(
+                Arc::clone(&runtime),
+                Arc::new(SlowCompletingExecutor {
+                    runtime,
+                    work: Duration::from_millis(400),
+                }),
+                ProcessKind::Internal,
+                fast_config()
+                    .with_heartbeat_interval(Duration::from_millis(5))
+                    .with_max_consecutive_heartbeat_failures(budget),
+            )
+            .start();
+
+            let snapshot = wait_for_status(&store, process_id, expected).await;
+            assert_eq!(snapshot.status, expected, "budget {budget}");
+            if expected == ProcessLifecycleStatus::Failed {
+                assert_eq!(
+                    snapshot.failure.as_ref().map(SanitizedFailure::category),
+                    Some("process_heartbeat_failed"),
+                    "a spent budget abandons the run for heartbeat failure, budget {budget}"
+                );
+            }
+            handle.shutdown().await;
+        }
     }
 
     #[tokio::test]
