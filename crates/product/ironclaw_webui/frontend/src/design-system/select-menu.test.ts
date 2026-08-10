@@ -314,6 +314,66 @@ test("SelectMenu filters searchable options from the open listbox", () => {
   assert.equal(collectScalars(rendered).includes("Disabled"), false);
 });
 
+test("SelectMenu filters by locale-independent option values", () => {
+  const harness = createHarness();
+  const props = {
+    options: [{ value: "INSTRUCT", label: "Friendly model" }],
+    searchable: true,
+  };
+
+  firstValueAfter(harness.render(props), "onClick=")();
+  let rendered = harness.render(props);
+  firstValueAfter(rendered, "onChange=")({ currentTarget: { value: "instruct" } });
+  rendered = harness.render(props);
+
+  assert.ok(collectScalars(rendered).includes("Friendly model"));
+});
+
+test("SelectMenu search input owns and handles filtered keyboard navigation", () => {
+  const changes = [];
+  const harness = createHarness();
+  const props = {
+    searchable: true,
+    searchAriaLabel: "Search models",
+    onChange: (value) => changes.push(value),
+  };
+
+  firstValueAfter(harness.render(props), "onClick=")();
+  let rendered = harness.render(props);
+  firstValueAfter(rendered, "onChange=")({ currentTarget: { value: "allow" } });
+  rendered = harness.render(props);
+
+  const searchInputProps = firstObjectWith(rendered, "aria-autocomplete");
+  assert.equal(searchInputProps.role, "combobox");
+  assert.equal(searchInputProps["aria-expanded"], "true");
+  assert.match(searchInputProps["aria-controls"], /-listbox$/);
+  assert.match(searchInputProps["aria-activedescendant"], /-option-0$/);
+
+  const space = keyEvent(" ");
+  searchInputProps.onKeyDown(space);
+  assert.equal(space.preventDefaultCalls, 0);
+  assert.deepEqual(changes, []);
+
+  searchInputProps.onKeyDown(keyEvent("ArrowDown"));
+  rendered = harness.render(props);
+  firstObjectWith(rendered, "aria-autocomplete").onKeyDown(keyEvent("Enter"));
+
+  assert.deepEqual(changes, ["always_allow"]);
+
+  rendered = harness.render({ ...props, value: "always_allow" });
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render({ ...props, value: "always_allow" });
+  const escape = keyEvent("Escape");
+  firstObjectWith(rendered, "aria-autocomplete").onKeyDown(escape);
+
+  assert.equal(escape.preventDefaultCalls, 1);
+  assert.equal(escape.stopPropagationCalls, 1);
+  assert.equal(
+    firstValueAfter(harness.render({ ...props, value: "always_allow" }), "aria-expanded="),
+    "false"
+  );
+});
+
 test("SelectMenu supports keyboard navigation and Enter selection", () => {
   const changes = [];
   const harness = createHarness();
