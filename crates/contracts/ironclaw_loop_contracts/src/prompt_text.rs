@@ -212,14 +212,20 @@ fn contains_credential_value_after_label(value: &str, lower: &str, label: &str) 
 }
 
 fn credential_value_candidate(suffix: &str) -> Option<&str> {
-    credential_value_candidates(suffix).next()
+    credential_value_candidates(suffix).find(|candidate| !is_credential_value_filler(candidate))
 }
 
 fn authorization_scheme_value_candidate(suffix: &str) -> Option<(&str, &str)> {
     let mut candidates = credential_value_candidates(suffix);
     let scheme = candidates.next()?;
-    let candidate = candidates.next()?;
+    let candidate = candidates.find(|candidate| !is_credential_value_filler(candidate))?;
     is_authorization_scheme(scheme).then_some((scheme, candidate))
+}
+
+fn is_credential_value_filler(candidate: &str) -> bool {
+    ["is", "token", "value"]
+        .iter()
+        .any(|filler| candidate.eq_ignore_ascii_case(filler))
 }
 
 fn credential_value_candidates(suffix: &str) -> impl Iterator<Item = &str> {

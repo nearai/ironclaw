@@ -482,7 +482,7 @@ mod tests {
     // --- to_loop_context_snippet: loop denylist drop-filter + reference ---
 
     /// Benign content is mapped onto a loop snippet with a stable `memory-snippet:*`
-    /// reference and identical safe-summary / model-content.
+    /// reference and a fixed metadata-only safe summary.
     #[test]
     fn maps_benign_snippet_with_reference() {
         let mapped =
@@ -493,21 +493,20 @@ mod tests {
             mapped.snippet_ref,
             memory_snippet_display_ref(["tenant-a", "user-x", "", "", "notes/alpha.md"])
         );
-        assert_eq!(mapped.safe_summary, mapped.model_content);
-        assert!(mapped.safe_summary.contains("ordinary planning note"));
+        assert_eq!(mapped.safe_summary, "memory context snippet");
+        assert!(mapped.model_content.contains("ordinary planning note"));
     }
 
-    /// A snippet carrying a filesystem path is dropped by the loop denylist
-    /// (rather than erroring the bundle later at render time).
+    /// Filesystem paths are useful recovery context and are not credentials.
     #[test]
-    fn drops_snippet_with_path_delimiters() {
-        assert!(to_loop_context_snippet(snippet("/etc/passwd")).is_none());
+    fn keeps_snippet_with_path_delimiters() {
+        assert!(to_loop_context_snippet(snippet("/etc/passwd")).is_some());
     }
 
-    /// A snippet mentioning a secret marker is dropped by the loop denylist.
+    /// A snippet carrying a credential value is dropped by prompt admission.
     #[test]
-    fn drops_snippet_with_sensitive_marker() {
-        assert!(to_loop_context_snippet(snippet("the api key is exposed")).is_none());
+    fn drops_snippet_with_credential_value() {
+        assert!(to_loop_context_snippet(snippet("api key is abc123def456")).is_none());
     }
 
     /// The denylist must not false-positive on benign substrings ("impact"

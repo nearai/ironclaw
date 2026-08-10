@@ -92,10 +92,7 @@ pub struct LoopContextSnippet {
 }
 
 impl LoopContextSnippet {
-    /// Construct a model-visible snippet returned by an untrusted memory
-    /// provider. The content keeps useful security prose and paths, while the
-    /// same credential-value policy used by prompt assembly rejects actual
-    /// secrets before the snippet enters the loop context.
+    /// Construct a model-visible snippet from untrusted memory after validation.
     pub fn from_untrusted_memory(
         snippet_ref: String,
         model_content: String,
