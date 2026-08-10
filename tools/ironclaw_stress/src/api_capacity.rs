@@ -2604,7 +2604,7 @@ async fn handle_mock_completion(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let decision = scripted_decision_for(&state, &request, request_index);
+    let decision = resolve_scripted_decision_for(&state, &request, request_index).await;
     match &decision {
         ScriptedDecision::ToolCalls(calls) => {
             if stream_response {
@@ -2628,6 +2628,9 @@ async fn handle_mock_completion(
                 let response = mock_completion_response(&state.model, request_index, text.clone());
                 write_json_response(stream, 200, &response).await
             }
+        }
+        ScriptedDecision::RetryAfter(_) => {
+            Err("delayed retry decision escaped the mock completion resolver".to_string())
         }
         ScriptedDecision::Placeholder => {
             let text = scripted::PLACEHOLDER_TEXT.to_string();
@@ -2696,6 +2699,15 @@ fn scripted_decision_for(
     request: &Value,
     request_index: u64,
 ) -> ScriptedDecision {
+    scripted_decision_for_inner(state, request, request_index, true)
+}
+
+fn scripted_decision_for_inner(
+    state: &MockLlmState,
+    request: &Value,
+    request_index: u64,
+    count_request: bool,
+) -> ScriptedDecision {
     if state.scripted.is_none() {
         return ScriptedDecision::None;
     }
@@ -2713,10 +2725,12 @@ fn scripted_decision_for(
         .scripted_counters
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *counters
-        .requests_seen
-        .entry(op.key.as_str().to_string())
-        .or_insert(0) += 1;
+    if count_request {
+        *counters
+            .requests_seen
+            .entry(op.key.as_str().to_string())
+            .or_insert(0) += 1;
+    }
     match &decision {
         ScriptedDecision::ToolCalls(calls) => {
             *counters
@@ -2724,6 +2738,7 @@ fn scripted_decision_for(
                 .entry(op.key.as_str().to_string())
                 .or_insert(0) += calls.len() as u64;
         }
+        ScriptedDecision::RetryAfter(_) => {}
         ScriptedDecision::Placeholder => {
             counters.placeholder_responses += 1;
         }
@@ -2738,6 +2753,25 @@ fn scripted_decision_for(
         ScriptedDecision::None => {}
     }
     decision
+}
+
+/// Resolve provider-directed retry delays inside the current HTTP completion
+/// request. No driver or counter mutex is held while sleeping. Re-evaluation
+/// does not count as another model request, but an emitted retry tool call is
+/// still recorded.
+async fn resolve_scripted_decision_for(
+    state: &MockLlmState,
+    request: &Value,
+    request_index: u64,
+) -> ScriptedDecision {
+    let mut decision = scripted_decision_for(state, request, request_index);
+    loop {
+        let ScriptedDecision::RetryAfter(delay) = decision else {
+            return decision;
+        };
+        tokio::time::sleep(delay).await;
+        decision = scripted_decision_for_inner(state, request, request_index, false);
+    }
 }
 
 fn classify_mock_request(body: &[u8]) -> MockRequestKind {
@@ -3207,6 +3241,104 @@ mod tests {
             background_request_latencies: Mutex::new(Vec::new()),
             request_start_offsets: Mutex::new(Vec::new()),
         }
+    }
+
+    #[tokio::test]
+    async fn mock_completion_waits_then_emits_delayed_retry_tool_call() {
+        let state = Arc::new(mock_state(Some(ScriptKey::MemoryRoundtrip)));
+        let marker = scripted::marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
+        let tools = json!([
+            {"type": "function", "function": {"name": "ironclaw__memory__write"}},
+            {"type": "function", "function": {"name": "ironclaw__memory__read"}},
+        ]);
+        let initial_request = json!({
+            "stream": false,
+            "messages": [{"role": "user", "content": marker}],
+            "tools": tools,
+        });
+        let initial_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let ScriptedDecision::ToolCalls(calls) =
+            scripted_decision_for(&state, &initial_request, initial_index)
+        else {
+            panic!("expected initial write call");
+        };
+        let initial_id = mock_tool_call_id(initial_index);
+        let error_observation = r#"{"schema_version":1,"status":"error","summary":"transient","detail":{"kind":"generic_failure","failure_kind":"transient"},"artifacts":[],"recovery":{"same_call_retry":"allowed_after_delay","recovery_hint":"wait_then_retry","retry_after_ms":50},"trust":"untrusted_tool_output"}"#;
+        let retry_request = json!({
+            "stream": false,
+            "messages": [
+                {"role": "user", "content": marker},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": initial_id,
+                        "type": "function",
+                        "function": {
+                            "name": calls[0].wire_name,
+                            "arguments": serde_json::to_string(&calls[0].arguments)
+                                .expect("arguments json"),
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": initial_id,
+                    "content": error_observation,
+                },
+            ],
+            "tools": tools,
+        });
+        let body = serde_json::to_vec(&retry_request).expect("request json");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let (accepted, connected) = tokio::join!(listener.accept(), TcpStream::connect(address));
+        let (mut server, _) = accepted.expect("accept");
+        let mut client = connected.expect("connect");
+        let handler_state = Arc::clone(&state);
+        let handler =
+            tokio::spawn(
+                async move { handle_mock_completion(&mut server, &body, handler_state).await },
+            );
+
+        let mut response = Vec::new();
+        let early =
+            tokio::time::timeout(Duration::from_millis(5), client.read_to_end(&mut response)).await;
+        assert!(
+            early.is_err(),
+            "a delayed retry must not emit a terminal placeholder response"
+        );
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("delayed retry response timeout")
+        .expect("read delayed retry response");
+        handler
+            .await
+            .expect("mock handler task")
+            .expect("mock handler response");
+
+        let body_start = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|position| position + 4)
+            .expect("HTTP response body");
+        let payload: Value =
+            serde_json::from_slice(&response[body_start..]).expect("response json");
+        assert_eq!(payload["choices"][0]["finish_reason"], "tool_calls");
+        assert_ne!(
+            payload["choices"][0]["message"]["tool_calls"][0]["id"],
+            initial_id
+        );
+        let counters = state
+            .scripted_counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(counters.requests_seen["memory_roundtrip"], 2);
+        assert_eq!(counters.tool_calls_emitted["memory_roundtrip"], 2);
     }
 
     #[test]

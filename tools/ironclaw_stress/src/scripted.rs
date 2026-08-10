@@ -485,6 +485,11 @@ pub(crate) enum ScriptedDecision {
     ToolCalls(Vec<ToolCallSpec>),
     /// Emit the final verdict text.
     FinalText(String),
+    /// Keep the current completion request open for the remaining provider
+    /// retry delay, then evaluate that same request again. The HTTP mock
+    /// consumes this internally and never serializes it as an assistant
+    /// completion.
+    RetryAfter(Duration),
     /// Emit an interim text response while waiting for tool disclosure.
     Placeholder,
     /// No scripted marker in this conversation; fall through to the default
@@ -1227,11 +1232,10 @@ fn respond_for_session(
 ) -> ScriptedDecision {
     let steps = session.op.key.steps(session.op.size_bytes);
     if session.write_retry_pending {
-        if session
-            .retry_not_before
-            .is_some_and(|retry_not_before| now < retry_not_before)
+        if let Some(retry_not_before) = session.retry_not_before
+            && now < retry_not_before
         {
-            return ScriptedDecision::Placeholder;
+            return ScriptedDecision::RetryAfter(retry_not_before.duration_since(now));
         }
         // The pending write step's last result was a structured error with
         // attempts remaining: re-open the same step for another emission
@@ -3727,7 +3731,10 @@ mod tests {
 
         assert_eq!(
             driver.decide_at(&request, &available, "call-1", started),
-            (ScriptedDecision::Placeholder, Some(parsed.clone())),
+            (
+                ScriptedDecision::RetryAfter(std::time::Duration::from_millis(250)),
+                Some(parsed.clone()),
+            ),
         );
         assert_eq!(
             driver.decide_at(
@@ -3736,7 +3743,10 @@ mod tests {
                 "call-2",
                 started + std::time::Duration::from_millis(249),
             ),
-            (ScriptedDecision::Placeholder, Some(parsed.clone())),
+            (
+                ScriptedDecision::RetryAfter(std::time::Duration::from_millis(1)),
+                Some(parsed.clone()),
+            ),
         );
         let (retry, _) = driver.decide_at(
             &request,
