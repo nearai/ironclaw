@@ -754,6 +754,20 @@ def build_plan(
                     "workspace lockfile breadth is deferred to the exhaustive merge-queue gate"
                 )
             continue
+        if path == ".config/nextest.toml":
+            # Test-runner config: every `Tests (Reborn)` lane executes cargo
+            # nextest with these profiles, so a change to it cannot be
+            # exercised by any narrow lane. It is deliberately NOT static
+            # control — the membership rule for that set is "no Reborn test
+            # lane reads the file", and these lanes read it. Widening to the
+            # exhaustive plan is the safe resolution (a superset can never
+            # under-select). Unclassified until 2026-08-10, when deleting the
+            # dead `live_tests::zizmor_scan*` overrides failed the whole
+            # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
+            return _full_plan(
+                "nextest runner config changed; this PR runs the exhaustive plan",
+                canonical_packages,
+            )
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
