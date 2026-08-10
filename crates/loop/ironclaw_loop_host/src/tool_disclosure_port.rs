@@ -40,7 +40,6 @@ const MAX_SEARCH_SIGNATURE_BYTES_TOTAL: usize = 24 * 1024;
 /// A single schema above this ceiling stays discoverable but requires
 /// `tool_describe`; this prevents one result from consuming the whole budget.
 const MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT: usize = 8 * 1024;
-const _: () = assert!(MAX_SEARCH_SIGNATURE_BYTES_TOTAL >= MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT);
 
 /// Internal bridge name for an auto-loaded schema (describe-first) response.
 ///

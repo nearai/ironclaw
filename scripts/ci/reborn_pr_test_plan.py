@@ -152,6 +152,10 @@ QA_HARNESS_PREFIXES = (
     # every downstream Reborn lane. Same class as the `.claude/` gap this row
     # already records.
     "scripts/reborn_qa_matrix/",
+    # The tool-discovery benchmark is a manual live-model harness. It records
+    # QA evidence across disclosure modes and catalog sizes; no Reborn Rust
+    # lane invokes it.
+    "scripts/tool_discovery_benchmark/",
     # The live Telegram release smoke harness (`run_smoke.py` + config +
     # README): run by hand against a real bot, referenced by no workflow, never
     # by a `Tests (Reborn)` lane. Unclassified until 2026-08-06, when PR
