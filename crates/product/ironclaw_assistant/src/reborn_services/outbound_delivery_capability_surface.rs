@@ -95,6 +95,13 @@ pub async fn list_outbound_delivery_targets_for_model(
     input: OutboundDeliveryTargetsListInput,
 ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
     let mut response = service.list_outbound_delivery_targets(caller).await?;
+    // The product list is the notification-channel picker (gated on
+    // `notifications`); the model may only deliver to final-reply-capable
+    // targets, so narrow here. A notification-only target (browser push) is
+    // therefore invisible to the model until it gains outbound delivery.
+    response
+        .targets
+        .retain(|option| option.capabilities.final_replies);
     if let Some(channel_filter) = input.channel {
         response.targets.retain(|option| {
             option

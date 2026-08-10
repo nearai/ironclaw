@@ -44,6 +44,7 @@ ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_cont
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host", version = "0.1.0" }
 ironclaw_conversations = { path = "../../domains/ironclaw_conversations", version = "0.1.0" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0" }
+ironclaw_web_push = { path = "../../domains/ironclaw_web_push", version = "0.1.0" }
 # The blocked-auth resume fan-out (WS6 eviction from the composition root)
 # reads durable process-gate records to find the caller's other parked runs.
 ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.0" }

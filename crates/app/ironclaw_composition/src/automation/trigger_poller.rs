@@ -517,11 +517,8 @@ mod tests {
         async fn run_failure_settlement_emits_health_warning_without_delivery() {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
             let recording = Arc::new(RecordingHook::default());
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-                .ok()
-                .expect("hook install");
-            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
+            let observer = PostSubmitHookObserver::new(hook_slot.clone(), CancellationToken::new());
+            hook_slot.set(recording.clone()).ok().expect("hook install");
 
             observer
                 .on_run_failure_settled(run_failure_settlement_event(TurnRunId::new()))

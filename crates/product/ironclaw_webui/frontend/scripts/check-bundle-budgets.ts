@@ -50,12 +50,18 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // can open in the in-app preview, including for cached messages rendered on the
 // initial route, and prevents model-authored `data-workspace-path` metadata
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
-// retained about 1.2 KB of explicit headroom without weakening the feature.
-// The shared native file-picker interaction then replaced three route-local
-// implementations. Vite correctly emits its 0.3 KB gzip helper as a shared
-// chunk because Chat, Settings, and Extensions all consume it; the measured
-// /chat closure is 217.2 KB gzip. Keep 0.3 KB of explicit headroom for it.
-const CHAT_GZIP_BUDGET = 217_500;
+// retains about 1.2 KB of explicit headroom without weakening the feature.
+// Two changes then landed on the merged tree, each adding a little to /chat:
+//  - Web Push notifications added ~13 `automations.notificationChannels.webPush.*`
+//    keys + a reworded `noSelectionHelper` to the eager `en.ts` fallback pack.
+//    Eager code was kept OUT of /chat: `registerServiceWorker` is in the
+//    dependency-free `lib/register-sw.ts`, and the enrollment UI rides the
+//    already-lazy automations route — so this is localized string content.
+//  - The shared native file-picker interaction (#7337) replaced three
+//    route-local impls; Vite emits its ~0.3 KB gzip helper as a shared chunk
+//    (Chat/Settings/Extensions all consume it).
+// Re-measured on the MERGED tree with `vite build` + this check.
+const CHAT_GZIP_BUDGET = 218_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

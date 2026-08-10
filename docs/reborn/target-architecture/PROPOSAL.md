@@ -250,6 +250,8 @@ crates/
 │   ├── ironclaw_identity             ▣ [substrates] (renamed)   external identity → stable UserId + user directory
 │   ├── ironclaw_llm                  ▣ [substrates] (narrowed)  LlmProvider contract, providers, registry, decorators
 │   ├── ironclaw_trace_commons        ▣ [substrates] (renamed)   Trace Commons client: envelope/redaction/queue/credits
+│   ├── ironclaw_web_push             ▣ [substrates]             Web Push (RFC 8030/8291/8292) records, encryption,
+│   │                                                            request planning (added 2026-08-08, browser channel)
 │   └── ironclaw_outbound             ▣ [substrates]             metadata-only outbound policy/state (sealed grants)
 ├── kernel/                           ▢ the authority perimeter — nine crates, steady-state reached
 │                                       (the transitional tenth, ironclaw_run_state, was deleted by #6696 on 2026-07-29)
@@ -305,6 +307,8 @@ crates/
 │       │                               filesystem backend (moved from domains/, amended 2026-07-29)
 │       ├── mem0/                     ▣ ironclaw_memory_mem0 [products] — [memory] provider surface, external
 │       │                               mem0 REST backend (moved from domains/, amended 2026-07-29)
+│       ├── web-push/                 ▣ ironclaw_web_push_extension [products] — outbound-only browser-push
+│       │                               ChannelAdapter + codec + target provider (added 2026-08-08)
 │       └── <ext>/                    ▢ data-only packages (github, gmail, google-*, web-access, notion-mcp,
 │                                       nearai-mcp, …): manifest.toml, prompts/, schemas/, wasm/, ◇ wasm-src/
 ├── product/                          ▢ first-party userland above the kernel

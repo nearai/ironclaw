@@ -623,6 +623,7 @@ pub struct RebornRuntime {
         Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
+    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
@@ -1843,6 +1844,10 @@ impl RebornRuntime {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    // A registered channel DM is both a final-reply target and a
+                    // notification channel, mirroring the generic channel
+                    // provider's `full_capabilities`.
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
@@ -4309,6 +4314,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_ingress: services.extension_ingress.clone(),
         #[cfg(any(test, feature = "test-support"))]
         deployment_channels: services.deployment_channels.clone(),
+        web_push: services.web_push.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
         #[cfg(feature = "test-support")]
